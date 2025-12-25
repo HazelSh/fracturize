@@ -1,0 +1,48 @@
+[meta]
+name = "Autumn Fractal Tree"
+author = "Gemini (via gemini-cli)"
+point_size = 0.002
+iters = 2000
+max_points = 500_000
+
+# Top - Gold
+[[transform]]
+translation = [0.0, 0.55, 0.0]
+scale = 0.55
+rotation = [0.0, 45.0, 0.0]
+color = [1.0, 0.8, 0.2]
+
+# Side 1 - Orange
+[[transform]]
+translation = [0.35, 0.1, 0.1]
+scale = 0.6
+rotation = [15.0, 0.0, -50.0]
+color = [1.0, 0.4, 0.0]
+
+# Side 2 - Red
+[[transform]]
+translation = [-0.35, 0.1, -0.1]
+scale = 0.6
+rotation = [-15.0, 0.0, 50.0]
+color = [0.9, 0.1, 0.1]
+
+# Front - Deep Green
+[[transform]]
+translation = [0.1, 0.1, 0.35]
+scale = 0.6
+rotation = [50.0, 20.0, 0.0]
+color = [0.1, 0.5, 0.2]
+
+# Back - Purple/Magenta
+[[transform]]
+translation = [-0.1, 0.1, -0.35]
+scale = 0.6
+rotation = [-50.0, -20.0, 0.0]
+color = [0.6, 0.1, 0.8]
+
+# Trunk - Brown (weighted more to pull points down)
+[[transform]]
+translation = [0.0, -0.6, 0.0]
+scale = 0.4
+color = [0.4, 0.25, 0.1]
+weight = 2.0

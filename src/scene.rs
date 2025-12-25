@@ -7,6 +7,7 @@ use std::path::Path;
 #[derive(Deserialize)]
 pub struct SceneMeta {
     pub name: String,
+    pub author: Option<String>,
     #[serde(default = "default_point_size")]
     pub point_size: f32,
     pub iters: usize,
@@ -50,6 +51,7 @@ pub struct SceneFile {
 /// Loaded scene ready for use
 pub struct Scene {
     pub name: String,
+    pub author: String,
     pub point_size: f32,
     pub iters: usize,
     pub max_points: usize,
@@ -91,6 +93,7 @@ impl Scene {
 
         Ok(Scene {
             name: scene_file.meta.name,
+            author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
             point_size: scene_file.meta.point_size,
             iters: scene_file.meta.iters,
             max_points: scene_file.meta.max_points,

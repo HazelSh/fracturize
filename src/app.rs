@@ -67,7 +67,7 @@ impl App {
     pub async fn new(window: Arc<Window>, scene: Scene) -> Self {
         let gpu = GpuContext::new(window.clone()).await;
 
-        log::info!("Loaded scene: {}", scene.name);
+        log::info!("Loaded scene: {} by {}", scene.name, scene.author);
 
         let point_size = scene.point_size;
         let max_points = scene.max_points;

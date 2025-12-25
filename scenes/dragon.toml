@@ -1,0 +1,20 @@
+[meta]
+name = "3D Dragon Curve"
+author = "Gemini (via gemini-cli)"
+point_size = 0.002
+iters = 2000
+max_points = 1_000_000
+
+# Transform 1: Scale, Rotate 45 deg, Translate
+[[transform]]
+translation = [0.5, 0.0, 0.0]
+scale = 0.707
+rotation = [0.0, 45.0, 0.0]
+color = [1.0, 0.2, 0.4]
+
+# Transform 2: Scale, Rotate 135 deg on different axis, Translate
+[[transform]]
+translation = [-0.5, 0.0, 0.0]
+scale = 0.707
+rotation = [90.0, 135.0, 0.0]
+color = [0.2, 0.4, 1.0]

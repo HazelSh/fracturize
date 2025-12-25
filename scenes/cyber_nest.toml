@@ -1,0 +1,37 @@
+[meta]
+name = "Cyber Nest"
+author = "Gemini (via gemini-cli)"
+point_size = 0.0015
+iters = 5000
+max_points = 1_500_000
+
+# The Core: High weight, small scale, keeps points from flying off
+[[transform]]
+translation = [0.0, 0.0, 0.0]
+scale = 0.1
+color = [1.0, 1.0, 1.0]
+weight = 0.5
+
+# Ring A: Wide rotation
+[[transform]]
+translation = [0.0, 0.0, 0.0]
+scale = 0.98
+rotation = [45.0, 45.0, 0.0]
+color = [0.0, 0.8, 1.0] # Bright Blue
+weight = 2.0
+
+# Ring B: Opposite rotation
+[[transform]]
+translation = [0.0, 0.0, 0.0]
+scale = 0.98
+rotation = [-45.0, 0.0, 45.0]
+color = [1.0, 0.0, 0.5] # Pink/Red
+weight = 2.0
+
+# Detailer: Adds noise and jitter
+[[transform]]
+translation = [0.5, 0.5, 0.5]
+scale = 0.4
+rotation = [120.0, 120.0, 120.0]
+color = [0.8, 1.0, 0.0] # Lime
+weight = 1.0
