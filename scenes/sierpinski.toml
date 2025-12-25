@@ -1,0 +1,29 @@
+[meta]
+name = "Sierpinski Tetrahedron"
+point_size = 0.0012
+iters = 800
+max_points = 100_000
+
+# Red vertex - top back
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+color = [1.0, 0.2, 0.2]
+
+# Green vertex - top front
+[[transform]]
+translation = [0.0, 0.47, -0.17]
+scale = 0.5
+color = [0.2, 1.0, 0.2]
+
+# Blue vertex - bottom left
+[[transform]]
+translation = [-0.41, -0.24, -0.17]
+scale = 0.5
+color = [0.2, 0.2, 1.0]
+
+# Yellow vertex - bottom right
+[[transform]]
+translation = [0.41, -0.24, -0.17]
+scale = 0.5
+color = [1.0, 1.0, 0.2]

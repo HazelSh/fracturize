@@ -10,7 +10,10 @@ Fracturize renders IFS (Iterated Function System) fractals in 3D using the chaos
 
 ```
 src/
-  main.rs       # Currently monolithic - contains all code
+  main.rs       # App state, rendering, event handling
+  scene.rs      # TOML scene file parsing
+scenes/
+  sierpinski.toml  # Default scene
 ```
 
 Key structures:
@@ -25,7 +28,10 @@ Key structures:
 - **glam** - Math (Vec3, Vec4, Mat4, Quat)
 - **rand + rand_xoshiro** - Fast RNG with Xoshiro256++
 - **bytemuck** - Safe transmutes for GPU buffers
-- **quick-xml + serde** - For .flame file parsing (not yet implemented)
+- **toml + serde** - Scene file parsing
+- **clap** - CLI argument parsing
+- **quick-xml** - For .flame file parsing (not yet implemented)
+- **image** - PNG output for screenshots
 
 ## Rendering Approach
 
@@ -69,3 +75,32 @@ Future considerations:
 - **miniquad index buffer**: CRITICAL - miniquad requires valid index buffer even for non-indexed triangle rendering. Create sequential indices `[0, 1, 2, 3, 4, 5, ...]` matching vertex count.
 - **Rust 2024**: raw identifier `r#gen()` needed for rand's gen method (gen is reserved keyword)
 - **GLSL ES 100**: Use `attribute`/`varying` not `in`/`out`, need `precision mediump float` in fragment shader
+
+## Scene Files (TOML)
+
+Scenes are defined in TOML format. Use `--scene <path>` to load.
+
+```toml
+[meta]
+name = "Scene Name"
+point_size = 0.012  # Billboard size in world units
+
+[[transform]]
+translation = [0.0, 0.0, 0.5]  # XYZ position
+scale = 0.5                     # Uniform scale
+rotation = [0, 0, 0]           # Euler angles in degrees (optional)
+color = [1.0, 0.2, 0.2]        # RGB 0-1
+weight = 1.0                    # Selection probability (optional, default 1.0)
+
+[[transform]]
+# ... more transforms
+```
+
+## Screenshot Support
+
+Built-in screenshot capture for AI verification:
+- Press `S` to take a screenshot (saved to `screenshots/capture.png`)
+- Use `--screenshot` flag for automated capture and exit
+- Use `--delay N` to set frames before capture (default: 120)
+- Screenshots render to an offscreen texture then save via `image` crate
+- Run `./screenshot.sh` for quick automated capture

@@ -1,0 +1,102 @@
+use std::sync::Arc;
+use wgpu::{Device, Instance, Queue, Surface, SurfaceConfiguration, TextureFormat};
+use winit::window::Window;
+
+/// Holds wgpu device, queue, and surface state
+pub struct GpuContext {
+    pub device: Device,
+    pub queue: Queue,
+    pub surface: Surface<'static>,
+    pub config: SurfaceConfiguration,
+    pub format: TextureFormat,
+}
+
+impl GpuContext {
+    /// Create a new GPU context for the given window
+    pub async fn new(window: Arc<Window>) -> Self {
+        let size = window.inner_size();
+
+        // Create wgpu instance with default backends
+        let instance = Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        // Create surface from window
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("Failed to create surface");
+
+        // Request adapter
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("Failed to find a suitable GPU adapter");
+
+        log::info!("Using adapter: {:?}", adapter.get_info());
+
+        // Request device and queue
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("fracturize_device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
+            .await
+            .expect("Failed to create device");
+
+        // Get preferred surface format (sRGB for gamma-correct output)
+        let surface_caps = surface.get_capabilities(&adapter);
+        let format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        log::info!("Using surface format: {:?}", format);
+
+        // Configure surface
+        let config = SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &config);
+
+        Self {
+            device,
+            queue,
+            surface,
+            config,
+            format,
+        }
+    }
+
+    /// Resize the surface when window size changes
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    /// Get current surface dimensions
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+}
