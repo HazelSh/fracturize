@@ -1,6 +1,6 @@
 [meta]
 name = "Sierpinski Tetrahedron"
-author = "Claude"
+author = "Claude Opus 4.5 (Claude Code 2.0.76)"
 point_size = 0.0012
 iters = 800
 max_points = 100_000

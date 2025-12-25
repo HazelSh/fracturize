@@ -1,0 +1,56 @@
+[meta]
+name = "Spiral Galaxy"
+author = "Claude Opus 4.5 (Claude Code 2.0.76)"
+point_size = 0.002
+iters = 4000
+max_points = 1_200_000
+
+# Four-arm spiral galaxy
+# Each arm spirals inward with rotation and slight contraction
+
+# Core attractor - keeps things from flying off
+[[transform]]
+translation = [0.0, 0.0, 0.0]
+scale = 0.15
+color = [1.0, 1.0, 0.9]
+weight = 0.3
+
+# Arm 1 - spirals counterclockwise, slight lift
+[[transform]]
+translation = [0.5, 0.02, 0.0]
+scale = 0.85
+rotation = [2.0, 25.0, 0.0]
+color = [0.3, 0.5, 1.0]
+weight = 1.5
+
+# Arm 2 - offset 90 degrees
+[[transform]]
+translation = [0.0, 0.02, 0.5]
+scale = 0.85
+rotation = [2.0, 25.0, 0.0]
+color = [1.0, 0.3, 0.5]
+weight = 1.5
+
+# Arm 3 - offset 180 degrees
+[[transform]]
+translation = [-0.5, 0.02, 0.0]
+scale = 0.85
+rotation = [2.0, 25.0, 0.0]
+color = [0.5, 1.0, 0.3]
+weight = 1.5
+
+# Arm 4 - offset 270 degrees
+[[transform]]
+translation = [0.0, 0.02, -0.5]
+scale = 0.85
+rotation = [2.0, 25.0, 0.0]
+color = [1.0, 0.8, 0.2]
+weight = 1.5
+
+# Dust lane - adds some vertical scatter
+[[transform]]
+translation = [0.2, 0.15, 0.2]
+scale = 0.6
+rotation = [15.0, 45.0, 10.0]
+color = [0.6, 0.4, 0.8]
+weight = 0.5

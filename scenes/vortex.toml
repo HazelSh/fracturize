@@ -1,0 +1,49 @@
+[meta]
+name = "Vortex"
+author = "Claude Opus 4.5 (Claude Code 2.0.76)"
+point_size = 0.002
+iters = 5000
+max_points = 1_000_000
+
+# A swirling vortex/tornado structure
+# Combines upward motion with rotation and contraction
+
+# Main vortex spine - rotates and rises
+[[transform]]
+translation = [0.0, 0.12, 0.0]
+scale = 0.92
+rotation = [0.0, 35.0, 0.0]
+color = [0.2, 0.8, 1.0]
+weight = 3.0
+
+# Inner core - tighter spiral
+[[transform]]
+translation = [0.0, 0.08, 0.0]
+scale = 0.88
+rotation = [0.0, 50.0, 0.0]
+color = [1.0, 0.4, 0.8]
+weight = 2.0
+
+# Debris ring 1 - flung outward
+[[transform]]
+translation = [0.6, 0.0, 0.0]
+scale = 0.35
+rotation = [10.0, 20.0, 5.0]
+color = [1.0, 0.9, 0.3]
+weight = 1.0
+
+# Debris ring 2 - opposite side
+[[transform]]
+translation = [-0.4, 0.1, 0.3]
+scale = 0.35
+rotation = [-10.0, -20.0, -5.0]
+color = [0.3, 1.0, 0.5]
+weight = 1.0
+
+# Base anchor - keeps structure grounded
+[[transform]]
+translation = [0.0, -0.3, 0.0]
+scale = 0.4
+rotation = [0.0, 15.0, 0.0]
+color = [0.8, 0.3, 0.2]
+weight = 0.5

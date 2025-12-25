@@ -1,0 +1,45 @@
+[meta]
+name = "Fractal Octahedron"
+author = "Claude Opus 4.5 (Claude Code 2.0.76)"
+point_size = 0.004
+iters = 2000
+max_points = 500_000
+
+# Octahedron: 6 vertices along the axes
+# Like Sierpinski but with 6 points instead of 4
+
+# +X vertex (red)
+[[transform]]
+translation = [0.5, 0.0, 0.0]
+scale = 0.4
+color = [1.0, 0.2, 0.2]
+
+# -X vertex (cyan)
+[[transform]]
+translation = [-0.5, 0.0, 0.0]
+scale = 0.4
+color = [0.2, 1.0, 1.0]
+
+# +Y vertex (green)
+[[transform]]
+translation = [0.0, 0.5, 0.0]
+scale = 0.4
+color = [0.2, 1.0, 0.2]
+
+# -Y vertex (magenta)
+[[transform]]
+translation = [0.0, -0.5, 0.0]
+scale = 0.4
+color = [1.0, 0.2, 1.0]
+
+# +Z vertex (blue)
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.4
+color = [0.2, 0.2, 1.0]
+
+# -Z vertex (yellow)
+[[transform]]
+translation = [0.0, 0.0, -0.5]
+scale = 0.4
+color = [1.0, 1.0, 0.2]

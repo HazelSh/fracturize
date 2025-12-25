@@ -166,10 +166,10 @@ impl ApplicationHandler for AppWrapper {
 fn default_scene() -> Scene {
     Scene {
         name: "Default Sierpinski".to_string(),
-        author: "Claude".to_string(),
-        point_size = 0.012,
-        iters = 50_000,
-        max_points = 200_000,
+        author: "Claude Opus 4.5 (Claude Code 2.0.76)".to_string(),
+        point_size: 0.012,
+        iters: 50_000,
+        max_points: 200_000,
         transforms: vec![
             (
                 Mat4::from_scale_rotation_translation(
