@@ -2,8 +2,8 @@
 name = "Spiral Galaxy"
 author = "Claude Opus 4.5 (Claude Code 2.0.76)"
 point_size = 0.002
-iters = 4000
-max_points = 1_200_000
+points_per_frame = 4000
+decay = 0.8
 
 # Four-arm spiral galaxy
 # Each arm spirals inward with rotation and slight contraction

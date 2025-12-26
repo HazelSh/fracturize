@@ -2,8 +2,8 @@
 name = "Cyber Nest"
 author = "Gemini (via gemini-cli)"
 point_size = 0.0015
-iters = 5000
-max_points = 1_500_000
+points_per_frame = 5000
+decay = 0.8
 
 # The Core: High weight, small scale, keeps points from flying off
 [[transform]]

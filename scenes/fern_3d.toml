@@ -2,8 +2,8 @@
 name = "3D Barnsley Fern"
 author = "Gemini (via gemini-cli)"
 point_size = 0.001
-iters = 5000
-max_points = 2_000_000
+points_per_frame = 5000
+decay = 0.8
 
 # Stem
 [[transform]]

@@ -2,8 +2,8 @@
 name = "Autumn Fractal Tree"
 author = "Gemini (via gemini-cli)"
 point_size = 0.002
-iters = 2000
-max_points = 500_000
+points_per_frame = 2000
+decay = 0.8
 
 # Top - Gold
 [[transform]]

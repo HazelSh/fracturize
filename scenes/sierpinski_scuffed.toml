@@ -1,0 +1,50 @@
+[meta]
+name = "Scuffed Sierpinski"
+author = "original by Claude Opus 4.5 (modified with Gemini)"
+point_size = 0.001
+points_per_frame = 28_000
+decay = 0.8
+
+# Red vertex - top back
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+color = [1.0, 0.2, 0.2]
+weight = 1.0
+
+# Green vertex - top front
+[[transform]]
+translation = [0.0, 0.47, -0.17]
+scale = 0.5
+color = [0.2, 1.0, 0.2]
+weight = 1.0
+
+# Blue vertex - bottom left
+[[transform]]
+translation = [-0.41, -0.24, -0.17]
+scale = 0.5
+color = [0.2, 0.2, 1.0]
+weight = 1.0
+
+# Yellow vertex - bottom right
+[[transform]]
+translation = [0.41, -0.24, -0.17]
+scale = 0.5
+color = [1.0, 1.0, 0.2]
+weight = 1.0
+
+# Scuff 1: Large scale, low weight, slight rotation
+[[transform]]
+translation = [0.1, 0.1, 0.1]
+scale = 1.2
+rotation = [10.0, 5.0, 0.0]
+color = [0.5, 0.5, 0.5] # Yellow tinge
+weight = 0.05
+
+# Scuff 2: Even larger scale, very low weight, twisted
+[[transform]]
+translation = [-0.1, -0.2, 0.0]
+scale = 1.5
+rotation = [0.0, 45.0, 20.0]
+color = [0.5, 0.0, 0.5] # Purple tinge
+weight = 0.02

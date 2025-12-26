@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use wgpu::{Device, Instance, Queue, Surface, SurfaceConfiguration, TextureFormat};
+use wgpu::{Device, Features, Instance, Queue, Surface, SurfaceConfiguration, TextureFormat};
 use winit::window::Window;
 
 /// Holds wgpu device, queue, and surface state
@@ -39,16 +39,29 @@ impl GpuContext {
 
         log::info!("Using adapter: {:?}", adapter.get_info());
 
+        // Check for required features
+        let adapter_features = adapter.features();
+        let has_f16 = adapter_features.contains(Features::SHADER_F16);
+        log::info!("GPU capabilities: f16={}", has_f16);
+
+        // Require f16 support - panic if not available
+        if !has_f16 {
+            panic!("GPU does not support SHADER_F16 feature, which is required for this application");
+        }
+
+        let required_features = Features::SHADER_F16;
+
         // Request device and queue
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("fracturize_device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::Performance,
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace: Default::default(),
                 },
-                None,
             )
             .await
             .expect("Failed to create device");

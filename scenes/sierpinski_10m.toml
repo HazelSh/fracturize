@@ -1,29 +1,28 @@
+# High-density Sierpinski - 10 million points
+# Tests the compact 8-byte point format
+
 [meta]
-name = "Sierpinski Tetrahedron"
-author = "Claude Opus 4.5 (Claude Code 2.0.76)"
-point_size = 0.002
-points_per_frame = 1_150_000
+name = "Sierpinski 10M"
+author = "Claude Opus 4.5"
+point_size = 0.004
+points_per_frame = 8_000
 decay = 0.8
 
-# Red vertex - top back
 [[transform]]
 translation = [0.0, 0.0, 0.5]
 scale = 0.5
 color = [1.0, 0.2, 0.2]
 
-# Green vertex - top front
 [[transform]]
 translation = [0.0, 0.47, -0.17]
 scale = 0.5
 color = [0.2, 1.0, 0.2]
 
-# Blue vertex - bottom left
 [[transform]]
 translation = [-0.41, -0.24, -0.17]
 scale = 0.5
 color = [0.2, 0.2, 1.0]
 
-# Yellow vertex - bottom right
 [[transform]]
 translation = [0.41, -0.24, -0.17]
 scale = 0.5

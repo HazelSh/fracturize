@@ -1,42 +1,117 @@
-// Chaos game compute shader
-// Runs IFS iterations on the GPU using xorshift128 RNG
+// Chaos game compute shader - Hash grid version
+// Projects points to view space and inserts into hash grid for accumulation
+enable f16;
 
-struct Point {
-    pos: vec3<f32>,
-    _pad0: f32,
-    color: vec4<f32>,
+struct HashCell {
+    key: atomic<u32>,
+    density: atomic<u32>,
+    color_weight: atomic<u32>,
+    min_depth: atomic<u32>,
 }
 
 struct Transform {
-    matrix: mat4x4<f32>,     // 64 bytes
-    color: vec4<f32>,        // 16 bytes
-    weight: f32,             // 4 bytes
-    cumulative_weight: f32,  // 4 bytes
-    _pad: vec2<f32>,         // 8 bytes
+    matrix: mat4x4<f32>,
+    color_value: f32,
+    weight: f32,
+    cumulative_weight: f32,
+    color_speed: f32,
 }
 
-struct IterationState {
+struct WalkerState {
     current_pos: vec3<f32>,
     _pad0: f32,
-    current_color: vec4<f32>,
-    point_write_idx: u32,
-    total_iterations: u32,
-    _align_pad: vec2<u32>,      // padding to align rng_state to 16 bytes
-    rng_state: vec4<u32>,       // xorshift128 state
-    _struct_pad: vec4<u32>,     // padding for struct alignment
+    current_color: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
+    rng_state: vec4<u32>,
 }
 
 struct ComputeParams {
     num_transforms: u32,
-    max_points: u32,
-    iterations_per_dispatch: u32,
+    num_walkers: u32,
+    iterations_per_walker: u32,
     _pad: u32,
 }
 
-@group(0) @binding(0) var<storage, read_write> points: array<Point>;
+struct HashGridParams {
+    prev_inv_view_proj: mat4x4<f32>,
+    curr_view_proj: mat4x4<f32>,
+    res_x: u32,
+    res_y: u32,
+    depth_slices: u32,
+    decay: f32,
+    hash_size: u32,
+    near_plane: f32,
+    far_plane: f32,
+    frame: u32,
+}
+
+// Empty key is 0 (cleared by GPU fill) - valid keys always have +1 offset
+const EMPTY_KEY: u32 = 0u;
+const MAX_PROBES: u32 = 64u;
+const DENSITY_UNIT: u32 = 256u;  // 1.0 in u16.8 fixed point
+
+@group(0) @binding(0) var<storage, read_write> grid: array<HashCell>;
 @group(0) @binding(1) var<storage, read> transforms: array<Transform>;
-@group(0) @binding(2) var<storage, read_write> state: IterationState;
-@group(0) @binding(3) var<uniform> params: ComputeParams;
+@group(0) @binding(2) var<storage, read_write> walker_states: array<WalkerState>;
+@group(0) @binding(3) var<uniform> compute_params: ComputeParams;
+@group(0) @binding(4) var<uniform> grid_params: HashGridParams;
+
+// Encode screen coordinates and depth slice to key
+// Add 1 to ensure the key is never 0 (which is EMPTY_KEY)
+fn encode_key(screen_x: u32, screen_y: u32, depth_slice: u32) -> u32 {
+    return ((screen_x << 21u) | (screen_y << 10u) | depth_slice) + 1u;
+}
+
+// Convert linear depth to depth slice (logarithmic mapping)
+fn depth_to_slice(depth: f32) -> u32 {
+    let log_near = log(grid_params.near_plane);
+    let log_far = log(grid_params.far_plane);
+    let t = (log(max(depth, grid_params.near_plane)) - log_near) / (log_far - log_near);
+    return u32(round(clamp(t, 0.0, 1.0) * f32(grid_params.depth_slices - 1u)));
+}
+
+// Hash function for linear probing
+fn hash_key(key: u32) -> u32 {
+    var h = key;
+    h = h ^ (h >> 16u);
+    h = h * 0x85ebca6bu;
+    h = h ^ (h >> 13u);
+    h = h * 0xc2b2ae35u;
+    h = h ^ (h >> 16u);
+    return h;
+}
+
+// Insert into hash table with linear probing
+fn hash_insert(key: u32, color_idx: u32, depth_fixed: u32) {
+    let start_idx = hash_key(key) % grid_params.hash_size;
+
+    for (var probe = 0u; probe < MAX_PROBES; probe++) {
+        let idx = (start_idx + probe) % grid_params.hash_size;
+
+        // Try to claim this slot
+        let old_key = atomicCompareExchangeWeak(&grid[idx].key, EMPTY_KEY, key);
+
+        if old_key.exchanged {
+            // We claimed an empty slot - initialize it
+            atomicStore(&grid[idx].density, DENSITY_UNIT);
+            // Store color index in upper 8 bits, weight in lower 16 bits
+            atomicStore(&grid[idx].color_weight, (color_idx << 24u) | 1u);
+            atomicStore(&grid[idx].min_depth, depth_fixed);
+            return;
+        } else if old_key.old_value == key {
+            // Same key exists - accumulate density
+            atomicAdd(&grid[idx].density, DENSITY_UNIT);
+            // Increment weight for color averaging (lower 16 bits)
+            atomicAdd(&grid[idx].color_weight, 1u);
+            atomicMin(&grid[idx].min_depth, depth_fixed);
+            return;
+        }
+        // Different key - continue probing
+    }
+    // Dropped sample (hash table too full in this region)
+}
 
 // xorshift128 random number generator
 fn xorshift128(s: ptr<function, vec4<u32>>) -> u32 {
@@ -51,12 +126,10 @@ fn xorshift128(s: ptr<function, vec4<u32>>) -> u32 {
     return (*s).x;
 }
 
-// Generate random float in [0, 1)
 fn rand_float(s: ptr<function, vec4<u32>>) -> f32 {
     return f32(xorshift128(s)) / 4294967296.0;
 }
 
-// Select transform based on cumulative weights
 fn select_transform(r: f32, num_transforms: u32) -> u32 {
     for (var i = 0u; i < num_transforms; i++) {
         if r < transforms[i].cumulative_weight {
@@ -66,54 +139,72 @@ fn select_transform(r: f32, num_transforms: u32) -> u32 {
     return num_transforms - 1u;
 }
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // Load RNG state into local variable
-    var rng = state.rng_state;
+    let walker_id = global_id.x;
 
-    // Load current position and color
-    var pos = state.current_pos;
-    var color = state.current_color;
-    var write_idx = state.point_write_idx;
-    let total_iters = state.total_iterations;
+    if walker_id >= compute_params.num_walkers {
+        return;
+    }
 
-    // Check if buffer is already full (determines write strategy)
-    let buffer_full = total_iters >= params.max_points;
+    var rng = walker_states[walker_id].rng_state;
+    var pos = walker_states[walker_id].current_pos;
+    var color_val = walker_states[walker_id].current_color;
 
-    // Run iterations
-    for (var i = 0u; i < params.iterations_per_dispatch; i++) {
-        // Select transform
+    let res_x = f32(grid_params.res_x);
+    let res_y = f32(grid_params.res_y);
+
+    for (var i = 0u; i < compute_params.iterations_per_walker; i++) {
         let r = rand_float(&rng);
-        let transform_idx = select_transform(r, params.num_transforms);
+        let transform_idx = select_transform(r, compute_params.num_transforms);
         let transform = transforms[transform_idx];
 
-        // Apply transform
         let pos4 = transform.matrix * vec4<f32>(pos, 1.0);
         pos = pos4.xyz;
 
-        // Blend colors (Apophysis-style: 80% old, 20% new)
-        color = color * 0.8 + transform.color * 0.2;
+        let speed = transform.color_speed;
+        color_val = color_val * (1.0 - speed) + transform.color_value * speed;
 
-        // Choose write index based on whether buffer is full
-        var actual_write_idx: u32;
-        if buffer_full {
-            // Buffer full: random overwrite (like old CPU version)
-            // This keeps most points stable, only updating scattered ones
-            actual_write_idx = xorshift128(&rng) % params.max_points;
-        } else {
-            // Buffer not full: sequential fill
-            actual_write_idx = write_idx;
-            write_idx = (write_idx + 1u) % params.max_points;
+        // Project to clip space
+        let clip = grid_params.curr_view_proj * vec4<f32>(pos, 1.0);
+
+        // Skip points behind camera
+        if clip.w <= grid_params.near_plane * 0.5 {
+            continue;
         }
 
-        // Store point
-        points[actual_write_idx] = Point(pos, 0.0, color);
+        // Perspective divide to NDC
+        let ndc = clip.xyz / clip.w;
+
+        // Skip points outside frustum
+        if any(abs(ndc.xy) > vec2<f32>(1.0, 1.0)) {
+            continue;
+        }
+
+        // Convert to screen coordinates with dithering to reduce quantization artifacts
+        // The -0.5 converts from edge-to-edge NDC mapping to pixel-center coordinates
+        let dither_x = rand_float(&rng) - 0.5;  // [-0.5, 0.5]
+        let dither_y = rand_float(&rng) - 0.5;
+        let screen_x = u32(clamp(round((ndc.x * 0.5 + 0.5) * res_x - 0.5 + dither_x), 0.0, res_x - 1.0));
+        let screen_y = u32(clamp(round((ndc.y * 0.5 + 0.5) * res_y - 0.5 + dither_y), 0.0, res_y - 1.0));
+
+        // Get depth slice
+        let depth_slice = depth_to_slice(clip.w);
+
+        // Encode key
+        let key = encode_key(screen_x, screen_y, depth_slice);
+
+        // Quantize color to 8-bit index (0-255)
+        let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
+
+        // Convert depth to fixed-point for atomicMin
+        let depth_fixed = u32(clamp(clip.w / grid_params.far_plane, 0.0, 1.0) * f32(0xFFFFFFFFu));
+
+        // Insert into hash grid
+        hash_insert(key, color_idx, depth_fixed);
     }
 
-    // Store state back
-    state.current_pos = pos;
-    state.current_color = color;
-    state.point_write_idx = write_idx;
-    state.total_iterations = total_iters + params.iterations_per_dispatch;
-    state.rng_state = rng;
+    walker_states[walker_id].current_pos = pos;
+    walker_states[walker_id].current_color = color_val;
+    walker_states[walker_id].rng_state = rng;
 }

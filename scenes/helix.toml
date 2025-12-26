@@ -2,28 +2,34 @@
 name = "Neon Helix"
 author = "Gemini (via gemini-cli)"
 point_size = 0.002
-iters = 5000
-max_points = 1_000_000
+points_per_frame = 5000
+decay = 0.8
+color_speed = 0.5
 
-# The Spine: Rotates and lifts the structure
-# Slightly contracting (0.95) to create a long spiral cone
+# The Spine: Low color speed so it doesn't wash out other colors immediately
 [[transform]]
+name = "Spine"
 translation = [0.0, 0.15, 0.0]
 scale = 0.95
 rotation = [0.0, 30.0, 0.0]
 color = [1.0, 0.0, 0.8] # Magenta
 weight = 3.0
+color_speed = 0.1
 
-# The Rib 1: Pulls out to the side to create width
+# The Rib 1: High color speed to inject color strongly
 [[transform]]
+name = "Cyan Rib"
 translation = [0.8, 0.0, 0.0]
 scale = 0.3
 rotation = [0.0, 0.0, 45.0]
 color = [0.0, 1.0, 1.0] # Cyan
+color_speed = 0.9
 
-# The Rib 2: Another detail element
+# The Rib 2: High color speed
 [[transform]]
+name = "Yellow Rib"
 translation = [-0.6, 0.2, 0.0]
 scale = 0.3
 rotation = [90.0, 0.0, 0.0]
 color = [1.0, 1.0, 0.0] # Yellow
+color_speed = 0.9

@@ -2,8 +2,8 @@
 name = "3D Dragon Curve"
 author = "Gemini (via gemini-cli)"
 point_size = 0.002
-iters = 2000
-max_points = 1_000_000
+points_per_frame = 2000
+decay = 0.8
 
 # Transform 1: Scale, Rotate 45 deg, Translate
 [[transform]]
