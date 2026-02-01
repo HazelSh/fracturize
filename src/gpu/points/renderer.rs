@@ -2,7 +2,7 @@
 //!
 //! Renders points as axis-aligned billboard quads with depth-based sizing.
 
-use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFormat};
+use wgpu::{BindGroup, Buffer, Device, RenderPipeline, TextureFormat};
 
 use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 
@@ -12,7 +12,6 @@ pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 /// Point billboard renderer
 pub struct PointRenderer {
     pub pipeline: RenderPipeline,
-    pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
     pub camera_buffer: Buffer,
 }
@@ -141,7 +140,6 @@ impl PointRenderer {
 
         Self {
             pipeline,
-            bind_group_layout,
             bind_group,
             camera_buffer,
         }

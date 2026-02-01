@@ -1,7 +1,9 @@
+#![allow(dead_code)]
+
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+#[allow(unused_imports)]
 use half::f16;
-use wgpu::util::DeviceExt;
 
 /// Hash grid capacity (4M entries)
 pub const HASH_GRID_SIZE: usize = 4 * 1024 * 1024;

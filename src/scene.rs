@@ -41,6 +41,7 @@ fn default_decay() -> f32 {
 /// Transform definition in TOML (human-readable format)
 #[derive(Deserialize)]
 pub struct TransformDef {
+    #[allow(dead_code)]
     pub name: Option<String>,
     pub translation: [f32; 3],
     #[serde(default = "default_scale")]
@@ -85,11 +86,14 @@ pub struct Scene {
     pub author: String,
     pub point_size: f32,
     /// Points generated per frame by the density renderer's chaos game
+    #[allow(dead_code)]
     pub points_per_frame: usize,
     /// Total point buffer size for the simple point renderer
     pub point_count: usize,
     /// Temporal decay factor (0.0-1.0)
+    #[allow(dead_code)]
     pub decay: f32,
+    #[allow(dead_code)]
     pub color_speed: f32,
     /// Transforms: (matrix, color_value, weight, color_speed)
     /// color_value is 0.0-1.0 index into colormap

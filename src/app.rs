@@ -101,7 +101,6 @@ pub struct App {
     pub rotation: f32,
     pub camera_distance: f32,
     pub point_size: f32,
-    pub buffer_capacity: u32,
 
     // Fog parameters
     pub fog_near: f32,
@@ -197,7 +196,6 @@ impl App {
             rotation: 0.0,
             camera_distance: 3.0,
             point_size,
-            buffer_capacity,
             fog_near: 3.0,
             fog_far: 4.5,
             fog_brightness,

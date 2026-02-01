@@ -6,11 +6,12 @@
 
 pub mod buffers;
 pub mod context;
+#[allow(dead_code, unused_imports, unused_variables)]
 pub mod density;
 pub mod points;
 
 // Re-export shared types
-pub use buffers::{CameraUniforms, GpuTransform, Point, PointComputeParams};
+pub use buffers::CameraUniforms;
 pub use context::GpuContext;
 
 // Re-export the active renderer (points)
