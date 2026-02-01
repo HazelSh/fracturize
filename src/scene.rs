@@ -41,7 +41,6 @@ fn default_decay() -> f32 {
 /// Transform definition in TOML (human-readable format)
 #[derive(Deserialize)]
 pub struct TransformDef {
-    #[allow(dead_code)]
     pub name: Option<String>,
     pub translation: [f32; 3],
     #[serde(default = "default_scale")]
@@ -69,10 +68,22 @@ fn default_weight() -> f32 {
     1.0
 }
 
+/// Camera configuration from TOML
+#[derive(Deserialize, Default)]
+pub struct CameraDef {
+    /// Orbit center / look-at point
+    pub focus: Option<[f32; 3]>,
+    /// Added to orbital camera position
+    pub offset: Option<[f32; 3]>,
+    /// Orbit radius
+    pub distance: Option<f32>,
+}
+
 /// Full scene file structure
 #[derive(Deserialize)]
 pub struct SceneFile {
     pub meta: SceneMeta,
+    pub camera: Option<CameraDef>,
     #[serde(rename = "transform")]
     pub transforms: Vec<TransformDef>,
 }
@@ -98,8 +109,16 @@ pub struct Scene {
     /// Transforms: (matrix, color_value, weight, color_speed)
     /// color_value is 0.0-1.0 index into colormap
     pub transforms: Vec<(Mat4, f32, f32, f32)>,
+    /// Human-readable name per transform (from scene file)
+    pub transform_names: Vec<Option<String>>,
     /// 256-color gradient for point coloring
     pub colormap: Colormap,
+    /// Camera orbit center / look-at point
+    pub camera_focus: Vec3,
+    /// Offset added to orbital camera position
+    pub camera_offset: Vec3,
+    /// Camera orbit radius
+    pub camera_distance: f32,
 }
 
 impl Scene {
@@ -121,6 +140,12 @@ impl Scene {
             .collect();
 
         let global_speed = scene_file.meta.color_speed;
+
+        let transform_names: Vec<Option<String>> = scene_file
+            .transforms
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
 
         let transforms: Vec<(Mat4, f32, f32, f32)> = scene_file
             .transforms
@@ -160,6 +185,11 @@ impl Scene {
         // Generate colormap from transform colors (always cyclic)
         let colormap = generate_colormap(&transform_colors);
 
+        let cam = scene_file.camera.unwrap_or_default();
+        let camera_focus = cam.focus.map(Vec3::from).unwrap_or(Vec3::ZERO);
+        let camera_offset = cam.offset.map(Vec3::from).unwrap_or(Vec3::new(0.0, 1.0, 0.0));
+        let camera_distance = cam.distance.unwrap_or(3.0);
+
         Ok(Scene {
             name: scene_file.meta.name,
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
@@ -169,7 +199,11 @@ impl Scene {
             decay: scene_file.meta.decay,
             color_speed: scene_file.meta.color_speed,
             transforms,
+            transform_names,
             colormap,
+            camera_focus,
+            camera_offset,
+            camera_distance,
         })
     }
 }

@@ -116,7 +116,7 @@ impl PointCompute {
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("transform_buffer"),
             contents: bytemuck::cast_slice(&gpu_transforms),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Initialize walker states with different seeds
@@ -127,7 +127,7 @@ impl PointCompute {
         let walker_states_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("walker_states_buffer"),
             contents: bytemuck::cast_slice(&walker_states),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Parameters uniform
@@ -327,6 +327,35 @@ impl PointCompute {
         compute_pass.set_pipeline(&self.pipeline);
         compute_pass.set_bind_group(0, bind_group, &[]);
         compute_pass.dispatch_workgroups(self.num_workgroups, 1, 1);
+    }
+
+    /// Reupload transform weights with some transforms disabled
+    pub fn update_weights(
+        &self,
+        queue: &wgpu::Queue,
+        transforms: &[(glam::Mat4, f32, f32, f32)],
+        enabled: &[bool],
+    ) {
+        let total_weight: f32 = transforms
+            .iter()
+            .zip(enabled.iter())
+            .map(|((_, _, w, _), &on)| if on { *w } else { 0.0 })
+            .sum();
+
+        let mut cumulative = 0.0;
+        let gpu_transforms: Vec<GpuTransform> = transforms
+            .iter()
+            .zip(enabled.iter())
+            .map(|((matrix, color_value, weight, color_speed), &on)| {
+                let effective_weight = if on { *weight } else { 0.0 };
+                if total_weight > 0.0 {
+                    cumulative += effective_weight / total_weight;
+                }
+                GpuTransform::new(*matrix, *color_value, effective_weight, cumulative, *color_speed)
+            })
+            .collect();
+
+        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&gpu_transforms));
     }
 
     /// Reset to initial state (for scene reload or reset key)

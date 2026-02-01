@@ -6,6 +6,11 @@ points_per_frame = 5000
 decay = 0.8
 color_speed = 0.5
 
+[camera]
+focus = [0.0, 1.0, 0.0]
+offset = [0.0, 1.5, 0.0]
+distance = 3.0
+
 # The Spine: Low color speed so it doesn't wash out other colors immediately
 [[transform]]
 name = "Spine"

@@ -213,6 +213,8 @@ pub struct GizmoRenderer {
     camera_buffer: wgpu::Buffer,
     /// Vertex buffer layout: [ref_edges_dots | xform_edges_dots | ref_faces | xform_faces]
     vertex_buffer: wgpu::Buffer,
+    /// Per-instance alpha multiplier (1.0 = full, <1.0 = greyed out)
+    alpha_buffer: wgpu::Buffer,
     instance_count: u32,
 }
 
@@ -238,6 +240,14 @@ impl GizmoRenderer {
             label: Some("gizmo_transforms"),
             contents: bytemuck::cast_slice(&matrices),
             usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Per-instance alpha (all 1.0 initially)
+        let alphas = vec![1.0f32; instance_count as usize];
+        let alpha_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gizmo_alphas"),
+            contents: bytemuck::cast_slice(&alphas),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Build vertex buffer: [ref_edges_dots | xform_edges_dots | ref_faces | xform_faces]
@@ -273,6 +283,16 @@ impl GizmoRenderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -319,6 +339,7 @@ impl GizmoRenderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: transform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: alpha_buffer.as_entire_binding() },
             ],
         });
 
@@ -328,6 +349,7 @@ impl GizmoRenderer {
             bind_group,
             camera_buffer,
             vertex_buffer,
+            alpha_buffer,
             instance_count,
         }
     }
@@ -335,6 +357,19 @@ impl GizmoRenderer {
     /// Upload camera uniforms
     pub fn upload_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+    }
+
+    /// Update per-instance alpha based on enabled state
+    /// Instance 0 is the reference gizmo (always full alpha),
+    /// instances 1..N correspond to transforms[0..N-1]
+    pub fn update_alpha(&self, queue: &wgpu::Queue, enabled: &[bool]) {
+        let mut alphas = vec![1.0f32; self.instance_count as usize];
+        for (i, &on) in enabled.iter().enumerate() {
+            if !on {
+                alphas[i + 1] = 0.25; // instance 0 is reference, transforms start at 1
+            }
+        }
+        queue.write_buffer(&self.alpha_buffer, 0, bytemuck::cast_slice(&alphas));
     }
 
     /// Draw gizmos in a render pass (should be called after the point cloud pass).

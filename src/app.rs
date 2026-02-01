@@ -6,8 +6,19 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Vec3};
 use winit::window::Window;
 
-use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, PointCompute, PointRenderer, DEPTH_FORMAT};
+use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, PointCompute, PointRenderer, TextRenderer, DEPTH_FORMAT};
+use crate::gpu::text::TextEntry;
 use crate::scene::Scene;
+
+/// Project a world-space position to screen coordinates
+fn world_to_screen(pos: Vec3, view_proj: Mat4, w: f32, h: f32) -> Option<(f32, f32)> {
+    let clip = view_proj * pos.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    Some(((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
+}
 
 /// Clear color: dark blue-black
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
@@ -100,9 +111,12 @@ pub struct App {
     pub frame_count: u32,
     pub rotation: f32,
     pub camera_distance: f32,
+    pub camera_focus: Vec3,
+    pub camera_offset: Vec3,
     pub point_size: f32,
 
     pub show_gizmos: bool,
+    pub show_text: bool,
 
     // Fog parameters
     pub fog_near: f32,
@@ -116,6 +130,29 @@ pub struct App {
     point_compute: PointCompute,
     point_renderer: PointRenderer,
     gizmo_renderer: GizmoRenderer,
+    text_renderer: TextRenderer,
+
+    /// Scene name for HUD
+    scene_name: String,
+    /// Scene author for HUD
+    scene_author: String,
+    /// Point buffer capacity for HUD
+    buffer_capacity: u32,
+
+    /// Transform names for text overlay
+    transform_names: Vec<Option<String>>,
+    /// Cached scene transforms for text label projection
+    scene_transforms: Vec<(Mat4, f32, f32, f32)>,
+    /// Colormap for transform label colors
+    colormap: [[f32; 4]; 256],
+
+    /// Selected transform index (Some when text overlay visible)
+    selected_transform: Option<usize>,
+    /// Per-transform enabled state
+    transform_enabled: Vec<bool>,
+    /// Original weights stashed from scene for restore
+    #[allow(dead_code)]
+    original_weights: Vec<f32>,
 
     depth_texture: wgpu::Texture,
 
@@ -192,6 +229,18 @@ impl App {
             mapped_at_creation: false,
         });
 
+        // Create text renderer
+        let text_renderer = TextRenderer::new(&gpu.device, &gpu.queue, gpu.format);
+
+        // Save scene data for text overlay
+        let scene_name = scene.name.clone();
+        let scene_author = scene.author.clone();
+        let transform_names = scene.transform_names.clone();
+        let scene_transforms = scene.transforms.clone();
+        let colormap = scene.colormap;
+        let num_transforms = scene_transforms.len();
+        let original_weights: Vec<f32> = scene_transforms.iter().map(|(_, _, w, _)| *w).collect();
+
         // Fog settings
         let (fog_brightness, fog_saturation) = if fog_enabled {
             (0.4, 0.3)
@@ -204,9 +253,12 @@ impl App {
             window,
             frame_count: 0,
             rotation: 0.0,
-            camera_distance: 3.0,
+            camera_distance: scene.camera_distance,
+            camera_focus: scene.camera_focus,
+            camera_offset: scene.camera_offset,
             point_size,
             show_gizmos: true,
+            show_text: true,
             fog_near: 3.0,
             fog_far: 4.5,
             fog_brightness,
@@ -215,6 +267,16 @@ impl App {
             point_compute,
             point_renderer,
             gizmo_renderer,
+            text_renderer,
+            scene_name,
+            scene_author,
+            buffer_capacity,
+            transform_names,
+            scene_transforms,
+            colormap,
+            selected_transform: Some(0),
+            transform_enabled: vec![true; num_transforms],
+            original_weights,
             depth_texture,
             screenshot_texture,
             screenshot_depth,
@@ -276,6 +338,52 @@ impl App {
         log::info!("Gizmos: {}", if self.show_gizmos { "on" } else { "off" });
     }
 
+    pub fn toggle_text_overlay(&mut self) {
+        self.show_text = !self.show_text;
+        self.selected_transform = if self.show_text { Some(0) } else { None };
+        log::info!("Text overlay: {}", if self.show_text { "on" } else { "off" });
+    }
+
+    pub fn select_prev_transform(&mut self) {
+        if let Some(idx) = self.selected_transform {
+            let n = self.scene_transforms.len();
+            self.selected_transform = Some(if idx == 0 { n - 1 } else { idx - 1 });
+        }
+    }
+
+    pub fn select_next_transform(&mut self) {
+        if let Some(idx) = self.selected_transform {
+            let n = self.scene_transforms.len();
+            self.selected_transform = Some((idx + 1) % n);
+        }
+    }
+
+    pub fn toggle_selected_transform(&mut self) {
+        let Some(idx) = self.selected_transform else { return };
+        if idx >= self.transform_enabled.len() { return }
+
+        // Guard: don't disable the last enabled transform
+        let enabled_count = self.transform_enabled.iter().filter(|&&e| e).count();
+        if self.transform_enabled[idx] && enabled_count <= 1 {
+            log::warn!("Cannot disable last remaining transform");
+            return;
+        }
+
+        self.transform_enabled[idx] = !self.transform_enabled[idx];
+        log::info!(
+            "Transform {} {}", idx,
+            if self.transform_enabled[idx] { "enabled" } else { "disabled" },
+        );
+
+        self.point_compute.update_weights(
+            &self.gpu.queue,
+            &self.scene_transforms,
+            &self.transform_enabled,
+        );
+        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
+        self.reset();
+    }
+
     pub fn request_screenshot(&mut self) {
         self.pending_screenshot = true;
     }
@@ -313,13 +421,13 @@ impl App {
         }
 
         let aspect = SCREENSHOT_WIDTH as f32 / SCREENSHOT_HEIGHT as f32;
-        let cam_pos = Vec3::new(
+        let cam_pos = self.camera_focus + self.camera_offset + Vec3::new(
             self.rotation.sin() * self.camera_distance,
-            1.0,
+            0.0,
             self.rotation.cos() * self.camera_distance,
         );
         let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-        let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
+        let view = Mat4::look_at_rh(cam_pos, self.camera_focus, Vec3::Y);
         let mvp = projection * view;
 
         let camera = CameraUniforms::new(
@@ -435,6 +543,185 @@ impl App {
         self.pending_screenshot = false;
     }
 
+    fn build_text_entries(&self, view_proj: Mat4, width: f32, height: f32) -> Vec<TextEntry> {
+        let mut entries = Vec::new();
+        let white = [255, 255, 255, 255];
+        let grey = [180, 180, 180, 220];
+
+        // === Top-left HUD ===
+        let point_count = self.point_compute.valid_point_count();
+
+        // Scene name + author
+        entries.push(TextEntry {
+            text: format!("{} — {}", self.scene_name, self.scene_author),
+            x: 10.0,
+            y: 10.0,
+            color: grey,
+            font_size: 12.0,
+        });
+
+        // Performance + point stats
+        entries.push(TextEntry {
+            text: format!(
+                "{:.0} FPS | {:.1}ms | {}k / {}k points",
+                self.fps_tracker.current_fps,
+                self.fps_tracker.current_frametime_ms,
+                point_count / 1000,
+                self.buffer_capacity / 1000,
+            ),
+            x: 10.0,
+            y: 26.0,
+            color: white,
+            font_size: 14.0,
+        });
+
+        // Camera params
+        let mut param_y = 48.0;
+        entries.push(TextEntry {
+            text: format!(
+                "cam: d={:.1} focus=({:.1},{:.1},{:.1}) off=({:.1},{:.1},{:.1})",
+                self.camera_distance,
+                self.camera_focus.x, self.camera_focus.y, self.camera_focus.z,
+                self.camera_offset.x, self.camera_offset.y, self.camera_offset.z,
+            ),
+            x: 10.0,
+            y: param_y,
+            color: grey,
+            font_size: 12.0,
+        });
+        param_y += 16.0;
+
+        // Point size
+        entries.push(TextEntry {
+            text: format!("pt size={:.4}", self.point_size),
+            x: 10.0,
+            y: param_y,
+            color: grey,
+            font_size: 12.0,
+        });
+        param_y += 16.0;
+
+        // Fog params (only if not default)
+        if self.fog_brightness < 1.0 || self.fog_saturation < 1.0 {
+            entries.push(TextEntry {
+                text: format!(
+                    "fog: near={:.1} far={:.1} b={:.2} s={:.2}",
+                    self.fog_near, self.fog_far, self.fog_brightness, self.fog_saturation,
+                ),
+                x: 10.0,
+                y: param_y,
+                color: grey,
+                font_size: 12.0,
+            });
+        }
+
+        // === Right-side transform list ===
+        let right_x = width - 250.0;
+        let mut y = 10.0;
+        entries.push(TextEntry {
+            text: "Transforms".to_string(),
+            x: right_x,
+            y,
+            color: white,
+            font_size: 14.0,
+        });
+        y += 20.0;
+
+        for (i, (mat, color_value, weight, _speed)) in self.scene_transforms.iter().enumerate() {
+            let name = self.transform_names
+                .get(i)
+                .and_then(|n| n.as_deref())
+                .unwrap_or("");
+            let label = if name.is_empty() {
+                format!("T{}", i)
+            } else {
+                format!("T{}: {}", i, name)
+            };
+
+            let translation = mat.w_axis.truncate();
+            let scale = mat.x_axis.length();
+
+            let is_selected = self.selected_transform == Some(i);
+            let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
+
+            let sel = if is_selected { ">" } else { " " };
+            let on = if is_enabled { " " } else { "×" };
+
+            let line = format!(
+                "{}{} {} p=({:.2},{:.2},{:.2}) s={:.2} w={:.1}",
+                sel, on, label, translation.x, translation.y, translation.z, scale, weight,
+            );
+
+            // Use colormap color for this transform, dim if disabled
+            let cm_idx = (color_value * 255.0).clamp(0.0, 255.0) as usize;
+            let cm = self.colormap[cm_idx];
+            let alpha: u8 = if is_enabled { 220 } else { 80 };
+            let color = [
+                (cm[0] * 255.0) as u8,
+                (cm[1] * 255.0) as u8,
+                (cm[2] * 255.0) as u8,
+                alpha,
+            ];
+
+            entries.push(TextEntry {
+                text: line,
+                x: right_x,
+                y,
+                color,
+                font_size: 12.0,
+            });
+            y += 16.0;
+        }
+
+        // === World-space gizmo labels ===
+        for (i, (mat, _color_value, _weight, _speed)) in self.scene_transforms.iter().enumerate() {
+            let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
+            let is_selected = self.selected_transform == Some(i);
+            let origin = mat.w_axis.truncate();
+            if let Some((sx, sy)) = world_to_screen(origin, view_proj, width, height) {
+                let name = self.transform_names
+                    .get(i)
+                    .and_then(|n| n.as_deref())
+                    .unwrap_or("");
+                let label = if name.is_empty() {
+                    format!("T{}", i)
+                } else {
+                    name.to_string()
+                };
+
+                if is_selected {
+                    // Draw background highlight for selected label
+                    let bg_chars: String = "\u{2588}".repeat(label.len() + 2);
+                    entries.push(TextEntry {
+                        text: bg_chars,
+                        x: sx + 4.0,
+                        y: sy - 7.0,
+                        color: [255, 255, 255, 200],
+                        font_size: 13.0,
+                    });
+                    entries.push(TextEntry {
+                        text: format!(" {} ", label),
+                        x: sx + 4.0,
+                        y: sy - 6.0,
+                        color: [0, 0, 0, 255],
+                        font_size: 13.0,
+                    });
+                } else {
+                    let alpha: u8 = if is_enabled { 200 } else { 80 };
+                    entries.push(TextEntry {
+                        text: label,
+                        x: sx + 8.0,
+                        y: sy - 6.0,
+                        color: [255, 255, 255, alpha],
+                        font_size: 13.0,
+                    });
+                }
+            }
+        }
+
+        entries
+    }
+
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         if self.pending_screenshot {
             self.take_screenshot();
@@ -442,14 +729,14 @@ impl App {
 
         let (width, height) = self.gpu.size();
         let aspect = width as f32 / height as f32;
-        let cam_pos = Vec3::new(
+        let cam_pos = self.camera_focus + self.camera_offset + Vec3::new(
             self.rotation.sin() * self.camera_distance,
-            1.0,
+            0.0,
             self.rotation.cos() * self.camera_distance,
         );
 
         let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-        let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
+        let view = Mat4::look_at_rh(cam_pos, self.camera_focus, Vec3::Y);
         let view_proj = projection * view;
 
         // Advance circular buffer and get valid point count
@@ -539,6 +826,31 @@ impl App {
             });
 
             self.gizmo_renderer.draw(&mut render_pass);
+        }
+
+        // === STEP 4: RENDER TEXT OVERLAY ===
+        if self.show_text {
+            let entries = self.build_text_entries(view_proj, width as f32, height as f32);
+            self.text_renderer.prepare(&self.gpu.device, &self.gpu.queue, width, height, &entries);
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            self.text_renderer.render(&mut render_pass);
         }
 
         self.gpu.queue.submit(std::iter::once(encoder.finish()));

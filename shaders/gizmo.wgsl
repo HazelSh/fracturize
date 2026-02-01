@@ -23,17 +23,21 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) @interpolate(flat) inst_alpha: f32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<storage, read> transforms: array<mat4x4<f32>>;
+@group(0) @binding(2) var<storage, read> instance_alpha: array<f32>;
 
 @vertex
 fn vs_main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
     let transform = transforms[instance_index];
+    let alpha_mult = instance_alpha[instance_index];
 
     var out: VertexOutput;
     out.color = in.color;
+    out.inst_alpha = alpha_mult;
 
     if in.vertex_type == 0u {
         // === FACE VERTEX: simple transform + project ===
@@ -157,5 +161,11 @@ fn vs_main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> Ver
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    var c = in.color;
+    if in.inst_alpha < 1.0 {
+        // Desaturate towards grey for disabled gizmos
+        let lum = dot(c.rgb, vec3<f32>(0.3, 0.6, 0.1));
+        c = vec4<f32>(vec3<f32>(lum), c.a * in.inst_alpha);
+    }
+    return c;
 }

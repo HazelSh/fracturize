@@ -119,11 +119,25 @@ impl ApplicationHandler for AppWrapper {
                             return;
                         }
                         PhysicalKey::Code(KeyCode::ArrowUp) => {
-                            app.zoom_in();
+                            if app.show_text {
+                                app.select_prev_transform();
+                            } else {
+                                app.zoom_in();
+                            }
                             return;
                         }
                         PhysicalKey::Code(KeyCode::ArrowDown) => {
-                            app.zoom_out();
+                            if app.show_text {
+                                app.select_next_transform();
+                            } else {
+                                app.zoom_out();
+                            }
+                            return;
+                        }
+                        PhysicalKey::Code(KeyCode::Enter) => {
+                            if app.show_text {
+                                app.toggle_selected_transform();
+                            }
                             return;
                         }
                         _ => {}
@@ -151,6 +165,9 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "g" | "G" => {
                                 app.toggle_gizmos();
+                            }
+                            "t" | "T" => {
+                                app.toggle_text_overlay();
                             }
                             "[" => {
                                 app.adjust_point_size(false);
@@ -237,6 +254,7 @@ fn default_scene() -> Scene {
         point_count: 500_000,
         decay: 0.8,
         color_speed: 0.5,
+        transform_names: vec![None; 4],
         transforms: vec![
             (
                 Mat4::from_scale_rotation_translation(
@@ -280,6 +298,9 @@ fn default_scene() -> Scene {
             ),
         ],
         colormap,
+        camera_focus: Vec3::ZERO,
+        camera_offset: Vec3::new(0.0, 1.0, 0.0),
+        camera_distance: 3.0,
     }
 }
 
