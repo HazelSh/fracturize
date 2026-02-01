@@ -84,6 +84,10 @@ pub struct HashGridParams {
     pub far_plane: f32,
     /// Frame number for debugging
     pub frame: u32,
+    /// Depth culling enabled (1 = yes, 0 = no)
+    pub depth_cull_enabled: u32,
+    /// Padding for 16-byte alignment (WGSL requires struct size multiple of largest alignment)
+    pub _pad: [u32; 3],
 }
 
 impl HashGridParams {
@@ -96,18 +100,21 @@ impl HashGridParams {
         far_plane: f32,
         decay: f32,
         frame: u32,
+        depth_cull_enabled: bool,
     ) -> Self {
         Self {
             prev_inv_view_proj: prev_inv_view_proj.to_cols_array_2d(),
             curr_view_proj: curr_view_proj.to_cols_array_2d(),
             res_x,
             res_y,
-            depth_slices: 1024,
+            depth_slices: 2048,  // 11 bits (stolen 1 from y)
             decay,
             hash_size: HASH_GRID_SIZE as u32,
             near_plane,
             far_plane,
             frame,
+            depth_cull_enabled: if depth_cull_enabled { 1 } else { 0 },
+            _pad: [0; 3],
         }
     }
 }
@@ -197,3 +204,40 @@ pub fn create_camera_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     })
 }
 
+// =============================================================================
+// Simple Point Renderer Types
+// =============================================================================
+
+/// A single point in the chaos game buffer (16 bytes)
+/// Used by the simple point renderer
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Point {
+    /// World-space position
+    pub position: [f32; 3],
+    /// Colormap index (0-255 in lower 8 bits)
+    pub color_idx: u32,
+}
+
+/// Compute parameters for the simple chaos game (32 bytes)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct PointComputeParams {
+    pub num_transforms: u32,
+    pub num_walkers: u32,
+    pub iterations_per_walker: u32,
+    pub write_offset: u32,
+    pub buffer_capacity: u32,
+    pub _pad: [u32; 3],
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_hash_grid_params_size() {
+        println!("HashGridParams size: {}", std::mem::size_of::<HashGridParams>());
+        assert_eq!(std::mem::size_of::<HashGridParams>(), 176, "HashGridParams must be 176 bytes to match WGSL struct");
+    }
+}

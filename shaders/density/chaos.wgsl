@@ -45,6 +45,10 @@ struct HashGridParams {
     near_plane: f32,
     far_plane: f32,
     frame: u32,
+    depth_cull_enabled: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 // Empty key is 0 (cleared by GPU fill) - valid keys always have +1 offset
@@ -57,11 +61,12 @@ const DENSITY_UNIT: u32 = 256u;  // 1.0 in u16.8 fixed point
 @group(0) @binding(2) var<storage, read_write> walker_states: array<WalkerState>;
 @group(0) @binding(3) var<uniform> compute_params: ComputeParams;
 @group(0) @binding(4) var<uniform> grid_params: HashGridParams;
+@group(0) @binding(5) var<storage, read_write> depth_buffer: array<atomic<u32>>;
 
 // Encode screen coordinates and depth slice to key
-// Add 1 to ensure the key is never 0 (which is EMPTY_KEY)
+// Layout: x:11 | y:10 | depth:11 (bits 21-31, 11-20, 0-10)
 fn encode_key(screen_x: u32, screen_y: u32, depth_slice: u32) -> u32 {
-    return ((screen_x << 21u) | (screen_y << 10u) | depth_slice) + 1u;
+    return ((screen_x << 21u) | (screen_y << 11u) | depth_slice) + 1u;
 }
 
 // Convert linear depth to depth slice (logarithmic mapping)
@@ -84,7 +89,8 @@ fn hash_key(key: u32) -> u32 {
 }
 
 // Insert into hash table with linear probing
-fn hash_insert(key: u32, color_idx: u32, depth_fixed: u32) {
+// Returns true if insert succeeded, false if dropped
+fn hash_insert(key: u32, color_idx: u32, depth_fixed: u32) -> bool {
     let start_idx = hash_key(key) % grid_params.hash_size;
 
     for (var probe = 0u; probe < MAX_PROBES; probe++) {
@@ -99,18 +105,19 @@ fn hash_insert(key: u32, color_idx: u32, depth_fixed: u32) {
             // Store color index in upper 8 bits, weight in lower 16 bits
             atomicStore(&grid[idx].color_weight, (color_idx << 24u) | 1u);
             atomicStore(&grid[idx].min_depth, depth_fixed);
-            return;
+            return true;
         } else if old_key.old_value == key {
             // Same key exists - accumulate density
             atomicAdd(&grid[idx].density, DENSITY_UNIT);
             // Increment weight for color averaging (lower 16 bits)
             atomicAdd(&grid[idx].color_weight, 1u);
             atomicMin(&grid[idx].min_depth, depth_fixed);
-            return;
+            return true;
         }
         // Different key - continue probing
     }
     // Dropped sample (hash table too full in this region)
+    return false;
 }
 
 // xorshift128 random number generator
@@ -181,12 +188,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             continue;
         }
 
-        // Convert to screen coordinates with dithering to reduce quantization artifacts
+        // Convert to screen coordinates (no dithering for temporal stability)
         // The -0.5 converts from edge-to-edge NDC mapping to pixel-center coordinates
-        let dither_x = rand_float(&rng) - 0.5;  // [-0.5, 0.5]
-        let dither_y = rand_float(&rng) - 0.5;
-        let screen_x = u32(clamp(round((ndc.x * 0.5 + 0.5) * res_x - 0.5 + dither_x), 0.0, res_x - 1.0));
-        let screen_y = u32(clamp(round((ndc.y * 0.5 + 0.5) * res_y - 0.5 + dither_y), 0.0, res_y - 1.0));
+        let screen_x = u32(clamp(round((ndc.x * 0.5 + 0.5) * res_x - 0.5), 0.0, res_x - 1.0));
+        let screen_y = u32(clamp(round((ndc.y * 0.5 + 0.5) * res_y - 0.5), 0.0, res_y - 1.0));
 
         // Get depth slice
         let depth_slice = depth_to_slice(clip.w);
@@ -197,11 +202,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Quantize color to 8-bit index (0-255)
         let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
 
-        // Convert depth to fixed-point for atomicMin
+        // Convert depth to fixed-point for atomicMin (smaller = closer)
         let depth_fixed = u32(clamp(clip.w / grid_params.far_plane, 0.0, 1.0) * f32(0xFFFFFFFFu));
 
-        // Insert into hash grid
-        hash_insert(key, color_idx, depth_fixed);
+        // Insert into hash grid - only update depth buffer if successful
+        if hash_insert(key, color_idx, depth_fixed) {
+            // Update screen-space depth buffer using depth_slice directly (not clip.w)
+            // This ensures exact match with compact.wgsl's reconstruction
+            // Inverted: larger depth_slice = farther, so invert for larger = closer
+            let pixel_idx = screen_y * grid_params.res_x + screen_x;
+            let inverted_slice = grid_params.depth_slices - 1u - depth_slice;
+            atomicMax(&depth_buffer[pixel_idx], inverted_slice);
+        }
     }
 
     walker_states[walker_id].current_pos = pos;

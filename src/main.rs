@@ -8,7 +8,7 @@ use clap::Parser;
 use glam::{Mat4, Vec3};
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
@@ -60,9 +60,11 @@ impl ApplicationHandler for AppWrapper {
         }
 
         // Create window (fixed size for hash grid alignment)
+        // Bit layout: x:11 (max 2048) | y:10 (max 1024) | depth:11
+        // Use 16:9 aspect ratio that fits within limits (PhysicalSize ignores DPI scaling)
         let window_attrs = WindowAttributes::default()
             .with_title("Fracturize - 3D IFS Fractal Renderer")
-            .with_inner_size(LogicalSize::new(1024, 768))
+            .with_inner_size(PhysicalSize::new(1280u32, 720u32))
             .with_resizable(false);
 
         let window = Arc::new(
@@ -83,7 +85,7 @@ impl ApplicationHandler for AppWrapper {
         };
 
         // Create app (blocking on async)
-        let app = pollster::block_on(App::new(window, scene, self.args.fog));
+        let app = pollster::block_on(App::new(window, scene, self.args.fog, false));
 
         self.app = Some(app);
     }
@@ -146,12 +148,6 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "m" | "M" => {
                                 app.adjust_fog_far(!self.shift_held);
-                            }
-                            "=" | "+" => {
-                                app.adjust_point_count(true);
-                            }
-                            "-" | "_" => {
-                                app.adjust_point_count(false);
                             }
                             "[" => {
                                 app.adjust_point_size(false);
@@ -235,6 +231,7 @@ fn default_scene() -> Scene {
         author: "Claude Opus 4.5 (Claude Code 2.0.76)".to_string(),
         point_size: 0.002,
         points_per_frame: 100_000,
+        point_count: 500_000,
         decay: 0.8,
         color_speed: 0.5,
         transforms: vec![

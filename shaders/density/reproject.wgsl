@@ -19,6 +19,10 @@ struct HashGridParams {
     near_plane: f32,
     far_plane: f32,
     frame: u32,
+    depth_cull_enabled: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 // Empty key is 0 (cleared by GPU fill) - valid keys always have bit 0 set
@@ -28,17 +32,18 @@ const MAX_PROBES: u32 = 64u;
 @group(0) @binding(0) var<storage, read_write> grid_prev: array<HashCell>;
 @group(0) @binding(1) var<storage, read_write> grid_curr: array<HashCell>;
 @group(0) @binding(2) var<uniform> params: HashGridParams;
+@group(0) @binding(3) var<storage, read_write> depth_buffer: array<atomic<u32>>;
 
 // Decode key to screen coordinates and depth slice
-// Subtract 1 to undo the +1 in encode_key
+// Layout: x:11 | y:10 | depth:11 (bits 21-31, 11-20, 0-10)
 fn decode_key(key: u32) -> vec3<u32> {
     let k = key - 1u;
-    let depth_mask = (1u << 10u) - 1u;
-    let y_mask = (1u << 11u) - 1u;
-    let x_mask = (1u << 11u) - 1u;
+    let depth_mask = (1u << 11u) - 1u;  // 11 bits for depth
+    let y_mask = (1u << 10u) - 1u;       // 10 bits for y
+    let x_mask = (1u << 11u) - 1u;       // 11 bits for x
 
     let depth_slice = k & depth_mask;
-    let screen_y = (k >> 10u) & y_mask;
+    let screen_y = (k >> 11u) & y_mask;
     let screen_x = (k >> 21u) & x_mask;
 
     return vec3<u32>(screen_x, screen_y, depth_slice);
@@ -47,7 +52,7 @@ fn decode_key(key: u32) -> vec3<u32> {
 // Encode screen coordinates and depth slice to key
 // Add 1 to ensure the key is never 0 (which is EMPTY_KEY)
 fn encode_key(screen_x: u32, screen_y: u32, depth_slice: u32) -> u32 {
-    return ((screen_x << 21u) | (screen_y << 10u) | depth_slice) + 1u;
+    return ((screen_x << 21u) | (screen_y << 11u) | depth_slice) + 1u;
 }
 
 // Convert depth slice to linear depth (logarithmic mapping)
@@ -91,7 +96,8 @@ fn hash_key(key: u32) -> u32 {
 }
 
 // Insert into hash table with linear probing
-fn hash_insert(key: u32, density: u32, color_weight: u32, min_depth: u32) {
+// Returns true if insert succeeded, false if dropped
+fn hash_insert(key: u32, density: u32, color_weight: u32, min_depth: u32) -> bool {
     let start_idx = hash_key(key) % params.hash_size;
 
     for (var probe = 0u; probe < MAX_PROBES; probe++) {
@@ -105,17 +111,18 @@ fn hash_insert(key: u32, density: u32, color_weight: u32, min_depth: u32) {
             atomicStore(&grid_curr[idx].density, density);
             atomicStore(&grid_curr[idx].color_weight, color_weight);
             atomicMin(&grid_curr[idx].min_depth, min_depth);
-            return;
+            return true;
         } else if old_key.old_value == key {
             // Same key exists - accumulate
             atomicAdd(&grid_curr[idx].density, density);
             // For color: we keep the existing color (first writer wins for simplicity)
             atomicMin(&grid_curr[idx].min_depth, min_depth);
-            return;
+            return true;
         }
         // Different key - continue probing
     }
     // Dropped sample (hash table too full in this region)
+    return false;
 }
 
 @compute @workgroup_size(256)
@@ -157,10 +164,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ndc_z = far * (w - near) / (w * (far - near));
     let clip_pos = vec4<f32>(ndc_x * w, ndc_y * w, ndc_z * w, w);
 
-    // Full reprojection with fixed NDC->screen conversion
-    // The -0.5 compensates for the +0.5 added in screen->NDC pixel centering
+    // Unproject to world space and normalize homogeneous coordinate
     let world_h = params.prev_inv_view_proj * clip_pos;
-    let new_clip = params.curr_view_proj * world_h;
+    let world_pos = world_h.xyz / world_h.w;
+
+    // Reproject to current view
+    let new_clip = params.curr_view_proj * vec4<f32>(world_pos, 1.0);
 
     // Frustum culling
     if new_clip.w <= params.near_plane * 0.5 {
@@ -174,12 +183,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Convert NDC to screen coords - subtract 0.5 to undo the pixel centering offset
-    let dither_seed = idx ^ (params.frame * 0x9E3779B9u);
-    let dither_x = dither_noise(dither_seed) - 0.5;
-    let dither_y = dither_noise(dither_seed ^ 0x12345678u) - 0.5;
-    let new_screen_x = u32(clamp(round((new_ndc.x * 0.5 + 0.5) * res_x - 0.5 + dither_x), 0.0, res_x - 1.0));
-    let new_screen_y = u32(clamp(round((new_ndc.y * 0.5 + 0.5) * res_y - 0.5 + dither_y), 0.0, res_y - 1.0));
+    // Convert NDC to screen coords (no dithering for temporal stability)
+    let new_screen_x = u32(clamp(round((new_ndc.x * 0.5 + 0.5) * res_x - 0.5), 0.0, res_x - 1.0));
+    let new_screen_y = u32(clamp(round((new_ndc.y * 0.5 + 0.5) * res_y - 0.5), 0.0, res_y - 1.0));
     let new_depth_slice = depth_to_slice(new_clip.w);
 
     // Encode new key
@@ -191,10 +197,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;  // Faded out completely
     }
 
-    // Convert depth to u32 for atomicMin (depth as fixed point)
-    // Use original depth (w) for debug identity pass
-    let depth_fixed = u32(clamp(w / params.far_plane, 0.0, 1.0) * f32(0xFFFFFFFFu));
+    // Convert depth to u32 for atomicMin (smaller = closer)
+    // Use new_clip.w for the reprojected position
+    let depth_fixed = u32(clamp(new_clip.w / params.far_plane, 0.0, 1.0) * f32(0xFFFFFFFFu));
 
-    // Insert into current grid
-    hash_insert(new_key, decayed_density, cell_color_weight, depth_fixed);
+    // Insert into current grid - only update depth buffer if successful
+    if hash_insert(new_key, decayed_density, cell_color_weight, depth_fixed) {
+        // Update screen-space depth buffer using depth_slice directly (not clip.w)
+        // This ensures exact match with compact.wgsl's reconstruction
+        let pixel_idx = new_screen_y * params.res_x + new_screen_x;
+        let inverted_slice = params.depth_slices - 1u - new_depth_slice;
+        atomicMax(&depth_buffer[pixel_idx], inverted_slice);
+    }
 }

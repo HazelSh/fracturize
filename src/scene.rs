@@ -21,6 +21,9 @@ pub struct SceneMeta {
     pub decay: f32,
     #[serde(default = "default_color_speed")]
     pub color_speed: f32,
+    /// Total point buffer size for the simple point renderer.
+    /// If unset, defaults to 500k.
+    pub point_count: Option<usize>,
 }
 
 fn default_point_size() -> f32 {
@@ -73,13 +76,18 @@ pub struct SceneFile {
     pub transforms: Vec<TransformDef>,
 }
 
+/// Default point buffer size for the simple point renderer
+const DEFAULT_POINT_COUNT: usize = 500_000;
+
 /// Loaded scene ready for use
 pub struct Scene {
     pub name: String,
     pub author: String,
     pub point_size: f32,
-    /// Points generated per frame by chaos game
+    /// Points generated per frame by the density renderer's chaos game
     pub points_per_frame: usize,
+    /// Total point buffer size for the simple point renderer
+    pub point_count: usize,
     /// Temporal decay factor (0.0-1.0)
     pub decay: f32,
     pub color_speed: f32,
@@ -153,6 +161,7 @@ impl Scene {
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
             point_size: scene_file.meta.point_size,
             points_per_frame: scene_file.meta.points_per_frame,
+            point_count: scene_file.meta.point_count.unwrap_or(DEFAULT_POINT_COUNT),
             decay: scene_file.meta.decay,
             color_speed: scene_file.meta.color_speed,
             transforms,

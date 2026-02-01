@@ -1,37 +1,42 @@
+//! Simple point billboard renderer
+//!
+//! Renders points as axis-aligned billboard quads with depth-based sizing.
+
 use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFormat};
 
-use super::buffers::{create_camera_buffer, CameraUniforms};
+use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 
-/// Depth buffer format (32-bit float for precision)
+/// Depth buffer format
 pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
-/// Voxel render pipeline
-/// Renders billboard quads from compacted voxel buffer
-pub struct VoxelRenderer {
+/// Point billboard renderer
+pub struct PointRenderer {
     pub pipeline: RenderPipeline,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
     pub camera_buffer: Buffer,
 }
 
-impl VoxelRenderer {
+impl PointRenderer {
     pub fn new(
         device: &Device,
         format: TextureFormat,
-        voxel_buffer: &Buffer,
+        point_buffer: &Buffer,
+        colormap_buffer: &Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("voxel_render_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/voxel_render.wgsl").into()),
+            label: Some("point_render_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/points/render.wgsl").into()),
         });
 
         // Bind group layout:
-        // 0: voxels (read)
+        // 0: points (read)
         // 1: camera (uniform)
+        // 2: colormap (read)
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("voxel_bind_group_layout"),
+            label: Some("point_bind_group_layout"),
             entries: &[
-                // Voxels storage buffer
+                // Points storage buffer
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
@@ -53,17 +58,28 @@ impl VoxelRenderer {
                     },
                     count: None,
                 },
+                // Colormap
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("voxel_pipeline_layout"),
+            label: Some("point_pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("voxel_pipeline"),
+            label: Some("point_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -105,16 +121,20 @@ impl VoxelRenderer {
         let camera_buffer = create_camera_buffer(device);
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("voxel_bind_group"),
+            label: Some("point_bind_group"),
             layout: &bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: voxel_buffer.as_entire_binding(),
+                    resource: point_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: colormap_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -132,10 +152,10 @@ impl VoxelRenderer {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
     }
 
-    /// Draw voxels - 6 vertices per voxel (2 triangles for quad billboards)
-    pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, voxel_count: u32) {
+    /// Draw points - 6 vertices per point (2 triangles for quad billboards)
+    pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, point_count: u32) {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.draw(0..voxel_count * 6, 0..1);
+        render_pass.draw(0..point_count * 6, 0..1);
     }
 }

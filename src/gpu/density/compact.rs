@@ -1,4 +1,4 @@
-use super::buffers::HASH_GRID_SIZE;
+use crate::gpu::buffers::HASH_GRID_SIZE;
 
 /// Compaction compute pipeline
 /// Scans hash grid, extracts non-empty cells to dense render buffer
@@ -12,7 +12,7 @@ impl CompactPipeline {
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("compact_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/compact.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/density/compact.wgsl").into()),
         });
 
         // Bind group layout:
@@ -79,6 +79,17 @@ impl CompactPipeline {
                     },
                     count: None,
                 },
+                // Depth buffer (read-only for culling)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -117,6 +128,7 @@ impl CompactPipeline {
         counter: &wgpu::Buffer,
         params_buffer: &wgpu::Buffer,
         colormap_buffer: &wgpu::Buffer,
+        depth_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compact_bind_group"),
@@ -141,6 +153,10 @@ impl CompactPipeline {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: colormap_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: depth_buffer.as_entire_binding(),
                 },
             ],
         })

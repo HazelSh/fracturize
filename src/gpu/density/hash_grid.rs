@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 
-use super::buffers::{HashCell, HashGridParams, RenderVoxel, VoxelCounter, HASH_GRID_SIZE, MAX_RENDER_VOXELS};
+use crate::gpu::buffers::{HashCell, HashGridParams, RenderVoxel, VoxelCounter, HASH_GRID_SIZE, MAX_RENDER_VOXELS};
 
 /// Double-buffered hash grid for view-space voxel accumulation
 ///
@@ -10,6 +10,9 @@ use super::buffers::{HashCell, HashGridParams, RenderVoxel, VoxelCounter, HASH_G
 /// 3. Compaction reads grid_b, writes to render_voxels
 /// 4. Rendering draws from render_voxels
 /// 5. Swap: grid_a and grid_b are swapped for next frame
+/// Maximum depth buffer resolution (2048x2048 = 16MB)
+pub const MAX_DEPTH_BUFFER_PIXELS: usize = 2048 * 2048;
+
 pub struct HashGrid {
     /// Grid A buffer (one frame's accumulation)
     pub grid_a: wgpu::Buffer,
@@ -23,6 +26,8 @@ pub struct HashGrid {
     pub counter_staging: wgpu::Buffer,
     /// Parameters uniform buffer
     pub params_buffer: wgpu::Buffer,
+    /// 2D screen-space depth buffer for depth culling (inverted: larger = closer)
+    pub depth_buffer: wgpu::Buffer,
     /// Current voxel count (from previous frame's readback)
     pub current_voxel_count: u32,
     /// Track which grid is "current" (for swapping)
@@ -85,6 +90,17 @@ impl HashGrid {
             mapped_at_creation: false,
         });
 
+        // 2D screen-space depth buffer for depth culling
+        // Uses inverted depth (larger = closer) so clear_buffer(0) = infinitely far
+        let depth_buffer_size = MAX_DEPTH_BUFFER_PIXELS * std::mem::size_of::<u32>();
+        log::info!("Creating depth buffer: {:.1}MB", depth_buffer_size as f64 / 1_000_000.0);
+        let depth_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("depth_buffer"),
+            size: depth_buffer_size as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             grid_a,
             grid_b,
@@ -92,6 +108,7 @@ impl HashGrid {
             voxel_counter,
             counter_staging,
             params_buffer,
+            depth_buffer,
             current_voxel_count: 0,
             swapped: false,
         }
@@ -129,6 +146,11 @@ impl HashGrid {
     pub fn reset_counter(&self, queue: &wgpu::Queue) {
         let counter = VoxelCounter { count: 0, _pad: [0; 3] };
         queue.write_buffer(&self.voxel_counter, 0, bytemuck::bytes_of(&counter));
+    }
+
+    /// Clear the depth buffer to 0 (infinitely far with inverted depth)
+    pub fn clear_depth_buffer(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.clear_buffer(&self.depth_buffer, 0, None);
     }
 
     /// Upload parameters for this frame

@@ -26,6 +26,10 @@ struct HashGridParams {
     near_plane: f32,
     far_plane: f32,
     frame: u32,
+    depth_cull_enabled: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct VoxelCounter {
@@ -36,22 +40,28 @@ struct VoxelCounter {
 const EMPTY_KEY: u32 = 0u;
 const MAX_RENDER_VOXELS: u32 = 2u * 1024u * 1024u;
 
+// Tolerance for depth comparison - now using slice indices directly
+// Larger tolerance needed because multiple depth slices may legitimately
+// contribute to the same screen pixel (fractal surfaces have depth variation)
+const DEPTH_SLICE_EPSILON: u32 = 2u;
+
 @group(0) @binding(0) var<storage, read_write> grid: array<HashCell>;
 @group(0) @binding(1) var<storage, read_write> render_voxels: array<RenderVoxel>;
 @group(0) @binding(2) var<storage, read_write> counter: VoxelCounter;
 @group(0) @binding(3) var<uniform> params: HashGridParams;
 @group(0) @binding(4) var<storage, read> colormap: array<vec4<f32>, 256>;
+@group(0) @binding(5) var<storage, read> depth_buffer: array<u32>;
 
 // Decode key to screen coordinates and depth slice
-// Subtract 1 to undo the +1 in encode_key
+// Layout: x:11 | y:10 | depth:11 (bits 21-31, 11-20, 0-10)
 fn decode_key(key: u32) -> vec3<u32> {
     let k = key - 1u;
-    let depth_mask = (1u << 10u) - 1u;
-    let y_mask = (1u << 11u) - 1u;
-    let x_mask = (1u << 11u) - 1u;
+    let depth_mask = (1u << 11u) - 1u;  // 11 bits for depth
+    let y_mask = (1u << 10u) - 1u;       // 10 bits for y
+    let x_mask = (1u << 11u) - 1u;       // 11 bits for x
 
     let depth_slice = k & depth_mask;
-    let screen_y = (k >> 10u) & y_mask;
+    let screen_y = (k >> 11u) & y_mask;
     let screen_x = (k >> 21u) & x_mask;
 
     return vec3<u32>(screen_x, screen_y, depth_slice);
@@ -103,17 +113,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let screen_y = coords.y;
     let depth_slice = coords.z;
 
-    // Convert to NDC with sub-pixel dithering for smooth rendering
-    let res_x = f32(params.res_x);
-    let res_y = f32(params.res_y);
-    let dither_seed = idx ^ (params.frame * 0x9E3779B9u);
-    let dither_x = dither_noise(dither_seed) - 0.5;
-    let dither_y = dither_noise(dither_seed ^ 0x12345678u) - 0.5;
-    let ndc_x = (f32(screen_x) + 0.5 + dither_x) / res_x * 2.0 - 1.0;
-    let ndc_y = (f32(screen_y) + 0.5 + dither_y) / res_y * 2.0 - 1.0;
-
     // Get linear depth
     let depth = slice_to_depth(depth_slice);
+
+    // Depth culling (optional): check if this cell is at the closest depth for this pixel
+    if params.depth_cull_enabled != 0u {
+        // We use inverted slice index (larger = closer), matching chaos.wgsl and reproject.wgsl
+        let pixel_idx = screen_y * params.res_x + screen_x;
+        let max_inverted_slice = depth_buffer[pixel_idx];
+
+        // Calculate this cell's inverted slice (same formula as chaos/reproject)
+        let cell_inverted_slice = params.depth_slices - 1u - depth_slice;
+
+        // Skip if this cell is behind the closest surface (with small tolerance)
+        if cell_inverted_slice + DEPTH_SLICE_EPSILON < max_inverted_slice {
+            return;  // Occluded by closer voxel
+        }
+    }
+
+    // Convert to NDC (pixel centers, no dithering)
+    let res_x = f32(params.res_x);
+    let res_y = f32(params.res_y);
+    let ndc_x = (f32(screen_x) + 0.5) / res_x * 2.0 - 1.0;
+    let ndc_y = (f32(screen_y) + 0.5) / res_y * 2.0 - 1.0;
 
     // NDC z for wgpu perspective_rh with [0,1] depth range:
     // ndc_z = far * (depth - near) / (depth * (far - near))

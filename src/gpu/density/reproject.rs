@@ -1,4 +1,4 @@
-use super::buffers::HASH_GRID_SIZE;
+use crate::gpu::buffers::HASH_GRID_SIZE;
 
 /// Reprojection compute pipeline
 /// Reads from previous frame's grid, reprojects to current view, writes to current grid
@@ -12,7 +12,7 @@ impl ReprojectPipeline {
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("reproject_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/reproject.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/density/reproject.wgsl").into()),
         });
 
         // Bind group layout:
@@ -55,6 +55,17 @@ impl ReprojectPipeline {
                     },
                     count: None,
                 },
+                // Depth buffer (read-write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -91,6 +102,7 @@ impl ReprojectPipeline {
         prev_grid: &wgpu::Buffer,
         curr_grid: &wgpu::Buffer,
         params_buffer: &wgpu::Buffer,
+        depth_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("reproject_bind_group"),
@@ -107,6 +119,10 @@ impl ReprojectPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: depth_buffer.as_entire_binding(),
                 },
             ],
         })

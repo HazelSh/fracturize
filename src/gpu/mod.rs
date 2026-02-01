@@ -1,15 +1,17 @@
-pub mod buffers;
-pub mod compact;
-pub mod compute;
-pub mod context;
-pub mod hash_grid;
-pub mod reproject;
-pub mod voxel_renderer;
+//! GPU rendering infrastructure
+//!
+//! This module contains two renderer implementations:
+//! - `density`: Complex hash-grid based renderer with temporal reprojection (experimental)
+//! - `points`: Simple point-based renderer with circular buffer updates (current)
 
-pub use buffers::{CameraUniforms, HashGridParams};
-pub use compact::CompactPipeline;
-pub use compute::ChaosCompute;
+pub mod buffers;
+pub mod context;
+pub mod density;
+pub mod points;
+
+// Re-export shared types
+pub use buffers::{CameraUniforms, GpuTransform, Point, PointComputeParams};
 pub use context::GpuContext;
-pub use hash_grid::HashGrid;
-pub use reproject::ReprojectPipeline;
-pub use voxel_renderer::{VoxelRenderer, DEPTH_FORMAT};
+
+// Re-export the active renderer (points)
+pub use points::{PointCompute, PointRenderer, DEPTH_FORMAT};

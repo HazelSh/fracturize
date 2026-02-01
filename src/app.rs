@@ -4,13 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec3};
-use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::gpu::{
-    CameraUniforms, ChaosCompute, CompactPipeline, GpuContext, HashGrid, HashGridParams,
-    ReprojectPipeline, VoxelRenderer, DEPTH_FORMAT,
-};
+use crate::gpu::{CameraUniforms, GpuContext, PointCompute, PointRenderer, DEPTH_FORMAT};
 use crate::scene::Scene;
 
 /// Clear color: dark blue-black
@@ -105,8 +101,7 @@ pub struct App {
     pub rotation: f32,
     pub camera_distance: f32,
     pub point_size: f32,
-    pub points_per_frame: usize,
-    pub decay: f32,
+    pub buffer_capacity: u32,
 
     // Fog parameters
     pub fog_near: f32,
@@ -116,17 +111,9 @@ pub struct App {
 
     fps_tracker: FpsTracker,
 
-    // Hash grid rendering pipeline
-    hash_grid: HashGrid,
-    reproject: ReprojectPipeline,
-    compact: CompactPipeline,
-    chaos_compute: ChaosCompute,
-    voxel_renderer: VoxelRenderer,
-    colormap_buffer: wgpu::Buffer,
-
-    // Previous frame's inverse view-projection for reprojection
-    prev_inv_view_proj: Mat4,
-    prev_view_proj: Mat4,
+    // Simple point rendering pipeline
+    point_compute: PointCompute,
+    point_renderer: PointRenderer,
 
     depth_texture: wgpu::Texture,
 
@@ -138,39 +125,32 @@ pub struct App {
 
 impl App {
     /// Create a new App
-    pub async fn new(window: Arc<Window>, scene: Scene, fog_enabled: bool) -> Self {
+    pub async fn new(window: Arc<Window>, scene: Scene, fog_enabled: bool, _depth_cull_enabled: bool) -> Self {
         let gpu = GpuContext::new(window.clone()).await;
 
         log::info!("Loaded scene: {} by {}", scene.name, scene.author);
-        log::info!(
-            "Hash grid mode: 4M entries × 16 bytes = {:.1}MB per grid",
-            (4 * 1024 * 1024 * 16) as f64 / 1_000_000.0
-        );
 
         let point_size = scene.point_size;
         log::info!("Point size from scene: {}", point_size);
 
-        let points_per_frame = scene.points_per_frame;
-        log::info!("Points per frame: {}", points_per_frame);
-        log::info!("Decay factor: {}", scene.decay);
+        let buffer_capacity = scene.point_count as u32;
+        log::info!("Point buffer capacity: {}", buffer_capacity);
 
-        // Create hash grid (double-buffered)
-        let hash_grid = HashGrid::new(&gpu.device);
+        // Create point compute pipeline
+        let point_compute = PointCompute::new(
+            &gpu.device,
+            &scene.transforms,
+            &scene.colormap,
+            buffer_capacity,
+        );
 
-        // Create compute pipelines
-        let reproject = ReprojectPipeline::new(&gpu.device);
-        let compact = CompactPipeline::new(&gpu.device);
-        let chaos_compute = ChaosCompute::new(&gpu.device, &scene.transforms, points_per_frame);
-
-        // Create colormap buffer (shared with compact pipeline)
-        let colormap_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("colormap_buffer"),
-            contents: bytemuck::cast_slice(&scene.colormap),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Create voxel renderer
-        let voxel_renderer = VoxelRenderer::new(&gpu.device, gpu.format, &hash_grid.render_voxels);
+        // Create point renderer
+        let point_renderer = PointRenderer::new(
+            &gpu.device,
+            gpu.format,
+            &point_compute.point_buffer,
+            &point_compute.colormap_buffer,
+        );
 
         // Create depth texture
         let (width, height) = gpu.size();
@@ -210,9 +190,6 @@ impl App {
             (1.0, 1.0)
         };
 
-        // Initial view-projection (will be updated on first frame)
-        let initial_vp = Mat4::IDENTITY;
-
         Self {
             gpu,
             window,
@@ -220,21 +197,14 @@ impl App {
             rotation: 0.0,
             camera_distance: 3.0,
             point_size,
-            points_per_frame,
-            decay: scene.decay,
+            buffer_capacity,
             fog_near: 3.0,
             fog_far: 4.5,
             fog_brightness,
             fog_saturation,
             fps_tracker: FpsTracker::new(),
-            hash_grid,
-            reproject,
-            compact,
-            chaos_compute,
-            voxel_renderer,
-            colormap_buffer,
-            prev_inv_view_proj: initial_vp.inverse(),
-            prev_view_proj: initial_vp,
+            point_compute,
+            point_renderer,
             depth_texture,
             screenshot_texture,
             screenshot_depth,
@@ -251,20 +221,8 @@ impl App {
     }
 
     pub fn reset(&mut self) {
-        self.chaos_compute.reset(&self.gpu.queue);
+        self.point_compute.reset(&self.gpu.queue);
         self.frame_count = 0;
-        // Clear grids on reset
-        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("reset_encoder"),
-        });
-        self.hash_grid.clear_current(&mut encoder, &self.gpu.device);
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
-        self.hash_grid.swap();
-        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("reset_encoder2"),
-        });
-        self.hash_grid.clear_current(&mut encoder, &self.gpu.device);
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
     }
 
     pub fn zoom_in(&mut self) {
@@ -273,13 +231,6 @@ impl App {
 
     pub fn zoom_out(&mut self) {
         self.camera_distance *= 1.1;
-    }
-
-    pub fn adjust_point_count(&mut self, increase: bool) {
-        let factor = if increase { 1.2 } else { 0.833 };
-        self.points_per_frame = ((self.points_per_frame as f32 * factor) as usize).clamp(10_000, 100_000_000);
-        self.chaos_compute.set_iterations(&self.gpu.queue, self.points_per_frame);
-        log::info!("Points per frame: {:.2}M", self.points_per_frame as f32 / 1_000_000.0);
     }
 
     pub fn adjust_point_size(&mut self, increase: bool) {
@@ -320,28 +271,29 @@ impl App {
         self.rotation += 0.005;
 
         if should_log {
-            let voxel_count = self.hash_grid.current_voxel_count;
+            let point_count = self.point_compute.valid_point_count();
+            let warmup_done = self.point_compute.current_frame >= self.point_compute.warmup_frames;
             let title = format!(
-                "Fracturize | {:.0} FPS | {:.1}ms | {}k voxels | {:.1}M pts/frame",
+                "Fracturize | {:.0} FPS | {:.1}ms | {}k points{}",
                 self.fps_tracker.current_fps,
                 self.fps_tracker.current_frametime_ms,
-                voxel_count / 1000,
-                self.points_per_frame as f32 / 1_000_000.0,
+                point_count / 1000,
+                if warmup_done { "" } else { " (warming up)" },
             );
             self.window.set_title(&title);
             log::info!(
-                "FPS: {:.1} | Frametime: {:.2}ms | Voxels: {}",
+                "FPS: {:.1} | Frametime: {:.2}ms | Points: {}",
                 self.fps_tracker.current_fps,
                 self.fps_tracker.current_frametime_ms,
-                voxel_count,
+                point_count,
             );
         }
     }
 
     pub fn take_screenshot(&mut self) {
-        let voxel_count = self.hash_grid.current_voxel_count;
-        if voxel_count == 0 {
-            log::warn!("No voxels to screenshot");
+        let point_count = self.point_compute.valid_point_count();
+        if point_count == 0 {
+            log::warn!("No points to screenshot");
             return;
         }
 
@@ -351,7 +303,7 @@ impl App {
             1.0,
             self.rotation.cos() * self.camera_distance,
         );
-        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 1000.0);
+        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
         let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
         let mvp = projection * view;
 
@@ -366,7 +318,7 @@ impl App {
             self.fog_brightness,
             self.fog_saturation,
         );
-        self.voxel_renderer.upload_camera(&self.gpu.queue, &camera);
+        self.point_renderer.upload_camera(&self.gpu.queue, &camera);
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("screenshot_encoder"),
@@ -399,7 +351,7 @@ impl App {
                 multiview_mask: None,
             });
 
-            self.voxel_renderer.draw(&mut render_pass, voxel_count);
+            self.point_renderer.draw(&mut render_pass, point_count);
         }
 
         let bytes_per_row = SCREENSHOT_WIDTH * 4;
@@ -481,33 +433,12 @@ impl App {
             self.rotation.cos() * self.camera_distance,
         );
 
-        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 1000.0);
+        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
         let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
-        let curr_view_proj = projection * view;
+        let view_proj = projection * view;
 
-        // Create grid params for this frame
-        let grid_params = HashGridParams::new(
-            self.prev_inv_view_proj,
-            curr_view_proj,
-            width,  // screen resolution x
-            height, // screen resolution y
-            0.1,    // near plane
-            1000.0, // far plane
-            self.decay,
-            self.frame_count,
-        );
-        self.hash_grid.upload_params(&self.gpu.queue, &grid_params);
-
-        // Reset voxel counter for compaction
-        self.hash_grid.reset_counter(&self.gpu.queue);
-
-        // Clear current grid before reprojection/accumulation
-        // We do this with a GPU fill rather than a full copy
-        let mut clear_encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("clear_encoder"),
-        });
-        clear_encoder.clear_buffer(self.hash_grid.curr_grid(), 0, None);
-        self.gpu.queue.submit(std::iter::once(clear_encoder.finish()));
+        // Advance circular buffer and get valid point count
+        let point_count = self.point_compute.advance_frame(&self.gpu.queue);
 
         let output = self.gpu.surface.get_current_texture()?;
         let color_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -517,44 +448,13 @@ impl App {
             label: Some("frame_encoder"),
         });
 
-        // === STEP 1: REPROJECT ===
-        // Reproject previous frame's voxels to current view
-        let reproject_bind_group = self.reproject.create_bind_group(
-            &self.gpu.device,
-            self.hash_grid.prev_grid(),
-            self.hash_grid.curr_grid(),
-            &self.hash_grid.params_buffer,
-        );
-        self.reproject.dispatch(&mut encoder, &reproject_bind_group);
+        // === STEP 1: RUN CHAOS GAME ===
+        let compute_bind_group = self.point_compute.create_bind_group(&self.gpu.device);
+        self.point_compute.dispatch(&mut encoder, &compute_bind_group);
 
-        // === STEP 2: ACCUMULATE ===
-        // Run chaos game, projecting new points into current grid
-        let chaos_bind_group = self.chaos_compute.create_bind_group(
-            &self.gpu.device,
-            self.hash_grid.curr_grid(),
-            &self.hash_grid.params_buffer,
-        );
-        self.chaos_compute.dispatch(&mut encoder, &chaos_bind_group);
-
-        // === STEP 3: COMPACT ===
-        // Extract non-empty cells to dense render buffer
-        let compact_bind_group = self.compact.create_bind_group(
-            &self.gpu.device,
-            self.hash_grid.curr_grid(),
-            &self.hash_grid.render_voxels,
-            &self.hash_grid.voxel_counter,
-            &self.hash_grid.params_buffer,
-            &self.colormap_buffer,
-        );
-        self.compact.dispatch(&mut encoder, &compact_bind_group);
-
-        // Copy counter to staging for readback
-        self.hash_grid.copy_counter_to_staging(&mut encoder);
-
-        // === STEP 4: RENDER ===
-        // Upload camera uniforms for voxel rendering
+        // === STEP 2: RENDER POINTS ===
         let camera = CameraUniforms::new(
-            curr_view_proj,
+            view_proj,
             height as f32,
             self.point_size,
             aspect,
@@ -564,11 +464,11 @@ impl App {
             self.fog_brightness,
             self.fog_saturation,
         );
-        self.voxel_renderer.upload_camera(&self.gpu.queue, &camera);
+        self.point_renderer.upload_camera(&self.gpu.queue, &camera);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("voxel_pass"),
+                label: Some("point_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &color_view,
                     resolve_target: None,
@@ -591,26 +491,13 @@ impl App {
                 multiview_mask: None,
             });
 
-            // Use previous frame's voxel count (to avoid stall)
-            let voxel_count = self.hash_grid.current_voxel_count;
-            if voxel_count > 0 {
-                self.voxel_renderer.draw(&mut render_pass, voxel_count);
+            if point_count > 0 {
+                self.point_renderer.draw(&mut render_pass, point_count);
             }
         }
 
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-
-        // === STEP 5: SWAP and READ BACK ===
-        // Read back the voxel count for next frame
-        self.hash_grid.read_counter(&self.gpu.device);
-
-        // Swap grids for next frame
-        self.hash_grid.swap();
-
-        // Store current matrices for next frame's reprojection
-        self.prev_view_proj = curr_view_proj;
-        self.prev_inv_view_proj = curr_view_proj.inverse();
 
         Ok(())
     }
