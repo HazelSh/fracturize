@@ -1,0 +1,18 @@
+
+
+Hi Claude. Let's make our own Apophysis with ~~blackjack and hookers~~ Rust and OpenGL and linux support, and let's do it in 3d. That means:
+
+* IFS fractal systems with not just linear but also a bunch of the basic nonlinear geometric transforms.
+* Some basic format for writing all this down, possibly .flame files which IIRC are just XML?
+* Transform kind blending
+* Transform positioning/editing
+* Transform weighting / random selection
+* Coloring algo based on transform colors & color accumulation during the render
+* Quick view with limited iteration count
+* Rendering with control over iterations, etc.
+* A point-cloud renderer like in classic 2010s Fairlight demoscene productions.
+* That unique Apophysis feel where the render is gritty and aliased to shit, but for 3d.
+
+First up, we'll need to init git and cargo, and get an openGL window. Then, let's get a basic scene set up based on Linear transforms, making sure that it should actually render/show something. Then let's render it. More GUI and transform types and 'proper' coloring can come after that.
+
+You can also set up AGENTS.md as required, if desired. Not CLAUDE.md; I reserve the right to bring in Gemini 3Pro / 3Flash / gemini-cli generally. 

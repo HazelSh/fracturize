@@ -101,6 +101,13 @@ weight = 1.0                    # Selection probability (optional, default 1.0)
 Built-in screenshot capture for AI verification:
 - Press `S` to take a screenshot (saved to `screenshots/capture.png`)
 - Use `--screenshot` flag for automated capture and exit
-- Use `--delay N` to set frames before capture (default: 120)
+- Use `--delay N` to set **frames** (not seconds!) before capture (default: 120)
 - Screenshots render to an offscreen texture then save via `image` crate
-- Run `./screenshot.sh` for quick automated capture
+- Run `./screenshot.sh [scene]` for quick automated capture
+
+**Important for AI agents:**
+- The delay is in FRAMES, not milliseconds or seconds
+- Current performance is ~10-25 FPS depending on GPU
+- So `--delay 600` = ~60 seconds wait, `--delay 5` = too fast to see convergence
+- The script uses `--delay 50` (~2-5 seconds) for reasonable iteration speed
+- Running the app interactively blocks until user closes it - always use `./screenshot.sh` for automated verification

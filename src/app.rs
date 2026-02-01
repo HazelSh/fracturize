@@ -266,7 +266,7 @@ impl App {
     pub fn update(&mut self) {
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
-        self.rotation += 0.005;
+        self.rotation += 0.003;
 
         if should_log {
             let point_count = self.point_compute.valid_point_count();

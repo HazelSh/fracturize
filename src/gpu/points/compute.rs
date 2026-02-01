@@ -65,6 +65,8 @@ pub struct PointCompute {
     pub num_walkers: u32,
     pub num_workgroups: u32,
     pub iterations_per_walker: u32,
+    /// Higher iteration count used during warmup to fill buffer faster
+    pub warmup_iterations_per_walker: u32,
     pub buffer_capacity: u32,
     pub write_offset: u32,
     pub warmup_frames: u32,
@@ -78,17 +80,21 @@ impl PointCompute {
         colormap: &[[f32; 4]; 256],
         buffer_capacity: u32,
     ) -> Self {
-        // Calculate parallelism - aim for ~5% of buffer per frame
-        let points_per_frame = (buffer_capacity / 20).max(1000);
+        // Calculate parallelism - aim for ~0.125% of buffer per frame (full cycle every 800 frames)
+        let points_per_frame = (buffer_capacity / 800).max(1000);
         let num_workgroups = 64u32;
         let num_walkers = num_workgroups * WORKGROUP_SIZE;
         let iterations_per_walker = ((points_per_frame + num_walkers - 1) / num_walkers).max(1);
         let actual_points_per_frame = num_walkers * iterations_per_walker;
-        let warmup_frames = (buffer_capacity + actual_points_per_frame - 1) / actual_points_per_frame;
+        
+        // Warmup uses 10x more iterations to fill buffer in ~80 frames instead of 800
+        let warmup_iterations_per_walker = iterations_per_walker * 10;
+        let warmup_points_per_frame = num_walkers * warmup_iterations_per_walker;
+        let warmup_frames = (buffer_capacity + warmup_points_per_frame - 1) / warmup_points_per_frame;
 
         log::info!(
-            "Point compute: {} walkers × {} iters = {} points/frame, buffer capacity {}, warmup {} frames",
-            num_walkers, iterations_per_walker, actual_points_per_frame, buffer_capacity, warmup_frames
+            "Point compute: {} walkers × {} iters = {} points/frame (warmup: {} iters, {} frames to fill)",
+            num_walkers, iterations_per_walker, actual_points_per_frame, warmup_iterations_per_walker, warmup_frames
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -225,6 +231,7 @@ impl PointCompute {
             num_walkers,
             num_workgroups,
             iterations_per_walker,
+            warmup_iterations_per_walker,
             buffer_capacity,
             write_offset: 0,
             warmup_frames,
@@ -232,24 +239,46 @@ impl PointCompute {
         }
     }
 
-    /// Points generated per frame
+    /// Whether we're still in warmup phase (buffer not yet full)
+    pub fn is_warming_up(&self) -> bool {
+        self.current_frame < self.warmup_frames
+    }
+
+    /// Current iterations per walker (higher during warmup)
+    pub fn current_iterations(&self) -> u32 {
+        if self.is_warming_up() {
+            self.warmup_iterations_per_walker
+        } else {
+            self.iterations_per_walker
+        }
+    }
+
+    /// Points generated per frame (varies during warmup)
     pub fn points_per_frame(&self) -> u32 {
-        self.num_walkers * self.iterations_per_walker
+        self.num_walkers * self.current_iterations()
     }
 
     /// Returns number of valid points to render this frame
     pub fn valid_point_count(&self) -> u32 {
-        let total_written = self.current_frame * self.points_per_frame();
-        total_written.min(self.buffer_capacity)
+        if self.is_warming_up() {
+            // During warmup, calculate total written accounting for warmup rate
+            let total_written = self.current_frame * self.num_walkers * self.warmup_iterations_per_walker;
+            total_written.min(self.buffer_capacity)
+        } else {
+            // After warmup, buffer is always full
+            self.buffer_capacity
+        }
     }
 
     /// Update for next frame - advances write offset and returns valid point count
     pub fn advance_frame(&mut self, queue: &wgpu::Queue) -> u32 {
-        // Upload params with current write offset
+        let current_iters = self.current_iterations();
+        
+        // Upload params with current write offset and iteration count
         let params = PointComputeParams {
             num_transforms: self.num_transforms,
             num_walkers: self.num_walkers,
-            iterations_per_walker: self.iterations_per_walker,
+            iterations_per_walker: current_iters,
             write_offset: self.write_offset,
             buffer_capacity: self.buffer_capacity,
             _pad: [0; 3],

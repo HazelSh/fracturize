@@ -1,0 +1,36 @@
+---- text renderer w/ crate,
+ -- then move FPS counter onscreen. 
+
+---- nonlinear transforms
+
+---- display transforms as right-angled ?tetrahedrons?/3-simplexes
+ -- & show 'default' non-transform in grey
+ -- ... add UI? ability to move on 3 axis, rotate on 3 axis, scale?
+  - w/ realtime updates to the rendering?
+
+---- needs to go faster! I want 100m points in realtime!
+
+---- lighting/shadowing?
+ -- (how the actual fuck? well, fairlight were doing it realtime in 2010, so...)
+ -- ... Fairlight/CNCD were not, actually, rendering IFS fractals.
+  - this matters. what the fuck is the normal?
+   - no, seriously. random bit of grit away from body of fractal. what angle is it at to the light?
+    - is it a tiny ball, I guess? and the balls have a size?
+     - and when there's other balls in the size, sample those, figure out a gradient...?
+      - tangent to that toward open-space is the normal...? seriously, this is fucked. worse than SDF by far. 
+
+---- ...particle system things? 'motion transforms'? velocity, acceleration, mass, per-point?
+
+---- dynamic point density / infinite zoom
+ -- & more optimization -- frustrum culling?
+
+---- in-engine scene browser, super lores preview
+ -- general menu overlay? combine with transform editor toggle?
+
+---- focus stealing prevention!
+ -- or headless mode for screenshots? not good 
+
+---- little bit of atmosphere in the shading? darken/desat colors further from camera?
+ -- depth is hard to spot at the moment
+  - much easier to add a touch of fog than to figure out pointcloud shadowing
+
