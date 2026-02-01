@@ -8,6 +8,7 @@ pub mod buffers;
 pub mod context;
 #[allow(dead_code, unused_imports, unused_variables)]
 pub mod density;
+pub mod gizmo;
 pub mod points;
 
 // Re-export shared types
@@ -15,4 +16,5 @@ pub use buffers::CameraUniforms;
 pub use context::GpuContext;
 
 // Re-export the active renderer (points)
+pub use gizmo::GizmoRenderer;
 pub use points::{PointCompute, PointRenderer, DEPTH_FORMAT};

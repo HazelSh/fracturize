@@ -149,6 +149,9 @@ impl ApplicationHandler for AppWrapper {
                             "m" | "M" => {
                                 app.adjust_fog_far(!self.shift_held);
                             }
+                            "g" | "G" => {
+                                app.toggle_gizmos();
+                            }
                             "[" => {
                                 app.adjust_point_size(false);
                             }

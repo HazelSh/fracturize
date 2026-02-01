@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Vec3};
 use winit::window::Window;
 
-use crate::gpu::{CameraUniforms, GpuContext, PointCompute, PointRenderer, DEPTH_FORMAT};
+use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, PointCompute, PointRenderer, DEPTH_FORMAT};
 use crate::scene::Scene;
 
 /// Clear color: dark blue-black
@@ -102,6 +102,8 @@ pub struct App {
     pub camera_distance: f32,
     pub point_size: f32,
 
+    pub show_gizmos: bool,
+
     // Fog parameters
     pub fog_near: f32,
     pub fog_far: f32,
@@ -113,6 +115,7 @@ pub struct App {
     // Simple point rendering pipeline
     point_compute: PointCompute,
     point_renderer: PointRenderer,
+    gizmo_renderer: GizmoRenderer,
 
     depth_texture: wgpu::Texture,
 
@@ -149,6 +152,13 @@ impl App {
             gpu.format,
             &point_compute.point_buffer,
             &point_compute.colormap_buffer,
+        );
+
+        // Create gizmo renderer
+        let gizmo_renderer = GizmoRenderer::new(
+            &gpu.device,
+            gpu.format,
+            &scene.transforms,
         );
 
         // Create depth texture
@@ -196,6 +206,7 @@ impl App {
             rotation: 0.0,
             camera_distance: 3.0,
             point_size,
+            show_gizmos: true,
             fog_near: 3.0,
             fog_far: 4.5,
             fog_brightness,
@@ -203,6 +214,7 @@ impl App {
             fps_tracker: FpsTracker::new(),
             point_compute,
             point_renderer,
+            gizmo_renderer,
             depth_texture,
             screenshot_texture,
             screenshot_depth,
@@ -257,6 +269,11 @@ impl App {
         let delta = if closer { -1.0 } else { 1.0 };
         self.fog_far = (self.fog_far + delta).clamp(self.fog_near + 1.0, 30.0);
         log::info!("Fog far: {:.1}", self.fog_far);
+    }
+
+    pub fn toggle_gizmos(&mut self) {
+        self.show_gizmos = !self.show_gizmos;
+        log::info!("Gizmos: {}", if self.show_gizmos { "on" } else { "off" });
     }
 
     pub fn request_screenshot(&mut self) {
@@ -463,6 +480,7 @@ impl App {
             self.fog_saturation,
         );
         self.point_renderer.upload_camera(&self.gpu.queue, &camera);
+        self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -480,7 +498,7 @@ impl App {
                     view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
@@ -492,6 +510,35 @@ impl App {
             if point_count > 0 {
                 self.point_renderer.draw(&mut render_pass, point_count);
             }
+        }
+
+        // === STEP 3: RENDER GIZMOS ===
+        if self.show_gizmos {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gizmo_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            self.gizmo_renderer.draw(&mut render_pass);
         }
 
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
