@@ -12,7 +12,7 @@ use crate::scene::TransformSpec;
 /// Number of threads per workgroup (must match shader)
 const WORKGROUP_SIZE: u32 = 256;
 
-/// Per-walker state (112 bytes, one per parallel walker)
+/// Per-walker state (48 bytes, one per parallel walker)
 /// Must match WGSL WalkerState struct
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -20,13 +20,10 @@ pub struct WalkerState {
     pub current_pos: [f32; 3],
     pub _pad0: f32,
     pub current_color: f32,
-    /// Write cursor into color_history
-    pub hist_pos: u32,
+    pub _pad1: f32,
     pub _pad2: f32,
     pub _pad3: f32,
     pub rng_state: [u32; 4],
-    /// Ring buffer of recent color values, for color_delay lookback
-    pub color_history: [f32; 16],
 }
 
 impl WalkerState {
@@ -47,11 +44,10 @@ impl WalkerState {
             current_pos: [0.0, 0.0, 0.0],
             _pad0: 0.0,
             current_color: 0.5,
-            hist_pos: 0,
+            _pad1: 0.0,
             _pad2: 0.0,
             _pad3: 0.0,
             rng_state: state,
-            color_history: [0.5; 16],
         }
     }
 }
@@ -381,6 +377,6 @@ mod tests {
 
     #[test]
     fn test_walker_state_size() {
-        assert_eq!(std::mem::size_of::<WalkerState>(), 112, "WalkerState must be 112 bytes to match WGSL struct");
+        assert_eq!(std::mem::size_of::<WalkerState>(), 48, "WalkerState must be 48 bytes to match WGSL struct");
     }
 }

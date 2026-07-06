@@ -11,7 +11,7 @@ struct Point {
     color_idx: u32,
 }
 
-// Must match GpuTransform in buffers.rs (160 bytes)
+// Must match GpuTransform in buffers.rs (144 bytes)
 struct Transform {
     matrix: mat4x4<f32>,
     color_value: f32,
@@ -20,22 +20,16 @@ struct Transform {
     color_speed: f32,
     // Variation weights; slot order matches scene::VARIATION_NAMES
     var_weights: array<vec4<f32>, 4>,
-    color_delay: u32,
-    color_detail: f32,
-    _pad0: u32,
-    _pad1: u32,
 }
 
 struct WalkerState {
     current_pos: vec3<f32>,
     _pad0: f32,
     current_color: f32,
-    hist_pos: u32,
+    _pad1: f32,
     _pad2: f32,
     _pad3: f32,
     rng_state: vec4<u32>,
-    // Ring buffer of recent color values, for color_delay lookback
-    color_history: array<f32, 16>,
 }
 
 struct ComputeParams {
@@ -205,11 +199,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var rng = walker_states[walker_id].rng_state;
     var pos = walker_states[walker_id].current_pos;
     var color_val = walker_states[walker_id].current_color;
-    var hist_pos = walker_states[walker_id].hist_pos;
-    var hist: array<f32, 16>;
-    for (var k = 0u; k < 16u; k++) {
-        hist[k] = walker_states[walker_id].color_history[k];
-    }
 
     for (var i = 0u; i < params.iterations_per_walker; i++) {
         // Select random transform based on weights
@@ -234,30 +223,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let speed = transforms[transform_idx].color_speed;
         color_val = color_val * (1.0 - speed) + transforms[transform_idx].color_value * speed;
 
-        // Emitted color can lag the walk by color_delay iterations: older
-        // iterations address finer position scales, so a lagged color moves
-        // color variation into finer structure. color_detail blends the lagged
-        // color (1.0) against the current one (0.0).
-        hist[hist_pos] = color_val;
-        let delayed = hist[(hist_pos + 16u - transforms[transform_idx].color_delay) & 15u];
-        let emit_val = mix(color_val, delayed, transforms[transform_idx].color_detail);
-        hist_pos = (hist_pos + 1u) & 15u;
-
         // Calculate output index with circular wrapping
         let local_idx = walker_id * params.iterations_per_walker + i;
         let output_idx = (params.write_offset + local_idx) % params.buffer_capacity;
 
         // Write point to buffer
-        let color_idx = u32(clamp(emit_val, 0.0, 1.0) * 255.0);
+        let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
         points[output_idx] = Point(pos, color_idx);
     }
 
     // Save walker state for next frame
     walker_states[walker_id].current_pos = pos;
     walker_states[walker_id].current_color = color_val;
-    walker_states[walker_id].hist_pos = hist_pos;
-    for (var k = 0u; k < 16u; k++) {
-        walker_states[walker_id].color_history[k] = hist[k];
-    }
     walker_states[walker_id].rng_state = rng;
 }

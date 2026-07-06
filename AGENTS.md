@@ -77,6 +77,8 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/capture.png |
 | [ / ] | shrink / grow point size |
+| D / Shift+D | finer / coarser color detail (color_falloff) |
+| C / Shift+C | less / more color contrast |
 | F / Shift+F | more / less fog |
 | N / Shift+N | fog start closer / farther |
 | M / Shift+M | fog end closer / farther |
@@ -91,9 +93,9 @@ name = "Scene Name"
 author = "Your Name"
 point_size = 0.002        # world-space point size
 point_count = 4_000_000   # circular point buffer capacity (default 500k)
-color_speed = 0.5         # global color blending speed (0-1)
-color_delay = 0           # emit color from N iterations ago (0-15, default 0)
-color_detail = 1.0        # blend of delayed vs current color (0-1, default 1)
+color_speed = 0.5         # global color blending speed (0-1); used when color_falloff = 0
+color_falloff = 0.0       # scale-aware color accumulation exponent (0 = off, ~1 neutral)
+color_contrast = 1.0      # render-time cyclic palette contrast stretch (1 = off)
 
 [camera]                  # optional
 focus = [0.0, 0.0, 0.0]   # orbit center / look-at
@@ -108,9 +110,7 @@ rotation = [0, 0, 0]           # Euler degrees (XYZ)
 color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap
 weight = 1.0                   # selection probability
 color_value = 0.25             # optional explicit colormap index (0-1)
-color_speed = 0.5              # optional per-transform override
-color_delay = 4                # optional per-transform override (0-15)
-color_detail = 0.5             # optional per-transform override (0-1)
+color_speed = 0.5              # optional per-transform override (wins over color_falloff)
 # Nonlinear variation blend; omit for classic affine ({ linear = 1.0 })
 variations = { swirl = 0.35, linear = 0.65 }
 ```
@@ -129,18 +129,23 @@ Scene-design notes learned the hard way:
   (0.5-0.7) for stronger per-branch color identity.
 - Color variation follows *coarse* structure by default: the most recent transform
   in a walker's history decides which top-level copy a point lands in, and older
-  iterations address progressively finer scales — but the color EMA weights recent
-  history heaviest, so neighboring pixels (which differ only in old digits) look
-  flat. `color_delay = N` emits the color state from N iterations back, moving
-  color variation to structure ~`scale^N` finer. N=3-5 gives rich sub-structure
-  coloring; N=8+ approaches per-pixel confetti. `color_detail` blends the delayed
-  color (1.0) against the classic coarse color (0.0) — try delay 4 / detail 0.5-0.7
-  to keep region identity plus fine sparkle. Both work per-transform too.
+  iterations address progressively finer scales — but the fixed-rate color EMA
+  weights recent history heaviest, so fine structure barely registers in color.
+  `color_falloff` switches the EMA to scale-aware accumulation: each step retains
+  `contraction^falloff` of the running color, so a step's color weight equals the
+  spatial scale it controls, raised to `falloff`. Color variation amplitude then
+  follows a pure power law of feature scale — self-similar coloring with detail
+  at every scale and no resonant size. ~1.0 is neutral (≈ classic look for
+  scale-0.5 scenes); 0.3-0.6 surfaces fine detail. Lower falloff compresses the
+  palette range toward the mean — raise `color_contrast` (2-4) to re-stretch it
+  (cyclic: large stretches also rotate hues when the mean index is off-center).
+  Both are keybind-tunable live (D / C) and saved into view files.
 
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (orbit angle, distance, focus, offset,
-point size, fog) to `views/<scene>-<timestamp>.toml`. Load one with `--view <path>`;
+point size, fog, color falloff/contrast) to `views/<scene>-<timestamp>.toml`.
+View color params override the scene's when present. Load one with `--view <path>`;
 in windowed mode the orbit starts paused so the framing holds (press O to resume).
 
 `--render <out.png>` renders a single frame **headlessly** — no window, no event
@@ -177,6 +182,8 @@ framings without keyboard interaction.
 - Keep it simple - avoid over-abstraction
 - Use glam for all math, not manual array ops
 - WGSL structs must match the `#[repr(C)]` Rust structs in `buffers.rs` exactly
-  (`GpuTransform` is 160 bytes; `var_weights` is `array<vec4<f32>, 4>` in WGSL)
+  (`GpuTransform` is 144 bytes; `CameraUniforms` is 112 and is declared in
+  points/render.wgsl, gizmo.wgsl, AND density/voxel_render.wgsl — update all
+  three; size tests in buffers.rs/compute.rs guard the Rust side)
 - New variations: append to `VARIATION_NAMES` in scene.rs AND the matching slot
   in `apply_variations()` in chaos.wgsl; slots must stay in sync

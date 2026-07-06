@@ -39,17 +39,47 @@ pub struct TransformSpec {
     pub color_value: f32,
     /// Selection weight
     pub weight: f32,
-    /// Color blending speed (0.0-1.0)
+    /// Effective color blending speed (0.0-1.0), resolved by resolve_color_speeds
     pub color_speed: f32,
-    /// Iterations of color lag (0-15); higher moves color variation to finer structure
-    pub color_delay: u32,
-    /// Blend weight of the delayed color vs the current one (0.0-1.0)
-    pub color_detail: f32,
+    /// Explicit per-transform color_speed from the scene file, if any.
+    /// Always wins over global color_speed and color_falloff.
+    pub explicit_color_speed: Option<f32>,
     /// Variation blend weights, by slot (see VARIATION_NAMES)
     pub variations: [f32; NUM_VARIATIONS],
 }
 
+/// Resolve each transform's effective color_speed.
+///
+/// With color_falloff = 0, transforms use their explicit color_speed or the
+/// global one (classic fixed-rate EMA). With color_falloff > 0, the EMA
+/// retain-factor per step is tied to the transform's spatial contraction:
+///
+///     retained = contraction^falloff    (speed = 1 - retained)
+///
+/// so the color weight of the transform applied k steps ago equals the
+/// spatial scale that step controls, raised to `falloff`. Color variation
+/// amplitude then follows a pure power law of feature scale — detail at
+/// every scale with no resonant size. Lower falloff = flatter spectrum
+/// (more fine detail, but colors compress toward the mean; compensate with
+/// color_contrast at render time).
+pub fn resolve_color_speeds(transforms: &mut [TransformSpec], global_speed: f32, falloff: f32) {
+    for t in transforms {
+        t.color_speed = match t.explicit_color_speed {
+            Some(s) => s,
+            None if falloff > 0.0 => 1.0 - t.contraction().powf(falloff),
+            None => global_speed,
+        };
+    }
+}
+
 impl TransformSpec {
+    /// Spatial contraction factor of the affine part (cube root of the
+    /// determinant), clamped away from 0 and 1 so falloff-derived speeds
+    /// stay sane for degenerate or expanding transforms.
+    pub fn contraction(&self) -> f32 {
+        self.matrix.determinant().abs().powf(1.0 / 3.0).clamp(0.05, 0.95)
+    }
+
     /// Weights for a pure-linear (classic affine) transform
     pub fn linear_variations() -> [f32; NUM_VARIATIONS] {
         let mut v = [0.0; NUM_VARIATIONS];
@@ -115,16 +145,17 @@ pub struct SceneMeta {
     pub decay: f32,
     #[serde(default = "default_color_speed")]
     pub color_speed: f32,
-    /// Global color delay: emit the color state from N iterations ago (0-15).
-    /// 0 = classic behavior (color tracks coarse structure). Higher values move
-    /// color variation to finer structure, since older iterations in the chaos
-    /// game address progressively finer position scales.
+    /// Scale-aware color accumulation exponent (see resolve_color_speeds).
+    /// 0 = classic fixed-rate EMA using color_speed. > 0 ties each EMA step's
+    /// retain-factor to the transform's contraction^falloff, giving color
+    /// detail at every spatial scale (power-law, no resonant size).
+    /// ~1.0 is neutral; lower = more fine detail (raise color_contrast too).
     #[serde(default)]
-    pub color_delay: u32,
-    /// Global blend between the current color (0.0, low-frequency regions) and
-    /// the delayed color (1.0, fine detail). Only matters when color_delay > 0.
-    #[serde(default = "default_color_detail")]
-    pub color_detail: f32,
+    pub color_falloff: f32,
+    /// Render-time contrast stretch of the colormap index around its center,
+    /// wrapping cyclically. Compensates the wash-out from low color_falloff.
+    #[serde(default = "default_color_contrast")]
+    pub color_contrast: f32,
     /// Total point buffer size for the simple point renderer.
     /// If unset, defaults to 500k.
     pub point_count: Option<usize>,
@@ -138,7 +169,7 @@ fn default_color_speed() -> f32 {
     0.5
 }
 
-fn default_color_detail() -> f32 {
+fn default_color_contrast() -> f32 {
     1.0
 }
 
@@ -163,15 +194,9 @@ pub struct TransformDef {
     #[serde(default)]
     pub color_value: Option<f32>,
     /// Per-transform color blending speed (0.0-1.0)
-    /// Overrides global scene color_speed if set
+    /// Overrides global color_speed and color_falloff if set
     #[serde(default)]
     pub color_speed: Option<f32>,
-    /// Per-transform color delay override (0-15 iterations)
-    #[serde(default)]
-    pub color_delay: Option<u32>,
-    /// Per-transform detail blend override (0.0-1.0)
-    #[serde(default)]
-    pub color_detail: Option<f32>,
     /// Variation blend weights by name, e.g. { spherical = 0.7, linear = 0.3 }
     /// Defaults to { linear = 1.0 } (classic affine IFS)
     #[serde(default)]
@@ -222,8 +247,11 @@ pub struct Scene {
     /// Temporal decay factor (0.0-1.0)
     #[allow(dead_code)]
     pub decay: f32,
-    #[allow(dead_code)]
     pub color_speed: f32,
+    /// Scale-aware color accumulation exponent (0 = classic fixed-rate EMA)
+    pub color_falloff: f32,
+    /// Render-time cyclic contrast stretch of the colormap index
+    pub color_contrast: f32,
     /// IFS transforms (affine matrix + variation blend weights)
     pub transforms: Vec<TransformSpec>,
     /// Human-readable name per transform (from scene file)
@@ -292,13 +320,8 @@ impl Scene {
                     }
                 });
 
-                // Use transform-specific speed or global default
+                // Placeholder; resolve_color_speeds computes the effective value
                 let speed = t.color_speed.unwrap_or(global_speed);
-                let delay = t.color_delay.unwrap_or(scene_file.meta.color_delay).min(15);
-                let detail = t
-                    .color_detail
-                    .unwrap_or(scene_file.meta.color_detail)
-                    .clamp(0.0, 1.0);
 
                 let variations = match &t.variations {
                     Some(table) => parse_variations(table)
@@ -311,12 +334,14 @@ impl Scene {
                     color_value,
                     weight: t.weight,
                     color_speed: speed,
-                    color_delay: delay,
-                    color_detail: detail,
+                    explicit_color_speed: t.color_speed,
                     variations,
                 })
             })
             .collect::<Result<_, String>>()?;
+
+        let mut transforms = transforms;
+        resolve_color_speeds(&mut transforms, global_speed, scene_file.meta.color_falloff);
 
         // Generate colormap from transform colors (always cyclic)
         let colormap = generate_colormap(&transform_colors);
@@ -334,6 +359,8 @@ impl Scene {
             point_count: scene_file.meta.point_count.unwrap_or(DEFAULT_POINT_COUNT),
             decay: scene_file.meta.decay,
             color_speed: scene_file.meta.color_speed,
+            color_falloff: scene_file.meta.color_falloff.max(0.0),
+            color_contrast: scene_file.meta.color_contrast.max(0.0),
             transforms,
             transform_names,
             colormap,

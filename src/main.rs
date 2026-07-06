@@ -203,6 +203,12 @@ impl ApplicationHandler for AppWrapper {
                             "f" | "F" => {
                                 app.adjust_fog_intensity(!self.shift_held);
                             }
+                            "d" | "D" => {
+                                app.adjust_color_falloff(!self.shift_held);
+                            }
+                            "c" | "C" => {
+                                app.adjust_color_contrast(self.shift_held);
+                            }
                             "n" | "N" => {
                                 app.adjust_fog_near(!self.shift_held);
                             }
@@ -309,6 +315,8 @@ fn default_scene() -> Scene {
         point_count: 500_000,
         decay: 0.8,
         color_speed: 0.5,
+        color_falloff: 0.0,
+        color_contrast: 1.0,
         transform_names: vec![None; 4],
         transforms: [
             (Vec3::new(0.0, 0.0, 0.5), 0.0),      // red
@@ -326,8 +334,7 @@ fn default_scene() -> Scene {
             color_value,
             weight: 1.0,
             color_speed: 0.5,
-            color_delay: 0,
-            color_detail: 1.0,
+            explicit_color_speed: None,
             variations: TransformSpec::linear_variations(),
         })
         .collect(),

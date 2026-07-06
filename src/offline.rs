@@ -33,7 +33,18 @@ pub struct OfflineParams<'a> {
 }
 
 pub fn render(params: OfflineParams) -> Result<(), String> {
-    let OfflineParams { scene, view, width, height, out_path, accumulate, fog_enabled } = params;
+    let OfflineParams { mut scene, view, width, height, out_path, accumulate, fog_enabled } = params;
+
+    // A view can override the scene's color parameters. Falloff feeds the
+    // chaos game (per-transform speeds), so apply it before compute setup.
+    if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
+        scene.color_falloff = f;
+        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+    }
+    let color_contrast = view
+        .as_ref()
+        .and_then(|v| v.color_contrast)
+        .unwrap_or(scene.color_contrast);
 
     // === Headless device (no surface) ===
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -120,7 +131,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
 
     let camera = CameraUniforms::new(
         mvp, height as f32, point_size, aspect, 1.0,
-        fog.0, fog.1, fog.2, fog.3,
+        fog.0, fog.1, fog.2, fog.3, color_contrast,
     );
     renderer.upload_camera(&queue, &camera);
     let use_point_primitives = point_size * height as f32 / distance <= 1.5;

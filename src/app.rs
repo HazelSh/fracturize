@@ -127,6 +127,14 @@ pub struct App {
     pub fog_brightness: f32,
     pub fog_saturation: f32,
 
+    // Color accumulation / rendering parameters
+    /// Scale-aware color accumulation exponent (0 = classic fixed-rate EMA)
+    pub color_falloff: f32,
+    /// Render-time cyclic contrast stretch of the colormap index
+    pub color_contrast: f32,
+    /// Global color_speed from the scene (used when color_falloff is 0)
+    scene_color_speed: f32,
+
     fps_tracker: FpsTracker,
 
     // Simple point rendering pipeline
@@ -278,6 +286,9 @@ impl App {
             fog_far: 4.5,
             fog_brightness,
             fog_saturation,
+            color_falloff: scene.color_falloff,
+            color_contrast: scene.color_contrast,
+            scene_color_speed: scene.color_speed,
             fps_tracker: FpsTracker::new(),
             point_compute,
             point_renderer,
@@ -312,6 +323,13 @@ impl App {
             app.fog_far = v.fog_far;
             app.fog_brightness = v.fog_brightness;
             app.fog_saturation = v.fog_saturation;
+            if let Some(c) = v.color_contrast {
+                app.color_contrast = c;
+            }
+            if let Some(f) = v.color_falloff {
+                app.color_falloff = f;
+                app.refresh_color_speeds();
+            }
             app.orbit_paused = true;
             log::info!("Loaded view (orbit paused; press O to resume)");
         }
@@ -337,6 +355,8 @@ impl App {
             fog_far: self.fog_far,
             fog_brightness: self.fog_brightness,
             fog_saturation: self.fog_saturation,
+            color_falloff: Some(self.color_falloff),
+            color_contrast: Some(self.color_contrast),
         };
 
         let slug: String = self
@@ -403,6 +423,42 @@ impl App {
         let delta = if closer { -1.0 } else { 1.0 };
         self.fog_far = (self.fog_far + delta).clamp(self.fog_near + 1.0, 30.0);
         log::info!("Fog far: {:.1}", self.fog_far);
+    }
+
+    /// Re-resolve per-transform color speeds from the current falloff and
+    /// push them to the GPU, then reset so the point buffer refills quickly
+    fn refresh_color_speeds(&mut self) {
+        crate::scene::resolve_color_speeds(
+            &mut self.scene_transforms,
+            self.scene_color_speed,
+            self.color_falloff,
+        );
+        self.point_compute.update_weights(
+            &self.gpu.queue,
+            &self.scene_transforms,
+            &self.transform_enabled,
+        );
+        self.reset();
+    }
+
+    /// Adjust the scale-aware color falloff exponent. Turning it up from 0
+    /// enters scale-aware mode at the neutral value 1.0.
+    pub fn adjust_color_falloff(&mut self, finer: bool) {
+        let old = self.color_falloff;
+        self.color_falloff = if old == 0.0 {
+            1.0
+        } else {
+            let factor = if finer { 1.0 / 1.15 } else { 1.15 };
+            (old * factor).clamp(0.05, 4.0)
+        };
+        log::info!("Color falloff: {:.2} -> {:.2} (lower = finer color detail)", old, self.color_falloff);
+        self.refresh_color_speeds();
+    }
+
+    pub fn adjust_color_contrast(&mut self, increase: bool) {
+        let factor = if increase { 1.15 } else { 1.0 / 1.15 };
+        self.color_contrast = (self.color_contrast * factor).clamp(0.25, 16.0);
+        log::info!("Color contrast: {:.2}", self.color_contrast);
     }
 
     pub fn toggle_gizmos(&mut self) {
@@ -524,6 +580,7 @@ impl App {
             self.fog_far,
             self.fog_brightness,
             self.fog_saturation,
+            self.color_contrast,
         );
         self.point_renderer.upload_camera(&self.gpu.queue, &camera);
 
@@ -646,6 +703,8 @@ impl App {
             ("V", "save current view to views/"),
             ("S", "save screenshot to screenshots/capture.png"),
             ("[ / ]", "shrink / grow point size"),
+            ("D / Shift+D", "finer / coarser color detail (falloff)"),
+            ("C / Shift+C", "less / more color contrast"),
             ("F / Shift+F", "more / less fog"),
             ("N / Shift+N", "fog start closer / farther"),
             ("M / Shift+M", "fog end closer / farther"),
@@ -760,6 +819,21 @@ impl App {
             font_size: 12.0,
         });
         param_y += 16.0;
+
+        // Color params (only if not default)
+        if self.color_falloff > 0.0 || self.color_contrast != 1.0 {
+            entries.push(TextEntry {
+                text: format!(
+                    "color: falloff={:.2} contrast={:.2}",
+                    self.color_falloff, self.color_contrast,
+                ),
+                x: 10.0,
+                y: param_y,
+                color: grey,
+                font_size: 12.0,
+            });
+            param_y += 16.0;
+        }
 
         // Fog params (only if not default)
         if self.fog_brightness < 1.0 || self.fog_saturation < 1.0 {
@@ -930,6 +1004,7 @@ impl App {
             self.fog_far,
             self.fog_brightness,
             self.fog_saturation,
+            self.color_contrast,
         );
         self.point_renderer.upload_camera(&self.gpu.queue, &camera);
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);

@@ -26,6 +26,12 @@ pub struct View {
     pub fog_far: f32,
     pub fog_brightness: f32,
     pub fog_saturation: f32,
+    /// Scale-aware color accumulation exponent; None = use the scene's value
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_falloff: Option<f32>,
+    /// Cyclic colormap contrast stretch; None = use the scene's value
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_contrast: Option<f32>,
 }
 
 impl View {
@@ -65,6 +71,8 @@ mod tests {
             fog_far: 4.5,
             fog_brightness: 0.4,
             fog_saturation: 0.3,
+            color_falloff: Some(0.6),
+            color_contrast: Some(2.0),
         };
         let dir = std::env::temp_dir().join("fracturize_view_test");
         let path = dir.join("roundtrip.toml");

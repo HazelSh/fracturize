@@ -131,7 +131,7 @@ pub struct VoxelCounter {
     pub _pad: [u32; 3],
 }
 
-/// GPU transform representation (160 bytes)
+/// GPU transform representation (144 bytes)
 /// Uses color_value (0-1) instead of full RGBA
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -143,9 +143,6 @@ pub struct GpuTransform {
     pub color_speed: f32,      // 4 bytes - per-transform blending speed
     /// Variation blend weights (slot order matches chaos.wgsl / scene::VARIATION_NAMES)
     pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 64 bytes
-    pub color_delay: u32,      // 4 bytes - iterations of color lag (0-15)
-    pub color_detail: f32,     // 4 bytes - blend of delayed vs current color (0-1)
-    pub _pad: [u32; 2],        // 8 bytes - struct size must be a multiple of 16
 }
 
 impl GpuTransform {
@@ -157,14 +154,11 @@ impl GpuTransform {
             cumulative_weight,
             color_speed: spec.color_speed,
             var_weights: spec.variations,
-            color_delay: spec.color_delay,
-            color_detail: spec.color_detail,
-            _pad: [0; 2],
         }
     }
 }
 
-/// Camera uniforms (96 bytes, must be 16-byte aligned)
+/// Camera uniforms (112 bytes, must be 16-byte aligned)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CameraUniforms {
@@ -177,6 +171,8 @@ pub struct CameraUniforms {
     pub fog_far: f32,       // 4 bytes - distance where fog is maximum
     pub fog_brightness: f32, // 4 bytes - brightness reduction at max fog (0-1, 1=no change)
     pub fog_saturation: f32, // 4 bytes - saturation reduction at max fog (0-1, 1=no change)
+    pub color_contrast: f32, // 4 bytes - cyclic contrast stretch of colormap index (1=off)
+    pub _pad: [f32; 3],     // 12 bytes - struct size must be a multiple of 16
 }
 
 impl CameraUniforms {
@@ -190,6 +186,7 @@ impl CameraUniforms {
         fog_far: f32,
         fog_brightness: f32,
         fog_saturation: f32,
+        color_contrast: f32,
     ) -> Self {
         Self {
             mvp: mvp.to_cols_array_2d(),
@@ -201,6 +198,8 @@ impl CameraUniforms {
             fog_far,
             fog_brightness,
             fog_saturation,
+            color_contrast,
+            _pad: [0.0; 3],
         }
     }
 }
@@ -248,7 +247,12 @@ mod tests {
     use super::*;
     #[test]
     fn test_gpu_transform_size() {
-        assert_eq!(std::mem::size_of::<GpuTransform>(), 160, "GpuTransform must be 160 bytes to match WGSL struct");
+        assert_eq!(std::mem::size_of::<GpuTransform>(), 144, "GpuTransform must be 144 bytes to match WGSL struct");
+    }
+
+    #[test]
+    fn test_camera_uniforms_size() {
+        assert_eq!(std::mem::size_of::<CameraUniforms>(), 112, "CameraUniforms must be 112 bytes to match WGSL struct");
     }
 
     #[test]

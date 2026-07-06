@@ -11,6 +11,10 @@ struct CameraUniforms {
     fog_far: f32,
     fog_brightness: f32,
     fog_saturation: f32,
+    color_contrast: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 struct VertexInput {
