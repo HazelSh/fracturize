@@ -1,6 +1,8 @@
 mod app;
 mod gpu;
+mod offline;
 mod scene;
+mod view;
 
 use std::sync::Arc;
 
@@ -17,6 +19,7 @@ use winit::{
 
 use app::App;
 use scene::{Scene, TransformSpec};
+use view::View;
 
 /// 3D IFS Fractal Renderer inspired by Apophysis
 #[derive(Parser, Debug)]
@@ -42,6 +45,31 @@ struct Args {
     /// Disable vsync (uncapped frame rate, useful for benchmarking)
     #[arg(long)]
     no_vsync: bool,
+
+    /// Load a saved view file (camera framing, point size, fog).
+    /// In windowed mode the orbit starts paused; press O to resume.
+    #[arg(long)]
+    view: Option<String>,
+
+    /// Render a single frame headlessly (no window) to this PNG path and exit
+    #[arg(long)]
+    render: Option<String>,
+
+    /// Output width for --render
+    #[arg(long, default_value = "1920")]
+    width: u32,
+
+    /// Output height for --render
+    #[arg(long, default_value = "1080")]
+    height: u32,
+
+    /// Override the scene's point buffer capacity (more points = denser render)
+    #[arg(long)]
+    points: Option<usize>,
+
+    /// Extra chaos-game frames after the buffer fills, for --render
+    #[arg(long, default_value = "32")]
+    accumulate: u32,
 }
 
 /// Wrapper to handle winit's async initialization pattern
@@ -78,7 +106,7 @@ impl ApplicationHandler for AppWrapper {
         );
 
         // Load scene - panic if provided path fails, use default if no path given
-        let scene = match &self.args.scene {
+        let mut scene = match &self.args.scene {
             Some(path) => Scene::load(path).unwrap_or_else(|e| {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
@@ -87,9 +115,23 @@ impl ApplicationHandler for AppWrapper {
                 default_scene()
             }
         };
+        if let Some(n) = self.args.points {
+            scene.point_count = n;
+        }
+
+        let view = self.args.view.as_ref().map(|path| {
+            View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
+        });
 
         // Create app (blocking on async)
-        let app = pollster::block_on(App::new(window, scene, self.args.fog, !self.args.no_vsync));
+        let app = pollster::block_on(App::new(
+            window,
+            scene,
+            self.args.fog,
+            !self.args.no_vsync,
+            self.args.scene.clone(),
+            view,
+        ));
 
         self.app = Some(app);
     }
@@ -175,6 +217,12 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "h" | "H" | "?" => {
                                 app.toggle_help();
+                            }
+                            "o" | "O" => {
+                                app.toggle_orbit();
+                            }
+                            "v" | "V" => {
+                                app.save_view();
                             }
                             "[" => {
                                 app.adjust_point_size(false);
@@ -294,6 +342,38 @@ fn main() {
 
     // Parse CLI args
     let args = Args::parse();
+
+    // Headless single-frame render mode: no window, no event loop
+    if let Some(out) = &args.render {
+        let mut scene = match &args.scene {
+            Some(path) => Scene::load(path).unwrap_or_else(|e| {
+                panic!("Failed to load scene '{}': {}", path, e);
+            }),
+            None => default_scene(),
+        };
+        if let Some(n) = args.points {
+            scene.point_count = n;
+        }
+        let view = args.view.as_ref().map(|path| {
+            View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
+        });
+
+        let result = offline::render(offline::OfflineParams {
+            scene,
+            view,
+            width: args.width,
+            height: args.height,
+            out_path: std::path::Path::new(out),
+            accumulate: args.accumulate,
+            fog_enabled: args.fog,
+        });
+        if let Err(e) = result {
+            eprintln!("Offline render failed: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     match &args.scene {
         Some(path) => log::info!("Starting Fracturize with scene: {}", path),
         None => log::info!("Starting Fracturize with built-in default scene"),

@@ -73,6 +73,8 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | Enter | enable/disable selected transform |
 | T | toggle info overlay (HUD + transform list) |
 | G | toggle transform gizmos |
+| O | pause / resume camera orbit |
+| V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/capture.png |
 | [ / ] | shrink / grow point size |
 | F / Shift+F | more / less fog |
@@ -121,6 +123,28 @@ Scene-design notes learned the hard way:
   scale ~1.1-1.2 with small rotations gives classic gnarl swirls.
 - Colors wash out to pastel when transforms mix heavily; raise `color_speed`
   (0.5-0.7) for stronger per-branch color identity.
+
+## View Files & Offline Rendering
+
+Press `V` in-app to dump the current view (orbit angle, distance, focus, offset,
+point size, fog) to `views/<scene>-<timestamp>.toml`. Load one with `--view <path>`;
+in windowed mode the orbit starts paused so the framing holds (press O to resume).
+
+`--render <out.png>` renders a single frame **headlessly** — no window, no event
+loop, no focus stealing — and exits. It fills the point buffer, renders once, and
+saves. Options: `--width/--height` (default 1920x1080), `--points N` (override the
+scene's buffer capacity for denser renders; 16 bytes/point of GPU memory),
+`--accumulate N` (extra chaos frames after the buffer fills, default 32),
+`--view <path>` for exact framing, `--fog`. Example:
+
+```
+fracturize --scene scenes/glasshouse.toml --view views/glasshouse-123.toml \
+  --render renders/glasshouse_4k.png --width 3840 --height 2160 --points 12000000
+```
+
+A 4K render with 12M points takes ~30s on the T490. `--points` also works in
+windowed mode. View files are the reliable way for agents to render specific
+framings without keyboard interaction.
 
 ## Screenshot Support
 

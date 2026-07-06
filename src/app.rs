@@ -9,6 +9,7 @@ use winit::window::Window;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, PointCompute, PointRenderer, TextRenderer, DEPTH_FORMAT};
 use crate::gpu::text::TextEntry;
 use crate::scene::{Scene, TransformSpec};
+use crate::view::View;
 
 /// Project a world-space position to screen coordinates
 fn world_to_screen(pos: Vec3, view_proj: Mat4, w: f32, h: f32) -> Option<(f32, f32)> {
@@ -110,6 +111,7 @@ pub struct App {
     pub window: Arc<Window>,
     pub frame_count: u32,
     pub rotation: f32,
+    pub orbit_paused: bool,
     pub camera_distance: f32,
     pub camera_focus: Vec3,
     pub camera_offset: Vec3,
@@ -137,6 +139,8 @@ pub struct App {
     scene_name: String,
     /// Scene author for HUD
     scene_author: String,
+    /// Scene file path (recorded in saved view files)
+    scene_path: Option<String>,
     /// Point buffer capacity for HUD
     buffer_capacity: u32,
 
@@ -165,7 +169,14 @@ pub struct App {
 
 impl App {
     /// Create a new App
-    pub async fn new(window: Arc<Window>, scene: Scene, fog_enabled: bool, vsync: bool) -> Self {
+    pub async fn new(
+        window: Arc<Window>,
+        scene: Scene,
+        fog_enabled: bool,
+        vsync: bool,
+        scene_path: Option<String>,
+        view: Option<View>,
+    ) -> Self {
         let gpu = GpuContext::new(window.clone(), vsync).await;
 
         log::info!("Loaded scene: {} by {}", scene.name, scene.author);
@@ -249,11 +260,12 @@ impl App {
             (1.0, 1.0)
         };
 
-        Self {
+        let mut app = Self {
             gpu,
             window,
             frame_count: 0,
             rotation: 0.0,
+            orbit_paused: false,
             camera_distance: scene.camera_distance,
             camera_focus: scene.camera_focus,
             camera_offset: scene.camera_offset,
@@ -273,6 +285,7 @@ impl App {
             text_renderer,
             scene_name,
             scene_author,
+            scene_path,
             buffer_capacity,
             transform_names,
             scene_transforms,
@@ -285,6 +298,62 @@ impl App {
             screenshot_depth,
             screenshot_buffer,
             pending_screenshot: false,
+        };
+
+        // Apply a saved view, if given. Pause the orbit so the loaded
+        // framing holds exactly (press O to resume).
+        if let Some(v) = view {
+            app.rotation = v.rotation;
+            app.camera_distance = v.distance;
+            app.camera_focus = Vec3::from(v.focus);
+            app.camera_offset = Vec3::from(v.offset);
+            app.point_size = v.point_size;
+            app.fog_near = v.fog_near;
+            app.fog_far = v.fog_far;
+            app.fog_brightness = v.fog_brightness;
+            app.fog_saturation = v.fog_saturation;
+            app.orbit_paused = true;
+            log::info!("Loaded view (orbit paused; press O to resume)");
+        }
+
+        app
+    }
+
+    pub fn toggle_orbit(&mut self) {
+        self.orbit_paused = !self.orbit_paused;
+        log::info!("Camera orbit: {}", if self.orbit_paused { "paused" } else { "running" });
+    }
+
+    /// Save the current view parameters to views/<scene>-<timestamp>.toml
+    pub fn save_view(&self) {
+        let view = View {
+            scene: self.scene_path.clone(),
+            rotation: self.rotation,
+            distance: self.camera_distance,
+            focus: self.camera_focus.to_array(),
+            offset: self.camera_offset.to_array(),
+            point_size: self.point_size,
+            fog_near: self.fog_near,
+            fog_far: self.fog_far,
+            fog_brightness: self.fog_brightness,
+            fog_saturation: self.fog_saturation,
+        };
+
+        let slug: String = self
+            .scene_name
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = format!("views/{}-{}.toml", slug.trim_matches('-'), timestamp);
+
+        match view.save(&path) {
+            Ok(()) => log::info!("View saved to {}", path),
+            Err(e) => log::error!("{}", e),
         }
     }
 
@@ -404,7 +473,9 @@ impl App {
     pub fn update(&mut self) {
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
-        self.rotation += 0.003;
+        if !self.orbit_paused {
+            self.rotation += 0.003;
+        }
 
         if should_log {
             let point_count = self.point_compute.valid_point_count();
@@ -571,6 +642,8 @@ impl App {
             ("Enter", "enable/disable selected transform"),
             ("T", "toggle info overlay"),
             ("G", "toggle transform gizmos"),
+            ("O", "pause / resume camera orbit"),
+            ("V", "save current view to views/"),
             ("S", "save screenshot to screenshots/capture.png"),
             ("[ / ]", "shrink / grow point size"),
             ("F / Shift+F", "more / less fog"),
