@@ -9,9 +9,12 @@ use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 /// Depth buffer format
 pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
-/// Point billboard renderer
+/// Point renderer with two pipelines:
+/// - billboard quads (4-vertex instanced strips) for visibly-sized points
+/// - native 1px point primitives for subpixel points (~3x faster)
 pub struct PointRenderer {
-    pub pipeline: RenderPipeline,
+    pub quad_pipeline: RenderPipeline,
+    pub point_pipeline: RenderPipeline,
     pub bind_group: BindGroup,
     pub camera_buffer: Buffer,
 }
@@ -77,45 +80,58 @@ impl PointRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None, // Opaque rendering
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make_pipeline = |label: &str, entry: &str, topology: wgpu::PrimitiveTopology| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None, // Opaque rendering
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let quad_pipeline = make_pipeline(
+            "point_quad_pipeline",
+            "vs_main",
+            wgpu::PrimitiveTopology::TriangleStrip,
+        );
+        let point_pipeline = make_pipeline(
+            "point_pixel_pipeline",
+            "vs_point",
+            wgpu::PrimitiveTopology::PointList,
+        );
 
         let camera_buffer = create_camera_buffer(device);
 
@@ -139,7 +155,8 @@ impl PointRenderer {
         });
 
         Self {
-            pipeline,
+            quad_pipeline,
+            point_pipeline,
             bind_group,
             camera_buffer,
         }
@@ -150,10 +167,21 @@ impl PointRenderer {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
     }
 
-    /// Draw points - 6 vertices per point (2 triangles for quad billboards)
-    pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, point_count: u32) {
-        render_pass.set_pipeline(&self.pipeline);
+    /// Draw points. When `use_point_primitives` is set, draws native 1px
+    /// points (fast path); otherwise one 4-vertex quad instance per point.
+    pub fn draw<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        point_count: u32,
+        use_point_primitives: bool,
+    ) {
         render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.draw(0..point_count * 6, 0..1);
+        if use_point_primitives {
+            render_pass.set_pipeline(&self.point_pipeline);
+            render_pass.draw(0..point_count, 0..1);
+        } else {
+            render_pass.set_pipeline(&self.quad_pipeline);
+            render_pass.draw(0..4, 0..point_count);
+        }
     }
 }

@@ -1,11 +1,11 @@
 # High-density Sierpinski - 10 million points
-# Tests the compact 8-byte point format
+# Showcases the native point-primitive fast path
 
 [meta]
 name = "Sierpinski 10M"
 author = "Claude Opus 4.5"
 point_size = 0.004
-points_per_frame = 8_000
+point_count = 10_000_000
 decay = 0.8
 
 [[transform]]

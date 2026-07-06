@@ -8,7 +8,7 @@ use winit::window::Window;
 
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, PointCompute, PointRenderer, TextRenderer, DEPTH_FORMAT};
 use crate::gpu::text::TextEntry;
-use crate::scene::Scene;
+use crate::scene::{Scene, TransformSpec};
 
 /// Project a world-space position to screen coordinates
 fn world_to_screen(pos: Vec3, view_proj: Mat4, w: f32, h: f32) -> Option<(f32, f32)> {
@@ -117,6 +117,7 @@ pub struct App {
 
     pub show_gizmos: bool,
     pub show_text: bool,
+    pub show_help: bool,
 
     // Fog parameters
     pub fog_near: f32,
@@ -142,7 +143,7 @@ pub struct App {
     /// Transform names for text overlay
     transform_names: Vec<Option<String>>,
     /// Cached scene transforms for text label projection
-    scene_transforms: Vec<(Mat4, f32, f32, f32)>,
+    scene_transforms: Vec<TransformSpec>,
     /// Colormap for transform label colors
     colormap: [[f32; 4]; 256],
 
@@ -164,8 +165,8 @@ pub struct App {
 
 impl App {
     /// Create a new App
-    pub async fn new(window: Arc<Window>, scene: Scene, fog_enabled: bool, _depth_cull_enabled: bool) -> Self {
-        let gpu = GpuContext::new(window.clone()).await;
+    pub async fn new(window: Arc<Window>, scene: Scene, fog_enabled: bool, vsync: bool) -> Self {
+        let gpu = GpuContext::new(window.clone(), vsync).await;
 
         log::info!("Loaded scene: {} by {}", scene.name, scene.author);
 
@@ -239,7 +240,7 @@ impl App {
         let scene_transforms = scene.transforms.clone();
         let colormap = scene.colormap;
         let num_transforms = scene_transforms.len();
-        let original_weights: Vec<f32> = scene_transforms.iter().map(|(_, _, w, _)| *w).collect();
+        let original_weights: Vec<f32> = scene_transforms.iter().map(|t| t.weight).collect();
 
         // Fog settings
         let (fog_brightness, fog_saturation) = if fog_enabled {
@@ -259,6 +260,8 @@ impl App {
             point_size,
             show_gizmos: true,
             show_text: true,
+            // Env override lets automated captures verify the help overlay
+            show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
             fog_near: 3.0,
             fog_far: 4.5,
             fog_brightness,
@@ -338,6 +341,10 @@ impl App {
         log::info!("Gizmos: {}", if self.show_gizmos { "on" } else { "off" });
     }
 
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
     pub fn toggle_text_overlay(&mut self) {
         self.show_text = !self.show_text;
         self.selected_transform = if self.show_text { Some(0) } else { None };
@@ -386,6 +393,12 @@ impl App {
 
     pub fn request_screenshot(&mut self) {
         self.pending_screenshot = true;
+    }
+
+    /// Use native 1px point primitives (~3x faster) when the projected point
+    /// size at the orbit distance would be subpixel anyway
+    fn use_point_primitives(&self, screen_height: f32) -> bool {
+        self.point_size * screen_height / self.camera_distance <= 1.5
     }
 
     pub fn update(&mut self) {
@@ -474,7 +487,11 @@ impl App {
                 multiview_mask: None,
             });
 
-            self.point_renderer.draw(&mut render_pass, point_count);
+            self.point_renderer.draw(
+                &mut render_pass,
+                point_count,
+                self.use_point_primitives(SCREENSHOT_HEIGHT as f32),
+            );
         }
 
         let bytes_per_row = SCREENSHOT_WIDTH * 4;
@@ -543,8 +560,78 @@ impl App {
         self.pending_screenshot = false;
     }
 
+    /// Keybind help panel, shown when `show_help` is on
+    fn build_help_entries(&self, height: f32) -> Vec<TextEntry> {
+        const HELP: &[(&str, &str)] = &[
+            ("H / ?", "toggle this help"),
+            ("Esc", "quit"),
+            ("Space", "re-seed points (reset)"),
+            ("Up / Down", "zoom in / out"),
+            ("", "(select transform when overlay is on)"),
+            ("Enter", "enable/disable selected transform"),
+            ("T", "toggle info overlay"),
+            ("G", "toggle transform gizmos"),
+            ("S", "save screenshot to screenshots/capture.png"),
+            ("[ / ]", "shrink / grow point size"),
+            ("F / Shift+F", "more / less fog"),
+            ("N / Shift+N", "fog start closer / farther"),
+            ("M / Shift+M", "fog end closer / farther"),
+        ];
+
+        let font_size = 13.0;
+        let line_height = font_size * 1.2;
+        // +2 lines: title and trailing spacer
+        let panel_lines = HELP.len() + 2;
+        let panel_y = (height - panel_lines as f32 * line_height) * 0.5;
+
+        let text: String = std::iter::once("Keybinds".to_string())
+            .chain(std::iter::once(String::new()))
+            .chain(HELP.iter().map(|(key, desc)| format!("{:<13} {}", key, desc)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Dark block-character backdrop so the panel reads over a bright fractal
+        let bg_width = 4 + text.lines().map(|l| l.len()).max().unwrap_or(0);
+        let bg: String = vec!["\u{2588}".repeat(bg_width); panel_lines].join("\n");
+
+        vec![
+            TextEntry {
+                text: bg,
+                x: 6.0,
+                y: panel_y,
+                color: [10, 10, 20, 215],
+                font_size,
+            },
+            TextEntry {
+                text,
+                x: 6.0 + font_size, // ~2 block chars of left padding
+                y: panel_y + line_height * 0.5,
+                color: [235, 235, 245, 255],
+                font_size,
+            },
+        ]
+    }
+
     fn build_text_entries(&self, view_proj: Mat4, width: f32, height: f32) -> Vec<TextEntry> {
         let mut entries = Vec::new();
+
+        if self.show_help {
+            entries.extend(self.build_help_entries(height));
+        } else {
+            // Discoverability hint, bottom-left
+            entries.push(TextEntry {
+                text: "[H] keybinds".to_string(),
+                x: 10.0,
+                y: height - 24.0,
+                color: [160, 160, 170, 180],
+                font_size: 12.0,
+            });
+        }
+
+        if !self.show_text {
+            return entries;
+        }
+
         let white = [255, 255, 255, 255];
         let grey = [180, 180, 180, 220];
 
@@ -627,7 +714,7 @@ impl App {
         });
         y += 20.0;
 
-        for (i, (mat, color_value, weight, _speed)) in self.scene_transforms.iter().enumerate() {
+        for (i, spec) in self.scene_transforms.iter().enumerate() {
             let name = self.transform_names
                 .get(i)
                 .and_then(|n| n.as_deref())
@@ -638,8 +725,8 @@ impl App {
                 format!("T{}: {}", i, name)
             };
 
-            let translation = mat.w_axis.truncate();
-            let scale = mat.x_axis.length();
+            let translation = spec.matrix.w_axis.truncate();
+            let scale = spec.matrix.x_axis.length();
 
             let is_selected = self.selected_transform == Some(i);
             let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
@@ -647,13 +734,19 @@ impl App {
             let sel = if is_selected { ">" } else { " " };
             let on = if is_enabled { " " } else { "×" };
 
+            let summary = spec.variation_summary();
+            let var_info = if summary == "linear" {
+                String::new()
+            } else {
+                format!(" [{}]", summary)
+            };
             let line = format!(
-                "{}{} {} p=({:.2},{:.2},{:.2}) s={:.2} w={:.1}",
-                sel, on, label, translation.x, translation.y, translation.z, scale, weight,
+                "{}{} {} p=({:.2},{:.2},{:.2}) s={:.2} w={:.1}{}",
+                sel, on, label, translation.x, translation.y, translation.z, scale, spec.weight, var_info,
             );
 
             // Use colormap color for this transform, dim if disabled
-            let cm_idx = (color_value * 255.0).clamp(0.0, 255.0) as usize;
+            let cm_idx = (spec.color_value * 255.0).clamp(0.0, 255.0) as usize;
             let cm = self.colormap[cm_idx];
             let alpha: u8 = if is_enabled { 220 } else { 80 };
             let color = [
@@ -674,10 +767,10 @@ impl App {
         }
 
         // === World-space gizmo labels ===
-        for (i, (mat, _color_value, _weight, _speed)) in self.scene_transforms.iter().enumerate() {
+        for (i, spec) in self.scene_transforms.iter().enumerate() {
             let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
             let is_selected = self.selected_transform == Some(i);
-            let origin = mat.w_axis.truncate();
+            let origin = spec.matrix.w_axis.truncate();
             if let Some((sx, sy)) = world_to_screen(origin, view_proj, width, height) {
                 let name = self.transform_names
                     .get(i)
@@ -751,8 +844,7 @@ impl App {
         });
 
         // === STEP 1: RUN CHAOS GAME ===
-        let compute_bind_group = self.point_compute.create_bind_group(&self.gpu.device);
-        self.point_compute.dispatch(&mut encoder, &compute_bind_group);
+        self.point_compute.dispatch(&mut encoder);
 
         // === STEP 2: RENDER POINTS ===
         let camera = CameraUniforms::new(
@@ -795,7 +887,11 @@ impl App {
             });
 
             if point_count > 0 {
-                self.point_renderer.draw(&mut render_pass, point_count);
+                self.point_renderer.draw(
+                    &mut render_pass,
+                    point_count,
+                    self.use_point_primitives(height as f32),
+                );
             }
         }
 
@@ -829,7 +925,7 @@ impl App {
         }
 
         // === STEP 4: RENDER TEXT OVERLAY ===
-        if self.show_text {
+        {
             let entries = self.build_text_entries(view_proj, width as f32, height as f32);
             self.text_renderer.prepare(&self.gpu.device, &self.gpu.queue, width, height, &entries);
 

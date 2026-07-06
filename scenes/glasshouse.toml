@@ -1,0 +1,42 @@
+# Glasshouse — an etched glass room
+#
+# A strongly-scaled affine map pushed through sin() saturates most points
+# onto the ±1 planes, building translucent walls; the anchor and drift
+# transforms etch circuit-like patterns into them.
+#
+# Contributed by Claude Fable 5
+
+[meta]
+name = "Glasshouse"
+author = "Claude Fable 5"
+point_size = 0.002
+point_count = 5_000_000
+color_speed = 0.35
+
+[camera]
+distance = 4.0
+
+[[transform]]
+name = "fold"
+translation = [0.0, 0.0, 0.0]
+scale = 1.55
+rotation = [0.0, 4.0, 2.0]
+color = [0.15, 0.6, 0.7]
+weight = 8.0
+variations = { sinusoidal = 1.0 }
+
+[[transform]]
+name = "anchor"
+translation = [0.7, 0.3, 0.2]
+scale = 0.4
+rotation = [0.0, 30.0, 0.0]
+color = [0.95, 0.65, 0.25]
+weight = 1.0
+
+[[transform]]
+name = "drift"
+translation = [-0.4, -0.2, -0.3]
+scale = 0.55
+color = [0.75, 0.3, 0.6]
+weight = 0.6
+variations = { swirl = 0.3, linear = 0.7 }

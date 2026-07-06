@@ -1,0 +1,40 @@
+# Jellyfish — bubble bell, trailing cylinder tentacles
+#
+# Contributed by Claude Fable 5
+
+[meta]
+name = "Jellyfish"
+author = "Claude Fable 5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.5
+
+[camera]
+distance = 5.5
+offset = [0.0, -0.2, 0.0]
+focus = [0.0, -0.35, 0.0]
+
+[[transform]]
+name = "bell"
+translation = [0.0, 0.55, 0.0]
+scale = 1.1
+color = [0.95, 0.5, 0.7]
+weight = 3.0
+variations = { bubble = 1.0 }
+
+[[transform]]
+name = "tentacles"
+translation = [0.0, -0.6, 0.0]
+scale = 0.85
+rotation = [0.0, 40.0, 0.0]
+color = [0.55, 0.35, 0.9]
+weight = 2.0
+variations = { cylinder = 0.75, linear = 0.25 }
+
+[[transform]]
+name = "shimmer"
+translation = [0.2, 0.1, 0.2]
+scale = 0.5
+color = [0.4, 0.9, 0.95]
+weight = 0.8
+variations = { julia = 1.0 }

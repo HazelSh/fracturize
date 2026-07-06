@@ -29,10 +29,10 @@ struct VertexOutput {
 @group(0) @binding(2) var<storage, read> colormap: array<vec4<f32>, 256>;
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    let point_index = vertex_index / 6u;
-    let corner_index = vertex_index % 6u;
-
+fn vs_main(
+    @builtin(vertex_index) corner_index: u32,
+    @builtin(instance_index) point_index: u32,
+) -> VertexOutput {
     let point = points[point_index];
 
     // Transform to clip space
@@ -58,16 +58,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let ndc_size_y = size_pixels / camera.screen_height * 2.0;
     let ndc_size_x = ndc_size_y / camera.aspect_ratio;
 
-    // Billboard quad corners (two triangles)
-    var offsets: array<vec2<f32>, 6>;
-    offsets[0] = vec2<f32>(-1.0, -1.0);
-    offsets[1] = vec2<f32>( 1.0, -1.0);
-    offsets[2] = vec2<f32>( 1.0,  1.0);
-    offsets[3] = vec2<f32>( 1.0,  1.0);
-    offsets[4] = vec2<f32>(-1.0,  1.0);
-    offsets[5] = vec2<f32>(-1.0, -1.0);
-
-    let offset = offsets[corner_index];
+    // Billboard quad corner from vertex index (4-vertex triangle strip):
+    // 0=(-1,-1) 1=(1,-1) 2=(-1,1) 3=(1,1)
+    let offset = vec2<f32>(
+        f32(corner_index & 1u) * 2.0 - 1.0,
+        f32(corner_index >> 1u) * 2.0 - 1.0,
+    );
 
     var out: VertexOutput;
     out.clip_position = vec4<f32>(
@@ -82,6 +78,29 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     out.color = colormap[color_idx].rgb;
     out.depth = depth;
 
+    return out;
+}
+
+// Fast path: native 1px point primitives, used when the projected point size
+// is subpixel anyway (~3x fewer vertices than the billboard quad path)
+@vertex
+fn vs_point(@builtin(vertex_index) point_index: u32) -> VertexOutput {
+    let point = points[point_index];
+
+    let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
+    let depth = clip.w;
+
+    var out: VertexOutput;
+    if depth <= 0.0 {
+        out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+        out.color = vec3<f32>(0.0);
+        out.depth = 0.0;
+        return out;
+    }
+
+    out.clip_position = vec4<f32>(clip.xyz / clip.w, 1.0);
+    out.color = colormap[point.color_idx & 0xFFu].rgb;
+    out.depth = depth;
     return out;
 }
 

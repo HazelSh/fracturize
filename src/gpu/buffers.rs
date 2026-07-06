@@ -131,7 +131,7 @@ pub struct VoxelCounter {
     pub _pad: [u32; 3],
 }
 
-/// GPU transform representation (80 bytes)
+/// GPU transform representation (144 bytes)
 /// Uses color_value (0-1) instead of full RGBA
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -141,16 +141,19 @@ pub struct GpuTransform {
     pub weight: f32,           // 4 bytes
     pub cumulative_weight: f32,// 4 bytes
     pub color_speed: f32,      // 4 bytes - per-transform blending speed
+    /// Variation blend weights (slot order matches chaos.wgsl / scene::VARIATION_NAMES)
+    pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 64 bytes
 }
 
 impl GpuTransform {
-    pub fn new(matrix: Mat4, color_value: f32, weight: f32, cumulative_weight: f32, color_speed: f32) -> Self {
+    pub fn new(spec: &crate::scene::TransformSpec, cumulative_weight: f32, effective_weight: f32) -> Self {
         Self {
-            matrix: matrix.to_cols_array_2d(),
-            color_value,
-            weight,
+            matrix: spec.matrix.to_cols_array_2d(),
+            color_value: spec.color_value,
+            weight: effective_weight,
             cumulative_weight,
-            color_speed,
+            color_speed: spec.color_speed,
+            var_weights: spec.variations,
         }
     }
 }

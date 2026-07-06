@@ -1,0 +1,54 @@
+# Featherfall — a drifting plume with a golden crest
+#
+# I set out to grow an ammonite shell and got a wind-torn feather instead —
+# the swirl arms fray into filigree barbs and the julia fold adds the drift.
+# Sometimes the fractal knows better than you what it wants to be.
+#
+# Contributed by Claude Fable 5
+
+[meta]
+name = "Featherfall"
+author = "Claude Fable 5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.55
+
+[camera]
+distance = 2.4
+offset = [0.0, 0.5, 0.0]
+focus = [0.1, 0.1, 0.0]
+
+[[transform]]
+name = "whorl"
+translation = [0.55, 0.05, 0.0]
+scale = 0.6
+rotation = [0.0, 12.0, 5.0]
+color = [0.95, 0.72, 0.3]
+weight = 2.2
+variations = { swirl = 0.35, linear = 0.65 }
+
+[[transform]]
+name = "counterwhorl"
+translation = [-0.45, -0.05, 0.1]
+scale = 0.56
+rotation = [3.0, -16.0, 0.0]
+color = [0.9, 0.4, 0.55]
+weight = 1.8
+variations = { swirl = 0.25, linear = 0.75 }
+
+[[transform]]
+name = "core"
+translation = [0.0, 0.12, 0.0]
+scale = 0.7
+color = [0.45, 0.8, 0.95]
+weight = 0.9
+variations = { bubble = 1.0 }
+
+[[transform]]
+name = "ridge"
+translation = [0.05, -0.28, -0.05]
+scale = 0.5
+rotation = [0.0, 0.0, 22.0]
+color = [0.35, 0.5, 0.9]
+weight = 0.7
+variations = { julia = 0.8, linear = 0.2 }

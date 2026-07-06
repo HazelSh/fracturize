@@ -74,7 +74,7 @@ pub struct ChaosCompute {
 impl ChaosCompute {
     pub fn new(
         device: &wgpu::Device,
-        transforms: &[(glam::Mat4, f32, f32, f32)], // (matrix, color_value, weight, color_speed)
+        transforms: &[crate::scene::TransformSpec],
         target_points_per_frame: usize,
     ) -> Self {
         // Calculate parallelism parameters
@@ -94,13 +94,13 @@ impl ChaosCompute {
         });
 
         // Prepare transform data with cumulative weights
-        let total_weight: f32 = transforms.iter().map(|(_, _, w, _)| w).sum();
+        let total_weight: f32 = transforms.iter().map(|t| t.weight).sum();
         let mut cumulative = 0.0;
         let gpu_transforms: Vec<GpuTransform> = transforms
             .iter()
-            .map(|(matrix, color_value, weight, speed)| {
-                cumulative += weight / total_weight;
-                GpuTransform::new(*matrix, *color_value, *weight, cumulative, *speed)
+            .map(|t| {
+                cumulative += t.weight / total_weight;
+                GpuTransform::new(t, cumulative, t.weight)
             })
             .collect();
 

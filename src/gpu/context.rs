@@ -13,7 +13,7 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Create a new GPU context for the given window
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>, vsync: bool) -> Self {
         let size = window.inner_size();
 
         // Create wgpu instance with default backends
@@ -51,13 +51,26 @@ impl GpuContext {
 
         let required_features = Features::SHADER_F16;
 
+        // Default limits cap storage buffer bindings at 128MiB, which caps the
+        // point buffer at ~8M points. Request whatever the adapter supports.
+        let adapter_limits = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
+            ..wgpu::Limits::default()
+        };
+        log::info!(
+            "Storage buffer binding limit: {} MiB",
+            adapter_limits.max_storage_buffer_binding_size / (1024 * 1024)
+        );
+
         // Request device and queue
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("fracturize_device"),
                     required_features,
-                    required_limits: wgpu::Limits::default(),
+                    required_limits,
                     memory_hints: wgpu::MemoryHints::Performance,
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),
                     trace: Default::default(),
@@ -83,7 +96,11 @@ impl GpuContext {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: if vsync {
+                wgpu::PresentMode::AutoVsync
+            } else {
+                wgpu::PresentMode::AutoNoVsync
+            },
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,

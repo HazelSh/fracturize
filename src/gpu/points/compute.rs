@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::gpu::buffers::{GpuTransform, Point, PointComputeParams};
+use crate::scene::TransformSpec;
 
 /// Number of threads per workgroup (must match shader)
 const WORKGROUP_SIZE: u32 = 256;
@@ -55,7 +56,7 @@ impl WalkerState {
 /// Writes points directly to a circular buffer
 pub struct PointCompute {
     pub pipeline: wgpu::ComputePipeline,
-    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub bind_group: wgpu::BindGroup,
     pub transform_buffer: wgpu::Buffer,
     pub walker_states_buffer: wgpu::Buffer,
     pub params_buffer: wgpu::Buffer,
@@ -76,7 +77,7 @@ pub struct PointCompute {
 impl PointCompute {
     pub fn new(
         device: &wgpu::Device,
-        transforms: &[(glam::Mat4, f32, f32, f32)], // (matrix, color_value, weight, color_speed)
+        transforms: &[TransformSpec],
         colormap: &[[f32; 4]; 256],
         buffer_capacity: u32,
     ) -> Self {
@@ -103,13 +104,13 @@ impl PointCompute {
         });
 
         // Prepare transform data with cumulative weights
-        let total_weight: f32 = transforms.iter().map(|(_, _, w, _)| w).sum();
+        let total_weight: f32 = transforms.iter().map(|t| t.weight).sum();
         let mut cumulative = 0.0;
         let gpu_transforms: Vec<GpuTransform> = transforms
             .iter()
-            .map(|(matrix, color_value, weight, color_speed)| {
-                cumulative += weight / total_weight;
-                GpuTransform::new(*matrix, *color_value, *weight, cumulative, *color_speed)
+            .map(|t| {
+                cumulative += t.weight / total_weight;
+                GpuTransform::new(t, cumulative, t.weight)
             })
             .collect();
 
@@ -219,9 +220,34 @@ impl PointCompute {
             cache: None,
         });
 
+        // All buffers are fixed for the lifetime of the pipeline, so the bind
+        // group can be created once instead of per frame
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("point_compute_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: point_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: transform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: walker_states_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         Self {
             pipeline,
-            bind_group_layout,
+            bind_group,
             transform_buffer,
             walker_states_buffer,
             params_buffer,
@@ -292,40 +318,14 @@ impl PointCompute {
         self.valid_point_count()
     }
 
-    /// Create bind group for dispatch
-    pub fn create_bind_group(&self, device: &wgpu::Device) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point_compute_bind_group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.point_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.transform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.walker_states_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.params_buffer.as_entire_binding(),
-                },
-            ],
-        })
-    }
-
     /// Dispatch the compute shader
-    pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, bind_group: &wgpu::BindGroup) {
+    pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("point_chaos_pass"),
             timestamp_writes: None,
         });
         compute_pass.set_pipeline(&self.pipeline);
-        compute_pass.set_bind_group(0, bind_group, &[]);
+        compute_pass.set_bind_group(0, &self.bind_group, &[]);
         compute_pass.dispatch_workgroups(self.num_workgroups, 1, 1);
     }
 
@@ -333,25 +333,25 @@ impl PointCompute {
     pub fn update_weights(
         &self,
         queue: &wgpu::Queue,
-        transforms: &[(glam::Mat4, f32, f32, f32)],
+        transforms: &[TransformSpec],
         enabled: &[bool],
     ) {
         let total_weight: f32 = transforms
             .iter()
             .zip(enabled.iter())
-            .map(|((_, _, w, _), &on)| if on { *w } else { 0.0 })
+            .map(|(t, &on)| if on { t.weight } else { 0.0 })
             .sum();
 
         let mut cumulative = 0.0;
         let gpu_transforms: Vec<GpuTransform> = transforms
             .iter()
             .zip(enabled.iter())
-            .map(|((matrix, color_value, weight, color_speed), &on)| {
-                let effective_weight = if on { *weight } else { 0.0 };
+            .map(|(t, &on)| {
+                let effective_weight = if on { t.weight } else { 0.0 };
                 if total_weight > 0.0 {
                     cumulative += effective_weight / total_weight;
                 }
-                GpuTransform::new(*matrix, *color_value, effective_weight, cumulative, *color_speed)
+                GpuTransform::new(t, cumulative, effective_weight)
             })
             .collect();
 

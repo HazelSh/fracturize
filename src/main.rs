@@ -16,7 +16,7 @@ use winit::{
 };
 
 use app::App;
-use scene::Scene;
+use scene::{Scene, TransformSpec};
 
 /// 3D IFS Fractal Renderer inspired by Apophysis
 #[derive(Parser, Debug)]
@@ -38,6 +38,10 @@ struct Args {
     /// Enable fog effect for depth perception
     #[arg(long)]
     fog: bool,
+
+    /// Disable vsync (uncapped frame rate, useful for benchmarking)
+    #[arg(long)]
+    no_vsync: bool,
 }
 
 /// Wrapper to handle winit's async initialization pattern
@@ -85,7 +89,7 @@ impl ApplicationHandler for AppWrapper {
         };
 
         // Create app (blocking on async)
-        let app = pollster::block_on(App::new(window, scene, self.args.fog, false));
+        let app = pollster::block_on(App::new(window, scene, self.args.fog, !self.args.no_vsync));
 
         self.app = Some(app);
     }
@@ -168,6 +172,9 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "t" | "T" => {
                                 app.toggle_text_overlay();
+                            }
+                            "h" | "H" | "?" => {
+                                app.toggle_help();
                             }
                             "[" => {
                                 app.adjust_point_size(false);
@@ -255,48 +262,25 @@ fn default_scene() -> Scene {
         decay: 0.8,
         color_speed: 0.5,
         transform_names: vec![None; 4],
-        transforms: vec![
-            (
-                Mat4::from_scale_rotation_translation(
-                    Vec3::splat(0.5),
-                    glam::Quat::IDENTITY,
-                    Vec3::new(0.0, 0.0, 0.5),
-                ),
-                0.0,  // color_value (maps to red)
-                1.0,
-                0.5,
+        transforms: [
+            (Vec3::new(0.0, 0.0, 0.5), 0.0),      // red
+            (Vec3::new(0.0, 0.47, -0.17), 0.333), // green
+            (Vec3::new(-0.41, -0.24, -0.17), 0.667), // blue
+            (Vec3::new(0.41, -0.24, -0.17), 1.0), // yellow
+        ]
+        .iter()
+        .map(|&(translation, color_value)| TransformSpec {
+            matrix: Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.5),
+                glam::Quat::IDENTITY,
+                translation,
             ),
-            (
-                Mat4::from_scale_rotation_translation(
-                    Vec3::splat(0.5),
-                    glam::Quat::IDENTITY,
-                    Vec3::new(0.0, 0.47, -0.17),
-                ),
-                0.333,  // color_value (maps to green)
-                1.0,
-                0.5,
-            ),
-            (
-                Mat4::from_scale_rotation_translation(
-                    Vec3::splat(0.5),
-                    glam::Quat::IDENTITY,
-                    Vec3::new(-0.41, -0.24, -0.17),
-                ),
-                0.667,  // color_value (maps to blue)
-                1.0,
-                0.5,
-            ),
-            (
-                Mat4::from_scale_rotation_translation(
-                    Vec3::splat(0.5),
-                    glam::Quat::IDENTITY,
-                    Vec3::new(0.41, -0.24, -0.17),
-                ),
-                1.0,  // color_value (maps to yellow)
-                1.0,
-                0.5,
-            ),
-        ],
+            color_value,
+            weight: 1.0,
+            color_speed: 0.5,
+            variations: TransformSpec::linear_variations(),
+        })
+        .collect(),
         colormap,
         camera_focus: Vec3::ZERO,
         camera_offset: Vec3::new(0.0, 1.0, 0.0),

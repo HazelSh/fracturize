@@ -33,7 +33,8 @@ bytemuck = { version = "1.19", features = ["derive"] }
 half = { version = "2.4", features = ["bytemuck"] }
 
 # Text rendering
-glyphon = { git = "https://github.com/grovesNL/glyphon" }
+# Pinned: later revisions moved to wgpu 29, which conflicts with our wgpu 28
+glyphon = { git = "https://github.com/grovesNL/glyphon", rev = "37b973d50b9bf2073389c61809765925954b8ab3" }
 
 # Image output
 image = "0.25"

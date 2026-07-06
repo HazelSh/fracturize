@@ -222,7 +222,7 @@ impl GizmoRenderer {
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        transforms: &[(Mat4, f32, f32, f32)],
+        transforms: &[crate::scene::TransformSpec],
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gizmo_shader"),
@@ -233,8 +233,8 @@ impl GizmoRenderer {
         let instance_count = 1 + transforms.len() as u32;
         let mut matrices: Vec<[[f32; 4]; 4]> = Vec::with_capacity(instance_count as usize);
         matrices.push(Mat4::IDENTITY.to_cols_array_2d());
-        for (mat, _, _, _) in transforms {
-            matrices.push(mat.to_cols_array_2d());
+        for spec in transforms {
+            matrices.push(spec.matrix.to_cols_array_2d());
         }
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("gizmo_transforms"),

@@ -1,10 +1,100 @@
 use glam::{Mat4, Quat, Vec3};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 /// 256-color gradient for Apophysis-style rendering
 pub type Colormap = [[f32; 4]; 256];
+
+/// Number of variation slots per transform (must match chaos.wgsl)
+pub const NUM_VARIATIONS: usize = 16;
+
+/// Variation names, in GPU slot order (must match apply_variations in chaos.wgsl)
+pub const VARIATION_NAMES: [&str; NUM_VARIATIONS] = [
+    "linear",      // 0: identity
+    "sinusoidal",  // 1: sin() per component
+    "spherical",   // 2: p / r^2 (inversion)
+    "swirl",       // 3: rotate xy by r^2
+    "horseshoe",   // 4: complex square-ish fold
+    "polar",       // 5: (theta/pi, r-1)
+    "disc",        // 6: (theta/pi)*(sin(pi r), cos(pi r))
+    "spiral",      // 7: (cos+sin r, sin-cos r)/r
+    "hyperbolic",  // 8: (sin(theta)/r, r cos(theta))
+    "diamond",     // 9: (sin t cos r, cos t sin r)
+    "julia",       // 10: sqrt-r half-angle with random branch
+    "bent",        // 11: piecewise fold of negative x/y
+    "fisheye",     // 12: 2p/(r+1) (eyefish)
+    "bubble",      // 13: 4p/(r^2+4)
+    "cylinder",    // 14: (sin x, y, z)
+    "tangent",     // 15: (sin x / cos y, tan y, z)
+];
+
+/// A single IFS transform, fully resolved for use by the app and GPU
+#[derive(Clone)]
+pub struct TransformSpec {
+    /// Affine part (applied before variations)
+    pub matrix: Mat4,
+    /// Colormap index (0.0-1.0)
+    pub color_value: f32,
+    /// Selection weight
+    pub weight: f32,
+    /// Color blending speed (0.0-1.0)
+    pub color_speed: f32,
+    /// Variation blend weights, by slot (see VARIATION_NAMES)
+    pub variations: [f32; NUM_VARIATIONS],
+}
+
+impl TransformSpec {
+    /// Weights for a pure-linear (classic affine) transform
+    pub fn linear_variations() -> [f32; NUM_VARIATIONS] {
+        let mut v = [0.0; NUM_VARIATIONS];
+        v[0] = 1.0;
+        v
+    }
+
+    /// Short summary of variation weights, e.g. "spherical 0.70 + linear 0.30"
+    pub fn variation_summary(&self) -> String {
+        let mut parts: Vec<(usize, f32)> = self
+            .variations
+            .iter()
+            .enumerate()
+            .filter(|&(_, &w)| w != 0.0)
+            .map(|(i, &w)| (i, w))
+            .collect();
+        if parts.is_empty() {
+            return "none".to_string();
+        }
+        if parts.len() == 1 && parts[0].0 == 0 {
+            return "linear".to_string();
+        }
+        parts.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+        parts
+            .iter()
+            .map(|(i, w)| format!("{} {:.2}", VARIATION_NAMES[*i], w))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+}
+
+/// Parse a TOML `variations` table into slot weights
+fn parse_variations(table: &BTreeMap<String, f32>) -> Result<[f32; NUM_VARIATIONS], String> {
+    let mut weights = [0.0f32; NUM_VARIATIONS];
+    for (name, &weight) in table {
+        let slot = VARIATION_NAMES
+            .iter()
+            .position(|&n| n == name)
+            .ok_or_else(|| {
+                format!(
+                    "Unknown variation '{}'. Available: {}",
+                    name,
+                    VARIATION_NAMES.join(", ")
+                )
+            })?;
+        weights[slot] = weight;
+    }
+    Ok(weights)
+}
 
 /// Scene metadata from TOML
 #[derive(Deserialize)]
@@ -13,8 +103,8 @@ pub struct SceneMeta {
     pub author: Option<String>,
     #[serde(default = "default_point_size")]
     pub point_size: f32,
-    /// Points generated per frame by the chaos game
-    #[serde(alias = "iters")] // backwards compat
+    /// Points generated per frame by the chaos game (legacy, unused by point renderer)
+    #[serde(alias = "iters", default)] // backwards compat
     pub points_per_frame: usize,
     /// Temporal decay factor (0.0-1.0). Lower = sharper, higher = more accumulation
     #[serde(default = "default_decay")]
@@ -58,6 +148,10 @@ pub struct TransformDef {
     /// Overrides global scene color_speed if set
     #[serde(default)]
     pub color_speed: Option<f32>,
+    /// Variation blend weights by name, e.g. { spherical = 0.7, linear = 0.3 }
+    /// Defaults to { linear = 1.0 } (classic affine IFS)
+    #[serde(default)]
+    pub variations: Option<BTreeMap<String, f32>>,
 }
 
 fn default_scale() -> f32 {
@@ -106,9 +200,8 @@ pub struct Scene {
     pub decay: f32,
     #[allow(dead_code)]
     pub color_speed: f32,
-    /// Transforms: (matrix, color_value, weight, color_speed)
-    /// color_value is 0.0-1.0 index into colormap
-    pub transforms: Vec<(Mat4, f32, f32, f32)>,
+    /// IFS transforms (affine matrix + variation blend weights)
+    pub transforms: Vec<TransformSpec>,
     /// Human-readable name per transform (from scene file)
     pub transform_names: Vec<Option<String>>,
     /// 256-color gradient for point coloring
@@ -147,7 +240,7 @@ impl Scene {
             .map(|t| t.name.clone())
             .collect();
 
-        let transforms: Vec<(Mat4, f32, f32, f32)> = scene_file
+        let transforms: Vec<TransformSpec> = scene_file
             .transforms
             .iter()
             .enumerate()
@@ -178,9 +271,21 @@ impl Scene {
                 // Use transform-specific speed or global default
                 let speed = t.color_speed.unwrap_or(global_speed);
 
-                (matrix, color_value, t.weight, speed)
+                let variations = match &t.variations {
+                    Some(table) => parse_variations(table)
+                        .map_err(|e| format!("Transform {}: {}", i, e))?,
+                    None => TransformSpec::linear_variations(),
+                };
+
+                Ok(TransformSpec {
+                    matrix,
+                    color_value,
+                    weight: t.weight,
+                    color_speed: speed,
+                    variations,
+                })
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
 
         // Generate colormap from transform colors (always cyclic)
         let colormap = generate_colormap(&transform_colors);

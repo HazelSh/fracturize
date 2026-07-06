@@ -1,0 +1,52 @@
+# Rose Window — a mandala of disc folds
+#
+# Three disc transforms at 120° build the rings; a diamond core
+# fills the center with lattice sparks.
+#
+# Contributed by Claude Fable 5
+
+[meta]
+name = "Rose Window"
+author = "Claude Fable 5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.7
+
+[camera]
+distance = 1.2
+offset = [0.0, 3.8, 0.0]
+
+[[transform]]
+name = "petal-a"
+translation = [0.5, 0.0, 0.0]
+scale = 0.65
+rotation = [0.0, 0.0, 10.0]
+color = [0.9, 0.3, 0.4]
+weight = 1.5
+variations = { disc = 0.6, linear = 0.4 }
+
+[[transform]]
+name = "petal-b"
+translation = [-0.25, 0.0, 0.43]
+scale = 0.65
+rotation = [0.0, 120.0, 10.0]
+color = [0.3, 0.5, 0.95]
+weight = 1.5
+variations = { disc = 0.6, linear = 0.4 }
+
+[[transform]]
+name = "petal-c"
+translation = [-0.25, 0.0, -0.43]
+scale = 0.65
+rotation = [0.0, -120.0, 10.0]
+color = [0.95, 0.8, 0.3]
+weight = 1.5
+variations = { disc = 0.6, linear = 0.4 }
+
+[[transform]]
+name = "core"
+translation = [0.0, 0.05, 0.0]
+scale = 0.5
+color = [0.6, 0.9, 0.8]
+weight = 1.0
+variations = { diamond = 0.7, linear = 0.3 }
