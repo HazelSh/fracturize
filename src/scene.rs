@@ -41,6 +41,10 @@ pub struct TransformSpec {
     pub weight: f32,
     /// Color blending speed (0.0-1.0)
     pub color_speed: f32,
+    /// Iterations of color lag (0-15); higher moves color variation to finer structure
+    pub color_delay: u32,
+    /// Blend weight of the delayed color vs the current one (0.0-1.0)
+    pub color_detail: f32,
     /// Variation blend weights, by slot (see VARIATION_NAMES)
     pub variations: [f32; NUM_VARIATIONS],
 }
@@ -111,6 +115,16 @@ pub struct SceneMeta {
     pub decay: f32,
     #[serde(default = "default_color_speed")]
     pub color_speed: f32,
+    /// Global color delay: emit the color state from N iterations ago (0-15).
+    /// 0 = classic behavior (color tracks coarse structure). Higher values move
+    /// color variation to finer structure, since older iterations in the chaos
+    /// game address progressively finer position scales.
+    #[serde(default)]
+    pub color_delay: u32,
+    /// Global blend between the current color (0.0, low-frequency regions) and
+    /// the delayed color (1.0, fine detail). Only matters when color_delay > 0.
+    #[serde(default = "default_color_detail")]
+    pub color_detail: f32,
     /// Total point buffer size for the simple point renderer.
     /// If unset, defaults to 500k.
     pub point_count: Option<usize>,
@@ -122,6 +136,10 @@ fn default_point_size() -> f32 {
 
 fn default_color_speed() -> f32 {
     0.5
+}
+
+fn default_color_detail() -> f32 {
+    1.0
 }
 
 fn default_decay() -> f32 {
@@ -148,6 +166,12 @@ pub struct TransformDef {
     /// Overrides global scene color_speed if set
     #[serde(default)]
     pub color_speed: Option<f32>,
+    /// Per-transform color delay override (0-15 iterations)
+    #[serde(default)]
+    pub color_delay: Option<u32>,
+    /// Per-transform detail blend override (0.0-1.0)
+    #[serde(default)]
+    pub color_detail: Option<f32>,
     /// Variation blend weights by name, e.g. { spherical = 0.7, linear = 0.3 }
     /// Defaults to { linear = 1.0 } (classic affine IFS)
     #[serde(default)]
@@ -270,6 +294,11 @@ impl Scene {
 
                 // Use transform-specific speed or global default
                 let speed = t.color_speed.unwrap_or(global_speed);
+                let delay = t.color_delay.unwrap_or(scene_file.meta.color_delay).min(15);
+                let detail = t
+                    .color_detail
+                    .unwrap_or(scene_file.meta.color_detail)
+                    .clamp(0.0, 1.0);
 
                 let variations = match &t.variations {
                     Some(table) => parse_variations(table)
@@ -282,6 +311,8 @@ impl Scene {
                     color_value,
                     weight: t.weight,
                     color_speed: speed,
+                    color_delay: delay,
+                    color_detail: detail,
                     variations,
                 })
             })

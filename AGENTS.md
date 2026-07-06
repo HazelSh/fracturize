@@ -92,6 +92,8 @@ author = "Your Name"
 point_size = 0.002        # world-space point size
 point_count = 4_000_000   # circular point buffer capacity (default 500k)
 color_speed = 0.5         # global color blending speed (0-1)
+color_delay = 0           # emit color from N iterations ago (0-15, default 0)
+color_detail = 1.0        # blend of delayed vs current color (0-1, default 1)
 
 [camera]                  # optional
 focus = [0.0, 0.0, 0.0]   # orbit center / look-at
@@ -107,6 +109,8 @@ color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap
 weight = 1.0                   # selection probability
 color_value = 0.25             # optional explicit colormap index (0-1)
 color_speed = 0.5              # optional per-transform override
+color_delay = 4                # optional per-transform override (0-15)
+color_detail = 0.5             # optional per-transform override (0-1)
 # Nonlinear variation blend; omit for classic affine ({ linear = 1.0 })
 variations = { swirl = 0.35, linear = 0.65 }
 ```
@@ -123,6 +127,15 @@ Scene-design notes learned the hard way:
   scale ~1.1-1.2 with small rotations gives classic gnarl swirls.
 - Colors wash out to pastel when transforms mix heavily; raise `color_speed`
   (0.5-0.7) for stronger per-branch color identity.
+- Color variation follows *coarse* structure by default: the most recent transform
+  in a walker's history decides which top-level copy a point lands in, and older
+  iterations address progressively finer scales — but the color EMA weights recent
+  history heaviest, so neighboring pixels (which differ only in old digits) look
+  flat. `color_delay = N` emits the color state from N iterations back, moving
+  color variation to structure ~`scale^N` finer. N=3-5 gives rich sub-structure
+  coloring; N=8+ approaches per-pixel confetti. `color_detail` blends the delayed
+  color (1.0) against the classic coarse color (0.0) — try delay 4 / detail 0.5-0.7
+  to keep region identity plus fine sparkle. Both work per-transform too.
 
 ## View Files & Offline Rendering
 
@@ -164,6 +177,6 @@ framings without keyboard interaction.
 - Keep it simple - avoid over-abstraction
 - Use glam for all math, not manual array ops
 - WGSL structs must match the `#[repr(C)]` Rust structs in `buffers.rs` exactly
-  (`GpuTransform` is 144 bytes; `var_weights` is `array<vec4<f32>, 4>` in WGSL)
+  (`GpuTransform` is 160 bytes; `var_weights` is `array<vec4<f32>, 4>` in WGSL)
 - New variations: append to `VARIATION_NAMES` in scene.rs AND the matching slot
   in `apply_variations()` in chaos.wgsl; slots must stay in sync

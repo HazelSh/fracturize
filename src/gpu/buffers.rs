@@ -131,7 +131,7 @@ pub struct VoxelCounter {
     pub _pad: [u32; 3],
 }
 
-/// GPU transform representation (144 bytes)
+/// GPU transform representation (160 bytes)
 /// Uses color_value (0-1) instead of full RGBA
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -143,6 +143,9 @@ pub struct GpuTransform {
     pub color_speed: f32,      // 4 bytes - per-transform blending speed
     /// Variation blend weights (slot order matches chaos.wgsl / scene::VARIATION_NAMES)
     pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 64 bytes
+    pub color_delay: u32,      // 4 bytes - iterations of color lag (0-15)
+    pub color_detail: f32,     // 4 bytes - blend of delayed vs current color (0-1)
+    pub _pad: [u32; 2],        // 8 bytes - struct size must be a multiple of 16
 }
 
 impl GpuTransform {
@@ -154,6 +157,9 @@ impl GpuTransform {
             cumulative_weight,
             color_speed: spec.color_speed,
             var_weights: spec.variations,
+            color_delay: spec.color_delay,
+            color_detail: spec.color_detail,
+            _pad: [0; 2],
         }
     }
 }
@@ -240,6 +246,11 @@ pub struct PointComputeParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_gpu_transform_size() {
+        assert_eq!(std::mem::size_of::<GpuTransform>(), 160, "GpuTransform must be 160 bytes to match WGSL struct");
+    }
+
     #[test]
     fn test_hash_grid_params_size() {
         println!("HashGridParams size: {}", std::mem::size_of::<HashGridParams>());

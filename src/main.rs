@@ -326,6 +326,8 @@ fn default_scene() -> Scene {
             color_value,
             weight: 1.0,
             color_speed: 0.5,
+            color_delay: 0,
+            color_detail: 1.0,
             variations: TransformSpec::linear_variations(),
         })
         .collect(),
