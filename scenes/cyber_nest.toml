@@ -3,6 +3,7 @@ name = "Cyber Nest"
 author = "Gemini (via gemini-cli)"
 point_size = 0.0015
 points_per_frame = 5000
+point_count = 6_000_000
 decay = 0.8
 
 # The Core: High weight, small scale, keeps points from flying off

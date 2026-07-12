@@ -3,7 +3,7 @@ name = "Sierpinski Tetrahedron"
 author = "Claude Opus 4.5 (Claude Code 2.0.76)"
 point_size = 0.002
 points_per_frame = 1_150_000
-point_count = 1_150_000
+point_count = 8_150_000
 decay = 0.8
 
 # Red vertex - top back
