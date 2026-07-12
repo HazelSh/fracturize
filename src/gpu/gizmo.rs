@@ -213,8 +213,12 @@ pub struct GizmoRenderer {
     camera_buffer: wgpu::Buffer,
     /// Vertex buffer layout: [ref_edges_dots | xform_edges_dots | ref_faces | xform_faces]
     vertex_buffer: wgpu::Buffer,
+    /// Instance 0 = identity reference, then one matrix per transform
+    transform_buffer: wgpu::Buffer,
     /// Per-instance alpha multiplier (1.0 = full, <1.0 = greyed out)
     alpha_buffer: wgpu::Buffer,
+    /// Hovered part uniform: [instance (0 = none), part id, 0, 0]
+    highlight_buffer: wgpu::Buffer,
     instance_count: u32,
 }
 
@@ -239,7 +243,7 @@ impl GizmoRenderer {
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("gizmo_transforms"),
             contents: bytemuck::cast_slice(&matrices),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Per-instance alpha (all 1.0 initially)
@@ -248,6 +252,13 @@ impl GizmoRenderer {
             label: Some("gizmo_alphas"),
             contents: bytemuck::cast_slice(&alphas),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Hover highlight (instance 0 = nothing hovered)
+        let highlight_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gizmo_highlight"),
+            contents: bytemuck::cast_slice(&[0u32; 4]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         // Build vertex buffer: [ref_edges_dots | xform_edges_dots | ref_faces | xform_faces]
@@ -300,6 +311,16 @@ impl GizmoRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -340,6 +361,7 @@ impl GizmoRenderer {
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: transform_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: alpha_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: highlight_buffer.as_entire_binding() },
             ],
         });
 
@@ -349,9 +371,45 @@ impl GizmoRenderer {
             bind_group,
             camera_buffer,
             vertex_buffer,
+            transform_buffer,
             alpha_buffer,
+            highlight_buffer,
             instance_count,
         }
+    }
+
+    /// Set (or clear) the hovered gizmo part. Instance 0 is the reference
+    /// gizmo, so transform i maps to instance i+1.
+    pub fn set_highlight(&self, queue: &wgpu::Queue, hover: Option<(usize, crate::pick::GizmoPart)>) {
+        use crate::pick::GizmoPart;
+        // Part ids follow the vertex build order: edges [ox oy oz xy yz xz],
+        // then 6 = origin dot
+        let data: [u32; 4] = match hover {
+            Some((t, part)) => {
+                let part_id = match part {
+                    GizmoPart::Axis(k) => k as u32,
+                    GizmoPart::RotEdge(2) => 3, // x-y edge rotates around z
+                    GizmoPart::RotEdge(0) => 4, // y-z edge rotates around x
+                    GizmoPart::RotEdge(_) => 5, // x-z edge rotates around y
+                    GizmoPart::Origin => 6,
+                };
+                [(t + 1) as u32, part_id, 0, 0]
+            }
+            None => [0, 0xFFFF, 0, 0],
+        };
+        queue.write_buffer(&self.highlight_buffer, 0, bytemuck::cast_slice(&data));
+    }
+
+    /// Re-upload transform matrices after live edits. The transform count
+    /// must match construction (rebuild the renderer when it changes).
+    pub fn update_transforms(&self, queue: &wgpu::Queue, transforms: &[crate::scene::TransformSpec]) {
+        debug_assert_eq!(1 + transforms.len() as u32, self.instance_count);
+        let mut matrices: Vec<[[f32; 4]; 4]> = Vec::with_capacity(self.instance_count as usize);
+        matrices.push(Mat4::IDENTITY.to_cols_array_2d());
+        for spec in transforms {
+            matrices.push(spec.matrix.to_cols_array_2d());
+        }
+        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&matrices));
     }
 
     /// Upload camera uniforms

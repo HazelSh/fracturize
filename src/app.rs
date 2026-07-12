@@ -6,19 +6,53 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Vec3};
 use winit::window::Window;
 
-use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, PointCompute, PointRenderer, TextRenderer, DEPTH_FORMAT};
+use crate::camera::{world_to_screen, OrbitCamera};
+use crate::gpu::lines::LineVertex;
+use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, TextRenderer, DEPTH_FORMAT};
 use crate::gpu::text::TextEntry;
 use crate::scene::{Scene, TransformSpec};
 use crate::view::View;
 
-/// Project a world-space position to screen coordinates
-fn world_to_screen(pos: Vec3, view_proj: Mat4, w: f32, h: f32) -> Option<(f32, f32)> {
-    let clip = view_proj * pos.extend(1.0);
-    if clip.w <= 0.0 {
-        return None;
-    }
-    let ndc = clip.truncate() / clip.w;
-    Some(((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
+/// Seconds since the epoch, for unique output filenames
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// RGB (0-1) to HSV (h in degrees, s/v in 0-1)
+fn rgb_to_hsv(c: Vec3) -> (f32, f32, f32) {
+    let max = c.x.max(c.y).max(c.z);
+    let min = c.x.min(c.y).min(c.z);
+    let delta = max - min;
+    let h = if delta < 1e-6 {
+        0.0
+    } else if max == c.x {
+        60.0 * (((c.y - c.z) / delta).rem_euclid(6.0))
+    } else if max == c.y {
+        60.0 * ((c.z - c.x) / delta + 2.0)
+    } else {
+        60.0 * ((c.x - c.y) / delta + 4.0)
+    };
+    let s = if max < 1e-6 { 0.0 } else { delta / max };
+    (h, s, max)
+}
+
+/// HSV (h in degrees, s/v in 0-1) to RGB (0-1)
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Vec3::new(r, g, b) + Vec3::splat(v - c)
 }
 
 /// Clear color: dark blue-black
@@ -105,17 +139,95 @@ impl FpsTracker {
     }
 }
 
-/// Main application state
+/// How a grabbed gizmo responds to cursor movement. All modes work from the
+/// matrix captured at grab time, so a drag is absolute rather than a chain of
+/// incremental (drift-prone) updates.
+#[derive(Clone, Copy, Debug)]
+enum GizmoDragMode {
+    /// Dragging the origin dot: translate in the plane through the grab point
+    /// facing the camera
+    TranslateView { normal: Vec3, grab_offset: Vec3 },
+    /// Dragging an origin->axis edge: slide along that world-space axis line
+    TranslateAxis { axis: Vec3, s0: f32 },
+    /// Dragging an outer edge: rotate around the transform's local axis
+    /// (world direction `axis`, through the transform origin)
+    Rotate { axis: Vec3, center: (f32, f32), start_angle: f32 },
+    /// Ctrl-drag anywhere on the gizmo: uniform scale, drag up = grow
+    Scale { start_y: f32 },
+}
+
+/// Actions dispatchable by clicking a help-panel row
+#[derive(Clone, Copy, Debug)]
+enum HelpAction {
+    ToggleHelp,
+    Reset,
+    Zoom,
+    ToggleSelected,
+    ToggleText,
+    ToggleGizmos,
+    ToggleOrbit,
+    SaveView,
+    Screenshot,
+    SaveScene,
+    AddTransform,
+    DeleteTransform,
+    Weight,
+    Hue,
+    Sat,
+    Val,
+    CycleVariation,
+    VariationWeight,
+    PointSize,
+    ColorFalloff,
+    ColorContrast,
+    FogIntensity,
+    FogNear,
+    FogFar,
+    Mutate,
+    Browse,
+    HqRender,
+    Traces,
+    InvertPitch,
+}
+
+/// What a mouse drag is currently doing
+#[derive(Clone, Copy, Debug)]
+enum Drag {
+    None,
+    /// Left-drag on empty space: orbit the camera
+    Orbit,
+    /// Middle-drag or shift+left-drag: pan the focus in the view plane
+    Pan,
+    /// Left-drag on a gizmo: edit that transform live
+    Gizmo {
+        transform: usize,
+        mode: GizmoDragMode,
+        start_matrix: Mat4,
+    },
+}
+
 pub struct App {
     pub gpu: GpuContext,
     pub window: Arc<Window>,
     pub frame_count: u32,
-    pub rotation: f32,
+    /// Wall-clock timestamp of the previous update (for time-based motion)
+    last_update: Instant,
     pub orbit_paused: bool,
-    pub camera_distance: f32,
-    pub camera_focus: Vec3,
-    pub camera_offset: Vec3,
+    pub camera: OrbitCamera,
     pub point_size: f32,
+
+    /// Persistent user preferences (I toggles pitch inversion)
+    prefs: crate::prefs::Prefs,
+    /// Duration of the last frame, for time-based motion and churn
+    frame_dt: f32,
+
+    // Mouse state
+    cursor: (f32, f32),
+    drag: Drag,
+    /// Gizmo part under the cursor (when not dragging)
+    hovered: Option<crate::pick::GizmoHit>,
+    pub shift_held: bool,
+    pub ctrl_held: bool,
 
     pub show_gizmos: bool,
     pub show_text: bool,
@@ -132,40 +244,43 @@ pub struct App {
     pub color_falloff: f32,
     /// Render-time cyclic contrast stretch of the colormap index
     pub color_contrast: f32,
-    /// Global color_speed from the scene (used when color_falloff is 0)
-    scene_color_speed: f32,
-
     fps_tracker: FpsTracker,
 
     // Simple point rendering pipeline
     point_compute: PointCompute,
     point_renderer: PointRenderer,
     gizmo_renderer: GizmoRenderer,
+    line_renderer: LineRenderer,
     text_renderer: TextRenderer,
 
-    /// Scene name for HUD
-    scene_name: String,
-    /// Scene author for HUD
-    scene_author: String,
-    /// Scene file path (recorded in saved view files)
+    /// Chaos-game trace overlay (X): show walker paths as line segments
+    pub show_traces: bool,
+
+    /// The scene, mutable: gizmo drags and editing keys change it in place,
+    /// Ctrl+S writes it back to disk
+    pub scene: Scene,
+    /// Scene file path (save target; also recorded in saved view files)
     scene_path: Option<String>,
     /// Point buffer capacity for HUD
     buffer_capacity: u32,
-
-    /// Transform names for text overlay
-    transform_names: Vec<Option<String>>,
-    /// Cached scene transforms for text label projection
-    scene_transforms: Vec<TransformSpec>,
-    /// Colormap for transform label colors
-    colormap: [[f32; 4]; 256],
 
     /// Selected transform index (Some when text overlay visible)
     selected_transform: Option<usize>,
     /// Per-transform enabled state
     transform_enabled: Vec<bool>,
-    /// Original weights stashed from scene for restore
-    #[allow(dead_code)]
-    original_weights: Vec<f32>,
+    /// Variation slot targeted by the variation-editing keys
+    selected_variation: usize,
+
+    // Scene browser overlay (B)
+    pub show_browser: bool,
+    browser_files: Vec<std::path::PathBuf>,
+    browser_selected: usize,
+
+    /// A background high-quality render is running (P)
+    hq_render_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Pre-mutation snapshots for Shift+U undo (newest last, bounded)
+    undo_stack: Vec<Scene>,
 
     depth_texture: wgpu::Texture,
 
@@ -252,14 +367,10 @@ impl App {
         // Create text renderer
         let text_renderer = TextRenderer::new(&gpu.device, &gpu.queue, gpu.format);
 
-        // Save scene data for text overlay
-        let scene_name = scene.name.clone();
-        let scene_author = scene.author.clone();
-        let transform_names = scene.transform_names.clone();
-        let scene_transforms = scene.transforms.clone();
-        let colormap = scene.colormap;
-        let num_transforms = scene_transforms.len();
-        let original_weights: Vec<f32> = scene_transforms.iter().map(|t| t.weight).collect();
+        // Trace line renderer (empty until X is pressed)
+        let line_renderer = LineRenderer::new(&gpu.device, gpu.format);
+
+        let num_transforms = scene.transforms.len();
 
         // Fog settings
         let (fog_brightness, fog_saturation) = if fog_enabled {
@@ -272,12 +383,22 @@ impl App {
             gpu,
             window,
             frame_count: 0,
-            rotation: 0.0,
+            last_update: Instant::now(),
             orbit_paused: false,
-            camera_distance: scene.camera_distance,
-            camera_focus: scene.camera_focus,
-            camera_offset: scene.camera_offset,
+            camera: OrbitCamera {
+                yaw: scene.camera_yaw,
+                pitch: scene.camera_pitch,
+                distance: scene.camera_distance,
+                focus: scene.camera_focus,
+            },
             point_size,
+            prefs: crate::prefs::Prefs::load(),
+            frame_dt: 1.0 / 60.0,
+            cursor: (0.0, 0.0),
+            drag: Drag::None,
+            hovered: None,
+            shift_held: false,
+            ctrl_held: false,
             show_gizmos: true,
             show_text: true,
             // Env override lets automated captures verify the help overlay
@@ -288,22 +409,24 @@ impl App {
             fog_saturation,
             color_falloff: scene.color_falloff,
             color_contrast: scene.color_contrast,
-            scene_color_speed: scene.color_speed,
             fps_tracker: FpsTracker::new(),
             point_compute,
             point_renderer,
             gizmo_renderer,
+            line_renderer,
             text_renderer,
-            scene_name,
-            scene_author,
+            show_traces: false,
+            scene,
             scene_path,
             buffer_capacity,
-            transform_names,
-            scene_transforms,
-            colormap,
             selected_transform: Some(0),
             transform_enabled: vec![true; num_transforms],
-            original_weights,
+            selected_variation: 0,
+            show_browser: false,
+            browser_files: Vec::new(),
+            browser_selected: 0,
+            undo_stack: Vec::new(),
+            hq_render_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             depth_texture,
             screenshot_texture,
             screenshot_depth,
@@ -314,10 +437,14 @@ impl App {
         // Apply a saved view, if given. Pause the orbit so the loaded
         // framing holds exactly (press O to resume).
         if let Some(v) = view {
-            app.rotation = v.rotation;
-            app.camera_distance = v.distance;
-            app.camera_focus = Vec3::from(v.focus);
-            app.camera_offset = Vec3::from(v.offset);
+            // Fold any legacy eye offset into the on-sphere camera
+            app.camera = OrbitCamera::from_legacy(
+                Vec3::from(v.focus),
+                Vec3::from(v.offset),
+                v.distance,
+                v.rotation,
+                v.pitch,
+            );
             app.point_size = v.point_size;
             app.fog_near = v.fog_near;
             app.fog_far = v.fog_far;
@@ -342,14 +469,27 @@ impl App {
         log::info!("Camera orbit: {}", if self.orbit_paused { "paused" } else { "running" });
     }
 
+    /// Filesystem-safe slug of the scene name
+    fn scene_slug(&self) -> String {
+        let slug: String = self
+            .scene
+            .name
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        slug.trim_matches('-').to_string()
+    }
+
     /// Save the current view parameters to views/<scene>-<timestamp>.toml
     pub fn save_view(&self) {
         let view = View {
             scene: self.scene_path.clone(),
-            rotation: self.rotation,
-            distance: self.camera_distance,
-            focus: self.camera_focus.to_array(),
-            offset: self.camera_offset.to_array(),
+            rotation: self.camera.yaw,
+            pitch: self.camera.pitch,
+            distance: self.camera.distance,
+            focus: self.camera.focus.to_array(),
+            offset: [0.0; 3],
             point_size: self.point_size,
             fog_near: self.fog_near,
             fog_far: self.fog_far,
@@ -359,20 +499,35 @@ impl App {
             color_contrast: Some(self.color_contrast),
         };
 
-        let slug: String = self
-            .scene_name
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '-' })
-            .collect();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let path = format!("views/{}-{}.toml", slug.trim_matches('-'), timestamp);
+        let path = format!("views/{}-{}.toml", self.scene_slug(), unix_timestamp());
 
         match view.save(&path) {
             Ok(()) => log::info!("View saved to {}", path),
+            Err(e) => log::error!("{}", e),
+        }
+    }
+
+    /// Write the scene (with any interactive edits) back to its TOML file.
+    /// Camera framing and render params adjusted in-app become scene defaults.
+    pub fn save_scene(&mut self) {
+        self.scene.camera_focus = self.camera.focus;
+        self.scene.camera_distance = self.camera.distance;
+        self.scene.camera_yaw = self.camera.yaw;
+        self.scene.camera_pitch = self.camera.pitch;
+        self.scene.point_size = self.point_size;
+        self.scene.color_falloff = self.color_falloff;
+        self.scene.color_contrast = self.color_contrast;
+
+        let path = self
+            .scene_path
+            .clone()
+            .unwrap_or_else(|| format!("scenes/untitled-{}.toml", unix_timestamp()));
+
+        match self.scene.save(&path) {
+            Ok(()) => {
+                log::info!("Scene saved to {}", path);
+                self.scene_path = Some(path);
+            }
             Err(e) => log::error!("{}", e),
         }
     }
@@ -390,11 +545,756 @@ impl App {
     }
 
     pub fn zoom_in(&mut self) {
-        self.camera_distance *= 0.9;
+        self.camera.zoom(1.0);
     }
 
     pub fn zoom_out(&mut self) {
-        self.camera_distance *= 1.1;
+        self.camera.zoom(-1.0);
+    }
+
+    /// Mouse wheel: zoom — unless a gizmo is hovered, in which case it
+    /// adjusts that transform's chaos weight (its selection probability),
+    /// the lever that emphasizes an element without changing structure
+    pub fn on_scroll(&mut self, steps: f32) {
+        if let Some(hit) = self.hovered {
+            self.selected_transform = Some(hit.transform);
+            let w = &mut self.scene.transforms[hit.transform].weight;
+            *w = (*w * 1.08f32.powf(steps)).clamp(0.01, 100.0);
+            log::info!("T{} weight: {:.2} (scroll)", hit.transform, *w);
+            self.sync_transforms_to_gpu();
+            return;
+        }
+        self.camera.zoom(steps);
+    }
+
+    /// Toggle flightsim-style pitch inversion (persisted across sessions)
+    pub fn toggle_invert_pitch(&mut self) {
+        self.prefs.invert_pitch = !self.prefs.invert_pitch;
+        log::info!(
+            "Pitch inversion: {}",
+            if self.prefs.invert_pitch { "inverted" } else { "normal" }
+        );
+        self.prefs.save();
+    }
+
+    pub fn on_cursor_moved(&mut self, x: f32, y: f32) {
+        let (dx, dy) = (x - self.cursor.0, y - self.cursor.1);
+        self.cursor = (x, y);
+
+        match self.drag {
+            Drag::None => self.update_hover(),
+            Drag::Orbit => {
+                let dy = if self.prefs.invert_pitch { -dy } else { dy };
+                self.camera.orbit(dx, dy);
+            }
+            Drag::Pan => {
+                let (_, h) = self.gpu.size();
+                self.camera.pan(dx, dy, h as f32);
+            }
+            Drag::Gizmo { transform, mode, start_matrix } => {
+                self.update_gizmo_drag(transform, mode, start_matrix);
+            }
+        }
+    }
+
+    /// Re-pick the gizmo part under the cursor; update the glow highlight and
+    /// the cursor icon so grabbable things announce themselves
+    fn update_hover(&mut self) {
+        use winit::window::CursorIcon;
+
+        let hit = if self.show_gizmos {
+            let (w, h) = self.gpu.size();
+            let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
+            crate::pick::pick_gizmo(
+                &matrices,
+                self.current_view_proj(),
+                self.cursor,
+                w as f32,
+                h as f32,
+            )
+        } else {
+            None
+        };
+
+        let changed = match (&self.hovered, &hit) {
+            (None, None) => false,
+            (Some(a), Some(b)) => a.transform != b.transform || a.part != b.part,
+            _ => true,
+        };
+        if changed {
+            self.gizmo_renderer.set_highlight(
+                &self.gpu.queue,
+                hit.map(|h| (h.transform, h.part)),
+            );
+            self.window.set_cursor(if hit.is_some() {
+                CursorIcon::Grab
+            } else {
+                CursorIcon::Default
+            });
+            self.hovered = hit;
+        }
+    }
+
+    /// Current view-projection matrix for the window surface
+    fn current_view_proj(&self) -> Mat4 {
+        let (w, h) = self.gpu.size();
+        self.camera.view_proj(w as f32 / h as f32)
+    }
+
+    pub fn on_mouse_press(&mut self, button: winit::event::MouseButton) {
+        use winit::event::MouseButton;
+        match button {
+            MouseButton::Left => {
+                // Overlay panels swallow clicks when open
+                if self.try_click_browser() {
+                    return;
+                }
+                if self.try_click_help() {
+                    return;
+                }
+                if let Some(drag) = self.try_grab_gizmo() {
+                    self.drag = drag;
+                    self.window.set_cursor(winit::window::CursorIcon::Grabbing);
+                    return;
+                }
+                self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
+                // Manual orbiting shouldn't fight the auto-orbit
+                self.orbit_paused = true;
+            }
+            MouseButton::Middle => {
+                self.drag = Drag::Pan;
+                self.orbit_paused = true;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn on_mouse_release(&mut self, button: winit::event::MouseButton) {
+        use winit::event::MouseButton;
+        if matches!(button, MouseButton::Left | MouseButton::Middle) {
+            if let Drag::Gizmo { transform, .. } = self.drag {
+                let spec = &self.scene.transforms[transform];
+                let t = spec.matrix.w_axis.truncate();
+                log::info!(
+                    "T{}: p=({:.3},{:.3},{:.3}) s={:.3}",
+                    transform, t.x, t.y, t.z, spec.matrix.x_axis.truncate().length(),
+                );
+            }
+            self.drag = Drag::None;
+            self.update_hover();
+        }
+    }
+
+    /// Try to start a gizmo drag at the current cursor position. Also selects
+    /// the grabbed transform.
+    fn try_grab_gizmo(&mut self) -> Option<Drag> {
+        use crate::pick::{pick_gizmo, GizmoPart};
+
+        if !self.show_gizmos {
+            return None;
+        }
+        let (w, h) = self.gpu.size();
+        let (w, h) = (w as f32, h as f32);
+        let view_proj = self.current_view_proj();
+
+        let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
+        let hit = pick_gizmo(&matrices, view_proj, self.cursor, w, h)?;
+
+        self.selected_transform = Some(hit.transform);
+        let m = matrices[hit.transform];
+        let origin = m.w_axis.truncate();
+        let inv_vp = view_proj.inverse();
+        let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, self.cursor.0, self.cursor.1, w, h);
+
+        // Ctrl turns any grab into a uniform scale
+        let mode = if self.ctrl_held {
+            GizmoDragMode::Scale { start_y: self.cursor.1 }
+        } else {
+            match hit.part {
+                GizmoPart::Origin => {
+                    let normal = self.camera.forward();
+                    let grab = crate::pick::ray_plane(ray_o, ray_d, origin, normal)?;
+                    GizmoDragMode::TranslateView { normal, grab_offset: origin - grab }
+                }
+                GizmoPart::Axis(k) => {
+                    let axis = m.col(k).truncate().normalize_or(Vec3::X);
+                    let s0 = crate::pick::line_param_closest_to_ray(origin, axis, ray_o, ray_d);
+                    GizmoDragMode::TranslateAxis { axis, s0 }
+                }
+                GizmoPart::RotEdge(k) => {
+                    let mut axis = m.col(k).truncate().normalize_or(Vec3::Y);
+                    // Screen-CCW should mean world-CCW around the axis as
+                    // seen by the camera; flip when the axis points away
+                    if axis.dot(self.camera.eye() - origin) < 0.0 {
+                        axis = -axis;
+                    }
+                    let center = crate::camera::world_to_screen(origin, view_proj, w, h)?;
+                    GizmoDragMode::Rotate {
+                        axis,
+                        center,
+                        start_angle: crate::pick::screen_angle(center, self.cursor),
+                    }
+                }
+            }
+        };
+
+        Some(Drag::Gizmo {
+            transform: hit.transform,
+            mode,
+            start_matrix: m,
+        })
+    }
+
+    /// Recompute the dragged transform's matrix from the grab-time state and
+    /// the current cursor, then push it live to the GPU
+    fn update_gizmo_drag(&mut self, transform: usize, mode: GizmoDragMode, start: Mat4) {
+        let (w, h) = self.gpu.size();
+        let (w, h) = (w as f32, h as f32);
+        let view_proj = self.current_view_proj();
+        let inv_vp = view_proj.inverse();
+        let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, self.cursor.0, self.cursor.1, w, h);
+        let start_origin = start.w_axis.truncate();
+
+        let new_matrix = match mode {
+            GizmoDragMode::TranslateView { normal, grab_offset } => {
+                let Some(hit) = crate::pick::ray_plane(ray_o, ray_d, start_origin, normal) else {
+                    return;
+                };
+                let mut m = start;
+                m.w_axis = (hit + grab_offset).extend(1.0);
+                m
+            }
+            GizmoDragMode::TranslateAxis { axis, s0 } => {
+                let s = crate::pick::line_param_closest_to_ray(start_origin, axis, ray_o, ray_d);
+                let mut m = start;
+                m.w_axis = (start_origin + axis * (s - s0)).extend(1.0);
+                m
+            }
+            GizmoDragMode::Rotate { axis, center, start_angle } => {
+                let angle = crate::pick::screen_angle(center, self.cursor);
+                let delta = crate::pick::wrap_angle(angle - start_angle);
+                let rot = Mat4::from_quat(glam::Quat::from_axis_angle(axis, delta));
+                // Rotate the linear part around the transform's own origin
+                let mut m = rot * Mat4::from_cols(
+                    start.x_axis,
+                    start.y_axis,
+                    start.z_axis,
+                    glam::Vec4::W,
+                );
+                m.w_axis = start.w_axis;
+                m
+            }
+            GizmoDragMode::Scale { start_y } => {
+                let factor = ((start_y - self.cursor.1) * 0.005).exp().clamp(0.02, 50.0);
+                let mut m = start;
+                m.x_axis *= factor;
+                m.y_axis *= factor;
+                m.z_axis *= factor;
+                m
+            }
+        };
+
+        self.scene.transforms[transform].matrix = new_matrix;
+        self.sync_transforms_to_gpu();
+    }
+
+    // === Scene browser (B) ===
+
+    /// Open/close the scene browser overlay. Opening rescans scenes/ (plus
+    /// the current scene's directory, if different).
+    pub fn toggle_browser(&mut self) {
+        if self.show_browser {
+            self.show_browser = false;
+            return;
+        }
+
+        let mut dirs = vec![std::path::PathBuf::from("scenes")];
+        if let Some(dir) = self
+            .scene_path
+            .as_ref()
+            .and_then(|p| Path::new(p).parent())
+            .filter(|d| !d.as_os_str().is_empty() && *d != Path::new("scenes"))
+        {
+            dirs.push(dir.to_path_buf());
+        }
+
+        let mut files: Vec<std::path::PathBuf> = dirs
+            .iter()
+            .filter_map(|d| fs::read_dir(d).ok())
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .collect();
+        files.sort();
+        files.dedup();
+
+        if files.is_empty() {
+            log::warn!("No scene files found in scenes/");
+            return;
+        }
+        // Start on the current scene when it's in the list
+        self.browser_selected = self
+            .scene_path
+            .as_ref()
+            .and_then(|p| files.iter().position(|f| f == Path::new(p)))
+            .unwrap_or(0);
+        self.browser_files = files;
+        self.show_browser = true;
+    }
+
+    pub fn browser_move(&mut self, down: bool) {
+        let n = self.browser_files.len();
+        if n == 0 {
+            return;
+        }
+        self.browser_selected = if down {
+            (self.browser_selected + 1) % n
+        } else {
+            (self.browser_selected + n - 1) % n
+        };
+    }
+
+    pub fn browser_load_selected(&mut self) {
+        if let Some(path) = self.browser_files.get(self.browser_selected).cloned() {
+            self.load_scene_file(&path);
+        }
+        self.show_browser = false;
+    }
+
+    /// Browser panel geometry: (x, y of first row, line height)
+    fn browser_panel_geometry(&self, height: f32) -> (f32, f32, f32) {
+        let line_height = 16.0f32;
+        let panel_lines = self.browser_files.len() + 2;
+        let y = (height - panel_lines as f32 * line_height) * 0.5;
+        (6.0, y, line_height)
+    }
+
+    /// Click a browser row to load that scene. Returns true if the click was
+    /// consumed by the panel.
+    fn try_click_browser(&mut self) -> bool {
+        if !self.show_browser {
+            return false;
+        }
+        let (_, h) = self.gpu.size();
+        let (px, py, lh) = self.browser_panel_geometry(h as f32);
+        let (cx, cy) = self.cursor;
+        let panel_h = (self.browser_files.len() + 2) as f32 * lh;
+        if cx < px || cx > px + 380.0 || cy < py || cy > py + panel_h {
+            // Clicking outside closes the browser
+            self.show_browser = false;
+            return true;
+        }
+        let row = ((cy - py - lh * 0.5) / lh).floor() as i32 - 1;
+        if row >= 0 && (row as usize) < self.browser_files.len() {
+            self.browser_selected = row as usize;
+            self.browser_load_selected();
+        }
+        true
+    }
+
+    /// Replace the current scene with one loaded from disk, rebuilding the
+    /// GPU pipelines and resetting camera/selection to the scene's defaults
+    pub fn load_scene_file(&mut self, path: &Path) {
+        let scene = match Scene::load(path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to load {}: {}", path.display(), e);
+                return;
+            }
+        };
+        log::info!("Loading scene: {} ({})", scene.name, path.display());
+
+        self.camera = OrbitCamera {
+            yaw: scene.camera_yaw,
+            pitch: scene.camera_pitch,
+            distance: scene.camera_distance,
+            focus: scene.camera_focus,
+        };
+        self.point_size = scene.point_size;
+        self.color_falloff = scene.color_falloff;
+        self.color_contrast = scene.color_contrast;
+        self.buffer_capacity = scene.point_count as u32;
+        self.transform_enabled = vec![true; scene.transforms.len()];
+        self.selected_transform = Some(0);
+        self.selected_variation = 0;
+        self.drag = Drag::None;
+        self.hovered = None;
+        self.scene = scene;
+        self.scene_path = Some(path.to_string_lossy().into_owned());
+        self.rebuild_pipelines();
+    }
+
+    /// Text overlay for the scene browser
+    fn build_browser_entries(&self, height: f32) -> Vec<TextEntry> {
+        let (px, py, lh) = self.browser_panel_geometry(height);
+        let font_size = 13.0;
+
+        let mut lines = vec!["Scenes  (Enter/click = load, Esc/B = close)".to_string()];
+        for (i, f) in self.browser_files.iter().enumerate() {
+            let stem = f.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+            let sel = if i == self.browser_selected { ">" } else { " " };
+            let cur = if self.scene_path.as_deref() == Some(&f.to_string_lossy() as &str) {
+                "*"
+            } else {
+                " "
+            };
+            lines.push(format!("{}{} {}", sel, cur, stem));
+        }
+        let text = lines.join("\n");
+
+        let bg_width = 4 + text.lines().map(|l| l.len()).max().unwrap_or(0);
+        let bg: String =
+            vec!["\u{2588}".repeat(bg_width); self.browser_files.len() + 2].join("\n");
+
+        vec![
+            TextEntry { text: bg, x: px, y: py, color: [10, 10, 20, 225], font_size },
+            TextEntry {
+                text,
+                x: px + font_size,
+                y: py + lh * 0.5,
+                color: [235, 235, 245, 255],
+                font_size,
+            },
+        ]
+    }
+
+    // === High-quality background render (P) ===
+
+    /// Kick off an offline render of the current framing on a background
+    /// thread (own wgpu device, so the realtime view keeps running). Pauses
+    /// the auto-orbit so the rendered framing is the one on screen.
+    pub fn start_hq_render(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        if self.hq_render_in_flight.load(Ordering::SeqCst) {
+            log::warn!("HQ render already running");
+            return;
+        }
+        self.orbit_paused = true;
+
+        let mut scene = self.scene.clone();
+        // Scale the point budget up from the interactive count
+        scene.point_count = (scene.point_count * 4).clamp(8_000_000, 40_000_000);
+
+        let view = View {
+            scene: self.scene_path.clone(),
+            rotation: self.camera.yaw,
+            pitch: self.camera.pitch,
+            distance: self.camera.distance,
+            focus: self.camera.focus.to_array(),
+            offset: [0.0; 3],
+            point_size: self.point_size,
+            fog_near: self.fog_near,
+            fog_far: self.fog_far,
+            fog_brightness: self.fog_brightness,
+            fog_saturation: self.fog_saturation,
+            color_falloff: Some(self.color_falloff),
+            color_contrast: Some(self.color_contrast),
+        };
+
+        let out = format!("renders/{}-{}.png", self.scene_slug(), unix_timestamp());
+        let flag = self.hq_render_in_flight.clone();
+        flag.store(true, Ordering::SeqCst);
+        log::info!(
+            "HQ render started: {} ({} points, 2560x1440) — timing prints when done",
+            out, scene.point_count,
+        );
+
+        std::thread::spawn(move || {
+            let result = crate::offline::render(crate::offline::OfflineParams {
+                scene,
+                view: Some(view),
+                width: 2560,
+                height: 1440,
+                out_path: Path::new(&out),
+                accumulate: 96,
+                fog_enabled: false, // view carries the real fog settings
+                grid: crate::offline::GridMode::Single,
+            });
+            match result {
+                Ok(()) => log::info!("HQ render finished: {}", out),
+                Err(e) => log::error!("HQ render failed: {}", e),
+            }
+            flag.store(false, Ordering::SeqCst);
+        });
+    }
+
+    // === Chaos-game traces (X) ===
+
+    /// X: show traces (re-rolling new random walkers each press);
+    /// Shift+X hides them.
+    pub fn toggle_traces(&mut self, hide: bool) {
+        if hide {
+            self.show_traces = false;
+            log::info!("Traces: off");
+            return;
+        }
+        self.show_traces = true;
+        self.regenerate_traces();
+    }
+
+    /// Run fresh CPU walkers through the current IFS and rebuild the trace
+    /// line geometry. Head of each trace is brightest; the tail fades out.
+    fn regenerate_traces(&mut self) {
+        const TRACES: usize = 24;
+        const STEPS: usize = 50;
+
+        let traces = crate::trace::generate_traces(
+            &self.scene.transforms,
+            &self.transform_enabled,
+            TRACES,
+            STEPS,
+            &mut rand::thread_rng(),
+        );
+
+        let mut verts = Vec::with_capacity(traces.iter().map(|t| t.len() * 2).sum());
+        for trace in &traces {
+            for (i, pair) in trace.windows(2).enumerate() {
+                // Age fade along the trace: oldest segments nearly invisible
+                let age = (i + 1) as f32 / (trace.len() - 1) as f32;
+                let alpha = 0.08 + 0.72 * age * age;
+                for step in pair {
+                    let cm = self.scene.colormap
+                        [(step.color_val * 255.0).clamp(0.0, 255.0) as usize];
+                    verts.push(LineVertex {
+                        position: step.pos.to_array(),
+                        color: [cm[0], cm[1], cm[2], alpha],
+                    });
+                }
+            }
+        }
+        let segments = verts.len() / 2;
+        self.line_renderer.set_lines(&self.gpu.device, &verts);
+        log::info!("Traces: {} walkers × {} steps ({} segments)", TRACES, STEPS, segments);
+    }
+
+    // === Evolutionary exploration (U / Shift+U) ===
+
+    /// Apply a random mutation to the scene (undoable with Shift+U).
+    /// Repeated presses walk the scene through mutation space; Ctrl+S keeps
+    /// a variant you like.
+    pub fn mutate_scene(&mut self) {
+        self.undo_stack.push(self.scene.clone());
+        if self.undo_stack.len() > 32 {
+            self.undo_stack.remove(0);
+        }
+
+        let log = crate::mutate::mutate(&mut self.scene, &mut rand::thread_rng(), 1.0);
+        log::info!("Mutation: {}", log.join("; "));
+        self.after_scene_shape_change();
+    }
+
+    /// Revert the most recent mutation
+    pub fn undo_mutation(&mut self) {
+        let Some(prev) = self.undo_stack.pop() else {
+            log::warn!("Nothing to undo");
+            return;
+        };
+        self.scene = prev;
+        log::info!("Mutation undone ({} left on stack)", self.undo_stack.len());
+        self.after_scene_shape_change();
+    }
+
+    /// Reconcile app state after the scene changed under us (mutation/undo
+    /// may add or remove transforms) and rebuild the GPU pipelines
+    fn after_scene_shape_change(&mut self) {
+        let n = self.scene.transforms.len();
+        self.transform_enabled.resize(n, true);
+        if let Some(sel) = self.selected_transform {
+            self.selected_transform = Some(sel.min(n.saturating_sub(1)));
+        }
+        self.drag = Drag::None;
+        self.hovered = None;
+        self.rebuild_pipelines();
+    }
+
+    // === Transform editing (see also gizmo drags above) ===
+
+    /// The transform editing keys act on: the explicit selection, or T0
+    fn selection(&self) -> Option<usize> {
+        let n = self.scene.transforms.len();
+        if n == 0 {
+            return None;
+        }
+        Some(self.selected_transform.unwrap_or(0).min(n - 1))
+    }
+
+    /// Add a transform: a nudged copy of the selection, or (fresh) a small
+    /// default one. Rebuilds the GPU pipelines for the new transform count.
+    pub fn add_transform(&mut self, fresh: bool) {
+        let (spec, name, color) = if fresh || self.selection().is_none() {
+            (
+                TransformSpec {
+                    matrix: Mat4::from_scale_rotation_translation(
+                        Vec3::splat(0.5),
+                        glam::Quat::IDENTITY,
+                        Vec3::new(0.3, 0.3, 0.0),
+                    ),
+                    color_value: 0.5,
+                    weight: 1.0,
+                    color_speed: self.scene.color_speed,
+                    explicit_color_speed: None,
+                    variations: TransformSpec::linear_variations(),
+                },
+                None,
+                Vec3::splat(0.9),
+            )
+        } else {
+            let idx = self.selection().unwrap();
+            let mut spec = self.scene.transforms[idx].clone();
+            // Nudge so the copy's gizmo doesn't sit exactly on the original
+            spec.matrix.w_axis += glam::Vec4::new(0.15, 0.0, 0.0, 0.0);
+            let name = self.scene.transform_names[idx]
+                .as_ref()
+                .map(|n| format!("{} copy", n));
+            (spec, name, self.scene.colors[idx])
+        };
+
+        self.scene.transforms.push(spec);
+        self.scene.transform_names.push(name);
+        self.scene.colors.push(color);
+        self.transform_enabled.push(true);
+        self.selected_transform = Some(self.scene.transforms.len() - 1);
+        self.scene.regenerate_colormap();
+        self.rebuild_pipelines();
+        log::info!("Added transform T{}", self.scene.transforms.len() - 1);
+    }
+
+    /// Delete the selected transform (keeps at least one)
+    pub fn delete_selected_transform(&mut self) {
+        let Some(idx) = self.selection() else { return };
+        if self.scene.transforms.len() <= 1 {
+            log::warn!("Cannot delete the last transform");
+            return;
+        }
+        self.scene.transforms.remove(idx);
+        self.scene.transform_names.remove(idx);
+        self.scene.colors.remove(idx);
+        self.transform_enabled.remove(idx);
+        self.selected_transform = Some(idx.min(self.scene.transforms.len() - 1));
+        self.drag = Drag::None;
+        self.scene.regenerate_colormap();
+        self.rebuild_pipelines();
+        log::info!("Deleted transform T{}", idx);
+    }
+
+    /// Multiply the selected transform's chaos-game weight
+    pub fn adjust_weight(&mut self, increase: bool) {
+        let Some(idx) = self.selection() else { return };
+        let factor = if increase { 1.15 } else { 1.0 / 1.15 };
+        let w = &mut self.scene.transforms[idx].weight;
+        *w = (*w * factor).clamp(0.01, 100.0);
+        log::info!("T{} weight: {:.2}", idx, *w);
+        self.sync_transforms_to_gpu();
+    }
+
+    /// Nudge the selected transform's gradient color in HSV space
+    /// (channel: 0 = hue, 1 = saturation, 2 = value)
+    pub fn adjust_color(&mut self, channel: usize, increase: bool) {
+        let Some(idx) = self.selection() else { return };
+        let (mut h, mut s, mut v) = rgb_to_hsv(self.scene.colors[idx]);
+        let dir = if increase { 1.0 } else { -1.0 };
+        match channel {
+            0 => h = (h + dir * 15.0).rem_euclid(360.0),
+            1 => s = (s + dir * 0.08).clamp(0.0, 1.0),
+            2 => v = (v + dir * 0.08).clamp(0.05, 1.0),
+            _ => return,
+        }
+        self.scene.colors[idx] = hsv_to_rgb(h, s, v);
+        let c = self.scene.colors[idx];
+        log::info!("T{} color: h={:.0} s={:.2} v={:.2} rgb=({:.2},{:.2},{:.2})", idx, h, s, v, c.x, c.y, c.z);
+        self.scene.regenerate_colormap();
+        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+    }
+
+    /// Step the variation slot targeted by the weight keys
+    pub fn cycle_variation(&mut self, forward: bool) {
+        let n = crate::scene::NUM_VARIATIONS;
+        self.selected_variation = if forward {
+            (self.selected_variation + 1) % n
+        } else {
+            (self.selected_variation + n - 1) % n
+        };
+        let idx = self.selection();
+        let w = idx.map_or(0.0, |i| self.scene.transforms[i].variations[self.selected_variation]);
+        log::info!(
+            "Variation slot: {} (weight {:.2} on selected transform)",
+            crate::scene::VARIATION_NAMES[self.selected_variation], w,
+        );
+    }
+
+    /// Adjust the selected transform's weight for the targeted variation
+    pub fn adjust_variation_weight(&mut self, increase: bool) {
+        let Some(idx) = self.selection() else { return };
+        let step = if increase { 0.05 } else { -0.05 };
+        let w = &mut self.scene.transforms[idx].variations[self.selected_variation];
+        // Snap through zero so slots can be cleanly removed
+        *w = ((*w + step) * 100.0).round() / 100.0;
+        *w = w.clamp(-4.0, 4.0);
+        log::info!(
+            "T{} {} = {:.2}",
+            idx, crate::scene::VARIATION_NAMES[self.selected_variation], *w,
+        );
+        self.sync_transforms_to_gpu();
+    }
+
+    /// Recreate the GPU pipelines after the transform count changed.
+    /// The chaos game restarts from warmup.
+    fn rebuild_pipelines(&mut self) {
+        crate::scene::resolve_color_speeds(
+            &mut self.scene.transforms,
+            self.scene.color_speed,
+            self.color_falloff,
+        );
+        self.point_compute = PointCompute::new(
+            &self.gpu.device,
+            &self.scene.transforms,
+            &self.scene.colormap,
+            self.buffer_capacity,
+        );
+        self.point_renderer = PointRenderer::new(
+            &self.gpu.device,
+            self.gpu.format,
+            &self.point_compute.point_buffer,
+            &self.point_compute.colormap_buffer,
+        );
+        self.gizmo_renderer = GizmoRenderer::new(
+            &self.gpu.device,
+            self.gpu.format,
+            &self.scene.transforms,
+        );
+        self.point_compute.update_weights(
+            &self.gpu.queue,
+            &self.scene.transforms,
+            &self.transform_enabled,
+        );
+        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
+        self.frame_count = 0;
+        if self.show_traces {
+            self.regenerate_traces();
+        }
+    }
+
+    /// Push edited transforms to the chaos-game and gizmo pipelines and
+    /// restart point accumulation so the fractal re-forms live
+    fn sync_transforms_to_gpu(&mut self) {
+        // Contraction feeds falloff-derived color speeds, so re-resolve
+        crate::scene::resolve_color_speeds(
+            &mut self.scene.transforms,
+            self.scene.color_speed,
+            self.color_falloff,
+        );
+        self.point_compute.update_weights(
+            &self.gpu.queue,
+            &self.scene.transforms,
+            &self.transform_enabled,
+        );
+        self.gizmo_renderer.update_transforms(&self.gpu.queue, &self.scene.transforms);
+        self.reset();
+        if self.show_traces {
+            self.regenerate_traces();
+        }
     }
 
     pub fn adjust_point_size(&mut self, increase: bool) {
@@ -429,13 +1329,13 @@ impl App {
     /// push them to the GPU, then reset so the point buffer refills quickly
     fn refresh_color_speeds(&mut self) {
         crate::scene::resolve_color_speeds(
-            &mut self.scene_transforms,
-            self.scene_color_speed,
+            &mut self.scene.transforms,
+            self.scene.color_speed,
             self.color_falloff,
         );
         self.point_compute.update_weights(
             &self.gpu.queue,
-            &self.scene_transforms,
+            &self.scene.transforms,
             &self.transform_enabled,
         );
         self.reset();
@@ -478,14 +1378,14 @@ impl App {
 
     pub fn select_prev_transform(&mut self) {
         if let Some(idx) = self.selected_transform {
-            let n = self.scene_transforms.len();
+            let n = self.scene.transforms.len();
             self.selected_transform = Some(if idx == 0 { n - 1 } else { idx - 1 });
         }
     }
 
     pub fn select_next_transform(&mut self) {
         if let Some(idx) = self.selected_transform {
-            let n = self.scene_transforms.len();
+            let n = self.scene.transforms.len();
             self.selected_transform = Some((idx + 1) % n);
         }
     }
@@ -509,7 +1409,7 @@ impl App {
 
         self.point_compute.update_weights(
             &self.gpu.queue,
-            &self.scene_transforms,
+            &self.scene.transforms,
             &self.transform_enabled,
         );
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
@@ -523,14 +1423,21 @@ impl App {
     /// Use native 1px point primitives (~3x faster) when the projected point
     /// size at the orbit distance would be subpixel anyway
     fn use_point_primitives(&self, screen_height: f32) -> bool {
-        self.point_size * screen_height / self.camera_distance <= 1.5
+        self.point_size * screen_height / self.camera.distance <= 1.5
     }
 
     pub fn update(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_update).as_secs_f32().min(0.1);
+        self.last_update = now;
+        self.frame_dt = dt;
+
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
         if !self.orbit_paused {
-            self.rotation += 0.003;
+            // Time-based so the orbit speed is refresh-rate independent
+            // (0.003 rad/frame at the old 60 FPS baseline)
+            self.camera.yaw += 0.18 * dt;
         }
 
         if should_log {
@@ -561,14 +1468,7 @@ impl App {
         }
 
         let aspect = SCREENSHOT_WIDTH as f32 / SCREENSHOT_HEIGHT as f32;
-        let cam_pos = self.camera_focus + self.camera_offset + Vec3::new(
-            self.rotation.sin() * self.camera_distance,
-            0.0,
-            self.rotation.cos() * self.camera_distance,
-        );
-        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-        let view = Mat4::look_at_rh(cam_pos, self.camera_focus, Vec3::Y);
-        let mvp = projection * view;
+        let mvp = self.camera.view_proj(aspect);
 
         let camera = CameraUniforms::new(
             mvp,
@@ -673,7 +1573,15 @@ impl App {
                 fs::create_dir_all(screenshot_dir).expect("Failed to create screenshots directory");
             }
 
-            let path = screenshot_dir.join("capture.png");
+            // Never overwrite: slug + timestamp, with a counter for
+            // multiple captures in the same second
+            let base = format!("{}-{}", self.scene_slug(), unix_timestamp());
+            let mut path = screenshot_dir.join(format!("{}.png", base));
+            let mut n = 1;
+            while path.exists() {
+                path = screenshot_dir.join(format!("{}-{}.png", base, n));
+                n += 1;
+            }
             image::save_buffer(
                 &path,
                 &pixels,
@@ -688,39 +1596,150 @@ impl App {
         self.pending_screenshot = false;
     }
 
+    /// Rows of the help panel: key label, description, and what a click on
+    /// the row does (None = informational only). Click = the first-listed
+    /// binding, shift+click = the second.
+    const HELP_ROWS: &'static [(&'static str, &'static str, Option<HelpAction>)] = &[
+        ("H / ?", "toggle this help", Some(HelpAction::ToggleHelp)),
+        ("Esc", "quit", None),
+        ("drag", "orbit camera (pauses auto-orbit)", None),
+        ("shift+drag", "pan focus (middle-drag works too)", None),
+        ("scroll", "zoom", None),
+        ("", "", None),
+        ("drag gizmo dot", "select + move in view plane", None),
+        ("drag O-axis edge", "move along that axis", None),
+        ("drag outer edge", "rotate around third axis", None),
+        ("ctrl+drag gizmo", "uniform scale", None),
+        ("A / Shift+A", "duplicate selected / add new transform", Some(HelpAction::AddTransform)),
+        ("Del", "delete selected transform", Some(HelpAction::DeleteTransform)),
+        (". / ,", "selected weight up / down", Some(HelpAction::Weight)),
+        ("J / Shift+J", "color hue up / down", Some(HelpAction::Hue)),
+        ("K / Shift+K", "color saturation up / down", Some(HelpAction::Sat)),
+        ("L / Shift+L", "color value up / down", Some(HelpAction::Val)),
+        ("E / Shift+E", "next / prev variation slot", Some(HelpAction::CycleVariation)),
+        ("= / -", "variation weight up / down", Some(HelpAction::VariationWeight)),
+        ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
+        ("U / Shift+U", "random mutation / undo it", Some(HelpAction::Mutate)),
+        ("X / Shift+X", "chaos traces: show+re-roll / hide", Some(HelpAction::Traces)),
+        ("I", "invert mouse pitch (saved to prefs)", Some(HelpAction::InvertPitch)),
+        ("scroll on gizmo", "adjust that transform's weight", None),
+        ("B", "browse + load scenes", Some(HelpAction::Browse)),
+        ("P", "HQ render current view (background)", Some(HelpAction::HqRender)),
+        ("", "", None),
+        ("Space", "re-seed points (reset)", Some(HelpAction::Reset)),
+        ("Up / Down", "zoom in / out", Some(HelpAction::Zoom)),
+        ("", "(select transform when overlay is on)", None),
+        ("Enter", "enable/disable selected transform", Some(HelpAction::ToggleSelected)),
+        ("T", "toggle info overlay", Some(HelpAction::ToggleText)),
+        ("G", "toggle transform gizmos", Some(HelpAction::ToggleGizmos)),
+        ("O", "pause / resume camera orbit", Some(HelpAction::ToggleOrbit)),
+        ("V", "save current view to views/", Some(HelpAction::SaveView)),
+        ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
+        ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
+        ("D / Shift+D", "finer / coarser color detail (falloff)", Some(HelpAction::ColorFalloff)),
+        ("C / Shift+C", "less / more color contrast", Some(HelpAction::ColorContrast)),
+        ("F / Shift+F", "more / less fog", Some(HelpAction::FogIntensity)),
+        ("N / Shift+N", "fog start closer / farther", Some(HelpAction::FogNear)),
+        ("M / Shift+M", "fog end closer / farther", Some(HelpAction::FogFar)),
+    ];
+
+    const HELP_FONT_SIZE: f32 = 13.0;
+    const HELP_LINE_HEIGHT: f32 = Self::HELP_FONT_SIZE * 1.2;
+    const HELP_X: f32 = 6.0;
+
+    /// Top of the help panel background for the given window height
+    fn help_panel_y(&self, height: f32) -> f32 {
+        // +3 lines: title, subtitle, trailing spacer
+        let panel_lines = Self::HELP_ROWS.len() + 3;
+        (height - panel_lines as f32 * Self::HELP_LINE_HEIGHT) * 0.5
+    }
+
+    /// If the cursor sits on a clickable help row, run its action.
+    /// Returns true when the click hit the panel (even a dead row).
+    fn try_click_help(&mut self) -> bool {
+        if !self.show_help {
+            return false;
+        }
+        let (w, h) = self.gpu.size();
+        let (_w, h) = (w as f32, h as f32);
+        let panel_y = self.help_panel_y(h);
+        // Panel text is ~68 monospace-ish chars; be generous on width
+        let panel_w = 420.0;
+        let panel_h = (Self::HELP_ROWS.len() + 3) as f32 * Self::HELP_LINE_HEIGHT;
+        let (cx, cy) = self.cursor;
+        if cx < Self::HELP_X || cx > Self::HELP_X + panel_w || cy < panel_y || cy > panel_y + panel_h {
+            return false;
+        }
+        // Text starts half a line into the panel; rows follow title + subtitle
+        let row = ((cy - panel_y - Self::HELP_LINE_HEIGHT * 0.5) / Self::HELP_LINE_HEIGHT).floor() as i32 - 2;
+        if row >= 0 {
+            if let Some((_, _, Some(action))) = Self::HELP_ROWS.get(row as usize) {
+                self.run_help_action(*action, self.shift_held);
+            }
+        }
+        true
+    }
+
+    /// Dispatch a clicked help row. `shift` selects the second-listed binding.
+    fn run_help_action(&mut self, action: HelpAction, shift: bool) {
+        match action {
+            HelpAction::ToggleHelp => self.toggle_help(),
+            HelpAction::Reset => self.reset(),
+            HelpAction::Zoom => if shift { self.zoom_out() } else { self.zoom_in() },
+            HelpAction::ToggleSelected => self.toggle_selected_transform(),
+            HelpAction::ToggleText => self.toggle_text_overlay(),
+            HelpAction::ToggleGizmos => self.toggle_gizmos(),
+            HelpAction::ToggleOrbit => self.toggle_orbit(),
+            HelpAction::SaveView => self.save_view(),
+            HelpAction::Screenshot => self.request_screenshot(),
+            HelpAction::SaveScene => self.save_scene(),
+            HelpAction::AddTransform => self.add_transform(shift),
+            HelpAction::DeleteTransform => self.delete_selected_transform(),
+            HelpAction::Weight => self.adjust_weight(!shift),
+            HelpAction::Hue => self.adjust_color(0, !shift),
+            HelpAction::Sat => self.adjust_color(1, !shift),
+            HelpAction::Val => self.adjust_color(2, !shift),
+            HelpAction::CycleVariation => self.cycle_variation(!shift),
+            HelpAction::VariationWeight => self.adjust_variation_weight(!shift),
+            HelpAction::PointSize => self.adjust_point_size(!shift),
+            HelpAction::ColorFalloff => self.adjust_color_falloff(!shift),
+            HelpAction::ColorContrast => self.adjust_color_contrast(shift),
+            HelpAction::FogIntensity => self.adjust_fog_intensity(!shift),
+            HelpAction::FogNear => self.adjust_fog_near(!shift),
+            HelpAction::FogFar => self.adjust_fog_far(!shift),
+            HelpAction::Mutate => {
+                if shift {
+                    self.undo_mutation()
+                } else {
+                    self.mutate_scene()
+                }
+            }
+            HelpAction::Browse => self.toggle_browser(),
+            HelpAction::HqRender => self.start_hq_render(),
+            HelpAction::Traces => self.toggle_traces(shift),
+            HelpAction::InvertPitch => self.toggle_invert_pitch(),
+        }
+    }
+
     /// Keybind help panel, shown when `show_help` is on
     fn build_help_entries(&self, height: f32) -> Vec<TextEntry> {
-        const HELP: &[(&str, &str)] = &[
-            ("H / ?", "toggle this help"),
-            ("Esc", "quit"),
-            ("Space", "re-seed points (reset)"),
-            ("Up / Down", "zoom in / out"),
-            ("", "(select transform when overlay is on)"),
-            ("Enter", "enable/disable selected transform"),
-            ("T", "toggle info overlay"),
-            ("G", "toggle transform gizmos"),
-            ("O", "pause / resume camera orbit"),
-            ("V", "save current view to views/"),
-            ("S", "save screenshot to screenshots/capture.png"),
-            ("[ / ]", "shrink / grow point size"),
-            ("D / Shift+D", "finer / coarser color detail (falloff)"),
-            ("C / Shift+C", "less / more color contrast"),
-            ("F / Shift+F", "more / less fog"),
-            ("N / Shift+N", "fog start closer / farther"),
-            ("M / Shift+M", "fog end closer / farther"),
-        ];
+        let font_size = Self::HELP_FONT_SIZE;
+        let line_height = Self::HELP_LINE_HEIGHT;
+        let panel_lines = Self::HELP_ROWS.len() + 3;
+        let panel_y = self.help_panel_y(height);
 
-        let font_size = 13.0;
-        let line_height = font_size * 1.2;
-        // +2 lines: title and trailing spacer
-        let panel_lines = HELP.len() + 2;
-        let panel_y = (height - panel_lines as f32 * line_height) * 0.5;
-
-        let text: String = std::iter::once("Keybinds".to_string())
-            .chain(std::iter::once(String::new()))
-            .chain(HELP.iter().map(|(key, desc)| format!("{:<13} {}", key, desc)))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text: String = [
+            "Keybinds".to_string(),
+            "(rows are clickable; shift+click = second binding)".to_string(),
+        ]
+        .into_iter()
+        .chain(
+            Self::HELP_ROWS
+                .iter()
+                .map(|(key, desc, _)| format!("{:<13} {}", key, desc)),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
 
         // Dark block-character backdrop so the panel reads over a bright fractal
         let bg_width = 4 + text.lines().map(|l| l.len()).max().unwrap_or(0);
@@ -729,14 +1748,14 @@ impl App {
         vec![
             TextEntry {
                 text: bg,
-                x: 6.0,
+                x: Self::HELP_X,
                 y: panel_y,
                 color: [10, 10, 20, 215],
                 font_size,
             },
             TextEntry {
                 text,
-                x: 6.0 + font_size, // ~2 block chars of left padding
+                x: Self::HELP_X + font_size, // ~2 block chars of left padding
                 y: panel_y + line_height * 0.5,
                 color: [235, 235, 245, 255],
                 font_size,
@@ -747,7 +1766,9 @@ impl App {
     fn build_text_entries(&self, view_proj: Mat4, width: f32, height: f32) -> Vec<TextEntry> {
         let mut entries = Vec::new();
 
-        if self.show_help {
+        if self.show_browser {
+            entries.extend(self.build_browser_entries(height));
+        } else if self.show_help {
             entries.extend(self.build_help_entries(height));
         } else {
             // Discoverability hint, bottom-left
@@ -772,7 +1793,7 @@ impl App {
 
         // Scene name + author
         entries.push(TextEntry {
-            text: format!("{} — {}", self.scene_name, self.scene_author),
+            text: format!("{} — {}", self.scene.name, self.scene.author),
             x: 10.0,
             y: 10.0,
             color: grey,
@@ -798,10 +1819,9 @@ impl App {
         let mut param_y = 48.0;
         entries.push(TextEntry {
             text: format!(
-                "cam: d={:.1} focus=({:.1},{:.1},{:.1}) off=({:.1},{:.1},{:.1})",
-                self.camera_distance,
-                self.camera_focus.x, self.camera_focus.y, self.camera_focus.z,
-                self.camera_offset.x, self.camera_offset.y, self.camera_offset.z,
+                "cam: d={:.1} yaw={:.2} pitch={:.2} focus=({:.1},{:.1},{:.1})",
+                self.camera.distance, self.camera.yaw, self.camera.pitch,
+                self.camera.focus.x, self.camera.focus.y, self.camera.focus.z,
             ),
             x: 10.0,
             y: param_y,
@@ -810,9 +1830,17 @@ impl App {
         });
         param_y += 16.0;
 
-        // Point size
+        // Point size + variation editing target
+        let var_weight = self
+            .selection()
+            .map_or(0.0, |i| self.scene.transforms[i].variations[self.selected_variation]);
         entries.push(TextEntry {
-            text: format!("pt size={:.4}", self.point_size),
+            text: format!(
+                "pt size={:.4} | var slot [E]: {} {:+.2}",
+                self.point_size,
+                crate::scene::VARIATION_NAMES[self.selected_variation],
+                var_weight,
+            ),
             x: 10.0,
             y: param_y,
             color: grey,
@@ -861,8 +1889,8 @@ impl App {
         });
         y += 20.0;
 
-        for (i, spec) in self.scene_transforms.iter().enumerate() {
-            let name = self.transform_names
+        for (i, spec) in self.scene.transforms.iter().enumerate() {
+            let name = self.scene.transform_names
                 .get(i)
                 .and_then(|n| n.as_deref())
                 .unwrap_or("");
@@ -894,7 +1922,7 @@ impl App {
 
             // Use colormap color for this transform, dim if disabled
             let cm_idx = (spec.color_value * 255.0).clamp(0.0, 255.0) as usize;
-            let cm = self.colormap[cm_idx];
+            let cm = self.scene.colormap[cm_idx];
             let alpha: u8 = if is_enabled { 220 } else { 80 };
             let color = [
                 (cm[0] * 255.0) as u8,
@@ -914,12 +1942,12 @@ impl App {
         }
 
         // === World-space gizmo labels ===
-        for (i, spec) in self.scene_transforms.iter().enumerate() {
+        for (i, spec) in self.scene.transforms.iter().enumerate() {
             let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
             let is_selected = self.selected_transform == Some(i);
             let origin = spec.matrix.w_axis.truncate();
             if let Some((sx, sy)) = world_to_screen(origin, view_proj, width, height) {
-                let name = self.transform_names
+                let name = self.scene.transform_names
                     .get(i)
                     .and_then(|n| n.as_deref())
                     .unwrap_or("");
@@ -969,18 +1997,10 @@ impl App {
 
         let (width, height) = self.gpu.size();
         let aspect = width as f32 / height as f32;
-        let cam_pos = self.camera_focus + self.camera_offset + Vec3::new(
-            self.rotation.sin() * self.camera_distance,
-            0.0,
-            self.rotation.cos() * self.camera_distance,
-        );
-
-        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-        let view = Mat4::look_at_rh(cam_pos, self.camera_focus, Vec3::Y);
-        let view_proj = projection * view;
+        let view_proj = self.camera.view_proj(aspect);
 
         // Advance circular buffer and get valid point count
-        let point_count = self.point_compute.advance_frame(&self.gpu.queue);
+        let point_count = self.point_compute.advance_frame(&self.gpu.queue, self.frame_dt);
 
         let output = self.gpu.surface.get_current_texture()?;
         let color_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1008,6 +2028,9 @@ impl App {
         );
         self.point_renderer.upload_camera(&self.gpu.queue, &camera);
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
+        if self.show_traces {
+            self.line_renderer.upload_camera(&self.gpu.queue, &camera);
+        }
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1041,6 +2064,34 @@ impl App {
                     self.use_point_primitives(height as f32),
                 );
             }
+        }
+
+        // === STEP 2.5: RENDER TRACES ===
+        if self.show_traces {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("trace_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.line_renderer.draw(&mut render_pass);
         }
 
         // === STEP 3: RENDER GIZMOS ===

@@ -33,11 +33,41 @@ struct VertexOutput {
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<storage, read> transforms: array<mat4x4<f32>>;
 @group(0) @binding(2) var<storage, read> instance_alpha: array<f32>;
+// Hovered gizmo part: x = instance index (0 = none), y = part id
+// (0..5 = edge index in build order [ox oy oz xy yz xz], 6 = origin dot)
+@group(0) @binding(3) var<uniform> highlight: vec4<u32>;
+
+// 1.0 when this vertex belongs to the hovered part of the hovered instance.
+// Edge identity comes from the vertex index: edges+dots live in 42-vertex
+// blocks (6 edges x 6 verts, then a 6-vert dot billboard); faces are drawn
+// from separate ranges and never highlight (vertex_type guards them).
+fn highlight_factor(instance_index: u32, vertex_index: u32, vertex_type: u32) -> f32 {
+    if instance_index != highlight.x {
+        return 0.0;
+    }
+    let local = vertex_index % 42u;
+    if vertex_type == 2u {
+        // origin dot
+        if highlight.y == 6u {
+            return 1.0;
+        }
+    } else if vertex_type == 1u {
+        if local < 36u && local / 6u == highlight.y {
+            return 1.0;
+        }
+    }
+    return 0.0;
+}
 
 @vertex
-fn vs_main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+fn vs_main(
+    in: VertexInput,
+    @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
+) -> VertexOutput {
     let transform = transforms[instance_index];
     let alpha_mult = instance_alpha[instance_index];
+    let hl = highlight_factor(instance_index, vertex_index, in.vertex_type);
 
     var out: VertexOutput;
     out.color = in.color;
@@ -81,8 +111,8 @@ fn vs_main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> Ver
         let edge_dir = normalize(screen_b - screen_a);
         let perp = vec2<f32>(-edge_dir.y, edge_dir.x);
 
-        // 2px width in NDC
-        let half_width_ndc_y = 2.0 / camera.screen_height;
+        // 2px width in NDC; hovered edges grow to 4.6px
+        let half_width_ndc_y = (2.0 + 2.6 * hl) / camera.screen_height;
         let half_width_ndc_x = half_width_ndc_y / camera.aspect_ratio;
         let offset = vec2<f32>(perp.x * half_width_ndc_x, perp.y * half_width_ndc_y);
 
@@ -131,7 +161,9 @@ fn vs_main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> Ver
             depth,
             1.0
         );
-        out.color = vec4<f32>(in.color.rgb, abs(in.color.a));
+        // Hovered edges glow toward white at full opacity
+        let edge_rgb = mix(in.color.rgb, vec3<f32>(1.0), 0.55 * hl);
+        out.color = vec4<f32>(edge_rgb, max(abs(in.color.a), hl));
 
     } else {
         // === DOT VERTEX: billboard ===
@@ -145,8 +177,8 @@ fn vs_main(in: VertexInput, @builtin(instance_index) instance_index: u32) -> Ver
 
         let ndc = clip.xyz / clip.w;
 
-        // 6px dot
-        let half_size_ndc_y = 6.0 / camera.screen_height;
+        // 6px dot; grows to 10px on hover
+        let half_size_ndc_y = (6.0 + 4.0 * hl) / camera.screen_height;
         let half_size_ndc_x = half_size_ndc_y / camera.aspect_ratio;
 
         // Billboard offset encoded in edge_other.xy (-1..1 range)

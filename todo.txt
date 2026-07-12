@@ -1,12 +1,7 @@
----- text renderer w/ crate,
- -- then move FPS counter onscreen. 
-
 ---- nonlinear transforms
 
----- display transforms as right-angled ?tetrahedrons?/3-simplexes
- -- & show 'default' non-transform in grey
- -- ... add UI? ability to move on 3 axis, rotate on 3 axis, scale?
-  - w/ realtime updates to the rendering?
+---- transform editing 
+ -- mouse input, grabbing of gizmos, rotations, stretching, point movements, etc w/ live re-render
 
 ---- needs to go faster! I want 100m points in realtime!
 
@@ -25,7 +20,6 @@
  -- & more optimization -- frustrum culling?
 
 ---- in-engine scene browser, super lores preview
- -- general menu overlay? combine with transform editor toggle?
 
 ---- focus stealing prevention!
  -- or headless mode for screenshots? not good 

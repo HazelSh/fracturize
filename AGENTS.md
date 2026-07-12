@@ -14,8 +14,13 @@ blend), writing positions into a circular point buffer that is rendered every fr
 ```
 src/
   main.rs        # CLI args, winit event loop, keybinds, default scene
-  app.rs         # App state, render orchestration, HUD/help text, screenshots
-  scene.rs       # TOML scene parsing, TransformSpec, variation names/slots
+  app.rs         # App state, mouse/edit handling, render orchestration, HUD, screenshots
+  camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
+  pick.rs        # Gizmo hit-testing and drag geometry (pure math, unit-tested)
+  mutate.rs      # Random scene mutation operators (U key, --mutations)
+  trace.rs       # CPU chaos walkers (variation port) for the trace overlay
+  prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
+  scene.rs       # TOML scene parsing AND saving, TransformSpec, variation names/slots
   gpu/
     context.rs   # wgpu device/surface setup (vsync flag, adapter limits)
     buffers.rs   # GPU struct definitions (GpuTransform, Point, CameraUniforms)
@@ -23,6 +28,7 @@ src/
       compute.rs   # Chaos game dispatch, circular buffer bookkeeping
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
+    lines.rs     # Trace line-segment renderer
     text.rs      # glyphon text overlay (HUD, transform list, help panel)
     density/     # Inactive experimental hash-grid density renderer
 shaders/
@@ -54,13 +60,44 @@ All GPU, three passes per frame:
    projected point size at orbit distance is subpixel (the common case), points are
    drawn as native 1px point primitives (~3x faster). Otherwise, 4-vertex instanced
    triangle-strip billboards with perspective sizing.
-3. **Gizmos + text**: optional overlays (see keybinds).
+3. **Gizmos, traces + text**: optional overlays (see keybinds). Traces (X)
+   are CPU walkers (trace.rs ports the 16 variations from chaos.wgsl — keep
+   them in sync!) rendered as alpha-faded line segments; they regenerate on
+   every scene edit.
+
+The chaos churn rate is wall-clock normalized: `advance_frame` takes the
+frame dt and scales walker iterations so the buffer refreshes at the same
+real-time rate at any refresh rate (60 FPS baseline: full cycle ~13 s).
+The auto-orbit is likewise time-based (0.18 rad/s).
 
 Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 - ~10M points at ~38 FPS uncapped (subpixel/point-primitive path)
 - ~5M points comfortably at 60 FPS; billboard path is ~3x slower per point
 - Storage-binding limits are raised to adapter max at startup (default 128MiB cap
   would limit the buffer to ~8M points; buffers are 16 bytes/point)
+
+## Mouse Controls
+
+| Input | Action |
+|-------|--------|
+| left-drag (empty space) | orbit camera, grab-the-scene: drag right spins it right, drag up tilts its top toward you (pauses auto-orbit) |
+| shift+drag / middle-drag | pan the focus in the view plane |
+| scroll | zoom |
+| drag a gizmo's origin dot | select + translate the transform in the view plane |
+| drag an origin→axis gizmo edge | translate along that axis |
+| drag an outer gizmo edge | rotate around the third local axis (edge x-y rotates around z) |
+| ctrl+drag any gizmo part | uniform scale (drag up = grow) |
+| scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
+
+Grabbable gizmo parts glow and grow on hover (edges widen and whiten, the
+origin dot enlarges) and the cursor switches to a grab hand. Gizmo drags
+re-run the chaos game live; the fractal re-forms as you drag (sparse while
+moving, densifying when you pause — warmup refills in ~1s). Picking math
+lives in `pick.rs`, drag application in `app.rs`.
+
+The camera eye always sits on the orbit sphere: the legacy scene/view
+`offset` (which made pitch drift the view distance) is folded into
+yaw/pitch/distance at load time and no longer written to files.
 
 ## Keybinds (also in-app: press H)
 
@@ -75,13 +112,39 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | G | toggle transform gizmos |
 | O | pause / resume camera orbit |
 | V | save current view to views/<scene>-<timestamp>.toml |
-| S | save screenshot to screenshots/capture.png |
+| S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
+| Ctrl+S | **save the scene** (with all edits) back to its TOML file |
+| U / Shift+U | random scene mutation / undo it (32-deep undo stack) |
+| X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
+| I | invert mouse pitch, flightsim style (persisted to prefs) |
+| B | scene browser overlay: arrows + Enter or click to load a scene in place |
+| P | background high-quality render of the current framing to renders/ (own GPU device; the realtime view keeps running; pauses orbit) |
+| A / Shift+A | duplicate selected transform / add a fresh one (rebuilds pipelines) |
+| Delete | delete selected transform |
+| , / . | selected transform's chaos weight down / up |
+| J / K / L | selected transform's color: hue / saturation / value up (+Shift = down) |
+| E / Shift+E | cycle the variation slot targeted by - / = (shown in HUD) |
+| - / = | targeted variation weight down / up (0.05 steps) on selected transform |
 | [ / ] | shrink / grow point size |
 | D / Shift+D | finer / coarser color detail (color_falloff) |
 | C / Shift+C | less / more color contrast |
 | F / Shift+F | more / less fog |
 | N / Shift+N | fog start closer / farther |
 | M / Shift+M | fog end closer / farther |
+
+The help panel (H) is clickable: each row triggers its first-listed binding,
+shift+click the second. The window is freely resizable. `I` persists to
+`~/.config/fracturize/prefs.toml` (user preferences, not scene data).
+
+Ctrl+S also bakes the current camera framing, point size, and color
+falloff/contrast into the scene's defaults. **Saving preserves comments**:
+existing files are edited in place via toml_edit — only changed values are
+rewritten, so header/per-transform comments, inline `# notes`, and formatting
+like `6_000_000` survive. Two exceptions: a legacy camera `offset` key is
+removed (folded into yaw/pitch/distance), and if transforms were added or
+removed the whole [[transform]] array is rebuilt (header/meta/camera comments
+still survive). Scenes with no path (built-in default) save to
+`scenes/untitled-<timestamp>.toml`.
 
 ## Scene Files (TOML)
 
@@ -99,8 +162,11 @@ color_contrast = 1.0      # render-time cyclic palette contrast stretch (1 = off
 
 [camera]                  # optional
 focus = [0.0, 0.0, 0.0]   # orbit center / look-at
-offset = [0.0, 1.0, 0.0]  # added to orbital camera position
-distance = 3.0            # orbit radius
+distance = 3.0            # orbit radius (true eye-focus distance)
+yaw = 0.0                 # orbit angle around Y, radians
+pitch = 0.32              # orbit elevation, radians (positive = above)
+# legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
+# into yaw/pitch/distance and never written back
 
 [[transform]]
 name = "whorl"                 # optional label shown in overlays
@@ -143,32 +209,71 @@ Scene-design notes learned the hard way:
 
 ## View Files & Offline Rendering
 
-Press `V` in-app to dump the current view (orbit angle, distance, focus, offset,
+Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
 point size, fog, color falloff/contrast) to `views/<scene>-<timestamp>.toml`.
 View color params override the scene's when present. Load one with `--view <path>`;
 in windowed mode the orbit starts paused so the framing holds (press O to resume).
 
-`--render <out.png>` renders a single frame **headlessly** — no window, no event
-loop, no focus stealing — and exits. It fills the point buffer, renders once, and
-saves. Options: `--width/--height` (default 1920x1080), `--points N` (override the
-scene's buffer capacity for denser renders; 16 bytes/point of GPU memory),
-`--accumulate N` (extra chaos frames after the buffer fills, default 32),
-`--view <path>` for exact framing, `--fog`. Example:
+`--render <out.png>` renders **headlessly** — no window, no event loop, no focus
+stealing — and exits, printing a timing breakdown (`setup | chaos fill | render |
+encode+save | total`) to stdout so you can budget effort. Options:
+
+- `--effort draft|low|medium|high|ultra` — named presets for point count +
+  accumulation: draft 1M/4, low 4M/16, medium 12M/48, high 40M/128, ultra
+  100M/256. Explicit `--points N` / `--accumulate N` override the preset.
+  Point count is a *render* property, not a scene property: the scene's
+  `point_count` is just the interactive default (16 bytes/point of GPU memory).
+- `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
+- `--view <path>` for exact framing (views store yaw + pitch), `--fog`.
+
+**Grid contact sheets** (for exploring 3D framing cheaply — the point cloud is
+filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
+
+- `--orbit-grid 4x2` — 8 views evenly spaced around a full horizontal orbit,
+  starting at the base yaw. Row-major; per-tile yaw printed to stdout.
+- `--move-grid 3x3 [--move-step 0.25]` — camera nudged left/center/right
+  (columns) × up/center/down (rows) in the view plane by `move-step` × orbit
+  distance, all still looking at the focus. Center tile = base view.
+
+**Mutation sheets** (evolutionary exploration): `--mutations N` renders the
+scene plus N random variants (tile 0 = original, near-square grid). Each
+variant is saved as `<out>.mutN.toml` and its operator list printed per tile
+("T2 rotate 21° about (...)", "T1 +swirl 0.18", ...), so you can look at the
+sheet, pick a tile, and load/iterate on its TOML. `--seed` reproduces a
+sheet (the used seed is always printed), `--mutation-strength` scales the
+perturbations (default 1.0). Unlike camera grids, each tile refills the point
+buffer, so prefer `--effort draft|low`. The same operators run in-app on `U`.
 
 ```
+# quick look at a new scene from all sides (fast: use draft + small tiles)
+fracturize --scene scenes/koru.toml --render /tmp/koru_orbit.png \
+  --effort draft --orbit-grid 4x2 --width 480 --height 270
+
+# test a slight camera move around a saved framing
+fracturize --scene scenes/koru.toml --view views/koru-123.toml \
+  --render /tmp/koru_move.png --effort low --move-grid 3x3 --width 320 --height 180
+
+# final frame
 fracturize --scene scenes/glasshouse.toml --view views/glasshouse-123.toml \
-  --render renders/glasshouse_4k.png --width 3840 --height 2160 --points 12000000
+  --render renders/glasshouse_4k.png --width 3840 --height 2160 --effort high
+
+# evolve: original + 8 mutations, reproducible
+fracturize --scene scenes/koru.toml --render /tmp/koru_evo.png \
+  --effort draft --mutations 8 --seed 42 --width 320 --height 180
 ```
 
-A 4K render with 12M points takes ~30s on the T490. `--points` also works in
-windowed mode. View files are the reliable way for agents to render specific
-framings without keyboard interaction.
+A 4K render with 12M points takes ~30s on the T490; the desktop (8GB VRAM) does
+medium-effort grids in well under a second — trust the printed timing line, not
+estimates. `--points` also works in windowed mode. View files are the reliable
+way for agents to render specific framings without keyboard interaction.
 
 ## Screenshot Support
 
 - Press `S` in-app, or run `--screenshot --delay N` to capture and exit
-  (N is in FRAMES, not seconds; at 60 FPS `--delay 150` ≈ 2.5s of accumulation)
-- `./screenshot.sh [scene]` wraps build + capture
+  (N is in FRAMES, not seconds; the count runs at the display refresh rate)
+- Files go to `screenshots/<scene-slug>-<unix-time>.png` — existing files are
+  never overwritten (a `-N` suffix disambiguates same-second captures)
+- `./screenshot.sh [scene]` wraps build + capture and echoes the newest file
 - Screenshots render offscreen at 1280x720 and contain only the point cloud
   (no gizmos/HUD). To verify overlays, run windowed and capture with
   ImageMagick: `import -window <id>`; set `FRACTURIZE_SHOW_HELP=1` to start with

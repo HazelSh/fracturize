@@ -151,7 +151,7 @@ impl PointCompute {
         let colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("colormap_buffer"),
             contents: bytemuck::cast_slice(colormap),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Bind group layout
@@ -270,19 +270,6 @@ impl PointCompute {
         self.current_frame < self.warmup_frames
     }
 
-    /// Current iterations per walker (higher during warmup)
-    pub fn current_iterations(&self) -> u32 {
-        if self.is_warming_up() {
-            self.warmup_iterations_per_walker
-        } else {
-            self.iterations_per_walker
-        }
-    }
-
-    /// Points generated per frame (varies during warmup)
-    pub fn points_per_frame(&self) -> u32 {
-        self.num_walkers * self.current_iterations()
-    }
 
     /// Returns number of valid points to render this frame
     pub fn valid_point_count(&self) -> u32 {
@@ -296,10 +283,20 @@ impl PointCompute {
         }
     }
 
-    /// Update for next frame - advances write offset and returns valid point count
-    pub fn advance_frame(&mut self, queue: &wgpu::Queue) -> u32 {
-        let current_iters = self.current_iterations();
-        
+    /// Update for next frame - advances write offset and returns valid point
+    /// count. `dt` is the wall-clock frame time: after warmup, the churn rate
+    /// (points regenerated per second) is normalized to it, so a 120 Hz
+    /// display refreshes the buffer at the same real-time rate as 60 Hz
+    /// (the historical baseline: `iterations_per_walker` per 1/60 s).
+    pub fn advance_frame(&mut self, queue: &wgpu::Queue, dt: f32) -> u32 {
+        let current_iters = if self.is_warming_up() {
+            // Warmup ignores dt: fill the buffer as fast as possible
+            self.warmup_iterations_per_walker
+        } else {
+            let target = self.iterations_per_walker as f32 * (dt * 60.0);
+            (target.round() as u32).clamp(1, self.warmup_iterations_per_walker)
+        };
+
         // Upload params with current write offset and iteration count
         let params = PointComputeParams {
             num_transforms: self.num_transforms,
@@ -312,7 +309,8 @@ impl PointCompute {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
         // Advance for next frame
-        self.write_offset = (self.write_offset + self.points_per_frame()) % self.buffer_capacity;
+        self.write_offset =
+            (self.write_offset + self.num_walkers * current_iters) % self.buffer_capacity;
         self.current_frame += 1;
 
         self.valid_point_count()
@@ -356,6 +354,12 @@ impl PointCompute {
             .collect();
 
         queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&gpu_transforms));
+    }
+
+    /// Re-upload the colormap after live color edits. Existing points keep
+    /// their colormap indices, so they recolor immediately.
+    pub fn update_colormap(&self, queue: &wgpu::Queue, colormap: &[[f32; 4]; 256]) {
+        queue.write_buffer(&self.colormap_buffer, 0, bytemuck::cast_slice(colormap));
     }
 
     /// Reset to initial state (for scene reload or reset key)

@@ -24,6 +24,7 @@ rand_xoshiro = "0.6"
 quick-xml = "0.37"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+toml_edit = "0.22"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

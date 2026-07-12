@@ -9,6 +9,7 @@ pub mod context;
 #[allow(dead_code, unused_imports, unused_variables)]
 pub mod density;
 pub mod gizmo;
+pub mod lines;
 pub mod points;
 pub mod text;
 
@@ -18,5 +19,6 @@ pub use context::GpuContext;
 
 // Re-export the active renderer (points)
 pub use gizmo::GizmoRenderer;
+pub use lines::LineRenderer;
 pub use points::{PointCompute, PointRenderer, DEPTH_FORMAT};
 pub use text::TextRenderer;

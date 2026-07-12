@@ -15,6 +15,9 @@ pub struct View {
     pub scene: Option<String>,
     /// Orbit angle in radians
     pub rotation: f32,
+    /// Orbit elevation angle in radians (0 = level with the focus)
+    #[serde(default)]
+    pub pitch: f32,
     /// Orbit radius
     pub distance: f32,
     /// Orbit center / look-at point
@@ -63,6 +66,7 @@ mod tests {
         let view = View {
             scene: Some("scenes/glasshouse.toml".to_string()),
             rotation: 1.25,
+            pitch: 0.35,
             distance: 4.0,
             focus: [0.1, 0.2, 0.3],
             offset: [0.0, 1.0, 0.0],
@@ -79,6 +83,7 @@ mod tests {
         view.save(&path).unwrap();
         let loaded = View::load(&path).unwrap();
         assert_eq!(loaded.rotation, view.rotation);
+        assert_eq!(loaded.pitch, view.pitch);
         assert_eq!(loaded.focus, view.focus);
         assert_eq!(loaded.scene, view.scene);
         std::fs::remove_dir_all(&dir).ok();

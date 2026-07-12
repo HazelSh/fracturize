@@ -9,6 +9,8 @@ pub struct GpuContext {
     pub surface: Surface<'static>,
     pub config: SurfaceConfiguration,
     pub format: TextureFormat,
+    /// Whether the GPU supports f16 shaders (needed for density renderer)
+    pub _has_f16: bool,
 }
 
 impl GpuContext {
@@ -16,9 +18,9 @@ impl GpuContext {
     pub async fn new(window: Arc<Window>, vsync: bool) -> Self {
         let size = window.inner_size();
 
-        // Create wgpu instance with default backends
+        // Create wgpu instance - prefer Vulkan on Linux to avoid EGL issues
         let instance = Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
 
@@ -39,17 +41,17 @@ impl GpuContext {
 
         log::info!("Using adapter: {:?}", adapter.get_info());
 
-        // Check for required features
+        // Check for optional features
         let adapter_features = adapter.features();
         let has_f16 = adapter_features.contains(Features::SHADER_F16);
         log::info!("GPU capabilities: f16={}", has_f16);
 
-        // Require f16 support - panic if not available
-        if !has_f16 {
-            panic!("GPU does not support SHADER_F16 feature, which is required for this application");
-        }
-
-        let required_features = Features::SHADER_F16;
+        // Request f16 if available (needed for density renderer, not for points renderer)
+        let required_features = if has_f16 {
+            Features::SHADER_F16
+        } else {
+            Features::empty()
+        };
 
         // Default limits cap storage buffer bindings at 128MiB, which caps the
         // point buffer at ~8M points. Request whatever the adapter supports.
@@ -113,6 +115,7 @@ impl GpuContext {
             surface,
             config,
             format,
+            _has_f16: has_f16,
         }
     }
 
