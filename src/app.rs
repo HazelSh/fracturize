@@ -10,7 +10,7 @@ use crate::camera::{world_to_screen, OrbitCamera};
 use crate::gpu::lines::LineVertex;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::scene::{Scene, TransformSpec};
-use crate::ui::{TextEntry, UiState};
+use crate::ui::{hints, TextEntry, UiState};
 use crate::view::View;
 
 /// Seconds since the epoch, for unique output filenames
@@ -85,14 +85,25 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, label: &
     })
 }
 
-/// FPS tracking
+/// Ring buffer capacity: ~8.5s of history at 60 FPS (plan: `[f32; 512]`).
+const FRAMETIME_RING_SIZE: usize = 512;
+/// Sparkline shows the most recent slice of the ring.
+const SPARKLINE_SAMPLES: usize = 120;
+
+/// FPS tracking: a fixed ring of per-frame times feeds a continuously
+/// updated avg/FPS and a p99 recomputed at the existing 1Hz display tick
+/// (`select_nth_unstable_by` on a copy — cheap enough at 1Hz on 512 floats).
 pub struct FpsTracker {
     last_log_time: Instant,
-    frames_since_log: u32,
     last_frame_time: Instant,
-    frame_times: Vec<Duration>,
+    ring: [f32; FRAMETIME_RING_SIZE],
+    /// Next slot to write (i.e. one past the most recently written sample)
+    ring_pos: usize,
+    /// How many slots hold valid data so far (saturates at ring size)
+    ring_len: usize,
     pub current_fps: f32,
     pub current_frametime_ms: f32,
+    pub p99_frametime_ms: f32,
     pub should_update_display: bool,
 }
 
@@ -101,41 +112,74 @@ impl FpsTracker {
         let now = Instant::now();
         Self {
             last_log_time: now,
-            frames_since_log: 0,
             last_frame_time: now,
-            frame_times: Vec::with_capacity(120),
+            ring: [0.0; FRAMETIME_RING_SIZE],
+            ring_pos: 0,
+            ring_len: 0,
             current_fps: 0.0,
             current_frametime_ms: 0.0,
+            p99_frametime_ms: 0.0,
             should_update_display: false,
         }
     }
 
     fn frame(&mut self) -> bool {
         let now = Instant::now();
-        let frame_time = now.duration_since(self.last_frame_time);
+        let frame_ms = now.duration_since(self.last_frame_time).as_secs_f32() * 1000.0;
         self.last_frame_time = now;
-        self.frames_since_log += 1;
         self.should_update_display = false;
 
-        self.frame_times.push(frame_time);
-        if self.frame_times.len() > 60 {
-            self.frame_times.remove(0);
-        }
+        self.ring[self.ring_pos] = frame_ms;
+        self.ring_pos = (self.ring_pos + 1) % FRAMETIME_RING_SIZE;
+        self.ring_len = (self.ring_len + 1).min(FRAMETIME_RING_SIZE);
 
-        if !self.frame_times.is_empty() {
-            let total: Duration = self.frame_times.iter().sum();
-            self.current_frametime_ms = total.as_secs_f32() * 1000.0 / self.frame_times.len() as f32;
-            self.current_fps = self.frame_times.len() as f32 / total.as_secs_f32();
-        }
+        // While the ring hasn't wrapped, valid samples are exactly
+        // `0..ring_len`; once full, every slot is valid regardless of
+        // order, so `.take(ring_len)` covers both cases correctly (sums and
+        // percentiles don't care about ordering).
+        let valid = &self.ring[..self.ring_len];
+        let sum: f32 = valid.iter().sum();
+        self.current_frametime_ms = sum / self.ring_len as f32;
+        self.current_fps = if self.current_frametime_ms > 0.0 {
+            1000.0 / self.current_frametime_ms
+        } else {
+            0.0
+        };
 
         let elapsed = now.duration_since(self.last_log_time);
         if elapsed >= Duration::from_secs(1) {
             self.should_update_display = true;
             self.last_log_time = now;
-            self.frames_since_log = 0;
+            self.recompute_p99();
         }
 
         self.should_update_display
+    }
+
+    fn recompute_p99(&mut self) {
+        if self.ring_len == 0 {
+            self.p99_frametime_ms = 0.0;
+            return;
+        }
+        let mut copy: Vec<f32> = self.ring[..self.ring_len].to_vec();
+        let idx = (((self.ring_len as f32) * 0.99) as usize).min(self.ring_len - 1);
+        copy.select_nth_unstable_by(idx, |a, b| a.partial_cmp(b).unwrap());
+        self.p99_frametime_ms = copy[idx];
+    }
+
+    /// Up to the last 120 frametime samples (milliseconds), oldest first —
+    /// for the status-bar sparkline.
+    fn sparkline_samples(&self) -> Vec<f32> {
+        let n = self.ring_len.min(SPARKLINE_SAMPLES);
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            // ring_pos is the next write slot, so ring_pos - 1 is the most
+            // recently written sample; walk backward from there.
+            let idx = (self.ring_pos + FRAMETIME_RING_SIZE - 1 - i) % FRAMETIME_RING_SIZE;
+            out.push(self.ring[idx]);
+        }
+        out.reverse();
+        out
     }
 }
 
@@ -437,6 +481,9 @@ impl App {
             (1.0, 1.0)
         };
 
+        let prefs = crate::prefs::Prefs::load();
+        let ui_state = UiState::from_prefs(&prefs);
+
         let mut app = Self {
             gpu,
             window,
@@ -451,7 +498,7 @@ impl App {
             },
             path_play_t: None,
             point_size,
-            prefs: crate::prefs::Prefs::load(),
+            prefs,
             frame_dt: 1.0 / 60.0,
             cursor: (0.0, 0.0),
             drag: Drag::None,
@@ -474,7 +521,7 @@ impl App {
             splat_renderer,
             gizmo_renderer,
             line_renderer,
-            ui_state: UiState::default(),
+            ui_state,
             render_mode,
             exposure,
             show_traces: false,
@@ -691,9 +738,64 @@ impl App {
         !matches!(self.drag, Drag::None)
     }
 
-    /// Current FPS, for the egui test window (Phase 1) and future status bar.
-    pub fn current_fps(&self) -> f32 {
-        self.fps_tracker.current_fps
+    /// (fps, avg frametime ms, p99 frametime ms) for the status bar.
+    pub fn fps_stats(&self) -> (f32, f32, f32) {
+        (
+            self.fps_tracker.current_fps,
+            self.fps_tracker.current_frametime_ms,
+            self.fps_tracker.p99_frametime_ms,
+        )
+    }
+
+    /// Up to the last 120 frametime samples (ms), oldest first, for the
+    /// status-bar sparkline.
+    pub fn frametime_sparkline(&self) -> Vec<f32> {
+        self.fps_tracker.sparkline_samples()
+    }
+
+    /// (valid points, buffer capacity, still warming up) for the status bar.
+    pub fn point_stats(&self) -> (u32, u32, bool) {
+        let valid = self.point_compute.valid_point_count();
+        let warming = self.point_compute.current_frame < self.point_compute.warmup_frames;
+        (valid, self.buffer_capacity, warming)
+    }
+
+    /// Hint for the gizmo part currently hovered (`None` when nothing's
+    /// hovered, e.g. gizmos are off or hover was suppressed because the
+    /// pointer is over egui) — status bar tier 2, per the plan.
+    pub fn hovered_hint(&self) -> Option<&'static str> {
+        use crate::pick::GizmoPart;
+        self.hovered.map(|hit| match hit.part {
+            GizmoPart::Origin => hints::HINT_ORIGIN,
+            GizmoPart::Axis(_) => hints::HINT_AXIS,
+            GizmoPart::RotEdge(_) => hints::HINT_ROT_EDGE,
+        })
+    }
+
+    /// Strength multiplier for U's random mutation (Explore window slider;
+    /// persisted in prefs).
+    pub fn mutate_strength(&self) -> f32 {
+        self.prefs.mutate_strength
+    }
+
+    pub fn set_mutate_strength(&mut self, strength: f32) {
+        self.prefs.mutate_strength = strength.clamp(0.1, 3.0);
+    }
+
+    /// Write prefs to disk now (callers debounce — e.g. on slider
+    /// drag-stop — so a drag doesn't hammer the file every frame).
+    pub fn save_prefs(&mut self) {
+        self.prefs.save();
+    }
+
+    /// Persist panel open/closed state the moment it differs from what's on
+    /// disk — same pattern as `toggle_invert_pitch`. Called every frame from
+    /// `ui::draw`; cheap no-op when nothing changed.
+    pub fn panel_prefs_changed(&mut self, panels: crate::prefs::PanelPrefs) {
+        if self.prefs.panels != panels {
+            self.prefs.panels = panels;
+            self.prefs.save();
+        }
     }
 
     pub fn zoom_in(&mut self) {
@@ -1240,7 +1342,7 @@ impl App {
             self.undo_stack.remove(0);
         }
 
-        let log = crate::mutate::mutate(&mut self.scene, &mut rand::thread_rng(), 1.0);
+        let log = crate::mutate::mutate(&mut self.scene, &mut rand::thread_rng(), self.prefs.mutate_strength);
         log::info!("Mutation: {}", log.join("; "));
         self.after_scene_shape_change();
     }

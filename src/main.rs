@@ -308,9 +308,13 @@ impl ApplicationHandler for AppWrapper {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                if egui.ctx.egui_wants_keyboard_input() {
-                    // egui owns keyboard focus (e.g. typing into a text
-                    // field) — don't also run keybinds.
+                // egui owns keyboard focus (e.g. typing into a text field),
+                // OR the pointer is mid-drag on an egui widget (e.g. a
+                // Slider — which doesn't take keyboard focus, only pointer
+                // capture) — either way, don't also run keybinds. Without
+                // the second check, S/F/D etc. leak through while dragging
+                // a Render-window slider.
+                if egui.ctx.egui_wants_keyboard_input() || egui.ctx.egui_is_using_pointer() {
                 } else if event.state.is_pressed() {
                     // Handle special keys by physical key (layout-independent)
                     match event.physical_key {
@@ -497,7 +501,7 @@ impl ApplicationHandler for AppWrapper {
                 // replaces the old text-overlay pass inside App::render).
                 let raw_input = egui.state.take_egui_input(&app.window);
                 let full_output = egui.ctx.run_ui(raw_input, |ui| {
-                    ui::draw(ui.ctx(), app);
+                    ui::draw(ui, app);
                 });
                 egui.state.handle_platform_output(&app.window, full_output.platform_output);
                 let pixels_per_point = full_output.pixels_per_point;

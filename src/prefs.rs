@@ -6,11 +6,46 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug)]
+/// Which of the Phase 2 `egui::Window` panels are open. Toggled from the top
+/// toolbar or a window's own close button (the two are the same bool, so
+/// they can never go out of sync); persisted the moment either changes.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq)]
+pub struct PanelPrefs {
+    #[serde(default)]
+    pub transforms_open: bool,
+    #[serde(default)]
+    pub explore_open: bool,
+    #[serde(default)]
+    pub camera_open: bool,
+    #[serde(default)]
+    pub render_open: bool,
+}
+
+fn default_mutate_strength() -> f32 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct Prefs {
     /// Flightsim-style: drag down to tilt the scene's top toward you
     #[serde(default)]
     pub invert_pitch: bool,
+    /// Open/closed state of the Phase 2 panel windows
+    #[serde(default)]
+    pub panels: PanelPrefs,
+    /// Strength multiplier for U's random mutation (Explore window slider)
+    #[serde(default = "default_mutate_strength")]
+    pub mutate_strength: f32,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            invert_pitch: false,
+            panels: PanelPrefs::default(),
+            mutate_strength: default_mutate_strength(),
+        }
+    }
 }
 
 fn prefs_path() -> Option<PathBuf> {
