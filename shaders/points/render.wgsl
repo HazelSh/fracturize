@@ -64,9 +64,12 @@ fn vs_main(
 
     let ndc = clip.xyz / clip.w;
 
-    // Point size decreases with depth (perspective)
+    // Point size decreases with depth (perspective). The upper clamp stops
+    // points right next to the camera from ballooning into giant squares
+    // that occlude the scene (volume-filling scenes put points arbitrarily
+    // close to the eye when zoomed in) — near-field dots stay dots.
     let base_size = camera.point_size * camera.screen_height / depth;
-    let size_pixels = max(base_size, camera.min_point_pixels);
+    let size_pixels = clamp(base_size, camera.min_point_pixels, 12.0);
 
     // Convert to NDC size
     let ndc_size_y = size_pixels / camera.screen_height * 2.0;

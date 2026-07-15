@@ -11,7 +11,7 @@ struct Point {
     color_idx: u32,
 }
 
-// Must match GpuTransform in buffers.rs (144 bytes)
+// Must match GpuTransform in buffers.rs (160 bytes)
 struct Transform {
     matrix: mat4x4<f32>,
     color_value: f32,
@@ -19,7 +19,7 @@ struct Transform {
     cumulative_weight: f32,
     color_speed: f32,
     // Variation weights; slot order matches scene::VARIATION_NAMES
-    var_weights: array<vec4<f32>, 4>,
+    var_weights: array<vec4<f32>, 5>,
 }
 
 struct WalkerState {
@@ -67,13 +67,21 @@ fn rand_float(s: ptr<function, vec4<u32>>) -> f32 {
     return f32(xorshift128(s)) / 4294967296.0;
 }
 
+// Binary search over the cumulative weights: first i with r < cum_weight[i].
+// Scenes are typically <10 transforms, but generated ones (L-system ports)
+// reach thousands, where a linear scan dominates the whole chaos pass.
 fn select_transform(r: f32, num_transforms: u32) -> u32 {
-    for (var i = 0u; i < num_transforms; i++) {
-        if r < transforms[i].cumulative_weight {
-            return i;
+    var lo = 0u;
+    var hi = num_transforms - 1u;
+    while lo < hi {
+        let mid = (lo + hi) / 2u;
+        if r < transforms[mid].cumulative_weight {
+            hi = mid;
+        } else {
+            lo = mid + 1u;
         }
     }
-    return num_transforms - 1u;
+    return lo;
 }
 
 // Fetch a variation weight by slot index from the packed vec4 array
@@ -183,6 +191,35 @@ fn apply_variations(t_idx: u32, p: vec3<f32>, rng: ptr<function, vec4<u32>>) -> 
     w = var_weight(t_idx, 15u);
     if w != 0.0 {
         out += w * vec3<f32>(sin(p.x) / max(abs(cos(p.y)), 1e-3) * sign(cos(p.y)), tan(p.y), p.z);
+    }
+
+    // 16: absfold — KIFS kaleidoscope fold: reflect into the positive octant.
+    // Pair with affine rotations (before/after via transform order) for
+    // kaleidoscopic symmetry (McGraw 2015).
+    w = var_weight(t_idx, 16u);
+    if w != 0.0 { out += w * abs(p); }
+
+    // 17: boxfold — Mandelbox fold: reflect components off the ±1 walls
+    w = var_weight(t_idx, 17u);
+    if w != 0.0 { out += w * (2.0 * clamp(p, vec3<f32>(-1.0), vec3<f32>(1.0)) - p); }
+
+    // 18: spherefold — Mandelbox sphere fold (minR2 = 0.25, fixR2 = 1):
+    // inner points blow outward, mid-range points invert, far points pass
+    w = var_weight(t_idx, 18u);
+    if w != 0.0 {
+        var f = 1.0;
+        if r2 < 0.25 { f = 4.0; } else if r2 < 1.0 { f = 1.0 / r2; }
+        out += w * f * p;
+    }
+
+    // 19: bulb — power-8 mandelbulb angle map, radius-preserving: octuple
+    // both spherical angles but keep r (so it never diverges/collapses)
+    w = var_weight(t_idx, 19u);
+    if w != 0.0 {
+        let rr = max(r, 1e-9);
+        let tb = 8.0 * acos(clamp(p.z / rr, -1.0, 1.0));
+        let pb = 8.0 * atan2(p.y, p.x);
+        out += w * r * vec3<f32>(sin(tb) * cos(pb), sin(tb) * sin(pb), cos(tb));
     }
 
     return out;

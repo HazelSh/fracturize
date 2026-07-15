@@ -39,3 +39,6 @@ glyphon = { git = "https://github.com/grovesNL/glyphon", rev = "37b973d50b9bf207
 
 # Image output
 image = "0.25"
+# Animated AVIF encoding (already built for image's still-AVIF support via
+# ravif; keep default-features off + threading to share the same build)
+rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }

@@ -20,5 +20,5 @@ pub use context::GpuContext;
 // Re-export the active renderer (points)
 pub use gizmo::GizmoRenderer;
 pub use lines::LineRenderer;
-pub use points::{PointCompute, PointRenderer, DEPTH_FORMAT};
+pub use points::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 pub use text::TextRenderer;

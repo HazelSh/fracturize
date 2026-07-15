@@ -1,0 +1,43 @@
+# A phyllotactic seedhead: one golden-angle map (rotate 137.5°, shrink,
+# climb) winds copies of a flattened frond around a central column, the
+# way florets pack a thistle. The frond curls with a touch of bent; a
+# bubble-mist core softens the axis. Meant for the splat renderer —
+# the fronds overlap into translucent density.
+[meta]
+name = "Thistledown"
+author = "Claude Fable 5 (Claude Code)"
+point_size = 0.003
+point_count = 8_000_000
+color_falloff = 0.7
+color_contrast = 1.5
+
+[camera]
+focus = [0.0, 0.62, 0.0]
+distance = 2.1
+pitch = 0.18
+
+[[transform]]
+name = "phyllotaxis"
+translation = [0.0, 0.07, 0.0]
+scale = 0.94
+rotation = [0.0, 137.5, 0.0]
+color = [0.95, 0.75, 0.35]
+weight = 6.0
+
+[[transform]]
+name = "frond"
+translation = [0.35, 0.28, 0.0]
+scale = [0.4, 0.09, 0.26]
+rotation = [18.0, 0.0, 40.0]
+color = [0.1, 0.6, 0.65]
+weight = 1.2
+variations = { bent = 0.2, linear = 0.8 }
+
+[[transform]]
+name = "mist"
+translation = [0.0, 0.35, 0.0]
+scale = 0.4
+rotation = [0.0, 0.0, 0.0]
+color = [0.85, 0.4, 0.55]
+weight = 0.3
+variations = { bubble = 0.6, linear = 0.4 }

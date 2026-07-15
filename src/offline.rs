@@ -19,7 +19,8 @@ use rand::SeedableRng;
 
 use crate::camera::OrbitCamera;
 use crate::gpu::buffers::CameraUniforms;
-use crate::gpu::{PointCompute, PointRenderer, DEPTH_FORMAT};
+use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+use crate::path::CameraPath;
 use crate::scene::Scene;
 use crate::view::View;
 
@@ -74,6 +75,10 @@ pub struct OfflineParams<'a> {
     pub accumulate: u32,
     pub fog_enabled: bool,
     pub grid: GridMode,
+    /// Use the additive log-density splat renderer instead of plain points
+    pub splat: bool,
+    /// Splat exposure multiplier (ignored for the point renderer)
+    pub exposure: f32,
 }
 
 /// Evenly spaced values in [-1, 1] (a single sample sits at 0)
@@ -103,7 +108,8 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
                     cam.yaw = base.yaw + k as f32 * std::f32::consts::TAU / n as f32;
                     TileView {
                         view_proj: cam.view_proj(aspect),
-                        label: format!("yaw {:.1}°", cam.yaw.to_degrees()),
+                        // Radians in parens: paste directly into [camera] yaw
+                        label: format!("yaw {:.1}° ({:.4})", cam.yaw.to_degrees(), cam.yaw),
                     }
                 })
                 .collect()
@@ -133,12 +139,19 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
                             format!("{} {:.2}", pos, v * step)
                         }
                     };
+                    // Equivalent orbit params, so a tile can be adopted
+                    // directly into a [camera] block or view file
+                    let v = eye - base.focus;
+                    let d = v.length().max(1e-4);
                     tiles.push(TileView {
                         view_proj: proj * view,
                         label: format!(
-                            "{} / {} (of distance, still looking at focus)",
+                            "{} / {} = yaw {:.4} pitch {:.4} distance {:.3}",
                             h(dx, "left", "right"),
                             h(dy, "up", "down"),
+                            v.x.atan2(v.z),
+                            (v.y / d).clamp(-1.0, 1.0).asin(),
+                            d,
                         ),
                     });
                 }
@@ -245,6 +258,47 @@ fn base_setup(view: &Option<View>, scene: &Scene, fog_enabled: bool) -> (OrbitCa
     }
 }
 
+/// Which renderer draws the tiles
+enum TileRenderer {
+    Points(PointRenderer),
+    Splat(SplatRenderer),
+}
+
+impl TileRenderer {
+    /// Build the requested renderer over a filled point buffer. For splat,
+    /// exposure is normalized against the buffer's point count and tile
+    /// height, matching the interactive renderer.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        compute: &PointCompute,
+        splat: bool,
+        exposure: f32,
+        point_count: u32,
+        height: u32,
+    ) -> Self {
+        if splat {
+            let renderer = SplatRenderer::new(
+                device, FORMAT, &compute.point_buffer, &compute.colormap_buffer,
+            );
+            renderer.upload_params(queue, exposure, point_count, height as f32, CLEAR_COLOR);
+            TileRenderer::Splat(renderer)
+        } else {
+            TileRenderer::Points(PointRenderer::new(
+                device, FORMAT, &compute.point_buffer, &compute.colormap_buffer,
+            ))
+        }
+    }
+
+    fn upload_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
+        match self {
+            TileRenderer::Points(r) => r.upload_camera(queue, camera),
+            TileRenderer::Splat(r) => r.upload_camera(queue, camera),
+        }
+    }
+}
+
 /// Reusable offscreen tile target: color + depth textures and a readback
 /// buffer, rendered per tile and blitted into the CPU-side contact sheet
 struct TileTarget {
@@ -304,7 +358,7 @@ impl TileTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &PointRenderer,
+        renderer: &mut TileRenderer,
         point_count: u32,
         use_point_primitives: bool,
         sheet: &mut [u8],
@@ -315,31 +369,45 @@ impl TileTarget {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("offline_render_encoder"),
         });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("offline_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+        match renderer {
+            TileRenderer::Points(renderer) => {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("offline_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            renderer.draw(&mut pass, point_count, use_point_primitives);
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                renderer.draw(&mut pass, point_count, use_point_primitives);
+            }
+            TileRenderer::Splat(renderer) => {
+                renderer.render(
+                    device,
+                    &mut encoder,
+                    &self.color_view,
+                    &self.depth_view,
+                    self.width,
+                    self.height,
+                    point_count,
+                    use_point_primitives,
+                );
+            }
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -411,6 +479,8 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         accumulate,
         fog_enabled,
         grid,
+        splat,
+        exposure,
     } = params;
     let t_start = Instant::now();
 
@@ -429,7 +499,8 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let t_setup = Instant::now();
 
     let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate);
-    let renderer = PointRenderer::new(&device, FORMAT, &compute.point_buffer, &compute.colormap_buffer);
+    let mut renderer =
+        TileRenderer::new(&device, &queue, &compute, splat, exposure, point_count, height);
     let t_fill = Instant::now();
 
     let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
@@ -453,7 +524,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
         target.render_tile(
-            &device, &queue, &renderer, point_count, use_point_primitives,
+            &device, &queue, &mut renderer, point_count, use_point_primitives,
             &mut sheet, sheet_w, col, row,
         );
         if tiles.len() > 1 {
@@ -472,6 +543,149 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         width, height, point_count, out_path.display(),
     );
     print_timing(t_start, t_setup, t_fill, t_render, t_done);
+    Ok(())
+}
+
+/// Delete `<stem>.mutN.toml` leftovers from previous runs at the same out
+/// path, so the variant files on disk always describe the current sheet
+/// (a stale mutN also hijacks the comment-preserving save into merging with
+/// the old variant). Purely best-effort: missing dirs/files, unreadable
+/// entries, or racing deletions are all silently fine — the render itself
+/// never depends on this.
+fn remove_stale_variants(out_stem: &Path) {
+    let Some(name) = out_stem.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let dir = match out_stem.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{name}.mut");
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(f) = file_name.to_str() else { continue };
+        let is_variant = f
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".toml"))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if is_variant {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Animation settings for `render_animation`
+pub struct AnimParams {
+    pub fps: u32,
+    /// Duration override; None uses the path's own duration
+    pub seconds: Option<f32>,
+    /// AV1 quality 0-100 (higher = better)
+    pub quality: u8,
+}
+
+/// Render an animated AVIF: the camera flies the scene's [[camera.path]]
+/// spline (or a seamless full-turn orbit when no path is authored) while the
+/// point cloud stays fixed — one chaos fill, one cheap render pass per frame,
+/// frames streamed straight into the AV1 encoder.
+pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), String> {
+    let OfflineParams {
+        mut scene,
+        view,
+        width,
+        height,
+        out_path,
+        accumulate,
+        fog_enabled,
+        grid: _,
+        splat,
+        exposure,
+    } = params;
+    // 4:2:0 chroma needs even dimensions
+    let (width, height) = (width & !1, height & !1);
+    let t_start = Instant::now();
+
+    if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
+        scene.color_falloff = f;
+        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+    }
+    let color_contrast = view
+        .as_ref()
+        .and_then(|v| v.color_contrast)
+        .unwrap_or(scene.color_contrast);
+
+    let (device, queue) = create_device()?;
+    let t_setup = Instant::now();
+
+    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate);
+    let mut renderer =
+        TileRenderer::new(&device, &queue, &compute, splat, exposure, point_count, height);
+    let t_fill = Instant::now();
+
+    let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
+    // A view overrides the base framing but the scene still owns the path;
+    // pathless scenes get a seamless full orbit around the base framing
+    let path = scene
+        .camera_path
+        .clone()
+        .unwrap_or_else(|| CameraPath::full_orbit(&base_camera));
+
+    let seconds = anim.seconds.unwrap_or_else(|| path.duration()).max(0.1);
+    let frames = ((seconds * anim.fps as f32).round() as u32).max(2);
+    println!(
+        "Animating {} frames ({:.1}s at {} fps): {} keypoints, {}{}",
+        frames,
+        seconds,
+        anim.fps,
+        path.keys.len(),
+        if path.closed { "closed loop" } else { "open path" },
+        if scene.camera_path.is_none() { " (auto full orbit)" } else { "" },
+    );
+
+    let mut encoder = crate::avif::AnimationEncoder::new(width, height, anim.fps, anim.quality, 8)?;
+    let aspect = width as f32 / height as f32;
+    let target = TileTarget::new(&device, width, height);
+    let mut frame_buf = vec![0u8; (width * height * 4) as usize];
+
+    for i in 0..frames {
+        // Closed paths exclude t=1 so the loop wraps without a repeated frame
+        let t = if path.closed {
+            i as f32 / frames as f32
+        } else {
+            i as f32 / (frames - 1) as f32
+        };
+        let cam = path.sample(t);
+        let camera = CameraUniforms::new(
+            cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
+            fog.0, fog.1, fog.2, fog.3, color_contrast,
+        );
+        renderer.upload_camera(&queue, &camera);
+        let use_point_primitives = point_size * height as f32 / cam.distance <= 1.5;
+        target.render_tile(
+            &device, &queue, &mut renderer, point_count, use_point_primitives,
+            &mut frame_buf, width, 0, 0,
+        );
+        encoder.push_frame(&frame_buf)?;
+    }
+    let t_render = Instant::now();
+
+    encoder.finish(out_path)?;
+    let t_done = Instant::now();
+
+    println!(
+        "Rendered {}x{} animation ({} frames, {} points) -> {}",
+        width, height, frames, point_count, out_path.display(),
+    );
+    println!(
+        "Timing: setup {:.2}s | chaos fill {:.2}s | render+encode {:.2}s | flush+mux {:.2}s | total {:.2}s",
+        (t_setup - t_start).as_secs_f32(),
+        (t_fill - t_setup).as_secs_f32(),
+        (t_render - t_fill).as_secs_f32(),
+        (t_done - t_render).as_secs_f32(),
+        (t_done - t_start).as_secs_f32(),
+    );
     Ok(())
 }
 
@@ -494,6 +708,8 @@ pub fn render_mutations(
         accumulate,
         fog_enabled,
         grid: _,
+        splat,
+        exposure,
     } = params;
     let t_start = Instant::now();
 
@@ -546,19 +762,20 @@ pub fn render_mutations(
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
 
     let out_stem = out_path.with_extension("");
+    remove_stale_variants(&out_stem);
     let mut fill_total = 0.0f32;
     for (idx, (variant, label)) in variants.iter().enumerate() {
         let t0 = Instant::now();
         // Each variant is a different IFS: refill the point buffer
         let (compute, point_count) = fill_points(&device, &queue, variant, accumulate);
-        let renderer =
-            PointRenderer::new(&device, FORMAT, &compute.point_buffer, &compute.colormap_buffer);
+        let mut renderer =
+            TileRenderer::new(&device, &queue, &compute, splat, exposure, point_count, height);
         renderer.upload_camera(&queue, &camera);
         fill_total += t0.elapsed().as_secs_f32();
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
         target.render_tile(
-            &device, &queue, &renderer, point_count, use_point_primitives,
+            &device, &queue, &mut renderer, point_count, use_point_primitives,
             &mut sheet, sheet_w, col, row,
         );
 

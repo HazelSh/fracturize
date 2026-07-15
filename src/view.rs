@@ -35,6 +35,19 @@ pub struct View {
     /// Cyclic colormap contrast stretch; None = use the scene's value
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_contrast: Option<f32>,
+    /// Renderer this view was captured with: "points" (default) or "splat"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<String>,
+    /// Splat-renderer exposure (only meaningful with renderer = "splat")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<f32>,
+}
+
+impl View {
+    /// Whether this view was captured with the splat renderer
+    pub fn is_splat(&self) -> bool {
+        self.renderer.as_deref() == Some("splat")
+    }
 }
 
 impl View {
@@ -77,6 +90,8 @@ mod tests {
             fog_saturation: 0.3,
             color_falloff: Some(0.6),
             color_contrast: Some(2.0),
+            renderer: Some("splat".to_string()),
+            exposure: Some(1.5),
         };
         let dir = std::env::temp_dir().join("fracturize_view_test");
         let path = dir.join("roundtrip.toml");

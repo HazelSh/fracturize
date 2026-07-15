@@ -1,5 +1,7 @@
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
+
+use crate::path::{CameraPath, PathKey};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -8,7 +10,7 @@ use std::path::Path;
 pub type Colormap = [[f32; 4]; 256];
 
 /// Number of variation slots per transform (must match chaos.wgsl)
-pub const NUM_VARIATIONS: usize = 16;
+pub const NUM_VARIATIONS: usize = 20;
 
 /// Variation names, in GPU slot order (must match apply_variations in chaos.wgsl)
 pub const VARIATION_NAMES: [&str; NUM_VARIATIONS] = [
@@ -28,6 +30,10 @@ pub const VARIATION_NAMES: [&str; NUM_VARIATIONS] = [
     "bubble",      // 13: 4p/(r^2+4)
     "cylinder",    // 14: (sin x, y, z)
     "tangent",     // 15: (sin x / cos y, tan y, z)
+    "absfold",     // 16: abs(p) — KIFS kaleidoscope fold (pair with rotations)
+    "boxfold",     // 17: 2*clamp(p,±1)-p — Mandelbox box fold
+    "spherefold",  // 18: Mandelbox sphere fold (minR2 0.25, fixR2 1)
+    "bulb",        // 19: power-8 mandelbulb angle map, radius-preserving
 ];
 
 /// A single IFS transform, fully resolved for use by the app and GPU
@@ -186,7 +192,7 @@ pub struct TransformDef {
     pub name: Option<String>,
     pub translation: [f64; 3],
     #[serde(default = "default_scale")]
-    pub scale: f64,
+    pub scale: ScaleDef,
     #[serde(default)]
     pub rotation: [f64; 3], // Euler angles in degrees (pitch, yaw, roll)
     pub color: [f64; 3],
@@ -206,8 +212,27 @@ pub struct TransformDef {
     pub variations: Option<BTreeMap<String, f64>>,
 }
 
-fn default_scale() -> f64 {
-    1.0
+fn default_scale() -> ScaleDef {
+    ScaleDef::Uniform(1.0)
+}
+
+/// Uniform (`scale = 0.5`) or per-axis (`scale = [0.05, 0.6, 0.05]`) scale.
+/// Per-axis scale is what makes L-system-style maps (squash onto a trunk
+/// segment, long thin branches) expressible in the TOML format.
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq)]
+#[serde(untagged)]
+pub enum ScaleDef {
+    Uniform(f64),
+    PerAxis([f64; 3]),
+}
+
+impl ScaleDef {
+    pub fn to_vec3(self) -> Vec3 {
+        match self {
+            ScaleDef::Uniform(s) => Vec3::splat(s as f32),
+            ScaleDef::PerAxis(a) => Vec3::from(a.map(|v| v as f32)),
+        }
+    }
 }
 
 fn default_weight() -> f64 {
@@ -233,6 +258,36 @@ pub struct CameraDef {
     /// Orbit elevation in radians (positive = above the focus)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pitch: Option<f64>,
+    /// Camera path: loop back to the first keypoint (seamless loops)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_closed: Option<bool>,
+    /// Camera path: playback/render duration in seconds (default 3s/segment)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_seconds: Option<f64>,
+    /// Camera path: ease in/out (default: open paths ease, closed don't)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_ease: Option<bool>,
+    /// Camera path spline keypoints ([[camera.path]]). Omitted fields
+    /// default to the base camera's values. Must be last: TOML requires
+    /// scalar keys before sub-tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<Vec<PathKeyDef>>,
+}
+
+/// One [[camera.path]] spline keypoint. Every field is optional and falls
+/// back to the base [camera] framing, so a key only states what changes.
+#[derive(Deserialize, Serialize, Clone, Copy, Default)]
+pub struct PathKeyDef {
+    /// Orbit angle in radians. Unbounded: successive keys spanning more than
+    /// a full turn author spirals; nothing is wrapped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yaw: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<[f64; 3]>,
 }
 
 /// Full scene file structure
@@ -283,6 +338,8 @@ pub struct Scene {
     pub camera_yaw: f32,
     /// Camera orbit elevation (radians)
     pub camera_pitch: f32,
+    /// Optional spline camera path ([[camera.path]] keypoints)
+    pub camera_path: Option<CameraPath>,
 }
 
 impl Scene {
@@ -325,7 +382,7 @@ impl Scene {
                 );
 
                 let matrix = Mat4::from_scale_rotation_translation(
-                    Vec3::splat(t.scale as f32),
+                    t.scale.to_vec3(),
                     rotation,
                     Vec3::from(t.translation.map(|v| v as f32)),
                 );
@@ -385,6 +442,34 @@ impl Scene {
             cam.pitch.unwrap_or(0.0) as f32,
         );
 
+        // Resolve [[camera.path]] keypoints; omitted fields inherit the base
+        // (folded) camera framing
+        let camera_path = match &cam.path {
+            Some(defs) if !defs.is_empty() => {
+                if defs.len() < 2 {
+                    return Err("camera.path needs at least 2 keypoints".to_string());
+                }
+                Some(CameraPath {
+                    keys: defs
+                        .iter()
+                        .map(|k| PathKey {
+                            yaw: k.yaw.map(|v| v as f32).unwrap_or(folded.yaw),
+                            pitch: k.pitch.map(|v| v as f32).unwrap_or(folded.pitch),
+                            distance: k.distance.map(|v| v as f32).unwrap_or(folded.distance),
+                            focus: k
+                                .focus
+                                .map(|f| Vec3::from(f.map(|v| v as f32)))
+                                .unwrap_or(camera_focus),
+                        })
+                        .collect(),
+                    closed: cam.path_closed.unwrap_or(false),
+                    ease: cam.path_ease,
+                    seconds: cam.path_seconds.map(|v| v as f32),
+                })
+            }
+            _ => None,
+        };
+
         Ok(Scene {
             name: scene_file.meta.name,
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
@@ -403,6 +488,7 @@ impl Scene {
             camera_distance: folded.distance,
             camera_yaw: folded.yaw,
             camera_pitch: folded.pitch,
+            camera_path,
         })
     }
 
@@ -437,10 +523,18 @@ impl Scene {
                     variations.len() == 1 && variations.get("linear") == Some(&1.0);
 
                 let color = self.colors.get(i).copied().unwrap_or(Vec3::ONE);
+                let scale = if approx(scale.x as f64, scale.y as f64)
+                    && approx(scale.x as f64, scale.z as f64)
+                {
+                    ScaleDef::Uniform(tidy(scale.x))
+                } else {
+                    ScaleDef::PerAxis(scale.to_array().map(tidy))
+                };
+
                 TransformDef {
                     name: self.transform_names.get(i).cloned().flatten(),
                     translation: trans.to_array().map(tidy),
-                    scale: tidy(scale.x),
+                    scale,
                     rotation: [rx, ry, rz].map(|r| tidy(r.to_degrees())),
                     color: color.to_array().map(tidy),
                     weight: tidy(spec.weight),
@@ -467,12 +561,31 @@ impl Scene {
                 color_contrast: tidy(self.color_contrast),
                 point_count: Some(self.point_count),
             },
-            camera: Some(CameraDef {
-                focus: Some(self.camera_focus.to_array().map(tidy)),
-                offset: None,
-                distance: Some(tidy(self.camera_distance)),
-                yaw: Some(tidy(self.camera_yaw)),
-                pitch: Some(tidy(self.camera_pitch)),
+            camera: Some({
+                // A 1-key path is a transient in-app authoring state; the
+                // loader requires 2+ keys, so don't write it out
+                let path = self.camera_path.as_ref().filter(|p| p.keys.len() >= 2);
+                CameraDef {
+                    focus: Some(self.camera_focus.to_array().map(tidy)),
+                    offset: None,
+                    distance: Some(tidy(self.camera_distance)),
+                    yaw: Some(tidy(self.camera_yaw)),
+                    pitch: Some(tidy(self.camera_pitch)),
+                    path_closed: path.and_then(|p| p.closed.then_some(true)),
+                    path_seconds: path.and_then(|p| p.seconds.map(tidy)),
+                    path_ease: path.and_then(|p| p.ease),
+                    path: path.map(|p| {
+                        p.keys
+                            .iter()
+                            .map(|k| PathKeyDef {
+                                yaw: Some(tidy(k.yaw)),
+                                pitch: Some(tidy(k.pitch)),
+                                distance: Some(tidy(k.distance)),
+                                focus: Some(k.focus.to_array().map(tidy)),
+                            })
+                            .collect()
+                    }),
+                }
             }),
             transforms,
         }
@@ -571,6 +684,12 @@ fn set_i64(table: &mut toml_edit::Table, key: &str, v: i64, default: Option<i64>
 
 fn set_str(table: &mut toml_edit::Table, key: &str, v: &str) {
     if table.get(key).and_then(|i| i.as_str()) != Some(v) {
+        set_value(table, key, v.into());
+    }
+}
+
+fn set_bool(table: &mut toml_edit::Table, key: &str, v: bool) {
+    if table.get(key).and_then(|i| i.as_bool()) != Some(v) {
         set_value(table, key, v.into());
     }
 }
@@ -677,6 +796,62 @@ fn merge_scene_into_document(
         // Folded into yaw/pitch/distance at load; leaving it would
         // double-apply on the next load
         camera.remove("offset");
+
+        match cam.path_closed {
+            Some(b) => set_bool(camera, "path_closed", b),
+            None => {
+                camera.remove("path_closed");
+            }
+        }
+        match cam.path_seconds {
+            Some(s) => set_f64(camera, "path_seconds", s, None),
+            None => {
+                camera.remove("path_seconds");
+            }
+        }
+        match cam.path_ease {
+            Some(b) => set_bool(camera, "path_ease", b),
+            None => {
+                camera.remove("path_ease");
+            }
+        }
+        match &cam.path {
+            None => {
+                camera.remove("path");
+            }
+            Some(keys) => {
+                let existing = camera
+                    .get("path")
+                    .and_then(|i| i.as_array_of_tables())
+                    .map(|a| a.len());
+                if existing == Some(keys.len()) {
+                    // Same key count: update values in place (keeps comments)
+                    let arr = camera.get_mut("path")?.as_array_of_tables_mut()?;
+                    for (t, def) in arr.iter_mut().zip(keys) {
+                        if let Some(y) = def.yaw {
+                            set_f64(t, "yaw", y, None);
+                        }
+                        if let Some(p) = def.pitch {
+                            set_f64(t, "pitch", p, None);
+                        }
+                        if let Some(d) = def.distance {
+                            set_f64(t, "distance", d, None);
+                        }
+                        if let Some(f) = def.focus {
+                            set_arr3(t, "focus", f, None);
+                        }
+                    }
+                } else {
+                    // Key count changed: rebuild from the fresh serialization
+                    let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
+                    camera["path"] = fresh_doc
+                        .get("camera")
+                        .and_then(|c| c.as_table())
+                        .and_then(|c| c.get("path"))?
+                        .clone();
+                }
+            }
+        }
     }
 
     let existing_len = doc
@@ -693,7 +868,17 @@ fn merge_scene_into_document(
                 }
             }
             set_arr3(t, "translation", def.translation, None);
-            set_f64(t, "scale", def.scale, Some(1.0));
+            match def.scale {
+                ScaleDef::Uniform(s) => {
+                    // An existing array form won't approx-match a float; clear
+                    // it so set_f64 writes the scalar cleanly
+                    if t.get("scale").is_some_and(|i| i.as_array().is_some()) {
+                        t.remove("scale");
+                    }
+                    set_f64(t, "scale", s, Some(1.0));
+                }
+                ScaleDef::PerAxis(a) => set_arr3(t, "scale", a, None),
+            }
             set_arr3(t, "rotation", def.rotation, Some([0.0; 3]));
             set_arr3(t, "color", def.color, None);
             set_f64(t, "weight", def.weight, Some(1.0));
@@ -742,6 +927,21 @@ fn inline_variation_tables(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The loader's rotation convention, pinned as a test: EulerRot::XYZ
+    /// composes as Rx * Ry * Rz on column vectors. External generators
+    /// (tools/lsystem_to_ifs.py) decompose matrices assuming exactly this.
+    #[test]
+    fn euler_xyz_is_rx_ry_rz() {
+        let (a, b, c) = (0.3f32, -0.7, 1.1);
+        let q = Quat::from_euler(glam::EulerRot::XYZ, a, b, c);
+        let m = glam::Mat3::from_rotation_x(a)
+            * glam::Mat3::from_rotation_y(b)
+            * glam::Mat3::from_rotation_z(c);
+        let diff = (glam::Mat3::from_quat(q) - m).to_cols_array();
+        let max = diff.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+        assert!(max < 1e-5, "EulerRot::XYZ convention drift: {}", max);
+    }
 
     #[test]
     fn variations_serialize_inline() {
@@ -917,6 +1117,132 @@ color = [0.0, 1.0, 1.0]
             assert!((*ca - *cb).length() < 1e-3);
         }
         assert!((scene.camera_distance - reloaded.camera_distance).abs() < 1e-4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn camera_path_roundtrip() {
+        let src = r#"
+[meta]
+name = "Pathed"
+
+[camera]
+focus = [0.0, 0.2, 0.0]
+distance = 3.0
+yaw = 0.5
+pitch = 0.3
+path_closed = true
+path_seconds = 8.0
+
+# approach from afar
+[[camera.path]]
+yaw = 0.0
+distance = 6.0
+
+[[camera.path]]
+yaw = 3.14
+pitch = 0.6
+focus = [0.0, 0.5, 0.0]
+
+[[camera.path]]
+yaw = 6.28
+distance = 1.5
+
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+color = [1.0, 0.2, 0.2]
+"#;
+        let dir = std::env::temp_dir().join("fracturize_path_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pathed.toml");
+        std::fs::write(&path, src).unwrap();
+
+        let scene = Scene::load(&path).unwrap();
+        let p = scene.camera_path.as_ref().expect("path parsed");
+        assert_eq!(p.keys.len(), 3);
+        assert!(p.closed);
+        assert_eq!(p.seconds, Some(8.0));
+        // Omitted fields inherit the base camera
+        assert!((p.keys[0].pitch - 0.3).abs() < 1e-6, "pitch inherits base");
+        assert!((p.keys[0].focus - Vec3::new(0.0, 0.2, 0.0)).length() < 1e-6);
+        assert!((p.keys[1].distance - 3.0).abs() < 1e-6, "distance inherits base");
+        assert!((p.keys[1].focus - Vec3::new(0.0, 0.5, 0.0)).length() < 1e-6);
+
+        // Merge-save keeps the path (and its comment); values survive a reload
+        scene.save(&path).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("# approach from afar"), "{}", out);
+        assert!(out.contains("[[camera.path]]"), "{}", out);
+        let reloaded = Scene::load(&path).unwrap();
+        let q = reloaded.camera_path.as_ref().unwrap();
+        assert_eq!(q.keys.len(), 3);
+        assert!(q.closed);
+        for (a, b) in p.keys.iter().zip(&q.keys) {
+            assert!((a.yaw - b.yaw).abs() < 1e-3);
+            assert!((a.pitch - b.pitch).abs() < 1e-3);
+            assert!((a.distance - b.distance).abs() < 1e-3);
+            assert!((a.focus - b.focus).length() < 1e-3);
+        }
+
+        // Fresh save (new file) round-trips too
+        let fresh_path = dir.join("fresh.toml");
+        scene.save(&fresh_path).unwrap();
+        let fresh = Scene::load(&fresh_path).unwrap();
+        assert_eq!(fresh.camera_path.as_ref().unwrap().keys.len(), 3);
+
+        // A scene without a path stays path-free after save
+        let no_path = {
+            let p2 = dir.join("nopath.toml");
+            std::fs::write(&p2, "[meta]\nname = \"n\"\n\n[[transform]]\ntranslation = [0.0, 0.0, 0.5]\nscale = 0.5\ncolor = [1.0, 1.0, 1.0]\n").unwrap();
+            let s = Scene::load(&p2).unwrap();
+            s.save(&p2).unwrap();
+            Scene::load(&p2).unwrap()
+        };
+        assert!(no_path.camera_path.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn per_axis_scale_roundtrip() {
+        let src = r#"
+[meta]
+name = "Anisotropic"
+
+[[transform]]
+translation = [0.0, 0.5, 0.0]
+scale = [0.05, 0.6, 0.05]
+rotation = [0.0, 20.0, 5.0]
+color = [0.4, 0.8, 0.3]
+
+[[transform]]
+translation = [0.3, 0.0, 0.0]
+scale = 0.7
+color = [0.9, 0.5, 0.2]
+"#;
+        let dir = std::env::temp_dir().join("fracturize_scale_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_path = dir.join("src.toml");
+        std::fs::write(&src_path, src).unwrap();
+
+        let scene = Scene::load(&src_path).unwrap();
+        let (s0, _, _) = scene.transforms[0].matrix.to_scale_rotation_translation();
+        assert!((s0 - Vec3::new(0.05, 0.6, 0.05)).length() < 1e-4);
+
+        // Round-trip through both save paths: in-place merge (existing file)
+        // and fresh serialization (new file)
+        for path in [&src_path, &dir.join("fresh.toml")] {
+            scene.save(path).unwrap();
+            let reloaded = Scene::load(path).unwrap();
+            for (a, b) in scene.transforms.iter().zip(reloaded.transforms.iter()) {
+                let diff = (a.matrix - b.matrix).to_cols_array();
+                let max = diff.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                assert!(max < 1e-3, "matrix drift {} exceeds tolerance", max);
+            }
+        }
+        // Uniform transform must stay scalar in the file
+        let saved = std::fs::read_to_string(&src_path).unwrap();
+        assert!(saved.contains("scale = 0.7"), "uniform scale kept scalar:\n{saved}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

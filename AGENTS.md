@@ -16,6 +16,8 @@ src/
   main.rs        # CLI args, winit event loop, keybinds, default scene
   app.rs         # App state, mouse/edit handling, render orchestration, HUD, screenshots
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
+  path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
+  avif.rs        # Animated AVIF writer: rav1e AV1 encode + minimal ISOBMFF muxer
   pick.rs        # Gizmo hit-testing and drag geometry (pure math, unit-tested)
   mutate.rs      # Random scene mutation operators (U key, --mutations)
   trace.rs       # CPU chaos walkers (variation port) for the trace overlay
@@ -27,13 +29,15 @@ src/
     points/      # Active renderer: chaos compute + point rendering
       compute.rs   # Chaos game dispatch, circular buffer bookkeeping
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
+      splat.rs     # Splat mode: additive log-density accumulation + tonemap
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # Trace line-segment renderer
     text.rs      # glyphon text overlay (HUD, transform list, help panel)
     density/     # Inactive experimental hash-grid density renderer
 shaders/
-  points/chaos.wgsl   # Chaos game + the 16 variation functions
+  points/chaos.wgsl   # Chaos game + the 20 variation functions
   points/render.wgsl  # vs_main (quads), vs_point (1px points), shared fs
+  points/splat.wgsl   # Splat accumulate (gaussian kernels) + log tonemap
   gizmo.wgsl
 scenes/          # TOML scene files
 ```
@@ -54,14 +58,31 @@ All GPU, three passes per frame:
 1. **Chaos compute** (`points/chaos.wgsl`): 16384 walkers each iterate the IFS a few
    times per frame, writing into a circular buffer (full refresh every ~800 frames;
    10x faster during warmup). Per iteration: pick transform by cumulative weight,
-   apply affine matrix, then blend the 16 variation functions by weight. Diverged or
+   apply affine matrix, then blend the 20 variation functions by weight. Diverged or
    NaN walkers are re-seeded randomly (important for nonlinear variations).
-2. **Point render** (`points/render.wgsl`): adaptive pipeline selection. When the
-   projected point size at orbit distance is subpixel (the common case), points are
-   drawn as native 1px point primitives (~3x faster). Otherwise, 4-vertex instanced
-   triangle-strip billboards with perspective sizing.
+2. **Point render** — two interchangeable modes over the same point buffer
+   (`R` toggles live; `--splat` / a view's `renderer = "splat"` select at launch):
+   - **points** (`points/render.wgsl`, default): opaque depth-tested points with
+     adaptive pipeline selection. When the projected point size at orbit distance
+     is subpixel (the common case), points are drawn as native 1px point
+     primitives (~3x faster). Otherwise, 4-vertex instanced triangle-strip
+     billboards with perspective sizing. Every point is full brightness.
+     Near-field growth is capped (12px in both modes) so points brushing
+     past the camera in volume-filling scenes render as motes, not
+     screen-eating squares/gaussian washes.
+   - **splat** (`points/splat.wgsl`): additive log-density accumulation,
+     flame-style. Each point deposits ~1 unit of energy as a gaussian splat into
+     an rgba16float HDR target (same subpixel fast path: 1px additive points);
+     a fullscreen pass then applies `log2(1 + density·exposure)` tonemapping.
+     Isolated points stay visible grit; overlapping ones form smooth density
+     gradients instead of clipping — this is the fix for diffuse scenes that
+     saturate into a pastel blob under the point renderer. No occlusion (the
+     fractal is pure emission; fog is applied per point before accumulation).
+     Exposure is normalized by point capacity and resolution, so brightness is
+     stable across effort levels and render sizes; `W`/`Shift+W` (or
+     `--exposure`) scale it. ~75% of the point renderer's FPS.
 3. **Gizmos, traces + text**: optional overlays (see keybinds). Traces (X)
-   are CPU walkers (trace.rs ports the 16 variations from chaos.wgsl — keep
+   are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl — keep
    them in sync!) rendered as alpha-faded line segments; they regenerate on
    every scene edit.
 
@@ -111,6 +132,9 @@ yaw/pitch/distance at load time and no longer written to files.
 | T | toggle info overlay (HUD + transform list) |
 | G | toggle transform gizmos |
 | O | pause / resume camera orbit |
+| Z | play / stop camera-path flythrough preview |
+| Y / Shift+Y | add current framing as a path keypoint / remove last keypoint |
+| Ctrl+Y | toggle camera path closed (seamless loop) |
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
@@ -125,6 +149,8 @@ yaw/pitch/distance at load time and no longer written to files.
 | J / K / L | selected transform's color: hue / saturation / value up (+Shift = down) |
 | E / Shift+E | cycle the variation slot targeted by - / = (shown in HUD) |
 | - / = | targeted variation weight down / up (0.05 steps) on selected transform |
+| R | toggle renderer: points / splat (additive log-density) |
+| W / Shift+W | splat exposure up / down |
 | [ / ] | shrink / grow point size |
 | D / Shift+D | finer / coarser color detail (color_falloff) |
 | C / Shift+C | less / more color contrast |
@@ -153,7 +179,8 @@ Use `--scene <path>` to load. See `scenes/` for examples.
 ```toml
 [meta]
 name = "Scene Name"
-author = "Your Name"
+author = "Your Name"       # agents: sign with your model name ("Claude Fable 5",
+                           # "Claude Opus 4.8"), not just the family name
 point_size = 0.002        # world-space point size
 point_count = 4_000_000   # circular point buffer capacity (default 500k)
 color_speed = 0.5         # global color blending speed (0-1); used when color_falloff = 0
@@ -167,11 +194,33 @@ yaw = 0.0                 # orbit angle around Y, radians
 pitch = 0.32              # orbit elevation, radians (positive = above)
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
 # into yaw/pitch/distance and never written back
+path_closed = true        # optional camera path: loop back to key 1 (seamless)
+path_seconds = 14.0       # playback/render duration (default 3s per segment)
+path_ease = false         # smoothstep time; default: open paths ease, loops don't
+
+# Camera path spline keypoints (2+ = a path; see src/path.rs). A uniform
+# Catmull-Rom spline runs through the keys in orbit-parameter space: yaw is
+# unbounded (keys spanning 2*TAU author a two-turn corkscrew — nothing wraps),
+# distance interpolates in log space (constant-relative-rate zooms), and focus
+# travels on its own spline so look directions blend smoothly while the eye
+# moves. Omitted fields inherit the base [camera] framing. Closed paths take
+# the shortest yaw route back to key 1. In-app: Y appends the current framing
+# as a keypoint, Shift+Y removes, Ctrl+Y toggles the loop, Z previews.
+[[camera.path]]
+yaw = 0.0
+pitch = 0.9
+distance = 5.5
+
+[[camera.path]]
+yaw = 3.14                # half a turn later...
+pitch = 0.1
+distance = 1.6            # ...swooped in close
+focus = [0.0, -0.5, 0.0]  # looking lower
 
 [[transform]]
 name = "whorl"                 # optional label shown in overlays
 translation = [0.0, 0.0, 0.5]
-scale = 0.5                    # uniform scale
+scale = 0.5                    # uniform, or per-axis: scale = [0.05, 0.6, 0.05]
 rotation = [0, 0, 0]           # Euler degrees (XYZ)
 color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap
 weight = 1.0                   # selection probability
@@ -181,9 +230,33 @@ color_speed = 0.5              # optional per-transform override (wins over colo
 variations = { swirl = 0.35, linear = 0.65 }
 ```
 
+Per-axis scale makes L-system-style geometry expressible: a transform with
+`scale = [0.06, 0.5, 0.06]` squashes the whole attractor onto a thin vertical
+segment — the "visible trunk" trick for IFS trees. `tools/lsystem_to_ifs.py`
+turtle-interprets a bracketed 3D L-system production (F draw, X recurse,
++-^&/\ turns, [] push/pop) and emits a scene this way; its `--depth N` flag
+expands to all length-N transform words (same attractor, N^branches
+transforms) for stress testing. Transform count is a storage buffer with no
+hard cap — tested to ~40k transforms; selection is a binary search over
+cumulative weights, so even thousands of transforms fill at full speed.
+
 Available variations (slot order in `scene.rs` / `chaos.wgsl`):
 `linear, sinusoidal, spherical, swirl, horseshoe, polar, disc, spiral,
-hyperbolic, diamond, julia, bent, fisheye, bubble, cylinder, tangent`
+hyperbolic, diamond, julia, bent, fisheye, bubble, cylinder, tangent,
+absfold, boxfold, spherefold, bulb`
+
+The last four are fold/escape-time imports (all bounded):
+- `absfold` — KIFS reflect-into-positive-octant (McGraw 2015). Its output
+  always has non-negative components, so the attractor gets flat facets on
+  the fold planes — deliberate crystal walls, not a bug (see
+  `scenes/stellate.toml`). Pair with affine rotations for kaleidoscopes.
+- `boxfold` / `spherefold` — the two Mandelbox operators (fold off ±1 walls;
+  sphere-invert with minR2 0.25 / fixR2 1). Blended together on a transform
+  with scale ~1 they make glassy plane-and-shard architecture
+  (`scenes/shatterbox.toml`).
+- `bulb` — power-8 mandelbulb angle map, radius-preserving (angles ×8, r
+  kept, so it neither diverges nor collapses). High weight = misty pearl
+  volumes with 8-fold mandala inclusions (`scenes/pearl.toml`).
 
 Scene-design notes learned the hard way:
 - Every point renders at full brightness (no log-density), so unbounded variations
@@ -193,6 +266,19 @@ Scene-design notes learned the hard way:
   scale ~1.1-1.2 with small rotations gives classic gnarl swirls.
 - Colors wash out to pastel when transforms mix heavily; raise `color_speed`
   (0.5-0.7) for stronger per-branch color identity.
+- `point_size` is world-space: size it against the *structure*, not by
+  copying another scene. A scene whose attractor spans ~1 world unit needs
+  roughly half the point_size of one spanning 2. Sanity check: keep
+  `point_size ≤ 1.5 × camera_distance / window_height` or the renderer
+  leaves the crisp 1px path at the default view on tall windows and every
+  point becomes a multi-pixel billboard — strands turn to chunky ribbons
+  (stellate shipped with 0.0025 and needed 0.0012).
+- Diffuse volumetric scenes (broad clouds rather than thin filaments) saturate
+  small renders into a solid pastel blob: every point is full brightness, so
+  once density passes ~1 point/pixel all structure is gone. Judge such scenes
+  at higher resolution or lower effort; filamentous scenes are unaffected.
+  Or switch to the splat renderer (R / `--splat`): its log-density tonemap keeps
+  structure visible at any density and such scenes generally look far better.
 - Color variation follows *coarse* structure by default: the most recent transform
   in a walker's history decides which top-level copy a point lands in, and older
   iterations address progressively finer scales — but the fixed-rate color EMA
@@ -210,7 +296,8 @@ Scene-design notes learned the hard way:
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
-point size, fog, color falloff/contrast) to `views/<scene>-<timestamp>.toml`.
+point size, fog, color falloff/contrast — plus `renderer = "splat"` and
+`exposure` when splat mode is active) to `views/<scene>-<timestamp>.toml`.
 View color params override the scene's when present. Load one with `--view <path>`;
 in windowed mode the orbit starts paused so the framing holds (press O to resume).
 
@@ -225,15 +312,39 @@ encode+save | total`) to stdout so you can budget effort. Options:
   `point_count` is just the interactive default (16 bytes/point of GPU memory).
 - `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`.
+- `--splat [--exposure X]` — render with the splat renderer (also implied by a
+  view saved in splat mode; explicit flags win). Works with all grid modes.
+  Exposure is capacity-normalized, so the same value looks the same at every
+  effort level; raise it (1.5-3) to brighten thin filaments, lower it to
+  recover detail in hot cores.
 
 **Grid contact sheets** (for exploring 3D framing cheaply — the point cloud is
 filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
 
 - `--orbit-grid 4x2` — 8 views evenly spaced around a full horizontal orbit,
-  starting at the base yaw. Row-major; per-tile yaw printed to stdout.
+  starting at the base yaw. Row-major; per-tile yaw printed to stdout in
+  degrees and radians (radians paste directly into `[camera] yaw`).
 - `--move-grid 3x3 [--move-step 0.25]` — camera nudged left/center/right
   (columns) × up/center/down (rows) in the view plane by `move-step` × orbit
-  distance, all still looking at the focus. Center tile = base view.
+  distance, all still looking at the focus. Center tile = base view. Each
+  tile prints its equivalent `yaw`/`pitch`/`distance`, so a good framing can
+  be adopted directly into a `[camera]` block or view file.
+
+**Animation** (`--render <out.avif>`): an animated AVIF of the camera flying
+the scene's `[[camera.path]]` spline — or, when the scene has no path, a
+seamless full-turn orbit of the base framing. The point cloud is fixed, so
+this is one chaos fill plus a cheap render pass per frame; frames stream
+straight into rav1e (AV1) and a hand-rolled ISOBMFF muxer (src/avif.rs), no
+external tools. Cannot combine with grid/mutation sheets. Options:
+
+- `--fps N` (default 30), `--seconds S` (default: the path's `path_seconds`,
+  else 3s per spline segment), `--quality 0-100` (default 60).
+- Closed paths omit the final frame so the loop wraps without a stutter.
+- Odd `--width`/`--height` are rounded down (4:2:0 chroma needs even sizes).
+- Budget: encoding dominates and scales with pixels — the desktop does
+  960x540 at ~1.6s/frame, so a 14s 24fps loop is ~9 minutes. Preview cheap
+  first: `--width 480 --height 270 --fps 12 --effort low` is ~0.4s/frame.
+  Verify output with `ffprobe` / extract frames with `ffmpeg`.
 
 **Mutation sheets** (evolutionary exploration): `--mutations N` renders the
 scene plus N random variants (tile 0 = original, near-square grid). Each
@@ -260,6 +371,11 @@ fracturize --scene scenes/glasshouse.toml --view views/glasshouse-123.toml \
 # evolve: original + 8 mutations, reproducible
 fracturize --scene scenes/koru.toml --render /tmp/koru_evo.png \
   --effort draft --mutations 8 --seed 42 --width 320 --height 180
+
+# animated loop of a camera path (scenes/winze.toml authors one; see its
+# header comments) — preview small/cheap, then commit to the real encode
+fracturize --scene scenes/winze.toml --render renders/winze.avif \
+  --effort medium --width 960 --height 540 --fps 24 --splat --exposure 1.5
 ```
 
 A 4K render with 12M points takes ~30s on the T490; the desktop (8GB VRAM) does
@@ -287,8 +403,8 @@ way for agents to render specific framings without keyboard interaction.
 - Keep it simple - avoid over-abstraction
 - Use glam for all math, not manual array ops
 - WGSL structs must match the `#[repr(C)]` Rust structs in `buffers.rs` exactly
-  (`GpuTransform` is 144 bytes; `CameraUniforms` is 112 and is declared in
-  points/render.wgsl, gizmo.wgsl, AND density/voxel_render.wgsl — update all
-  three; size tests in buffers.rs/compute.rs guard the Rust side)
+  (`GpuTransform` is 160 bytes; `CameraUniforms` is 112 and is declared in
+  points/render.wgsl, points/splat.wgsl, gizmo.wgsl, AND density/voxel_render.wgsl
+  — update all four; size tests in buffers.rs/compute.rs guard the Rust side)
 - New variations: append to `VARIATION_NAMES` in scene.rs AND the matching slot
   in `apply_variations()` in chaos.wgsl; slots must stay in sync

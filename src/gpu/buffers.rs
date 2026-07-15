@@ -131,7 +131,7 @@ pub struct VoxelCounter {
     pub _pad: [u32; 3],
 }
 
-/// GPU transform representation (144 bytes)
+/// GPU transform representation (160 bytes)
 /// Uses color_value (0-1) instead of full RGBA
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -142,7 +142,7 @@ pub struct GpuTransform {
     pub cumulative_weight: f32,// 4 bytes
     pub color_speed: f32,      // 4 bytes - per-transform blending speed
     /// Variation blend weights (slot order matches chaos.wgsl / scene::VARIATION_NAMES)
-    pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 64 bytes
+    pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 80 bytes
 }
 
 impl GpuTransform {
@@ -247,7 +247,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_gpu_transform_size() {
-        assert_eq!(std::mem::size_of::<GpuTransform>(), 144, "GpuTransform must be 144 bytes to match WGSL struct");
+        assert_eq!(std::mem::size_of::<GpuTransform>(), 160, "GpuTransform must be 160 bytes to match WGSL struct");
     }
 
     #[test]

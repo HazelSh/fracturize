@@ -1,8 +1,10 @@
 mod app;
+mod avif;
 mod camera;
 mod gpu;
 mod mutate;
 mod offline;
+mod path;
 mod prefs;
 mod trace;
 mod pick;
@@ -56,10 +58,25 @@ struct Args {
     #[arg(long)]
     view: Option<String>,
 
-    /// Render headlessly (no window) to this PNG path and exit.
+    /// Render headlessly (no window) and exit. A .png path renders stills
+    /// (and grids); a .avif path renders an animation along the scene's
+    /// [[camera.path]] (or a full-orbit loop when the scene has none).
     /// Prints camera mapping (for grids) and a timing breakdown to stdout.
     #[arg(long)]
     render: Option<String>,
+
+    /// Animation frame rate for --render <out.avif>
+    #[arg(long, default_value = "30")]
+    fps: u32,
+
+    /// Animation duration in seconds (default: the path's own duration —
+    /// path_seconds in the scene, or 3s per spline segment)
+    #[arg(long)]
+    seconds: Option<f32>,
+
+    /// Animation AV1 quality, 0-100 (higher = better quality, bigger file)
+    #[arg(long, default_value = "60")]
+    quality: u8,
 
     /// Output width for --render (per tile when a grid mode is used)
     #[arg(long, default_value = "1920")]
@@ -110,6 +127,16 @@ struct Args {
     /// RNG seed for --mutations (default: time-based; printed for reproduction)
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Use the splat renderer: additive log-density accumulation
+    /// (flame-style) instead of opaque points. R toggles it in-app.
+    #[arg(long)]
+    splat: bool,
+
+    /// Splat-renderer exposure multiplier (default 1.0, or the view's saved
+    /// value). W / Shift+W adjust it in-app.
+    #[arg(long)]
+    exposure: Option<f32>,
 }
 
 /// Named effort presets for offline rendering: (points, accumulate frames).
@@ -202,6 +229,8 @@ impl ApplicationHandler for AppWrapper {
             !self.args.no_vsync,
             self.args.scene.clone(),
             view,
+            self.args.splat,
+            self.args.exposure,
         ));
 
         self.app = Some(app);
@@ -336,6 +365,18 @@ impl ApplicationHandler for AppWrapper {
                             "o" | "O" => {
                                 app.toggle_orbit();
                             }
+                            "z" | "Z" => {
+                                app.toggle_path_play();
+                            }
+                            "y" | "Y" => {
+                                if app.ctrl_held {
+                                    app.toggle_path_closed();
+                                } else if app.shift_held {
+                                    app.remove_path_key();
+                                } else {
+                                    app.add_path_key();
+                                }
+                            }
                             "v" | "V" => {
                                 app.save_view();
                             }
@@ -384,6 +425,12 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "e" | "E" => {
                                 app.cycle_variation(!app.shift_held);
+                            }
+                            "r" | "R" => {
+                                app.toggle_render_mode();
+                            }
+                            "w" | "W" => {
+                                app.adjust_exposure(!app.shift_held);
                             }
                             "-" | "_" => {
                                 app.adjust_variation_weight(false);
@@ -508,6 +555,7 @@ fn default_scene() -> Scene {
         camera_distance: default_cam.distance,
         camera_yaw: default_cam.yaw,
         camera_pitch: default_cam.pitch,
+        camera_path: None,
     }
 }
 
@@ -570,6 +618,13 @@ fn main() {
             (None, None) => offline::GridMode::Single,
         };
 
+        // --splat wins; otherwise a splat-captured view selects the renderer
+        let splat = args.splat || view.as_ref().is_some_and(|v| v.is_splat());
+        let exposure = args
+            .exposure
+            .or(view.as_ref().and_then(|v| v.exposure))
+            .unwrap_or(1.0);
+
         let params = offline::OfflineParams {
             scene,
             view,
@@ -579,20 +634,40 @@ fn main() {
             accumulate,
             fog_enabled: args.fog,
             grid,
+            splat,
+            exposure,
         };
-        let result = match args.mutations {
-            Some(n) => {
-                if !matches!(grid, offline::GridMode::Single) {
-                    eprintln!("--mutations cannot be combined with --orbit-grid/--move-grid");
-                    std::process::exit(1);
-                }
-                if n == 0 || n > 24 {
-                    eprintln!("--mutations must be 1..=24");
-                    std::process::exit(1);
-                }
-                offline::render_mutations(params, n, args.mutation_strength, args.seed)
+        let animated = std::path::Path::new(out)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("avif"));
+        let result = if animated {
+            if !matches!(grid, offline::GridMode::Single) || args.mutations.is_some() {
+                eprintln!("animation (.avif) cannot be combined with grid or mutation sheets");
+                std::process::exit(1);
             }
-            None => offline::render(params),
+            offline::render_animation(
+                params,
+                offline::AnimParams {
+                    fps: args.fps,
+                    seconds: args.seconds,
+                    quality: args.quality,
+                },
+            )
+        } else {
+            match args.mutations {
+                Some(n) => {
+                    if !matches!(grid, offline::GridMode::Single) {
+                        eprintln!("--mutations cannot be combined with --orbit-grid/--move-grid");
+                        std::process::exit(1);
+                    }
+                    if n == 0 || n > 24 {
+                        eprintln!("--mutations must be 1..=24");
+                        std::process::exit(1);
+                    }
+                    offline::render_mutations(params, n, args.mutation_strength, args.seed)
+                }
+                None => offline::render(params),
+            }
         };
         if let Err(e) = result {
             eprintln!("Offline render failed: {}", e);

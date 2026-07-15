@@ -127,6 +127,36 @@ pub fn apply_variations(
             p.z,
         );
     }
+    // 16: absfold — KIFS kaleidoscope fold
+    let w = weights[16];
+    if w != 0.0 {
+        out += w * p.abs();
+    }
+    // 17: boxfold — Mandelbox fold
+    let w = weights[17];
+    if w != 0.0 {
+        out += w * (2.0 * p.clamp(Vec3::NEG_ONE, Vec3::ONE) - p);
+    }
+    // 18: spherefold — Mandelbox sphere fold (minR2 = 0.25, fixR2 = 1)
+    let w = weights[18];
+    if w != 0.0 {
+        let f = if r2 < 0.25 {
+            4.0
+        } else if r2 < 1.0 {
+            1.0 / r2
+        } else {
+            1.0
+        };
+        out += w * f * p;
+    }
+    // 19: bulb — power-8 mandelbulb angle map, radius-preserving
+    let w = weights[19];
+    if w != 0.0 {
+        let rr = r.max(1e-9);
+        let tb = 8.0 * (p.z / rr).clamp(-1.0, 1.0).acos();
+        let pb = 8.0 * p.y.atan2(p.x);
+        out += w * r * Vec3::new(tb.sin() * pb.cos(), tb.sin() * pb.sin(), tb.cos());
+    }
 
     out
 }

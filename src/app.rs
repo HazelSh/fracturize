@@ -8,7 +8,7 @@ use winit::window::Window;
 
 use crate::camera::{world_to_screen, OrbitCamera};
 use crate::gpu::lines::LineVertex;
-use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, TextRenderer, DEPTH_FORMAT};
+use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, TextRenderer, DEPTH_FORMAT};
 use crate::gpu::text::TextEntry;
 use crate::scene::{Scene, TransformSpec};
 use crate::view::View;
@@ -188,6 +188,19 @@ enum HelpAction {
     HqRender,
     Traces,
     InvertPitch,
+    RenderMode,
+    Exposure,
+    PathPlay,
+    PathKey,
+}
+
+/// Which point renderer draws the fractal. Points is the classic opaque
+/// depth-tested renderer; Splat is additive log-density accumulation
+/// (flame-style, no occlusion). R toggles at runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderMode {
+    Points,
+    Splat,
 }
 
 /// What a mouse drag is currently doing
@@ -214,6 +227,8 @@ pub struct App {
     last_update: Instant,
     pub orbit_paused: bool,
     pub camera: OrbitCamera,
+    /// Camera-path flythrough preview: normalized path time when playing
+    path_play_t: Option<f32>,
     pub point_size: f32,
 
     /// Persistent user preferences (I toggles pitch inversion)
@@ -249,9 +264,15 @@ pub struct App {
     // Simple point rendering pipeline
     point_compute: PointCompute,
     point_renderer: PointRenderer,
+    splat_renderer: SplatRenderer,
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
     text_renderer: TextRenderer,
+
+    /// Which renderer draws the fractal (R toggles)
+    pub render_mode: RenderMode,
+    /// Splat-renderer exposure multiplier (W / Shift+W)
+    pub exposure: f32,
 
     /// Chaos-game trace overlay (X): show walker paths as line segments
     pub show_traces: bool,
@@ -299,6 +320,8 @@ impl App {
         vsync: bool,
         scene_path: Option<String>,
         view: Option<View>,
+        splat: bool,
+        exposure: Option<f32>,
     ) -> Self {
         let gpu = GpuContext::new(window.clone(), vsync).await;
 
@@ -325,6 +348,25 @@ impl App {
             &point_compute.point_buffer,
             &point_compute.colormap_buffer,
         );
+
+        // Splat renderer shares the same point + colormap buffers
+        let splat_renderer = SplatRenderer::new(
+            &gpu.device,
+            gpu.format,
+            &point_compute.point_buffer,
+            &point_compute.colormap_buffer,
+        );
+
+        // --splat / a splat-captured view starts in splat mode; an explicit
+        // --exposure wins over the view's saved exposure
+        let render_mode = if splat || view.as_ref().is_some_and(|v| v.is_splat()) {
+            RenderMode::Splat
+        } else {
+            RenderMode::Points
+        };
+        let exposure = exposure
+            .or(view.as_ref().and_then(|v| v.exposure))
+            .unwrap_or(1.0);
 
         // Create gizmo renderer
         let gizmo_renderer = GizmoRenderer::new(
@@ -391,6 +433,7 @@ impl App {
                 distance: scene.camera_distance,
                 focus: scene.camera_focus,
             },
+            path_play_t: None,
             point_size,
             prefs: crate::prefs::Prefs::load(),
             frame_dt: 1.0 / 60.0,
@@ -412,9 +455,12 @@ impl App {
             fps_tracker: FpsTracker::new(),
             point_compute,
             point_renderer,
+            splat_renderer,
             gizmo_renderer,
             line_renderer,
             text_renderer,
+            render_mode,
+            exposure,
             show_traces: false,
             scene,
             scene_path,
@@ -469,6 +515,70 @@ impl App {
         log::info!("Camera orbit: {}", if self.orbit_paused { "paused" } else { "running" });
     }
 
+    /// Play / stop the camera-path flythrough preview (Z)
+    pub fn toggle_path_play(&mut self) {
+        if self.path_play_t.is_some() {
+            self.path_play_t = None;
+            log::info!("Camera path: stopped");
+            return;
+        }
+        match &self.scene.camera_path {
+            Some(p) if p.keys.len() >= 2 => {
+                self.path_play_t = Some(0.0);
+                self.orbit_paused = true;
+                log::info!(
+                    "Camera path: playing {} keys over {:.1}s",
+                    p.keys.len(),
+                    p.duration()
+                );
+            }
+            _ => log::warn!("No camera path to play — press Y to add keypoints"),
+        }
+    }
+
+    /// Append the current camera framing as a path keypoint (Y)
+    pub fn add_path_key(&mut self) {
+        let key = crate::path::PathKey::from_camera(&self.camera);
+        let path = self.scene.camera_path.get_or_insert_with(|| crate::path::CameraPath {
+            keys: Vec::new(),
+            closed: false,
+            ease: None,
+            seconds: None,
+        });
+        path.keys.push(key);
+        log::info!(
+            "Camera path keypoint {} added (Z plays, Ctrl+S saves with the scene)",
+            path.keys.len()
+        );
+    }
+
+    /// Remove the last path keypoint (Shift+Y)
+    pub fn remove_path_key(&mut self) {
+        let Some(path) = &mut self.scene.camera_path else {
+            log::warn!("No camera path");
+            return;
+        };
+        path.keys.pop();
+        let n = path.keys.len();
+        if n == 0 {
+            self.scene.camera_path = None;
+            self.path_play_t = None;
+            log::info!("Camera path removed");
+        } else {
+            log::info!("Camera path keypoint removed ({} left)", n);
+        }
+    }
+
+    /// Toggle whether the path loops back to its first key (Ctrl+Y)
+    pub fn toggle_path_closed(&mut self) {
+        if let Some(path) = &mut self.scene.camera_path {
+            path.closed = !path.closed;
+            log::info!("Camera path: {}", if path.closed { "closed loop" } else { "open" });
+        } else {
+            log::warn!("No camera path");
+        }
+    }
+
     /// Filesystem-safe slug of the scene name
     fn scene_slug(&self) -> String {
         let slug: String = self
@@ -481,9 +591,9 @@ impl App {
         slug.trim_matches('-').to_string()
     }
 
-    /// Save the current view parameters to views/<scene>-<timestamp>.toml
-    pub fn save_view(&self) {
-        let view = View {
+    /// The view currently on screen, for saving (V) and HQ renders (P)
+    fn current_view(&self) -> View {
+        View {
             scene: self.scene_path.clone(),
             rotation: self.camera.yaw,
             pitch: self.camera.pitch,
@@ -497,7 +607,20 @@ impl App {
             fog_saturation: self.fog_saturation,
             color_falloff: Some(self.color_falloff),
             color_contrast: Some(self.color_contrast),
-        };
+            renderer: match self.render_mode {
+                RenderMode::Points => None,
+                RenderMode::Splat => Some("splat".to_string()),
+            },
+            exposure: match self.render_mode {
+                RenderMode::Points => None,
+                RenderMode::Splat => Some(self.exposure),
+            },
+        }
+    }
+
+    /// Save the current view parameters to views/<scene>-<timestamp>.toml
+    pub fn save_view(&self) {
+        let view = self.current_view();
 
         let path = format!("views/{}-{}.toml", self.scene_slug(), unix_timestamp());
 
@@ -658,12 +781,15 @@ impl App {
                     return;
                 }
                 self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
-                // Manual orbiting shouldn't fight the auto-orbit
+                // Manual orbiting shouldn't fight the auto-orbit or a
+                // playing path flythrough
                 self.orbit_paused = true;
+                self.path_play_t = None;
             }
             MouseButton::Middle => {
                 self.drag = Drag::Pan;
                 self.orbit_paused = true;
+                self.path_play_t = None;
             }
             _ => {}
         }
@@ -977,21 +1103,10 @@ impl App {
         // Scale the point budget up from the interactive count
         scene.point_count = (scene.point_count * 4).clamp(8_000_000, 40_000_000);
 
-        let view = View {
-            scene: self.scene_path.clone(),
-            rotation: self.camera.yaw,
-            pitch: self.camera.pitch,
-            distance: self.camera.distance,
-            focus: self.camera.focus.to_array(),
-            offset: [0.0; 3],
-            point_size: self.point_size,
-            fog_near: self.fog_near,
-            fog_far: self.fog_far,
-            fog_brightness: self.fog_brightness,
-            fog_saturation: self.fog_saturation,
-            color_falloff: Some(self.color_falloff),
-            color_contrast: Some(self.color_contrast),
-        };
+        let view = self.current_view();
+
+        let splat = self.render_mode == RenderMode::Splat;
+        let exposure = self.exposure;
 
         let out = format!("renders/{}-{}.png", self.scene_slug(), unix_timestamp());
         let flag = self.hq_render_in_flight.clone();
@@ -1011,6 +1126,8 @@ impl App {
                 accumulate: 96,
                 fog_enabled: false, // view carries the real fog settings
                 grid: crate::offline::GridMode::Single,
+                splat,
+                exposure,
             });
             match result {
                 Ok(()) => log::info!("HQ render finished: {}", out),
@@ -1259,6 +1376,12 @@ impl App {
             &self.point_compute.point_buffer,
             &self.point_compute.colormap_buffer,
         );
+        self.splat_renderer = SplatRenderer::new(
+            &self.gpu.device,
+            self.gpu.format,
+            &self.point_compute.point_buffer,
+            &self.point_compute.colormap_buffer,
+        );
         self.gizmo_renderer = GizmoRenderer::new(
             &self.gpu.device,
             self.gpu.format,
@@ -1295,6 +1418,26 @@ impl App {
         if self.show_traces {
             self.regenerate_traces();
         }
+    }
+
+    pub fn toggle_render_mode(&mut self) {
+        self.render_mode = match self.render_mode {
+            RenderMode::Points => RenderMode::Splat,
+            RenderMode::Splat => RenderMode::Points,
+        };
+        log::info!(
+            "Renderer: {}",
+            match self.render_mode {
+                RenderMode::Points => "points",
+                RenderMode::Splat => "splat (additive log-density)",
+            }
+        );
+    }
+
+    pub fn adjust_exposure(&mut self, increase: bool) {
+        let factor = if increase { 1.25 } else { 0.8 };
+        self.exposure = (self.exposure * factor).clamp(0.01, 100.0);
+        log::info!("Splat exposure: {:.2}", self.exposure);
     }
 
     pub fn adjust_point_size(&mut self, increase: bool) {
@@ -1434,7 +1577,24 @@ impl App {
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
-        if !self.orbit_paused {
+        if let Some(t) = self.path_play_t {
+            // Path flythrough preview: fly the spline in real time
+            match &self.scene.camera_path {
+                Some(path) if path.keys.len() >= 2 => {
+                    let t = t + dt / path.duration();
+                    if !path.closed && t >= 1.0 {
+                        self.camera = path.sample(1.0);
+                        self.path_play_t = None;
+                        log::info!("Camera path: finished");
+                    } else {
+                        let t = if path.closed { t.rem_euclid(1.0) } else { t };
+                        self.camera = path.sample(t);
+                        self.path_play_t = Some(t);
+                    }
+                }
+                _ => self.path_play_t = None,
+            }
+        } else if !self.orbit_paused {
             // Time-based so the orbit speed is refresh-rate independent
             // (0.003 rad/frame at the old 60 FPS baseline)
             self.camera.yaw += 0.18 * dt;
@@ -1482,7 +1642,6 @@ impl App {
             self.fog_saturation,
             self.color_contrast,
         );
-        self.point_renderer.upload_camera(&self.gpu.queue, &camera);
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("screenshot_encoder"),
@@ -1490,36 +1649,61 @@ impl App {
 
         let color_view = self.screenshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = self.screenshot_depth.create_view(&wgpu::TextureViewDescriptor::default());
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("screenshot_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+        match self.render_mode {
+            RenderMode::Points => {
+                self.point_renderer.upload_camera(&self.gpu.queue, &camera);
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("screenshot_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
 
-            self.point_renderer.draw(
-                &mut render_pass,
-                point_count,
-                self.use_point_primitives(SCREENSHOT_HEIGHT as f32),
-            );
+                self.point_renderer.draw(
+                    &mut render_pass,
+                    point_count,
+                    self.use_point_primitives(SCREENSHOT_HEIGHT as f32),
+                );
+            }
+            RenderMode::Splat => {
+                // The accum texture resizes to the screenshot dimensions
+                // here and back to the window's on the next frame
+                self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
+                self.splat_renderer.upload_params(
+                    &self.gpu.queue,
+                    self.exposure,
+                    self.buffer_capacity,
+                    SCREENSHOT_HEIGHT as f32,
+                    CLEAR_COLOR,
+                );
+                self.splat_renderer.render(
+                    &self.gpu.device,
+                    &mut encoder,
+                    &color_view,
+                    &depth_view,
+                    SCREENSHOT_WIDTH,
+                    SCREENSHOT_HEIGHT,
+                    point_count,
+                    self.use_point_primitives(SCREENSHOT_HEIGHT as f32),
+                );
+            }
         }
 
         let bytes_per_row = SCREENSHOT_WIDTH * 4;
@@ -1633,8 +1817,13 @@ impl App {
         ("T", "toggle info overlay", Some(HelpAction::ToggleText)),
         ("G", "toggle transform gizmos", Some(HelpAction::ToggleGizmos)),
         ("O", "pause / resume camera orbit", Some(HelpAction::ToggleOrbit)),
+        ("Z", "play / stop camera path flythrough", Some(HelpAction::PathPlay)),
+        ("Y / Shift+Y", "add / remove camera path keypoint", Some(HelpAction::PathKey)),
+        ("Ctrl+Y", "toggle camera path loop", None),
         ("V", "save current view to views/", Some(HelpAction::SaveView)),
         ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
+        ("R", "renderer: points / splat (log-density)", Some(HelpAction::RenderMode)),
+        ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
         ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
         ("D / Shift+D", "finer / coarser color detail (falloff)", Some(HelpAction::ColorFalloff)),
         ("C / Shift+C", "less / more color contrast", Some(HelpAction::ColorContrast)),
@@ -1690,6 +1879,14 @@ impl App {
             HelpAction::ToggleText => self.toggle_text_overlay(),
             HelpAction::ToggleGizmos => self.toggle_gizmos(),
             HelpAction::ToggleOrbit => self.toggle_orbit(),
+            HelpAction::PathPlay => self.toggle_path_play(),
+            HelpAction::PathKey => {
+                if shift {
+                    self.remove_path_key()
+                } else {
+                    self.add_path_key()
+                }
+            }
             HelpAction::SaveView => self.save_view(),
             HelpAction::Screenshot => self.request_screenshot(),
             HelpAction::SaveScene => self.save_scene(),
@@ -1718,6 +1915,8 @@ impl App {
             HelpAction::HqRender => self.start_hq_render(),
             HelpAction::Traces => self.toggle_traces(shift),
             HelpAction::InvertPitch => self.toggle_invert_pitch(),
+            HelpAction::RenderMode => self.toggle_render_mode(),
+            HelpAction::Exposure => self.adjust_exposure(!shift),
         }
     }
 
@@ -1830,16 +2029,43 @@ impl App {
         });
         param_y += 16.0;
 
+        // Camera path status (only when a path exists)
+        if let Some(path) = &self.scene.camera_path {
+            let status = match self.path_play_t {
+                Some(t) => format!("playing {:.0}%", t * 100.0),
+                None => "Z plays".to_string(),
+            };
+            entries.push(TextEntry {
+                text: format!(
+                    "path: {} keys, {}, {:.1}s | {}",
+                    path.keys.len(),
+                    if path.closed { "loop" } else { "open" },
+                    path.duration(),
+                    status,
+                ),
+                x: 10.0,
+                y: param_y,
+                color: grey,
+                font_size: 12.0,
+            });
+            param_y += 16.0;
+        }
+
         // Point size + variation editing target
         let var_weight = self
             .selection()
             .map_or(0.0, |i| self.scene.transforms[i].variations[self.selected_variation]);
+        let splat_info = match self.render_mode {
+            RenderMode::Points => String::new(),
+            RenderMode::Splat => format!(" | splat [R] exp={:.2}", self.exposure),
+        };
         entries.push(TextEntry {
             text: format!(
-                "pt size={:.4} | var slot [E]: {} {:+.2}",
+                "pt size={:.4} | var slot [E]: {} {:+.2}{}",
                 self.point_size,
                 crate::scene::VARIATION_NAMES[self.selected_variation],
                 var_weight,
+                splat_info,
             ),
             x: 10.0,
             y: param_y,
@@ -2026,40 +2252,62 @@ impl App {
             self.fog_saturation,
             self.color_contrast,
         );
-        self.point_renderer.upload_camera(&self.gpu.queue, &camera);
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
         if self.show_traces {
             self.line_renderer.upload_camera(&self.gpu.queue, &camera);
         }
 
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("point_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+        match self.render_mode {
+            RenderMode::Points => {
+                self.point_renderer.upload_camera(&self.gpu.queue, &camera);
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("point_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
 
-            if point_count > 0 {
-                self.point_renderer.draw(
-                    &mut render_pass,
+                if point_count > 0 {
+                    self.point_renderer.draw(
+                        &mut render_pass,
+                        point_count,
+                        self.use_point_primitives(height as f32),
+                    );
+                }
+            }
+            RenderMode::Splat => {
+                self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
+                self.splat_renderer.upload_params(
+                    &self.gpu.queue,
+                    self.exposure,
+                    self.buffer_capacity,
+                    height as f32,
+                    CLEAR_COLOR,
+                );
+                self.splat_renderer.render(
+                    &self.gpu.device,
+                    &mut encoder,
+                    &color_view,
+                    &depth_view,
+                    width,
+                    height,
                     point_count,
                     self.use_point_primitives(height as f32),
                 );

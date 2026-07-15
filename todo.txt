@@ -1,9 +1,5 @@
----- nonlinear transforms
-
----- transform editing 
- -- mouse input, grabbing of gizmos, rotations, stretching, point movements, etc w/ live re-render
-
 ---- needs to go faster! I want 100m points in realtime!
+  -- "motherfucking realtime motherfucking raytracing"
 
 ---- lighting/shadowing?
  -- (how the actual fuck? well, fairlight were doing it realtime in 2010, so...)
@@ -17,14 +13,32 @@
 ---- ...particle system things? 'motion transforms'? velocity, acceleration, mass, per-point?
 
 ---- dynamic point density / infinite zoom
- -- & more optimization -- frustrum culling?
 
----- in-engine scene browser, super lores preview
-
----- focus stealing prevention!
- -- or headless mode for screenshots? not good 
+---- in-engine scene browser, super lo-res preview
 
 ---- little bit of atmosphere in the shading? darken/desat colors further from camera?
  -- depth is hard to spot at the moment
   - much easier to add a touch of fog than to figure out pointcloud shadowing
+ -- unfuck existing fog implementation? 
 
+---- saving .gifs / animated/motion png? or modern animated .avifs
+ -- DONE (fable5, 2026-07-15): `--render out.avif` = animated AVIF, rav1e +
+    hand-rolled avis muxer in src/avif.rs. --fps/--seconds/--quality.
+
+---- rework keyboard shortcuts + list → into real GUI with buttons etc
+
+---- infinite zoom plan / space-filling
+
+---- better handling of point counts, bake into UI, remove from scene. not a scene param.
+
+---- better handling of fizz / sparkle -- tuned lower for more stable renders
+
+---- chaos traces not showing what I want to show...
+
+---- camera paths with .gif render or video render?
+ -- DONE (fable5, 2026-07-15): [[camera.path]] spline keypoints in scenes
+    (src/path.rs — Catmull-Rom over yaw/pitch/log-distance/focus, closed
+    loops, multi-turn spirals). In-app: Y add key, Ctrl+Y loop, Z preview.
+    Pathless scenes animate as a seamless full orbit. scenes/winze.toml +
+    renders/winze.avif are the demo.
+ -- automatic feature detection, automatic camera positioning/pointing? at/lookat 'voids', 'clusters'?

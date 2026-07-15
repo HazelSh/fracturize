@@ -7,6 +7,8 @@
 
 pub mod compute;
 pub mod renderer;
+pub mod splat;
 
 pub use compute::PointCompute;
 pub use renderer::{PointRenderer, DEPTH_FORMAT};
+pub use splat::SplatRenderer;

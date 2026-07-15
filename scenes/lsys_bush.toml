@@ -1,0 +1,60 @@
+[meta]
+name = "bush3d d1 (6 maps)"
+author = "Claude Fable 5 (L-system port)"
+point_size = 0.004
+point_count = 6000000
+color_falloff = 0.8
+color_contrast = 1.5
+
+[camera]
+focus = [0.0, 0.9, 0.0]
+distance = 3.2
+pitch = 0.15
+
+[[transform]]
+name = "trunk"
+translation = [0.0000, 0.0000, 0.0000]
+scale = [0.06, 0.5, 0.06]
+rotation = [-0.00, 0.00, -0.00]
+color = [0.450, 0.300, 0.150]
+weight = 0.05833
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.5000, 0.0000]
+scale = 0.55
+rotation = [-0.00, 0.00, 28.00]
+color = [0.300, 0.750, 0.250]
+weight = 0.16667
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.5000, 0.0000]
+scale = 0.55
+rotation = [-0.00, 0.00, -28.00]
+color = [0.550, 0.850, 0.300]
+weight = 0.16667
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.5000, 0.0000]
+scale = 0.55
+rotation = [28.00, 0.00, -0.00]
+color = [0.200, 0.600, 0.350]
+weight = 0.16667
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.5000, 0.0000]
+scale = 0.55
+rotation = [-28.00, 0.00, -0.00]
+color = [0.750, 0.800, 0.300]
+weight = 0.16667
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.5000, 0.0000]
+scale = 0.55
+rotation = [-0.00, 28.00, -0.00]
+color = [0.400, 0.900, 0.500]
+weight = 0.16667

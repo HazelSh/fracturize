@@ -1,0 +1,52 @@
+[meta]
+name = "birch d1 (5 maps)"
+author = "Claude Fable 5 (L-system port)"
+point_size = 0.004
+point_count = 6000000
+color_falloff = 0.8
+color_contrast = 1.5
+
+[camera]
+focus = [0.0, 0.9, 0.0]
+distance = 3.2
+pitch = 0.15
+
+[[transform]]
+name = "trunk"
+translation = [0.0000, 0.0000, 0.0000]
+scale = [0.06, 0.45, 0.06]
+rotation = [-0.00, 0.00, -0.00]
+color = [0.450, 0.300, 0.150]
+weight = 0.07000
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.4500, 0.0000]
+scale = 0.6
+rotation = [22.00, 0.00, 22.00]
+color = [0.300, 0.750, 0.250]
+weight = 0.20000
+
+[[transform]]
+name = "trunk"
+translation = [0.0000, 0.4500, 0.0000]
+scale = [0.06, 0.45, 0.06]
+rotation = [-0.00, 0.00, -0.00]
+color = [0.450, 0.300, 0.150]
+weight = 0.07000
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.9000, 0.0000]
+scale = 0.6
+rotation = [-22.00, 0.00, -22.00]
+color = [0.550, 0.850, 0.300]
+weight = 0.20000
+
+[[transform]]
+name = "branch"
+translation = [0.0000, 0.9000, 0.0000]
+scale = 0.6
+rotation = [-0.00, 22.00, -0.00]
+color = [0.200, 0.600, 0.350]
+weight = 0.20000
