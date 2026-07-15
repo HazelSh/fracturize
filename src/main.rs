@@ -2,6 +2,7 @@ mod app;
 mod avif;
 mod camera;
 mod gpu;
+mod history;
 mod mutate;
 mod offline;
 mod path;
@@ -404,7 +405,17 @@ impl ApplicationHandler for AppWrapper {
                                 app.toggle_orbit();
                             }
                             "z" | "Z" => {
-                                app.toggle_path_play();
+                                // Ctrl must be checked first: Ctrl+Z / Ctrl+Shift+Z
+                                // are undo/redo, not the path-play toggle.
+                                if app.ctrl_held {
+                                    if app.shift_held {
+                                        app.redo();
+                                    } else {
+                                        app.undo();
+                                    }
+                                } else {
+                                    app.toggle_path_play();
+                                }
                             }
                             "y" | "Y" => {
                                 if app.ctrl_held {
@@ -441,7 +452,9 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "u" | "U" => {
                                 if app.shift_held {
-                                    app.undo_mutation();
+                                    // Shift+U aliases the unified undo (kept for
+                                    // muscle memory; identical to Ctrl+Z).
+                                    app.undo();
                                 } else {
                                     app.mutate_scene();
                                 }

@@ -1,8 +1,8 @@
-//! Explore window: the first real panel with wired controls, proving the
-//! pattern later phases (browser, random flames, history list) build on.
-//! Phase 2 scope: mutate strength slider + Mutate/Undo buttons (the U /
-//! Shift+U keybinds keep working unchanged — both paths share
-//! `App::mutate_scene` / `App::undo_mutation`).
+//! Explore window: mutate/strength slider + the unified history list.
+//! Undo/Redo buttons and the history list all go through the same
+//! `App::undo`/`redo`/`jump_undo`/`jump_redo` choke points as the
+//! Ctrl+Z/Ctrl+Shift+Z/Shift+U keybinds (src/history.rs) — clicking a row N
+//! deep undoes/redoes N steps in one rebuild.
 
 use crate::app::App;
 
@@ -18,7 +18,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .id(egui::Id::new("fracturize_explore_window"))
         .open(&mut open)
         .default_pos(egui::pos2(20.0, 60.0))
-        .default_width(220.0)
+        .default_width(240.0)
         .show(ctx, |ui| {
             let mut strength = app.mutate_strength();
             let resp = ui.add(
@@ -53,23 +53,95 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     app.mutate_scene();
                 }
 
-                let resp = ui.button("Undo");
+                let resp = ui.add_enabled(app.history.undo_len() > 0, egui::Button::new("Undo"));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Revert the last mutation (Shift+U)",
-                    "click: undo the last mutation",
+                    "Undo the last edit (Ctrl+Z, Shift+U)",
+                    "click: undo the last edit",
                 );
                 if resp.clicked() {
-                    app.undo_mutation();
+                    app.undo();
+                }
+
+                let resp = ui.add_enabled(app.history.redo_len() > 0, egui::Button::new("Redo"));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Redo the last undone edit (Ctrl+Shift+Z)",
+                    "click: redo the last undone edit",
+                );
+                if resp.clicked() {
+                    app.redo();
                 }
             });
 
-            ui.label(
-                egui::RichText::new("History list + random flames arrive in later phases.")
-                    .small()
-                    .weak(),
-            );
+            ui.separator();
+            ui.label(egui::RichText::new("History").strong());
+
+            let redo_labels: Vec<String> = app.history.redo_display().map(str::to_string).collect();
+            let undo_labels: Vec<String> = app.history.undo_display().map(str::to_string).collect();
+            let redo_len = redo_labels.len();
+
+            if redo_labels.is_empty() && undo_labels.is_empty() {
+                ui.label(egui::RichText::new("No edits yet.").small().weak());
+            } else {
+                let mut jump_redo: Option<usize> = None;
+                let mut jump_undo: Option<usize> = None;
+
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        // Redo entries, grayed, furthest first — the one
+                        // closest to "current" (last in the vec) sits right
+                        // above the marker.
+                        for (i, label) in redo_labels.iter().enumerate() {
+                            let resp = ui.add(
+                                egui::Label::new(egui::RichText::new(format!("↷ {}", label)).weak())
+                                    .sense(egui::Sense::click()),
+                            );
+                            let resp = hinted(
+                                resp,
+                                &mut app.ui_state,
+                                format!("Redo forward to after \"{}\"", label),
+                                "click: redo to this point",
+                            );
+                            if resp.clicked() {
+                                jump_redo = Some(redo_len - i);
+                            }
+                        }
+
+                        ui.label(
+                            egui::RichText::new("— current —").small().italics().weak(),
+                        );
+
+                        // Undo entries, newest-first: the top row is what
+                        // Ctrl+Z undoes next.
+                        for (j, label) in undo_labels.iter().enumerate() {
+                            let resp = ui.add(
+                                egui::Label::new(format!("↶ {}", label)).sense(egui::Sense::click()),
+                            );
+                            let resp = hinted(
+                                resp,
+                                &mut app.ui_state,
+                                format!("Undo back to before \"{}\"", label),
+                                "click: undo to this point",
+                            );
+                            if resp.clicked() {
+                                jump_undo = Some(j + 1);
+                            }
+                        }
+                    });
+
+                // At most one of these fires per frame (a single click), and
+                // they're mutually exclusive sections of the same list.
+                if let Some(n) = jump_redo {
+                    app.jump_redo(n);
+                }
+                if let Some(n) = jump_undo {
+                    app.jump_undo(n);
+                }
+            }
         });
 
     app.ui_state.panels.explore_open = open;

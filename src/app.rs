@@ -9,6 +9,7 @@ use winit::window::Window;
 use crate::camera::{world_to_screen, OrbitCamera};
 use crate::gpu::lines::LineVertex;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+use crate::history::{EditSnapshot, History};
 use crate::scene::{Scene, TransformSpec};
 use crate::ui::{hints, TextEntry, UiState};
 use crate::view::View;
@@ -228,6 +229,7 @@ enum HelpAction {
     FogNear,
     FogFar,
     Mutate,
+    Undo,
     Browse,
     HqRender,
     Traces,
@@ -363,8 +365,12 @@ pub struct App {
     /// A background high-quality render is running (P)
     hq_render_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
-    /// Pre-mutation snapshots for Shift+U undo (newest last, bounded)
-    undo_stack: Vec<Scene>,
+    /// Unified undo/redo history (see src/history.rs): every scene-mutating
+    /// edit path commits through `commit_edit`. Cleared on scene load.
+    pub history: History,
+    /// Snapshot taken at gizmo-grab time, consumed (and committed) at
+    /// release — a drag is a single history entry, not one per frame.
+    gizmo_drag_before: Option<EditSnapshot>,
 
     depth_texture: wgpu::Texture,
 
@@ -534,7 +540,8 @@ impl App {
             show_browser: false,
             browser_files: Vec::new(),
             browser_selected: 0,
-            undo_stack: Vec::new(),
+            history: History::new(),
+            gizmo_drag_before: None,
             hq_render_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             depth_texture,
             screenshot_texture,
@@ -738,6 +745,95 @@ impl App {
         !matches!(self.drag, Drag::None)
     }
 
+    // === Unified undo/redo history (src/history.rs) ===
+
+    /// Snapshot of every piece of state history tracks. Callers take one of
+    /// these *before* mutating, then hand it to `commit_edit` after.
+    pub fn edit_snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            scene: self.scene.clone(),
+            transform_enabled: self.transform_enabled.clone(),
+            point_size: self.point_size,
+            color_falloff: self.color_falloff,
+            color_contrast: self.color_contrast,
+        }
+    }
+
+    /// The single choke point for history-tracked edits. `coalesce_key`
+    /// lets rapid same-key commits (held weight/color keys, drag-scroll
+    /// bursts) merge into one entry instead of flooding the stack.
+    pub fn commit_edit(&mut self, label: impl Into<String>, coalesce_key: Option<&str>, before: EditSnapshot) {
+        self.history.commit(label, coalesce_key, before, Instant::now());
+    }
+
+    /// Restore a snapshot and rebuild the GPU pipelines — the same path
+    /// add/delete transform uses, since undo/redo can change transform count.
+    fn apply_snapshot(&mut self, snap: EditSnapshot) {
+        self.scene = snap.scene;
+        self.transform_enabled = snap.transform_enabled;
+        self.point_size = snap.point_size;
+        self.color_falloff = snap.color_falloff;
+        self.color_contrast = snap.color_contrast;
+        self.after_scene_shape_change();
+    }
+
+    /// Undo the most recent history entry (Ctrl+Z, Shift+U, the Explore
+    /// window's Undo button).
+    pub fn undo(&mut self) {
+        let current = self.edit_snapshot();
+        match self.history.undo(current) {
+            Some((label, restore)) => {
+                self.apply_snapshot(restore);
+                log::info!("Undo: {}", label);
+            }
+            None => log::warn!("Nothing to undo"),
+        }
+    }
+
+    /// Redo the most recently undone entry (Ctrl+Shift+Z, the Explore
+    /// window's Redo button).
+    pub fn redo(&mut self) {
+        let current = self.edit_snapshot();
+        match self.history.redo(current) {
+            Some((label, restore)) => {
+                self.apply_snapshot(restore);
+                log::info!("Redo: {}", label);
+            }
+            None => log::warn!("Nothing to redo"),
+        }
+    }
+
+    /// Undo `steps` entries in one go (clicking N deep into the Explore
+    /// window's history list) as a single pipeline rebuild.
+    pub fn jump_undo(&mut self, steps: usize) {
+        if steps == 0 {
+            return;
+        }
+        let current = self.edit_snapshot();
+        match self.history.jump_undo(steps, current) {
+            Some(restore) => {
+                self.apply_snapshot(restore);
+                log::info!("Undid {} step(s)", steps);
+            }
+            None => log::warn!("Not enough undo history for {} step(s)", steps),
+        }
+    }
+
+    /// Symmetric opposite of `jump_undo`.
+    pub fn jump_redo(&mut self, steps: usize) {
+        if steps == 0 {
+            return;
+        }
+        let current = self.edit_snapshot();
+        match self.history.jump_redo(steps, current) {
+            Some(restore) => {
+                self.apply_snapshot(restore);
+                log::info!("Redid {} step(s)", steps);
+            }
+            None => log::warn!("Not enough redo history for {} step(s)", steps),
+        }
+    }
+
     /// (fps, avg frametime ms, p99 frametime ms) for the status bar.
     pub fn fps_stats(&self) -> (f32, f32, f32) {
         (
@@ -812,10 +908,16 @@ impl App {
     pub fn on_scroll(&mut self, steps: f32) {
         if let Some(hit) = self.hovered {
             self.selected_transform = Some(hit.transform);
+            let before = self.edit_snapshot();
             let w = &mut self.scene.transforms[hit.transform].weight;
             *w = (*w * 1.08f32.powf(steps)).clamp(0.01, 100.0);
             log::info!("T{} weight: {:.2} (scroll)", hit.transform, *w);
             self.sync_transforms_to_gpu();
+            self.commit_edit(
+                format!("Weight T{}", hit.transform),
+                Some(&format!("weight:T{}", hit.transform)),
+                before,
+            );
             return;
         }
         self.camera.zoom(steps);
@@ -921,6 +1023,9 @@ impl App {
                     return;
                 }
                 if let Some(drag) = self.try_grab_gizmo() {
+                    // A gizmo grab always yields Drag::Gizmo; snapshot now so
+                    // the whole drag commits as one history entry at release.
+                    self.gizmo_drag_before = Some(self.edit_snapshot());
                     self.drag = drag;
                     self.window.set_cursor(winit::window::CursorIcon::Grabbing);
                     return;
@@ -943,17 +1048,45 @@ impl App {
     pub fn on_mouse_release(&mut self, button: winit::event::MouseButton) {
         use winit::event::MouseButton;
         if matches!(button, MouseButton::Left | MouseButton::Middle) {
-            if let Drag::Gizmo { transform, .. } = self.drag {
+            if let Drag::Gizmo { transform, mode, start_matrix } = self.drag {
                 let spec = &self.scene.transforms[transform];
                 let t = spec.matrix.w_axis.truncate();
                 log::info!(
                     "T{}: p=({:.3},{:.3},{:.3}) s={:.3}",
                     transform, t.x, t.y, t.z, spec.matrix.x_axis.truncate().length(),
                 );
+                let matrix_changed = spec.matrix != start_matrix;
+                if matrix_changed {
+                    if let Some(before) = self.gizmo_drag_before.take() {
+                        let label = self.gizmo_drag_label(transform, mode);
+                        self.commit_edit(label, None, before);
+                    }
+                } else {
+                    // No net motion (a click that didn't drag): no history entry.
+                    self.gizmo_drag_before = None;
+                }
             }
             self.drag = Drag::None;
             self.update_hover();
         }
+    }
+
+    /// History label for a completed gizmo drag, e.g. "Move whorl" /
+    /// "Rotate T2" / "Scale core".
+    fn gizmo_drag_label(&self, transform: usize, mode: GizmoDragMode) -> String {
+        let name = self
+            .scene
+            .transform_names
+            .get(transform)
+            .and_then(|n| n.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("T{}", transform));
+        let verb = match mode {
+            GizmoDragMode::TranslateView { .. } | GizmoDragMode::TranslateAxis { .. } => "Move",
+            GizmoDragMode::Rotate { .. } => "Rotate",
+            GizmoDragMode::Scale { .. } => "Scale",
+        };
+        format!("{} {}", verb, name)
     }
 
     /// Try to start a gizmo drag at the current cursor position. Also selects
@@ -1193,6 +1326,7 @@ impl App {
         self.hovered = None;
         self.scene = scene;
         self.scene_path = Some(path.to_string_lossy().into_owned());
+        self.history.clear();
         self.rebuild_pipelines();
     }
 
@@ -1333,29 +1467,29 @@ impl App {
 
     // === Evolutionary exploration (U / Shift+U) ===
 
-    /// Apply a random mutation to the scene (undoable with Shift+U).
+    /// Apply a random mutation to the scene (undoable with Ctrl+Z / Shift+U).
     /// Repeated presses walk the scene through mutation space; Ctrl+S keeps
     /// a variant you like.
     pub fn mutate_scene(&mut self) {
-        self.undo_stack.push(self.scene.clone());
-        if self.undo_stack.len() > 32 {
-            self.undo_stack.remove(0);
-        }
+        let before = self.edit_snapshot();
 
         let log = crate::mutate::mutate(&mut self.scene, &mut rand::thread_rng(), self.prefs.mutate_strength);
         log::info!("Mutation: {}", log.join("; "));
         self.after_scene_shape_change();
-    }
 
-    /// Revert the most recent mutation
-    pub fn undo_mutation(&mut self) {
-        let Some(prev) = self.undo_stack.pop() else {
-            log::warn!("Nothing to undo");
-            return;
-        };
-        self.scene = prev;
-        log::info!("Mutation undone ({} left on stack)", self.undo_stack.len());
-        self.after_scene_shape_change();
+        // Label from the op log, truncated so the history list stays tidy
+        // (the op log can contain multi-byte glyphs like '°', so truncate at
+        // the nearest char boundary rather than a raw byte index)
+        let mut label = log.join("; ");
+        if label.len() > 60 {
+            let mut cut = 57;
+            while cut > 0 && !label.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            label.truncate(cut);
+            label.push_str("...");
+        }
+        self.commit_edit(label, None, before);
     }
 
     /// Reconcile app state after the scene changed under us (mutation/undo
@@ -1385,6 +1519,7 @@ impl App {
     /// Add a transform: a nudged copy of the selection, or (fresh) a small
     /// default one. Rebuilds the GPU pipelines for the new transform count.
     pub fn add_transform(&mut self, fresh: bool) {
+        let before = self.edit_snapshot();
         let (spec, name, color) = if fresh || self.selection().is_none() {
             (
                 TransformSpec {
@@ -1421,6 +1556,8 @@ impl App {
         self.scene.regenerate_colormap();
         self.rebuild_pipelines();
         log::info!("Added transform T{}", self.scene.transforms.len() - 1);
+        let label = if fresh { "Add transform" } else { "Duplicate transform" };
+        self.commit_edit(label, None, before);
     }
 
     /// Delete the selected transform (keeps at least one)
@@ -1430,6 +1567,7 @@ impl App {
             log::warn!("Cannot delete the last transform");
             return;
         }
+        let before = self.edit_snapshot();
         self.scene.transforms.remove(idx);
         self.scene.transform_names.remove(idx);
         self.scene.colors.remove(idx);
@@ -1439,35 +1577,48 @@ impl App {
         self.scene.regenerate_colormap();
         self.rebuild_pipelines();
         log::info!("Deleted transform T{}", idx);
+        self.commit_edit("Delete transform", None, before);
     }
 
     /// Multiply the selected transform's chaos-game weight
     pub fn adjust_weight(&mut self, increase: bool) {
         let Some(idx) = self.selection() else { return };
+        let before = self.edit_snapshot();
         let factor = if increase { 1.15 } else { 1.0 / 1.15 };
         let w = &mut self.scene.transforms[idx].weight;
         *w = (*w * factor).clamp(0.01, 100.0);
         log::info!("T{} weight: {:.2}", idx, *w);
         self.sync_transforms_to_gpu();
+        self.commit_edit(format!("Weight T{}", idx), Some(&format!("weight:T{}", idx)), before);
     }
 
     /// Nudge the selected transform's gradient color in HSV space
     /// (channel: 0 = hue, 1 = saturation, 2 = value)
     pub fn adjust_color(&mut self, channel: usize, increase: bool) {
         let Some(idx) = self.selection() else { return };
+        if channel > 2 {
+            return;
+        }
+        let before = self.edit_snapshot();
         let (mut h, mut s, mut v) = rgb_to_hsv(self.scene.colors[idx]);
         let dir = if increase { 1.0 } else { -1.0 };
         match channel {
             0 => h = (h + dir * 15.0).rem_euclid(360.0),
             1 => s = (s + dir * 0.08).clamp(0.0, 1.0),
             2 => v = (v + dir * 0.08).clamp(0.05, 1.0),
-            _ => return,
+            _ => unreachable!("channel > 2 returned above"),
         }
         self.scene.colors[idx] = hsv_to_rgb(h, s, v);
         let c = self.scene.colors[idx];
         log::info!("T{} color: h={:.0} s={:.2} v={:.2} rgb=({:.2},{:.2},{:.2})", idx, h, s, v, c.x, c.y, c.z);
         self.scene.regenerate_colormap();
         self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        const CHANNEL_NAMES: [&str; 3] = ["Hue", "Saturation", "Value"];
+        self.commit_edit(
+            format!("{} T{}", CHANNEL_NAMES[channel], idx),
+            Some(&format!("color:{}:T{}", channel, idx)),
+            before,
+        );
     }
 
     /// Step the variation slot targeted by the weight keys
@@ -1489,6 +1640,7 @@ impl App {
     /// Adjust the selected transform's weight for the targeted variation
     pub fn adjust_variation_weight(&mut self, increase: bool) {
         let Some(idx) = self.selection() else { return };
+        let before = self.edit_snapshot();
         let step = if increase { 0.05 } else { -0.05 };
         let w = &mut self.scene.transforms[idx].variations[self.selected_variation];
         // Snap through zero so slots can be cleanly removed
@@ -1499,6 +1651,12 @@ impl App {
             idx, crate::scene::VARIATION_NAMES[self.selected_variation], *w,
         );
         self.sync_transforms_to_gpu();
+        let vname = crate::scene::VARIATION_NAMES[self.selected_variation];
+        self.commit_edit(
+            format!("{} T{}", vname, idx),
+            Some(&format!("varweight:T{}:{}", idx, self.selected_variation)),
+            before,
+        );
     }
 
     /// Recreate the GPU pipelines after the transform count changed.
@@ -1586,9 +1744,11 @@ impl App {
     }
 
     pub fn adjust_point_size(&mut self, increase: bool) {
+        let before = self.edit_snapshot();
         let factor = if increase { 1.1 } else { 0.909 };
         self.point_size = (self.point_size * factor).clamp(0.0001, 0.1);
         log::info!("Point size: {:.5}", self.point_size);
+        self.commit_edit("Point size", Some("point_size"), before);
     }
 
     pub fn adjust_fog_intensity(&mut self, more_fog: bool) {
@@ -1632,6 +1792,7 @@ impl App {
     /// Adjust the scale-aware color falloff exponent. Turning it up from 0
     /// enters scale-aware mode at the neutral value 1.0.
     pub fn adjust_color_falloff(&mut self, finer: bool) {
+        let before = self.edit_snapshot();
         let old = self.color_falloff;
         self.color_falloff = if old == 0.0 {
             1.0
@@ -1641,12 +1802,15 @@ impl App {
         };
         log::info!("Color falloff: {:.2} -> {:.2} (lower = finer color detail)", old, self.color_falloff);
         self.refresh_color_speeds();
+        self.commit_edit("Color falloff", Some("color_falloff"), before);
     }
 
     pub fn adjust_color_contrast(&mut self, increase: bool) {
+        let before = self.edit_snapshot();
         let factor = if increase { 1.15 } else { 1.0 / 1.15 };
         self.color_contrast = (self.color_contrast * factor).clamp(0.25, 16.0);
         log::info!("Color contrast: {:.2}", self.color_contrast);
+        self.commit_edit("Color contrast", Some("color_contrast"), before);
     }
 
     pub fn toggle_gizmos(&mut self) {
@@ -1689,6 +1853,7 @@ impl App {
             return;
         }
 
+        let before = self.edit_snapshot();
         self.transform_enabled[idx] = !self.transform_enabled[idx];
         log::info!(
             "Transform {} {}", idx,
@@ -1702,6 +1867,12 @@ impl App {
         );
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
         self.reset();
+        let label = if self.transform_enabled[idx] {
+            format!("Enable T{}", idx)
+        } else {
+            format!("Disable T{}", idx)
+        };
+        self.commit_edit(label, None, before);
     }
 
     pub fn request_screenshot(&mut self) {
@@ -1958,6 +2129,7 @@ impl App {
         ("= / -", "variation weight up / down", Some(HelpAction::VariationWeight)),
         ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
         ("U / Shift+U", "random mutation / undo it", Some(HelpAction::Mutate)),
+        ("Ctrl+Z / Ctrl+Shift+Z", "undo / redo any edit", Some(HelpAction::Undo)),
         ("X / Shift+X", "chaos traces: show+re-roll / hide", Some(HelpAction::Traces)),
         ("I", "invert mouse pitch (saved to prefs)", Some(HelpAction::InvertPitch)),
         ("scroll on gizmo", "adjust that transform's weight", None),
@@ -2060,9 +2232,16 @@ impl App {
             HelpAction::FogFar => self.adjust_fog_far(!shift),
             HelpAction::Mutate => {
                 if shift {
-                    self.undo_mutation()
+                    self.undo()
                 } else {
                     self.mutate_scene()
+                }
+            }
+            HelpAction::Undo => {
+                if shift {
+                    self.redo()
+                } else {
+                    self.undo()
                 }
             }
             HelpAction::Browse => self.toggle_browser(),
