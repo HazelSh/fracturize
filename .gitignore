@@ -3,3 +3,5 @@ Cargo.lock
 /screenshots
 /renders
 /views
+__pycache__/
+*.pdf

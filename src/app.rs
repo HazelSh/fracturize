@@ -8,9 +8,9 @@ use winit::window::Window;
 
 use crate::camera::{world_to_screen, OrbitCamera};
 use crate::gpu::lines::LineVertex;
-use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, TextRenderer, DEPTH_FORMAT};
-use crate::gpu::text::TextEntry;
+use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::scene::{Scene, TransformSpec};
+use crate::ui::{TextEntry, UiState};
 use crate::view::View;
 
 /// Seconds since the epoch, for unique output filenames
@@ -203,6 +203,21 @@ pub enum RenderMode {
     Splat,
 }
 
+/// Outcome of `App::render`'s attempt to acquire and present a frame.
+/// wgpu 29 replaced `Surface::get_current_texture`'s `Result<_, SurfaceError>`
+/// with the `CurrentSurfaceTexture` enum (and dropped the `OutOfMemory`
+/// variant — device loss is now reported via `Device::set_device_lost_callback`
+/// rather than through frame acquisition).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameOutcome {
+    /// Frame presented normally.
+    Presented,
+    /// Transient (timeout/occluded/validation) — skip, try again next frame.
+    Skip,
+    /// Surface needs reconfiguring (lost/outdated).
+    Reconfigure,
+}
+
 /// What a mouse drag is currently doing
 #[derive(Clone, Copy, Debug)]
 enum Drag {
@@ -267,7 +282,11 @@ pub struct App {
     splat_renderer: SplatRenderer,
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
-    text_renderer: TextRenderer,
+
+    /// Plain-data egui UI state (open panels, drag caches, ... — grows in
+    /// later phases). Phase 1 only uses `legacy_entries`, the TextEntry shim
+    /// stash rebuilt every `update()`.
+    pub ui_state: UiState,
 
     /// Which renderer draws the fractal (R toggles)
     pub render_mode: RenderMode,
@@ -406,9 +425,6 @@ impl App {
             mapped_at_creation: false,
         });
 
-        // Create text renderer
-        let text_renderer = TextRenderer::new(&gpu.device, &gpu.queue, gpu.format);
-
         // Trace line renderer (empty until X is pressed)
         let line_renderer = LineRenderer::new(&gpu.device, gpu.format);
 
@@ -458,7 +474,7 @@ impl App {
             splat_renderer,
             gizmo_renderer,
             line_renderer,
-            text_renderer,
+            ui_state: UiState::default(),
             render_mode,
             exposure,
             show_traces: false,
@@ -667,6 +683,19 @@ impl App {
         self.frame_count = 0;
     }
 
+    /// Whether a mouse drag (orbit/pan/gizmo) is currently in progress —
+    /// used by the egui event-gating rules in main.rs: a mouse-release
+    /// always reaches the app while a drag is active, and gizmo hover is
+    /// never suppressed mid-drag, even if the pointer strays over a panel.
+    pub fn has_active_drag(&self) -> bool {
+        !matches!(self.drag, Drag::None)
+    }
+
+    /// Current FPS, for the egui test window (Phase 1) and future status bar.
+    pub fn current_fps(&self) -> f32 {
+        self.fps_tracker.current_fps
+    }
+
     pub fn zoom_in(&mut self) {
         self.camera.zoom(1.0);
     }
@@ -700,12 +729,26 @@ impl App {
         self.prefs.save();
     }
 
-    pub fn on_cursor_moved(&mut self, x: f32, y: f32) {
+    /// `suppress_hover`: true when the pointer is over an egui area and no
+    /// drag is active — gizmo hover-picking is skipped so egui panels don't
+    /// fight the 3D gizmo highlight/cursor-icon underneath them. Active
+    /// drags (orbit/pan/gizmo) always keep receiving motion regardless.
+    pub fn on_cursor_moved(&mut self, x: f32, y: f32, suppress_hover: bool) {
         let (dx, dy) = (x - self.cursor.0, y - self.cursor.1);
         self.cursor = (x, y);
 
         match self.drag {
-            Drag::None => self.update_hover(),
+            Drag::None => {
+                if suppress_hover {
+                    if self.hovered.is_some() {
+                        self.gizmo_renderer.set_highlight(&self.gpu.queue, None);
+                        self.window.set_cursor(winit::window::CursorIcon::Default);
+                        self.hovered = None;
+                    }
+                } else {
+                    self.update_hover();
+                }
+            }
             Drag::Orbit => {
                 let dy = if self.prefs.invert_pitch { -dy } else { dy };
                 self.camera.orbit(dx, dy);
@@ -1618,6 +1661,15 @@ impl App {
                 point_count,
             );
         }
+
+        // Rebuild the legacy TextEntry shim (HUD, help panel, browser,
+        // gizmo labels) for this frame; ui::draw_legacy_text paints it via
+        // an egui foreground layer once RedrawRequested runs ctx.run_ui.
+        let (width, height) = self.gpu.size();
+        let aspect = width as f32 / height as f32;
+        let view_proj = self.camera.view_proj(aspect);
+        self.ui_state.legacy_entries =
+            self.build_text_entries(view_proj, width as f32, height as f32);
     }
 
     pub fn take_screenshot(&mut self) {
@@ -2216,7 +2268,16 @@ impl App {
         entries
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    /// Render one frame, including the egui pass (`egui_renderer`/`paint_jobs`/
+    /// `textures_delta`/`pixels_per_point` come from the caller's
+    /// `ctx.run_ui` + `tessellate`, per the frame flow in main.rs).
+    pub fn render(
+        &mut self,
+        egui_renderer: &mut egui_wgpu::Renderer,
+        paint_jobs: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        pixels_per_point: f32,
+    ) -> FrameOutcome {
         if self.pending_screenshot {
             self.take_screenshot();
         }
@@ -2228,8 +2289,25 @@ impl App {
         // Advance circular buffer and get valid point count
         let point_count = self.point_compute.advance_frame(&self.gpu.queue, self.frame_dt);
 
-        let output = self.gpu.surface.get_current_texture()?;
-        let color_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // wgpu 29: `get_current_texture` returns `CurrentSurfaceTexture`
+        // directly (no more `Result<_, SurfaceError>`, and no `OutOfMemory`
+        // variant — device loss is now reported via
+        // `Device::set_device_lost_callback` instead).
+        let surface_texture = match self.gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return FrameOutcome::Skip;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                return FrameOutcome::Reconfigure;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                log::warn!("Surface validation error acquiring frame");
+                return FrameOutcome::Skip;
+            }
+        };
+        let color_view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2371,13 +2449,26 @@ impl App {
             self.gizmo_renderer.draw(&mut render_pass);
         }
 
-        // === STEP 4: RENDER TEXT OVERLAY ===
+        // === STEP 4: RENDER EGUI OVERLAY (replaces the old text-overlay pass) ===
         {
-            let entries = self.build_text_entries(view_proj, width as f32, height as f32);
-            self.text_renderer.prepare(&self.gpu.device, &self.gpu.queue, width, height, &entries);
+            for (id, image_delta) in &textures_delta.set {
+                egui_renderer.update_texture(&self.gpu.device, &self.gpu.queue, *id, image_delta);
+            }
 
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("text_pass"),
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [width, height],
+                pixels_per_point,
+            };
+            let user_cmd_bufs = egui_renderer.update_buffers(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                paint_jobs,
+                &screen_descriptor,
+            );
+
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &color_view,
                     resolve_target: None,
@@ -2392,13 +2483,24 @@ impl App {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // egui-wgpu's `render` takes a `'static` pass so it can keep
+            // referenced resources (textures/buffers) alive as long as
+            // needed; the only consequence is that further use of `encoder`
+            // after this point would be a runtime rather than compile-time
+            // error, and we don't touch it again this frame.
+            let mut render_pass = render_pass.forget_lifetime();
+            egui_renderer.render(&mut render_pass, paint_jobs, &screen_descriptor);
+            drop(render_pass);
 
-            self.text_renderer.render(&mut render_pass);
+            for id in &textures_delta.free {
+                egui_renderer.free_texture(id);
+            }
+
+            self.gpu.queue.submit(user_cmd_bufs.into_iter().chain(std::iter::once(encoder.finish())));
         }
 
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        surface_texture.present();
 
-        Ok(())
+        FrameOutcome::Presented
     }
 }

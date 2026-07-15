@@ -163,9 +163,9 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
 
 /// Create a headless wgpu device with storage limits raised to adapter max
 fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,

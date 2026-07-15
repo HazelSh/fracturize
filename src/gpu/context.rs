@@ -19,9 +19,9 @@ impl GpuContext {
         let size = window.inner_size();
 
         // Create wgpu instance - prefer Vulkan on Linux to avoid EGL issues
-        let instance = Instance::new(&wgpu::InstanceDescriptor {
+        let instance = Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         // Create surface from window

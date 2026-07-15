@@ -11,7 +11,6 @@ pub mod density;
 pub mod gizmo;
 pub mod lines;
 pub mod points;
-pub mod text;
 
 // Re-export shared types
 pub use buffers::CameraUniforms;
@@ -21,4 +20,3 @@ pub use context::GpuContext;
 pub use gizmo::GizmoRenderer;
 pub use lines::LineRenderer;
 pub use points::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
-pub use text::TextRenderer;

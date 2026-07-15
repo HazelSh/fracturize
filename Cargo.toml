@@ -5,9 +5,16 @@ edition = "2024"
 
 [dependencies]
 # Windowing and rendering
-wgpu = "28.0"
+wgpu = "29"
 winit = "0.30"
 pollster = "0.4"
+
+# Immediate-mode UI (Phase 1: scaffold + TextEntry shim only, see AGENTS.md)
+egui = "0.35"
+egui-wgpu = "0.35"
+egui-winit = "0.35"
+# egui-phosphor omitted: no release matching egui 0.35 exists yet as of this
+# writing (latest 0.12.0 pins egui ^0.34); add in Phase 2 once available.
 
 # Logging
 env_logger = "0.11"
@@ -32,10 +39,6 @@ clap = { version = "4", features = ["derive"] }
 # Utils
 bytemuck = { version = "1.19", features = ["derive"] }
 half = { version = "2.4", features = ["bytemuck"] }
-
-# Text rendering
-# Pinned: later revisions moved to wgpu 29, which conflicts with our wgpu 28
-glyphon = { git = "https://github.com/grovesNL/glyphon", rev = "37b973d50b9bf2073389c61809765925954b8ab3" }
 
 # Image output
 image = "0.25"

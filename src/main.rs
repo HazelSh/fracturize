@@ -9,6 +9,7 @@ mod prefs;
 mod trace;
 mod pick;
 mod scene;
+mod ui;
 mod view;
 
 use std::sync::Arc;
@@ -175,15 +176,20 @@ fn parse_grid(spec: &str) -> Result<(u32, u32), String> {
     Ok((cols, rows))
 }
 
-/// Wrapper to handle winit's async initialization pattern
+/// Wrapper to handle winit's async initialization pattern.
+///
+/// Owns the egui layer alongside `app` (rather than `App` owning it): the
+/// per-frame UI closure needs `&mut App`, so `AppWrapper` must be able to
+/// split-borrow `self.app` and `self.egui` independently.
 struct AppWrapper {
     app: Option<App>,
+    egui: Option<ui::EguiLayer>,
     args: Args,
 }
 
 impl AppWrapper {
     fn new(args: Args) -> Self {
-        Self { app: None, args }
+        Self { app: None, egui: None, args }
     }
 }
 
@@ -223,7 +229,7 @@ impl ApplicationHandler for AppWrapper {
 
         // Create app (blocking on async)
         let app = pollster::block_on(App::new(
-            window,
+            window.clone(),
             scene,
             self.args.fog,
             !self.args.no_vsync,
@@ -233,6 +239,7 @@ impl ApplicationHandler for AppWrapper {
             self.args.exposure,
         ));
 
+        self.egui = Some(ui::EguiLayer::new(&window, &app.gpu.device, app.gpu.format));
         self.app = Some(app);
     }
 
@@ -245,39 +252,66 @@ impl ApplicationHandler for AppWrapper {
         let Some(app) = self.app.as_mut() else {
             return;
         };
+        let Some(egui) = self.egui.as_mut() else {
+            return;
+        };
+
+        // egui must see every event first.
+        let resp = egui.state.on_window_event(&app.window, &event);
+
+        // Modifiers and cursor position always update app state, regardless
+        // of whether egui consumed the event or a drag is in flight.
+        if let WindowEvent::ModifiersChanged(mods) = &event {
+            app.shift_held = mods.state().shift_key();
+            app.ctrl_held = mods.state().control_key();
+        }
+        if let WindowEvent::CursorMoved { position, .. } = &event {
+            // Suppress gizmo hover picking while the pointer is over an egui
+            // area, unless the app is already mid-drag (active viewport
+            // drags keep receiving motion even over panels).
+            let suppress_hover = egui.ctx.is_pointer_over_egui() && !app.has_active_drag();
+            app.on_cursor_moved(position.x as f32, position.y as f32, suppress_hover);
+        }
 
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
 
-            WindowEvent::ModifiersChanged(mods) => {
-                app.shift_held = mods.state().shift_key();
-                app.ctrl_held = mods.state().control_key();
-            }
+            WindowEvent::ModifiersChanged(_) => {} // handled above
 
-            WindowEvent::CursorMoved { position, .. } => {
-                app.on_cursor_moved(position.x as f32, position.y as f32);
-            }
+            WindowEvent::CursorMoved { .. } => {} // handled above
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if state.is_pressed() {
-                    app.on_mouse_press(button);
-                } else {
-                    app.on_mouse_release(button);
+                let is_release = !state.is_pressed();
+                let gated = resp.consumed || egui.ctx.egui_wants_pointer_input();
+                // A release always reaches the app while a drag is active,
+                // so drags ending over a panel don't stick.
+                if !gated || (is_release && app.has_active_drag()) {
+                    if state.is_pressed() {
+                        app.on_mouse_press(button);
+                    } else {
+                        app.on_mouse_release(button);
+                    }
                 }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let steps = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
-                };
-                app.on_scroll(steps);
+                let gated = resp.consumed || egui.ctx.egui_wants_pointer_input();
+                if !gated {
+                    let steps = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
+                    };
+                    app.on_scroll(steps);
+                }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state.is_pressed() {
+                if egui.ctx.egui_wants_keyboard_input() {
+                    // egui owns keyboard focus (e.g. typing into a text
+                    // field) — don't also run keybinds.
+                } else if event.state.is_pressed() {
                     // Handle special keys by physical key (layout-independent)
                     match event.physical_key {
                         PhysicalKey::Code(KeyCode::Escape) => {
@@ -458,18 +492,27 @@ impl ApplicationHandler for AppWrapper {
                     app.request_screenshot();
                 }
 
-                match app.render() {
-                    Ok(_) => {}
-                    Err(wgpu::SurfaceError::Lost) => {
+                // Frame flow: gather input -> run the egui pass -> hand
+                // platform output back -> tessellate -> render (egui pass
+                // replaces the old text-overlay pass inside App::render).
+                let raw_input = egui.state.take_egui_input(&app.window);
+                let full_output = egui.ctx.run_ui(raw_input, |ui| {
+                    ui::draw(ui.ctx(), app);
+                });
+                egui.state.handle_platform_output(&app.window, full_output.platform_output);
+                let pixels_per_point = full_output.pixels_per_point;
+                let paint_jobs = egui.ctx.tessellate(full_output.shapes, pixels_per_point);
+
+                match app.render(
+                    &mut egui.renderer,
+                    &paint_jobs,
+                    &full_output.textures_delta,
+                    pixels_per_point,
+                ) {
+                    app::FrameOutcome::Presented | app::FrameOutcome::Skip => {}
+                    app::FrameOutcome::Reconfigure => {
                         let (w, h) = app.gpu.size();
                         app.resize(w, h);
-                    }
-                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                        log::error!("Out of GPU memory!");
-                        event_loop.exit();
-                    }
-                    Err(e) => {
-                        log::warn!("Surface error: {:?}", e);
                     }
                 }
 

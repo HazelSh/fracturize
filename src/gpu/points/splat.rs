@@ -107,7 +107,7 @@ impl SplatRenderer {
 
         let accum_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("splat_accum_pipeline_layout"),
-            bind_group_layouts: &[&accum_layout],
+            bind_group_layouts: &[Some(&accum_layout)],
             immediate_size: 0,
         });
 
@@ -201,7 +201,7 @@ impl SplatRenderer {
 
         let tonemap_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("splat_tonemap_pipeline_layout"),
-            bind_group_layouts: &[&tonemap_layout],
+            bind_group_layouts: &[Some(&tonemap_layout)],
             immediate_size: 0,
         });
 
@@ -237,8 +237,8 @@ impl SplatRenderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
