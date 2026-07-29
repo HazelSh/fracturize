@@ -44,13 +44,24 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
                     ui.add_space(6.0);
                     let (fps, avg_ms, p99_ms) = app.fps_stats();
+                    let wait_ms = app.present_wait_ms();
                     ui.label(format!(
-                        "{:.0} FPS · {:.1}ms · p99 {:.1}ms · ui {:.1}ms",
+                        "{:.0} FPS · {:.1}ms · p99 {:.1}ms · ui {:.1}ms · wait {:.1}ms",
                         fps,
                         avg_ms,
                         p99_ms,
                         app.ui_ms(),
-                    ));
+                        wait_ms,
+                    ))
+                    .on_hover_text(
+                        "ui: CPU cost of building this frame's panels.\n\
+                         wait: time parked waiting for the display to take the \
+                         last frame.\n\n\
+                         With vsync on, most of the frame budget *should* be \
+                         wait — that's headroom. If the frame time climbs while \
+                         wait stays high, the bottleneck is outside the app \
+                         (compositor, driver, another GPU client), not the UI.",
+                    );
 
                     // Which variation slot E / - / = are pointed at. The one
                     // piece of the retired HUD with no home in a panel: the

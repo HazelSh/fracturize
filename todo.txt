@@ -42,3 +42,8 @@
     Pathless scenes animate as a seamless full orbit. scenes/winze.toml +
     renders/winze.avif are the demo.
  -- automatic feature detection, automatic camera positioning/pointing? at/lookat 'voids', 'clusters'?
+
+
+
+
+🕮⊞◌⃘⁂

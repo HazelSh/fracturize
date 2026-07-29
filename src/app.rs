@@ -342,6 +342,9 @@ pub struct App {
     pub ui_state: UiState,
     /// Smoothed cost of building the egui frame, in ms (see record_ui_time)
     ui_build_ms: f32,
+    /// Smoothed time blocked in `get_current_texture`, in ms — the frame's
+    /// idle-waiting-for-vsync share (see `present_wait_ms`)
+    present_wait_ms: f32,
     /// When prefs last changed without being written yet (window drags churn
     /// geometry every frame; see flush_dirty_prefs)
     prefs_dirty_since: Option<std::time::Instant>,
@@ -556,6 +559,7 @@ impl App {
             indicator_key: None,
             ui_state,
             ui_build_ms: 0.0,
+            present_wait_ms: 0.0,
             prefs_dirty_since: None,
             saved_views_cache: None,
             pending_capacity: None,
@@ -1055,6 +1059,26 @@ impl App {
     /// Smoothed UI build time in milliseconds.
     pub fn ui_ms(&self) -> f32 {
         self.ui_build_ms
+    }
+
+    /// Record how long `get_current_texture` blocked, smoothed the same way
+    /// as `record_ui_time`.
+    pub fn record_present_wait(&mut self, ms: f32) {
+        self.present_wait_ms = self.present_wait_ms * 0.9 + ms * 0.1;
+    }
+
+    /// Smoothed time per frame spent blocked acquiring the swapchain image.
+    ///
+    /// This is the number that settles the recurring "are the panels costing
+    /// me frames?" question. With vsync on, a healthy frame spends most of its
+    /// budget parked *here*, doing nothing: high wait means the display is
+    /// pacing us and there is headroom to spare. A frame time that has gone up
+    /// while this has gone *down* means the work genuinely got slower. A frame
+    /// time that has gone up while this stays high means something outside our
+    /// control (compositor, driver, another GPU client) is holding the
+    /// swapchain, and no amount of UI optimisation will help.
+    pub fn present_wait_ms(&self) -> f32 {
+        self.present_wait_ms
     }
 
     /// (fps, avg frametime ms, p99 frametime ms) for the status bar.
@@ -2734,6 +2758,12 @@ impl App {
         // directly (no more `Result<_, SurfaceError>`, and no `OutOfMemory`
         // variant — device loss is now reported via
         // `Device::set_device_lost_callback` instead).
+        // Acquiring the swapchain image is where a vsync-paced frame parks:
+        // under FIFO the driver blocks here until a buffer frees up. Timing it
+        // separately is what makes "we're idle waiting for the display" and
+        // "we're actually too slow" distinguishable in the status bar — see
+        // `record_present_wait`.
+        let acquire_start = Instant::now();
         let surface_texture = match self.gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -2748,6 +2778,7 @@ impl App {
                 return FrameOutcome::Skip;
             }
         };
+        self.record_present_wait(acquire_start.elapsed().as_secs_f32() * 1000.0);
         let color_view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
