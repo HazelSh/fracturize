@@ -358,5 +358,17 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
         if resp.clicked() {
             app.save_scene();
         }
+
+        let resp = ui.button("Save as…");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Fork the scene: write it under a new name and keep working on that copy, \
+             leaving the original as it was (Ctrl+Shift+S)",
+            "click: save the scene under a new name",
+        );
+        if resp.clicked() {
+            super::save_as::open(app);
+        }
     });
 }

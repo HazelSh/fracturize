@@ -25,6 +25,7 @@ pub mod hints;
 pub mod icons;
 pub mod labels;
 pub mod render_panel;
+pub mod save_as;
 pub mod shortcuts;
 pub mod status_bar;
 pub mod toolbar;
@@ -64,6 +65,8 @@ pub struct UiState {
     /// by hand — it snaps back the instant the selection leaves the viewport
     /// — so it only happens on the frame the selection actually moves.
     pub browser_scrolled_to: Option<usize>,
+    /// "Save scene as…" dialog: open state and in-progress filename.
+    pub save_as: save_as::SaveAsState,
 }
 
 impl UiState {
@@ -75,6 +78,7 @@ impl UiState {
             renaming_transform: None,
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,
+            save_as: save_as::SaveAsState::default(),
         }
     }
 }
@@ -222,6 +226,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     shortcuts::draw(&ctx, app);
     step("shortcuts", t, &mut timings);
+    let t = std::time::Instant::now();
+    save_as::draw(&ctx, app);
+    step("save_as", t, &mut timings);
     let t = std::time::Instant::now();
     status_bar::draw(ui, app);
     step("status_bar", t, &mut timings);

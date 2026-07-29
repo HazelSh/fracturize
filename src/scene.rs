@@ -163,6 +163,15 @@ pub struct SceneMeta {
     /// wrapping cyclically. Compensates the wash-out from low color_falloff.
     #[serde(default = "default_color_contrast")]
     pub color_contrast: f64,
+    /// Background colour behind the fractal, in **linear** 0-1 RGB — the
+    /// value handed straight to `LoadOp::Clear`, which for an sRGB target is
+    /// linear. Defaults to the dark blue-black every scene rendered on before
+    /// this was configurable, so nothing moves. Note for hand-authoring:
+    /// `[0.02, 0.02, 0.05]` is that default and looks like sRGB `#282a45` —
+    /// linear values run much darker than the number suggests, and the Render
+    /// window's picker does the conversion for you.
+    #[serde(default = "default_background")]
+    pub background: [f64; 3],
     /// Depth-cue fog strength, 0 (off) to 1. A single amount rather than the
     /// four raw shader knobs: the near/far band auto-ranges off the camera
     /// distance (see `App::fog_range`) and the brightness/saturation falloffs
@@ -187,6 +196,35 @@ fn default_color_speed() -> f64 {
 
 fn default_color_contrast() -> f64 {
     1.0
+}
+
+/// A background colour as a wgpu clear value. Linear RGB — which is what
+/// `LoadOp::Clear` wants for an sRGB target, and what `Scene::background`
+/// stores, so this is a repack rather than a conversion.
+///
+/// `alpha` is 0 for a transparent render and 1 otherwise. It only ever
+/// reaches the swapchain as 1: the window has no alpha channel to composite
+/// through, so transparency is a property of what gets written to a file, not
+/// a preview mode.
+pub fn clear_color(background: Vec3, alpha: f64) -> wgpu::Color {
+    wgpu::Color {
+        r: background.x as f64,
+        g: background.y as f64,
+        b: background.z as f64,
+        a: alpha,
+    }
+}
+
+/// The dark blue-black every scene rendered on before the background was
+/// configurable. Linear RGB (see `SceneMeta::background`).
+pub const DEFAULT_BACKGROUND: Vec3 = Vec3::new(0.02, 0.02, 0.05);
+
+fn default_background() -> [f64; 3] {
+    [
+        DEFAULT_BACKGROUND.x as f64,
+        DEFAULT_BACKGROUND.y as f64,
+        DEFAULT_BACKGROUND.z as f64,
+    ]
 }
 
 fn default_decay() -> f64 {
@@ -337,6 +375,8 @@ pub struct Scene {
     pub color_contrast: f32,
     /// Depth-cue fog strength, 0 (off) to 1 — see `SceneMeta::fog`
     pub fog: f32,
+    /// Background colour, linear RGB — see `SceneMeta::background`
+    pub background: Vec3,
     /// IFS transforms (affine matrix + variation blend weights)
     pub transforms: Vec<TransformSpec>,
     /// Human-readable name per transform (from scene file)
@@ -500,6 +540,8 @@ impl Scene {
             color_falloff: (scene_file.meta.color_falloff as f32).max(0.0),
             color_contrast: (scene_file.meta.color_contrast as f32).max(0.0),
             fog: (scene_file.meta.fog as f32).clamp(0.0, 1.0),
+            background: Vec3::from(scene_file.meta.background.map(|v| v as f32))
+                .clamp(Vec3::ZERO, Vec3::ONE),
             transforms,
             transform_names,
             colors: transform_colors,
@@ -581,6 +623,7 @@ impl Scene {
                 color_falloff: tidy(self.color_falloff),
                 color_contrast: tidy(self.color_contrast),
                 fog: tidy(self.fog),
+                background: self.background.to_array().map(tidy),
                 // Point count is a render property chosen in the Render
                 // window and persisted to prefs, not part of the artwork, so
                 // saving no longer writes it. `None` also means the merge
@@ -809,6 +852,7 @@ fn merge_scene_into_document(
         set_f64(meta, "color_falloff", file.meta.color_falloff, Some(0.0));
         set_f64(meta, "color_contrast", file.meta.color_contrast, Some(1.0));
         set_f64(meta, "fog", file.meta.fog, Some(0.0));
+        set_arr3(meta, "background", file.meta.background, Some(default_background()));
         if let Some(pc) = file.meta.point_count {
             set_i64(meta, "point_count", pc as i64, None);
         }

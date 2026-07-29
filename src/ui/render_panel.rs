@@ -27,6 +27,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             draw_color(ui, app);
             ui.separator();
             draw_fog(ui, app);
+            ui.separator();
+            draw_output(ui, app);
         });
 
     super::remember(ctx, app, super::WindowKey::Render);
@@ -166,6 +168,40 @@ pub fn point_count(ui: &mut egui::Ui, app: &mut App) {
                 .weak(),
         );
     }
+}
+
+fn draw_output(ui: &mut egui::Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        // `color_edit_button_rgb` takes linear RGB, which is exactly what
+        // `Scene::background` stores and what `LoadOp::Clear` wants — no
+        // conversion anywhere in the chain.
+        let mut rgb = app.scene.background.to_array();
+        let resp = ui.color_edit_button_rgb(&mut rgb);
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Background colour. Scene data — saved with the scene, and undoable.",
+            "click: pick a background colour",
+        );
+        if resp.changed() {
+            app.set_background(glam::Vec3::from(rgb));
+        }
+        ui.label("background");
+
+        let mut transparent = app.transparent_render;
+        let resp = ui.checkbox(&mut transparent, "transparent");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Write an alpha channel in screenshots (S) and HQ renders (P) so they can be \
+             composited. The window itself stays opaque — there's nothing behind it to show \
+             through. Not available for .avif output.",
+            "click: toggle transparent output",
+        );
+        if resp.changed() {
+            app.transparent_render = transparent;
+        }
+    });
 }
 
 fn draw_color(ui: &mut egui::Ui, app: &mut App) {

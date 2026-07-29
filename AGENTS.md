@@ -16,7 +16,8 @@ src/
   main.rs        # CLI args, winit event loop + egui event gating, keybinds, default scene
   app.rs         # App state, mouse/edit handling, render orchestration, screenshots
   history.rs     # Unified snapshot undo/redo behind App::commit_edit (all edits)
-  indicators.rs  # Offset-vector / rotation-axis line geometry for the selection
+  fog.rs         # Depth-cue fog: one amount, band and falloffs derived
+  indicators.rs  # Selection offset/rotation lines, and camera-path polylines
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
@@ -25,7 +26,8 @@ src/
     hints.rs       # hinted(): tooltip + status-bar hint on one widget response
     transforms.rs  # Transform tab rail + selected-transform detail pane
     explore.rs     # Random flame, mutate + strength, undo/redo, history list
-    render_panel.rs# Renderer mode, exposure, point size + count, color, fog
+    render_panel.rs# Renderer mode, exposure, point size + count, color, fog, output
+    save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
     camera_panel.rs# Framing, saved views, camera paths, HQ render / screenshot
     browser.rs     # Scene picker (B)
     shortcuts.rs   # Keybind reference window (H)
@@ -183,6 +185,7 @@ framing on the next save.
 | D / Shift+D | finer / coarser color detail (color_falloff) |
 | C / Shift+C | less / more color contrast |
 | F / Shift+F | more / less fog |
+| Ctrl+Shift+S | save scene as… (fork under a new name) |
 
 The Keybinds window (H) is clickable: each row triggers its first-listed
 binding, shift+click the second. `I` persists to
@@ -289,6 +292,37 @@ way, so an interesting roll can always be recovered. `spherical` is never
 rolled (its 1/r^2 inversion blows scenes out — fine by hand, bad by dice).
 A rolled flame is a normal history entry: one Ctrl+Z restores what was there.
 
+## Background & Transparent Output
+
+`background` is scene data (linear RGB, see "Scene Files"), picked in the
+Render window and undoable. It reaches both renderers as the pass clear value
+and, for splat, as the colour the tonemap composites against.
+
+The splat tonemap **composites** rather than adds: `mix(background,
+mean_color, clamp(brightness))`. It used to be `background + mean_color *
+brightness`, pure emission, which is only right when the background is black —
+put a fractal on a light background that way and every pixel clips to white.
+Treating log density as coverage fixes that and collapses the two output modes
+into one model: an opaque render is now exactly the transparent one composited
+over the background. On the near-black default the difference from the old
+formula is ~1% RMSE, so existing scenes look the same; `--render` of a *points*
+scene is byte-identical.
+
+`--transparent` (and the Render window's checkbox, which covers `S` screenshots
+and `P` HQ renders) writes an alpha channel: the clear alpha goes to 0, the
+points renderer's own alpha marks where points landed, and the splat renderer
+writes straight-alpha coverage so dusty edges stay dusty instead of becoming a
+cutout. The live window is always opaque — its swapchain has nothing behind it.
+**Not supported for `.avif`**: `src/avif.rs` reads only r/g/b converting to
+YUV, so `--transparent` with an `.avif` output errors rather than quietly
+producing opaque video.
+
+Save-as / fork is `Ctrl+Shift+S` or the Camera window's button — a small modal
+(`src/ui/save_as.rs`), not a native dialog: one text field doesn't justify an
+`rfd` dependency when the app already browses `scenes/` with `B`. It refuses to
+overwrite without an explicit tick, because undo only covers the scene you have
+open.
+
 ## Fog
 
 Depth cue, and the only one this renderer has — additive point clouds have no
@@ -323,6 +357,10 @@ point_count = 4_000_000   # circular point buffer capacity (default 500k)
 color_speed = 0.5         # global color blending speed (0-1); used when color_falloff = 0
 color_falloff = 0.0       # scale-aware color accumulation exponent (0 = off, ~1 neutral)
 color_contrast = 1.0      # render-time cyclic palette contrast stretch (1 = off)
+fog = 0.0                 # depth cue, 0-1 (see "Fog")
+background = [0.02, 0.02, 0.05]   # LINEAR rgb behind the fractal. Linear, not
+                          # sRGB: this is the clear value, and 0.02 reads as
+                          # sRGB #282a45. Use the Render window's picker.
 
 [camera]                  # optional
 focus = [0.0, 0.0, 0.0]   # orbit center / look-at
@@ -460,6 +498,8 @@ encode+save | total`) to stdout so you can budget effort. Options:
   Point count is a *render* property, not a scene property: the scene's
   `point_count` is just the interactive default (16 bytes/point of GPU memory).
 - `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
+- `--transparent` — RGBA output for compositing (PNG only; see "Background
+  & Transparent Output").
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`
   (legacy on-switch; a scene's own `fog` value wins over it).
 - `--splat [--exposure X]` — render with the splat renderer (also implied by a

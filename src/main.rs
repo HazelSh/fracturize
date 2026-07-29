@@ -143,6 +143,12 @@ struct Args {
     #[arg(long)]
     exposure: Option<f32>,
 
+    /// Render with a transparent background: the PNG gets an alpha channel
+    /// carrying the fractal's own coverage, for compositing. Not supported for
+    /// .avif output — the AV1 muxer has no alpha plane.
+    #[arg(long)]
+    transparent: bool,
+
     /// Start from a randomly generated flame instead of a scene file.
     /// Quality-checked on the CPU before it's handed back, so it always
     /// renders. Pair with --seed to reproduce a roll (the seed used is
@@ -357,7 +363,12 @@ impl ApplicationHandler for AppWrapper {
                     // Handle special keys by physical key (layout-independent)
                     match event.physical_key {
                         PhysicalKey::Code(KeyCode::Escape) => {
-                            if app.show_browser {
+                            // Escape quits, which makes it the worst possible
+                            // key to leave unhandled while something modal is
+                            // up: dismiss that first.
+                            if app.ui_state.save_as.is_open() {
+                                app.ui_state.save_as = Default::default();
+                            } else if app.show_browser {
                                 app.toggle_browser();
                             } else {
                                 event_loop.exit();
@@ -407,7 +418,9 @@ impl ApplicationHandler for AppWrapper {
                         }
                         Key::Character(c) => match c.as_str() {
                             "s" | "S" => {
-                                if app.ctrl_held {
+                                if app.ctrl_held && app.shift_held {
+                                    ui::save_as::open(app);
+                                } else if app.ctrl_held {
                                     app.save_scene();
                                 } else {
                                     app.request_screenshot();
@@ -665,6 +678,7 @@ fn default_scene() -> Scene {
         camera_yaw: default_cam.yaw,
         camera_pitch: default_cam.pitch,
         camera_roll: default_cam.roll,
+        background: scene::DEFAULT_BACKGROUND,
         camera_path: None,
     }
 }
@@ -747,6 +761,7 @@ fn main() {
             grid,
             splat,
             exposure,
+            transparent: args.transparent,
         };
         let animated = std::path::Path::new(out)
             .extension()
@@ -754,6 +769,16 @@ fn main() {
         let result = if animated {
             if !matches!(grid, offline::GridMode::Single) || args.mutations.is_some() {
                 eprintln!("animation (.avif) cannot be combined with grid or mutation sheets");
+                std::process::exit(1);
+            }
+            if args.transparent {
+                // Fail rather than quietly hand back opaque video: src/avif.rs
+                // reads only r/g/b converting to YUV, so there is nowhere for
+                // an alpha plane to go without muxer work.
+                eprintln!(
+                    "--transparent is not supported for .avif output (the AV1 muxer has no \
+                     alpha plane). Render a PNG sequence instead, or drop --transparent."
+                );
                 std::process::exit(1);
             }
             offline::render_animation(

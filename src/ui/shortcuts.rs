@@ -97,6 +97,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         &[
             ("B", "browse + load scenes", Some(HelpAction::Browse)),
             ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
+            ("Ctrl+Shift+S", "save scene as… (fork it under a new name)", None),
             ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
             ("P", "HQ render current view (background)", Some(HelpAction::HqRender)),
         ],

@@ -24,14 +24,6 @@ use crate::path::CameraPath;
 use crate::scene::Scene;
 use crate::view::View;
 
-/// Matches the interactive renderer's clear color
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.02,
-    g: 0.02,
-    b: 0.05,
-    a: 1.0,
-};
-
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Multi-view layouts. Grid tiles are laid out row-major.
@@ -79,6 +71,9 @@ pub struct OfflineParams<'a> {
     pub splat: bool,
     /// Splat exposure multiplier (ignored for the point renderer)
     pub exposure: f32,
+    /// Write an alpha channel: the background clears to transparent and the
+    /// fractal carries its own coverage, so the render can be composited.
+    pub transparent: bool,
 }
 
 /// Evenly spaced values in [-1, 1] (a single sample sits at 0)
@@ -291,12 +286,14 @@ impl TileRenderer {
         exposure: f32,
         point_count: u32,
         height: u32,
+        clear: wgpu::Color,
+        transparent: bool,
     ) -> Self {
         if splat {
             let renderer = SplatRenderer::new(
                 device, FORMAT, &compute.point_buffer, &compute.colormap_buffer,
             );
-            renderer.upload_params(queue, exposure, point_count, height as f32, CLEAR_COLOR);
+            renderer.upload_params(queue, exposure, point_count, height as f32, clear, transparent);
             TileRenderer::Splat(renderer)
         } else {
             TileRenderer::Points(PointRenderer::new(
@@ -323,10 +320,13 @@ struct TileTarget {
     width: u32,
     height: u32,
     padded_bytes_per_row: u32,
+    /// What the point pass clears to — the scene's background, with alpha 0
+    /// for a transparent render.
+    clear: wgpu::Color,
 }
 
 impl TileTarget {
-    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    fn new(device: &wgpu::Device, width: u32, height: u32, clear: wgpu::Color) -> Self {
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offline_color"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -362,6 +362,7 @@ impl TileTarget {
             width,
             height,
             padded_bytes_per_row,
+            clear,
         }
     }
 
@@ -391,7 +392,7 @@ impl TileTarget {
                         view: &self.color_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            load: wgpu::LoadOp::Clear(self.clear),
                             store: wgpu::StoreOp::Store,
                         },
                         depth_slice: None,
@@ -495,6 +496,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         grid,
         splat,
         exposure,
+        transparent,
     } = params;
     let t_start = Instant::now();
 
@@ -509,12 +511,16 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         .and_then(|v| v.color_contrast)
         .unwrap_or(scene.color_contrast);
 
+    let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
+
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
     let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate);
     let mut renderer =
-        TileRenderer::new(&device, &queue, &compute, splat, exposure, point_count, height);
+        TileRenderer::new(
+        &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+    );
     let t_fill = Instant::now();
 
     let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
@@ -524,7 +530,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let (cols, rows) = grid.tile_count();
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
 
-    let target = TileTarget::new(&device, width, height);
+    let target = TileTarget::new(&device, width, height, clear);
     let sheet_w = width * cols;
     let sheet_h = height * rows;
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
@@ -616,6 +622,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         grid: _,
         splat,
         exposure,
+        transparent,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -630,12 +637,16 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         .and_then(|v| v.color_contrast)
         .unwrap_or(scene.color_contrast);
 
+    let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
+
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
     let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate);
     let mut renderer =
-        TileRenderer::new(&device, &queue, &compute, splat, exposure, point_count, height);
+        TileRenderer::new(
+        &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+    );
     let t_fill = Instant::now();
 
     let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
@@ -660,7 +671,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
 
     let mut encoder = crate::avif::AnimationEncoder::new(width, height, anim.fps, anim.quality, 8)?;
     let aspect = width as f32 / height as f32;
-    let target = TileTarget::new(&device, width, height);
+    let target = TileTarget::new(&device, width, height, clear);
     let mut frame_buf = vec![0u8; (width * height * 4) as usize];
 
     for i in 0..frames {
@@ -724,6 +735,7 @@ pub fn render_mutations(
         grid: _,
         splat,
         exposure,
+        transparent,
     } = params;
     let t_start = Instant::now();
 
@@ -758,6 +770,8 @@ pub fn render_mutations(
     let cols = (n as f32).sqrt().ceil() as u32;
     let rows = n.div_ceil(cols);
 
+    let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
+
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
@@ -770,7 +784,7 @@ pub fn render_mutations(
         fog.0, fog.1, fog.2, fog.3, color_contrast,
     );
 
-    let target = TileTarget::new(&device, width, height);
+    let target = TileTarget::new(&device, width, height, clear);
     let sheet_w = width * cols;
     let sheet_h = height * rows;
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
@@ -783,7 +797,9 @@ pub fn render_mutations(
         // Each variant is a different IFS: refill the point buffer
         let (compute, point_count) = fill_points(&device, &queue, variant, accumulate);
         let mut renderer =
-            TileRenderer::new(&device, &queue, &compute, splat, exposure, point_count, height);
+            TileRenderer::new(
+        &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+    );
         renderer.upload_camera(&queue, &camera);
         fill_total += t0.elapsed().as_secs_f32();
 

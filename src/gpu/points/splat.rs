@@ -32,7 +32,11 @@ struct SplatParams {
     background: [f32; 4],
     exposure_scale: f32,
     gain: f32,
-    _pad: [f32; 2],
+    /// 1.0 = write straight-alpha coverage instead of compositing over
+    /// `background`. Takes one of the two pad slots, so the uniform's size
+    /// and alignment are unchanged.
+    transparent: f32,
+    _pad: f32,
 }
 
 pub struct SplatRenderer {
@@ -300,6 +304,7 @@ impl SplatRenderer {
         point_capacity: u32,
         screen_height: f32,
         background: wgpu::Color,
+        transparent: bool,
     ) {
         let exposure_scale = if point_capacity > 0 {
             exposure * EXPOSURE_K * screen_height * screen_height / point_capacity as f32
@@ -315,7 +320,8 @@ impl SplatRenderer {
             ],
             exposure_scale,
             gain: GAIN,
-            _pad: [0.0; 2],
+            transparent: transparent as u32 as f32,
+            _pad: 0.0,
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
     }

@@ -42,8 +42,10 @@ struct SplatParams {
     exposure_scale: f32,
     /// Output gain applied after the log
     gain: f32,
+    /// 1.0 = write straight-alpha coverage instead of compositing over
+    /// `background` (transparent PNG output)
+    transparent: f32,
     _pad0: f32,
-    _pad1: f32,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -183,13 +185,36 @@ fn vs_tonemap(@builtin(vertex_index) idx: u32) -> TonemapOutput {
 
 @fragment
 fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
+    let transparent = params.transparent > 0.5;
     let acc = textureLoad(accum, vec2<i32>(in.clip_position.xy), 0);
     let density = acc.a;
     if density <= 0.0 {
+        if transparent {
+            return vec4<f32>(0.0);
+        }
         return vec4<f32>(params.background.rgb, 1.0);
     }
     // Density-weighted mean color, brightness from log density
     let mean_color = acc.rgb / density;
     let brightness = log2(1.0 + density * params.exposure_scale) * params.gain;
-    return vec4<f32>(params.background.rgb + mean_color * brightness, 1.0);
+    // Coverage, not gain. This used to be `background + mean_color *
+    // brightness` — pure emission, which is right only if the background is
+    // black. Once the background became a scene parameter it stopped being:
+    // add a fractal to a light background and every pixel clips to white,
+    // which is what happened the first time this was tried at 0.9 grey.
+    //
+    // Treating log-density as *coverage* and compositing fixes that and
+    // unifies the two output modes — the opaque render is now exactly the
+    // transparent one composited over the background, one model instead of
+    // two. On the near-black default background the difference from the old
+    // formula is bounded by the background itself (~2% of full scale), so
+    // existing scenes are visually unchanged.
+    let coverage = clamp(brightness, 0.0, 1.0);
+    if transparent {
+        // Straight (non-premultiplied) alpha, which is what PNG stores:
+        // colour is the palette hue, coverage is the log density, so the
+        // dusty edges stay dusty instead of turning into a cutout.
+        return vec4<f32>(mean_color, coverage);
+    }
+    return vec4<f32>(mix(params.background.rgb, mean_color, coverage), 1.0);
 }

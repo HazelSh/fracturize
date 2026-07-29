@@ -83,13 +83,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
     Vec3::new(r, g, b) + Vec3::splat(v - c)
 }
 
-/// Clear color: dark blue-black
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.02,
-    g: 0.02,
-    b: 0.05,
-    a: 1.0,
-};
+
 
 /// Screenshot dimensions
 const SCREENSHOT_WIDTH: u32 = 1280;
@@ -340,6 +334,11 @@ pub struct App {
     /// Depth-cue strength, 0 (off) to 1. Scene data — saved by Ctrl+S and
     /// undoable, like the other look parameters the scene file carries.
     pub fog_amount: f32,
+    /// Write an alpha channel in captured stills (S) and HQ renders (P), so
+    /// they can be composited. Session state, not scene data: it says what
+    /// leaves the app, not what the artwork is. The live window is always
+    /// opaque — its swapchain has nothing to composite through.
+    pub transparent_render: bool,
     /// Pinned fog band in world units, or `None` to auto-range off the camera
     /// distance. Only the Render window's advanced disclosure and legacy view
     /// files set this; auto is the default and the case worth optimising for.
@@ -605,6 +604,7 @@ impl App {
             show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
             fog_amount,
             fog_band: None,
+            transparent_render: false,
             color_falloff: scene.color_falloff,
             color_contrast: scene.color_contrast,
             fps_tracker: FpsTracker::new(),
@@ -1005,7 +1005,9 @@ impl App {
 
     /// Write the scene (with any interactive edits) back to its TOML file.
     /// Camera framing and render params adjusted in-app become scene defaults.
-    pub fn save_scene(&mut self) {
+    /// Fold the live values that live on `App` rather than on `Scene` back
+    /// into the scene, so what gets written is what's on screen.
+    fn sync_scene_for_save(&mut self) {
         self.scene.camera_focus = self.camera.focus;
         self.scene.camera_distance = self.camera.distance;
         self.scene.camera_yaw = self.camera.yaw;
@@ -1015,16 +1017,62 @@ impl App {
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
         self.scene.fog = self.fog_amount;
+    }
 
+    pub fn save_scene(&mut self) {
+        self.sync_scene_for_save();
         let path = self
             .scene_path
             .clone()
             .unwrap_or_else(|| format!("scenes/untitled-{}.toml", unix_timestamp()));
+        self.write_scene_to(&path);
+    }
 
-        match self.scene.save(&path) {
+    /// Save under a new name and continue working on *that* file — the fork
+    /// point for "I like this, but I want to keep the original too".
+    ///
+    /// Deliberately refuses to overwrite: the dialog checks first and says so,
+    /// and this is the backstop for the case where something appeared in
+    /// between. Clobbering another scene is not recoverable from in-app —
+    /// history only covers the scene you have open.
+    pub fn save_scene_as(&mut self, path: &str, overwrite: bool) -> Result<(), String> {
+        if !overwrite && Path::new(path).exists() {
+            return Err(format!("{} already exists", path));
+        }
+        self.sync_scene_for_save();
+        self.scene.save(path).map_err(|e| e.to_string())?;
+        log::info!("Scene saved as {}", path);
+        self.scene_path = Some(path.to_string());
+        // The slug feeds views/ lookups and render filenames, and it comes
+        // from the scene name, not the path — but the *saved views* cache is
+        // keyed on it, so a rename has to drop it.
+        self.invalidate_saved_views();
+        Ok(())
+    }
+
+    /// The path a "save as" should suggest: the current file with a `-copy`
+    /// suffix, or a name derived from the scene for an unsaved one.
+    pub fn suggested_fork_path(&self) -> String {
+        match &self.scene_path {
+            Some(p) => {
+                let path = Path::new(p);
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("scene");
+                let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+                let name = format!("{}-copy.toml", stem);
+                match dir {
+                    Some(d) => d.join(name).to_string_lossy().into_owned(),
+                    None => name,
+                }
+            }
+            None => format!("scenes/{}.toml", self.scene_slug()),
+        }
+    }
+
+    fn write_scene_to(&mut self, path: &str) {
+        match self.scene.save(path) {
             Ok(()) => {
                 log::info!("Scene saved to {}", path);
-                self.scene_path = Some(path);
+                self.scene_path = Some(path.to_string());
             }
             Err(e) => log::error!("{}", e),
         }
@@ -1793,6 +1841,7 @@ impl App {
 
         let splat = self.render_mode == RenderMode::Splat;
         let exposure = self.exposure;
+        let transparent = self.transparent_render;
 
         let out = format!("renders/{}-{}.png", self.scene_slug(), unix_timestamp());
         let flag = self.hq_render_in_flight.clone();
@@ -1814,6 +1863,7 @@ impl App {
                 grid: crate::offline::GridMode::Single,
                 splat,
                 exposure,
+                transparent,
             });
             match result {
                 Ok(()) => log::info!("HQ render finished: {}", out),
@@ -2510,6 +2560,14 @@ impl App {
         (near, far, brightness, saturation)
     }
 
+    /// Background colour behind the fractal (linear RGB). Scene data, so it
+    /// is an undoable edit like the other look parameters Ctrl+S writes.
+    pub fn set_background(&mut self, rgb: Vec3) {
+        let before = self.edit_snapshot();
+        self.scene.background = rgb.clamp(Vec3::ZERO, Vec3::ONE);
+        self.commit_edit("Background", Some("background"), before);
+    }
+
     pub fn set_fog_amount(&mut self, amount: f32) {
         let before = self.edit_snapshot();
         self.fog_amount = amount.clamp(0.0, 1.0);
@@ -2761,6 +2819,9 @@ impl App {
 
         let aspect = SCREENSHOT_WIDTH as f32 / SCREENSHOT_HEIGHT as f32;
         let mvp = self.camera.view_proj(aspect);
+        // Unlike the window pass, this one writes to a file that has an alpha
+        // channel worth filling in.
+        let alpha = if self.transparent_render { 0.0 } else { 1.0 };
 
         let fog = self.fog_uniforms();
         let camera = CameraUniforms::new(
@@ -2791,7 +2852,7 @@ impl App {
                         view: &color_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            load: wgpu::LoadOp::Clear(crate::scene::clear_color(self.scene.background, alpha)),
                             store: wgpu::StoreOp::Store,
                         },
                         depth_slice: None,
@@ -2824,7 +2885,8 @@ impl App {
                     self.exposure,
                     self.buffer_capacity,
                     SCREENSHOT_HEIGHT as f32,
-                    CLEAR_COLOR,
+                    crate::scene::clear_color(self.scene.background, alpha),
+                    self.transparent_render,
                 );
                 self.splat_renderer.render(
                     &self.gpu.device,
@@ -3057,7 +3119,7 @@ impl App {
                         view: &color_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            load: wgpu::LoadOp::Clear(crate::scene::clear_color(self.scene.background, 1.0)),
                             store: wgpu::StoreOp::Store,
                         },
                         depth_slice: None,
@@ -3090,7 +3152,8 @@ impl App {
                     self.exposure,
                     self.buffer_capacity,
                     height as f32,
-                    CLEAR_COLOR,
+                    crate::scene::clear_color(self.scene.background, 1.0),
+                    false,
                 );
                 self.splat_renderer.render(
                     &self.gpu.device,
