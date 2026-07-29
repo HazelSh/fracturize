@@ -18,6 +18,10 @@ pub struct View {
     /// Orbit elevation angle in radians (0 = level with the focus)
     #[serde(default)]
     pub pitch: f32,
+    /// Roll about the view axis in radians. `#[serde(default)]` so views
+    /// written before roll existed load as level rather than failing.
+    #[serde(default)]
+    pub roll: f32,
     /// Orbit radius
     pub distance: f32,
     /// Orbit center / look-at point
@@ -93,6 +97,7 @@ mod tests {
             scene: Some("scenes/glasshouse.toml".to_string()),
             rotation: 1.25,
             pitch: 0.35,
+            roll: -0.4,
             distance: 4.0,
             focus: [0.1, 0.2, 0.3],
             offset: [0.0, 1.0, 0.0],
@@ -114,8 +119,34 @@ mod tests {
         let loaded = View::load(&path).unwrap();
         assert_eq!(loaded.rotation, view.rotation);
         assert_eq!(loaded.pitch, view.pitch);
+        assert_eq!(loaded.roll, view.roll);
         assert_eq!(loaded.focus, view.focus);
         assert_eq!(loaded.scene, view.scene);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A view written before roll existed must still load, level.
+    #[test]
+    fn pre_roll_view_loads_level() {
+        let legacy = r#"
+rotation = 1.0
+distance = 3.0
+focus = [0.0, 0.0, 0.0]
+offset = [0.0, 0.0, 0.0]
+point_size = 0.002
+fog_near = 3.0
+fog_far = 4.5
+fog_brightness = 0.4
+fog_saturation = 0.3
+"#;
+        let dir = std::env::temp_dir().join("fracturize_view_legacy_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.toml");
+        std::fs::write(&path, legacy).unwrap();
+        let v = View::load(&path).unwrap();
+        assert_eq!(v.roll, 0.0);
+        assert_eq!(v.pitch, 0.0);
+        assert_eq!(v.fog, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

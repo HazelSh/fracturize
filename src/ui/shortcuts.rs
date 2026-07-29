@@ -27,6 +27,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         &[
             ("drag", "orbit camera (pauses auto-orbit)", None),
             ("shift+drag", "pan focus (middle-drag works too)", None),
+            ("right-drag", "roll the camera (level it in the Camera window)", None),
             ("scroll", "zoom", None),
             ("Up / Down", "zoom in / out", Some(HelpAction::Zoom)),
             ("O", "pause / resume camera orbit", Some(HelpAction::ToggleOrbit)),

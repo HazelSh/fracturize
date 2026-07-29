@@ -172,6 +172,7 @@ mod tests {
             pitch: 0.25,
             distance: 3.0,
             focus: Vec3::ZERO,
+            roll: 0.0,
         }
     }
 

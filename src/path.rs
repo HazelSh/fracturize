@@ -29,6 +29,9 @@ pub struct PathKey {
     pub pitch: f32,
     pub distance: f32,
     pub focus: Vec3,
+    /// View-axis roll (radians). Interpolated like yaw — unwrapped, so a key
+    /// authored a full turn away rolls the whole way rather than snapping.
+    pub roll: f32,
 }
 
 impl PathKey {
@@ -38,6 +41,7 @@ impl PathKey {
             pitch: cam.pitch,
             distance: cam.distance,
             focus: cam.focus,
+            roll: cam.roll,
         }
     }
 }
@@ -136,12 +140,14 @@ impl CameraPath {
                 pitch: 0.0,
                 distance: 3.0,
                 focus: Vec3::ZERO,
+                roll: 0.0,
             });
             return OrbitCamera {
                 yaw: k.yaw,
                 pitch: k.pitch,
                 distance: k.distance,
                 focus: k.focus,
+                roll: k.roll,
             };
         }
 
@@ -176,6 +182,7 @@ impl CameraPath {
                 cr3(|k| k.focus.y),
                 cr3(|k| k.focus.z),
             ),
+            roll: cr3(|k| k.roll),
         }
     }
 }
@@ -185,7 +192,7 @@ mod tests {
     use super::*;
 
     fn key(yaw: f32, pitch: f32, dist: f32, focus: Vec3) -> PathKey {
-        PathKey { yaw, pitch, distance: dist, focus }
+        PathKey { yaw, pitch, distance: dist, focus, roll: 0.0 }
     }
 
     fn linear_path(closed: bool) -> CameraPath {
@@ -265,12 +272,28 @@ mod tests {
 
     #[test]
     fn full_orbit_matches_auto_orbit() {
-        let base = OrbitCamera { yaw: 0.7, pitch: 0.3, distance: 4.0, focus: Vec3::X };
+        let base = OrbitCamera { yaw: 0.7, pitch: 0.3, distance: 4.0, focus: Vec3::X, roll: 0.0 };
         let p = CameraPath::full_orbit(&base);
         let mid = p.sample(0.5);
         assert!((mid.yaw - (base.yaw + std::f32::consts::PI)).abs() < 1e-3);
         assert!((mid.pitch - base.pitch).abs() < 1e-4);
         assert!((mid.distance - base.distance).abs() < 1e-3);
+    }
+
+    #[test]
+    fn roll_interpolates_along_the_path() {
+        let p = CameraPath {
+            keys: vec![
+                PathKey { yaw: 0.0, pitch: 0.0, distance: 3.0, focus: Vec3::ZERO, roll: 0.0 },
+                PathKey { yaw: 1.0, pitch: 0.0, distance: 3.0, focus: Vec3::ZERO, roll: 1.0 },
+            ],
+            closed: false,
+            ease: Some(false),
+            seconds: None,
+        };
+        assert!((p.sample(0.0).roll - 0.0).abs() < 1e-4);
+        assert!((p.sample(0.5).roll - 0.5).abs() < 1e-3);
+        assert!((p.sample(1.0).roll - 1.0).abs() < 1e-4);
     }
 
     #[test]

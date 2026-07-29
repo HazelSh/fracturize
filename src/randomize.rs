@@ -395,6 +395,7 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
         camera_distance: (radius * 2.4).clamp(0.8, 12.0),
         camera_yaw: 0.0,
         camera_pitch: 0.3,
+        camera_roll: 0.0,
         camera_path: None::<CameraPath>,
     }
 }

@@ -262,6 +262,7 @@ mod tests {
             camera_distance: 3.0,
             camera_yaw: 0.0,
             camera_pitch: 0.0,
+            camera_roll: 0.0,
             camera_path: None,
         }
     }

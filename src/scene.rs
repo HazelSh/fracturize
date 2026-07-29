@@ -266,6 +266,9 @@ pub struct CameraDef {
     /// Orbit elevation in radians (positive = above the focus)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pitch: Option<f64>,
+    /// Roll about the view axis in radians (0 = horizon level)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roll: Option<f64>,
     /// Camera path: loop back to the first keypoint (seamless loops)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_closed: Option<bool>,
@@ -296,6 +299,8 @@ pub struct PathKeyDef {
     pub distance: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focus: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roll: Option<f64>,
 }
 
 /// Full scene file structure
@@ -348,6 +353,8 @@ pub struct Scene {
     pub camera_yaw: f32,
     /// Camera orbit elevation (radians)
     pub camera_pitch: f32,
+    /// Camera roll about the view axis (radians)
+    pub camera_roll: f32,
     /// Optional spline camera path ([[camera.path]] keypoints)
     pub camera_path: Option<CameraPath>,
 }
@@ -450,6 +457,7 @@ impl Scene {
             camera_distance,
             cam.yaw.unwrap_or(0.0) as f32,
             cam.pitch.unwrap_or(0.0) as f32,
+            cam.roll.unwrap_or(0.0) as f32,
         );
 
         // Resolve [[camera.path]] keypoints; omitted fields inherit the base
@@ -470,6 +478,7 @@ impl Scene {
                                 .focus
                                 .map(|f| Vec3::from(f.map(|v| v as f32)))
                                 .unwrap_or(camera_focus),
+                            roll: k.roll.map(|v| v as f32).unwrap_or(folded.roll),
                         })
                         .collect(),
                     closed: cam.path_closed.unwrap_or(false),
@@ -499,6 +508,7 @@ impl Scene {
             camera_distance: folded.distance,
             camera_yaw: folded.yaw,
             camera_pitch: folded.pitch,
+            camera_roll: folded.roll,
             camera_path,
         })
     }
@@ -589,6 +599,7 @@ impl Scene {
                     distance: Some(tidy(self.camera_distance)),
                     yaw: Some(tidy(self.camera_yaw)),
                     pitch: Some(tidy(self.camera_pitch)),
+                    roll: (self.camera_roll != 0.0).then(|| tidy(self.camera_roll)),
                     path_closed: path.and_then(|p| p.closed.then_some(true)),
                     path_seconds: path.and_then(|p| p.seconds.map(tidy)),
                     path_ease: path.and_then(|p| p.ease),
@@ -600,6 +611,7 @@ impl Scene {
                                 pitch: Some(tidy(k.pitch)),
                                 distance: Some(tidy(k.distance)),
                                 focus: Some(k.focus.to_array().map(tidy)),
+                                roll: (k.roll != 0.0).then(|| tidy(k.roll)),
                             })
                             .collect()
                     }),
@@ -812,6 +824,13 @@ fn merge_scene_into_document(
         set_f64(camera, "distance", cam.distance?, None);
         set_f64(camera, "yaw", cam.yaw?, Some(0.0));
         set_f64(camera, "pitch", cam.pitch?, Some(0.0));
+        match cam.roll {
+            Some(r) => set_f64(camera, "roll", r, Some(0.0)),
+            // Rolled back to level: drop the key rather than write `roll = 0`
+            None => {
+                camera.remove("roll");
+            }
+        }
         // Folded into yaw/pitch/distance at load; leaving it would
         // double-apply on the next load
         camera.remove("offset");
@@ -858,6 +877,12 @@ fn merge_scene_into_document(
                         }
                         if let Some(f) = def.focus {
                             set_arr3(t, "focus", f, None);
+                        }
+                        match def.roll {
+                            Some(r) => set_f64(t, "roll", r, Some(0.0)),
+                            None => {
+                                t.remove("roll");
+                            }
                         }
                     }
                 } else {
@@ -1091,6 +1116,7 @@ point_count = 123456
 focus = [0.0, 1.0, 0.0]
 offset = [0.0, 1.5, 0.0]
 distance = 3.5
+roll = 0.35
 
 [[transform]]
 name = "Spine"
@@ -1120,6 +1146,11 @@ color = [0.0, 1.0, 1.0]
         assert_eq!(reloaded.name, scene.name);
         assert_eq!(reloaded.color_falloff, scene.color_falloff);
         assert!((reloaded.fog - 0.35).abs() < 1e-4, "fog {}", reloaded.fog);
+        assert!(
+            (reloaded.camera_roll - 0.35).abs() < 1e-4,
+            "roll {}",
+            reloaded.camera_roll
+        );
         // point_count is deliberately *not* round-tripped: it's a render
         // property owned by the Render window and prefs, so saving to a fresh
         // file omits it and the reload falls back to the default. Loading a

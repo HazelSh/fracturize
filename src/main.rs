@@ -623,6 +623,7 @@ fn default_scene() -> Scene {
         3.0,
         0.0,
         0.0,
+        0.0,
     );
 
     Scene {
@@ -663,6 +664,7 @@ fn default_scene() -> Scene {
         camera_distance: default_cam.distance,
         camera_yaw: default_cam.yaw,
         camera_pitch: default_cam.pitch,
+        camera_roll: default_cam.roll,
         camera_path: None,
     }
 }

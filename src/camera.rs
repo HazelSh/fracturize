@@ -6,7 +6,7 @@
 //! which made pitching drift the view distance) is folded into equivalent
 //! yaw/pitch/distance at load time via [`OrbitCamera::from_legacy`].
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 
 pub const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_4; // 45°
 pub const Z_NEAR: f32 = 0.1;
@@ -25,6 +25,15 @@ pub struct OrbitCamera {
     pub distance: f32,
     /// Orbit center / look-at point
     pub focus: Vec3,
+    /// Rotation of the camera about its own view axis (radians). Not part of
+    /// the orbit — it doesn't move the eye — but it is part of the framing,
+    /// so it travels with the other three everywhere they go.
+    ///
+    /// Deliberately not `#[derive(Default)]`-able: a missing `roll` in a
+    /// struct literal has to be a compile error, because a silently-zeroed
+    /// one would reset the framing on the next save/load round trip and
+    /// nothing would report it.
+    pub roll: f32,
 }
 
 impl OrbitCamera {
@@ -32,7 +41,14 @@ impl OrbitCamera {
     /// orbit sphere: fold it into an equivalent on-sphere yaw/pitch/distance
     /// (the eye position is preserved exactly; orbiting then keeps the view
     /// distance constant instead of drifting with pitch)
-    pub fn from_legacy(focus: Vec3, offset: Vec3, distance: f32, yaw: f32, pitch: f32) -> Self {
+    pub fn from_legacy(
+        focus: Vec3,
+        offset: Vec3,
+        distance: f32,
+        yaw: f32,
+        pitch: f32,
+        roll: f32,
+    ) -> Self {
         let (sp, cp) = pitch.sin_cos();
         let (sy, cy) = yaw.sin_cos();
         let eye = focus + offset + distance * Vec3::new(cp * sy, sp, cp * cy);
@@ -43,6 +59,7 @@ impl OrbitCamera {
             pitch: (v.y / d).clamp(-1.0, 1.0).asin(),
             distance: d,
             focus,
+            roll,
         }
     }
 
@@ -52,8 +69,19 @@ impl OrbitCamera {
         self.focus + self.distance * Vec3::new(cp * sy, sp, cp * cy)
     }
 
+    /// The "world up" handed to `look_at`, rolled about the view axis.
+    /// Everything else that needs a camera basis goes through this, so pans
+    /// and gizmo drags stay aligned with what's on screen when rolled.
+    fn up_reference(&self) -> Vec3 {
+        if self.roll == 0.0 {
+            Vec3::Y
+        } else {
+            Quat::from_axis_angle(self.forward(), self.roll) * Vec3::Y
+        }
+    }
+
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.eye(), self.focus, Vec3::Y)
+        Mat4::look_at_rh(self.eye(), self.focus, self.up_reference())
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
@@ -66,7 +94,7 @@ impl OrbitCamera {
 
     /// Camera-space right in world coordinates
     pub fn right(&self) -> Vec3 {
-        self.forward().cross(Vec3::Y).normalize_or(Vec3::X)
+        self.forward().cross(self.up_reference()).normalize_or(Vec3::X)
     }
 
     /// Camera-space up in world coordinates
@@ -91,6 +119,13 @@ impl OrbitCamera {
     /// Scroll zoom: positive = zoom in
     pub fn zoom(&mut self, steps: f32) {
         self.distance = (self.distance * 0.9f32.powf(steps)).clamp(0.05, 80.0);
+    }
+
+    /// Right-drag roll: horizontal drag spins the horizon. Kept unwrapped so
+    /// a path key at 2π reads as a full turn rather than as zero — same
+    /// convention as `PathKey::yaw`.
+    pub fn roll_by(&mut self, dx: f32) {
+        self.roll += dx * 0.006;
     }
 }
 
@@ -129,13 +164,56 @@ mod tests {
         let legacy_eye =
             focus + offset + Vec3::new(yaw.sin() * distance, 0.0, yaw.cos() * distance);
 
-        let cam = OrbitCamera::from_legacy(focus, offset, distance, yaw, 0.0);
+        let cam = OrbitCamera::from_legacy(focus, offset, distance, yaw, 0.0, 0.0);
         assert!((cam.eye() - legacy_eye).length() < 1e-4);
         // And the distance is now the true eye-focus distance (constant under pitch)
         assert!((cam.distance - (legacy_eye - focus).length()).abs() < 1e-4);
         // Folding is idempotent once offset is zero
-        let cam2 = OrbitCamera::from_legacy(cam.focus, Vec3::ZERO, cam.distance, cam.yaw, cam.pitch);
+        let cam2 =
+            OrbitCamera::from_legacy(cam.focus, Vec3::ZERO, cam.distance, cam.yaw, cam.pitch, 0.0);
         assert!((cam2.eye() - cam.eye()).length() < 1e-4);
+    }
+
+    #[test]
+    fn roll_spins_the_horizon_without_moving_the_eye() {
+        let level = OrbitCamera {
+            yaw: 0.4,
+            pitch: 0.2,
+            distance: 3.0,
+            focus: Vec3::ZERO,
+            roll: 0.0,
+        };
+        let rolled = OrbitCamera { roll: std::f32::consts::FRAC_PI_2, ..level };
+
+        // The eye is an orbit property; roll must not touch it.
+        assert!((rolled.eye() - level.eye()).length() < 1e-5);
+        assert!((rolled.forward() - level.forward()).length() < 1e-5);
+
+        // A quarter turn takes the old up to the old right (or its negation,
+        // depending on handedness) — either way it stops being the old up.
+        assert!(
+            rolled.up().dot(level.up()).abs() < 1e-3,
+            "90 degrees of roll should leave up perpendicular to where it was"
+        );
+        // And the basis stays orthonormal, so pans in a rolled view still
+        // move the scene with the pointer.
+        assert!(rolled.right().dot(rolled.up()).abs() < 1e-5);
+        assert!((rolled.right().length() - 1.0).abs() < 1e-5);
+        assert!((rolled.up().length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn zero_roll_is_exactly_the_old_behaviour() {
+        // Every existing scene and view loads with roll 0; their framing must
+        // be bit-for-bit what it was before roll existed.
+        let cam = OrbitCamera {
+            yaw: 1.1,
+            pitch: -0.3,
+            distance: 2.5,
+            focus: Vec3::new(0.2, 0.0, -0.1),
+            roll: 0.0,
+        };
+        assert_eq!(cam.view_matrix(), Mat4::look_at_rh(cam.eye(), cam.focus, Vec3::Y));
     }
 
     #[test]
@@ -145,6 +223,7 @@ mod tests {
             pitch: 0.3,
             distance: 3.0,
             focus: Vec3::ZERO,
+            roll: 0.0,
         };
         let vp = cam.view_proj(16.0 / 9.0);
         let (origin, dir) = cursor_ray(vp.inverse(), 640.0, 360.0, 1280.0, 720.0);
@@ -160,6 +239,7 @@ mod tests {
             pitch: -0.4,
             distance: 4.0,
             focus: Vec3::new(0.5, 0.0, -0.2),
+            roll: 0.0,
         };
         let vp = cam.view_proj(16.0 / 9.0);
         let p = Vec3::new(0.3, 0.1, 0.2);

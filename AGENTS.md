@@ -121,6 +121,7 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 |-------|--------|
 | left-drag (empty space) | orbit camera, grab-the-scene: drag right spins it right, drag up tilts its top toward you (pauses auto-orbit) |
 | shift+drag / middle-drag | pan the focus in the view plane |
+| right-drag (empty space) | roll the camera about its view axis (not over a gizmo — that gesture is reserved) |
 | scroll | zoom |
 | drag a gizmo's origin dot | select + translate the transform in the view plane |
 | drag an origin→axis gizmo edge | translate along that axis |
@@ -140,6 +141,12 @@ lives in `pick.rs`, drag application in `app.rs`.
 The camera eye always sits on the orbit sphere: the legacy scene/view
 `offset` (which made pitch drift the view distance) is folded into
 yaw/pitch/distance at load time and no longer written to files.
+
+Roll is the fourth camera parameter and travels with the other three
+everywhere — scene `[camera]`, view files, path keypoints, the offline
+renderer. `OrbitCamera` deliberately has no `Default`, so a struct literal
+that forgets `roll` fails to compile rather than silently levelling someone's
+framing on the next save.
 
 ## Keybinds (also in-app: press H)
 
@@ -322,6 +329,8 @@ focus = [0.0, 0.0, 0.0]   # orbit center / look-at
 distance = 3.0            # orbit radius (true eye-focus distance)
 yaw = 0.0                 # orbit angle around Y, radians
 pitch = 0.32              # orbit elevation, radians (positive = above)
+roll = 0.0                # optional: rotation about the view axis, radians
+                          # (omitted when level; right-drag sets it in-app)
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
 # into yaw/pitch/distance and never written back
 path_closed = true        # optional camera path: loop back to key 1 (seamless)
@@ -336,6 +345,15 @@ path_ease = false         # smoothstep time; default: open paths ease, loops don
 # moves. Omitted fields inherit the base [camera] framing. Closed paths take
 # the shortest yaw route back to key 1. In-app: Y appends the current framing
 # as a keypoint, Shift+Y removes, Ctrl+Y toggles the loop, Z previews.
+#
+# Paths are drawn in the viewport when gizmos are on (G): the eye's route as
+# a green polyline, a cross at each keypoint, and a warm playhead marker with
+# a stalk pointing where that camera looks while previewing. The default
+# turntable is a synthesized `CameraPath` too, but isn't drawn — while it
+# runs the camera stands on its own circle, so the drawing would be a
+# permanent horizontal line telling you nothing. The Camera window's "Adopt
+# the orbit as a path" copies it into the scene when you want to edit it;
+# until then no scene grows a path it never asked for.
 [[camera.path]]
 yaw = 0.0
 pitch = 0.9
@@ -346,6 +364,7 @@ yaw = 3.14                # half a turn later...
 pitch = 0.1
 distance = 1.6            # ...swooped in close
 focus = [0.0, -0.5, 0.0]  # looking lower
+roll = 0.4                # ...and tilted
 
 [[transform]]
 name = "whorl"                 # optional label shown in overlays

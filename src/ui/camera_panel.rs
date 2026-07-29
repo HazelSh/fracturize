@@ -77,6 +77,37 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             app.camera.distance = distance.clamp(0.05, 100.0);
             app.orbit_paused = true;
         }
+
+        // Roll's home. Right-drag sets it, but a gesture with no readout
+        // can't be undone precisely, and "level" is a thing you want back
+        // exactly rather than approximately.
+        let mut roll_deg = app.camera.roll.to_degrees();
+        let resp = ui.add(
+            egui::DragValue::new(&mut roll_deg)
+                .speed(0.5)
+                .suffix("°")
+                .prefix("roll: "),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Rotation about the view axis — right-drag the viewport does this too",
+            "drag: roll the camera",
+        );
+        if resp.changed() {
+            app.set_camera_roll(roll_deg.to_radians());
+        }
+
+        let resp = ui.add_enabled(app.camera.roll != 0.0, egui::Button::new("level"));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Put the horizon back exactly level",
+            "click: level the camera",
+        );
+        if resp.clicked() {
+            app.set_camera_roll(0.0);
+        }
     });
 
     ui.label(
@@ -161,10 +192,24 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
 
     let Some(path) = &app.scene.camera_path else {
         ui.label(
-            egui::RichText::new("No path yet — add two or more keypoints to fly between them.")
-                .small()
-                .weak(),
+            egui::RichText::new(
+                "No path yet — add two or more keypoints to fly between them, \
+                 or start from the turntable this scene already orbits on.",
+            )
+            .small()
+            .weak(),
         );
+        let resp = ui.button("Adopt the orbit as a path");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Copy the default turntable's four keypoints into the scene, ready to edit. \
+             Until you do, the orbit stays out of the scene file.",
+            "click: turn the default orbit into an editable path",
+        );
+        if resp.clicked() {
+            app.promote_orbit_path();
+        }
         return;
     };
 

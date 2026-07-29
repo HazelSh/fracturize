@@ -19,10 +19,15 @@
 //!
 //! The world origin is the base because that is what an IFS transform maps
 //! about, and it's where the grey identity cell already sits.
+//!
+//! [`build_path`] is the same idea applied to a camera path: a motion you
+//! otherwise have to press play and watch to know anything about, drawn as a
+//! thing in the scene you can see all of at once.
 
 use glam::{Mat4, Quat, Vec3};
 
 use crate::gpu::LineVertex;
+use crate::path::CameraPath;
 
 /// Offset vector colour: warm, so it reads apart from the cool rotation
 /// indicator and from the palette colours the fractal itself uses.
@@ -47,6 +52,76 @@ pub fn build(matrix: Mat4) -> Vec<LineVertex> {
     push_offset(&mut verts, translation, cell);
     push_rotation(&mut verts, translation, rotation, cell);
     verts
+}
+
+/// Camera-path polyline colour: green, so it reads apart from the amber
+/// offset vector and the cyan rotation arc a selected transform draws.
+const PATH_COLOR: [f32; 4] = [0.4, 0.95, 0.55, 0.7];
+/// Keypoint marker colour — brighter than the line so keys stand out on it.
+const PATH_KEY_COLOR: [f32; 4] = [0.65, 1.0, 0.75, 0.95];
+/// The moving playhead, warm against the green so it's findable at a glance.
+const PLAYHEAD_COLOR: [f32; 4] = [1.0, 0.85, 0.4, 0.95];
+/// Spline samples per segment. The path is drawn every frame the camera moves
+/// (the playhead marker changes), so this is a per-frame vertex budget, not a
+/// one-off — 16 is smooth at any sane path length without being wasteful.
+const PATH_SAMPLES_PER_SEGMENT: usize = 16;
+
+/// Build the line list for a camera path: the eye's route as a polyline,
+/// a cross at every keypoint, and — while playing — a cross at the playhead
+/// with a stalk pointing where that camera is looking.
+///
+/// Everything is drawn at the eye positions rather than the focus positions:
+/// the path is a route through space, and where it *looks* is the one thing
+/// the polyline alone can't show, which is what the playhead's stalk is for.
+pub fn build_path(path: &CameraPath, playhead: Option<f32>) -> Vec<LineVertex> {
+    if path.keys.len() < 2 {
+        return Vec::new();
+    }
+    let samples = path.segments() * PATH_SAMPLES_PER_SEGMENT;
+    let mut verts = Vec::with_capacity(2 * (samples + path.keys.len() * 3 + 4));
+
+    // Marker size scales with the path's own radius so it stays legible for
+    // both a close-in fly-through and a wide orbit.
+    let mean_distance =
+        path.keys.iter().map(|k| k.distance).sum::<f32>() / path.keys.len() as f32;
+    let tick = (mean_distance * 0.04).max(1e-3);
+
+    let mut prev = path.sample(0.0).eye();
+    for i in 1..=samples {
+        let p = path.sample(i as f32 / samples as f32).eye();
+        seg(&mut verts, prev, p, PATH_COLOR);
+        prev = p;
+    }
+    // An open path's polyline stops at the last key; a closed one has already
+    // come back round, because sample(1.0) wraps to the start.
+
+    for key in &path.keys {
+        let cam = crate::camera::OrbitCamera {
+            yaw: key.yaw,
+            pitch: key.pitch,
+            distance: key.distance,
+            focus: key.focus,
+            roll: key.roll,
+        };
+        push_cross(&mut verts, cam.eye(), tick, PATH_KEY_COLOR);
+    }
+
+    if let Some(t) = playhead {
+        let cam = path.sample(t);
+        let eye = cam.eye();
+        push_cross(&mut verts, eye, tick * 1.8, PLAYHEAD_COLOR);
+        seg(&mut verts, eye, eye + cam.forward() * tick * 4.0, PLAYHEAD_COLOR);
+    }
+
+    verts
+}
+
+/// Three axis-aligned struts through a point — a marker that reads as a
+/// position from any camera angle without needing to billboard.
+fn push_cross(verts: &mut Vec<LineVertex>, at: Vec3, size: f32, color: [f32; 4]) {
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        seg(verts, at - axis * size, at + axis * size, color);
+    }
 }
 
 fn seg(verts: &mut Vec<LineVertex>, a: Vec3, b: Vec3, color: [f32; 4]) {

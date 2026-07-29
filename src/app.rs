@@ -10,6 +10,7 @@ use crate::camera::OrbitCamera;
 use crate::gpu::lines::LineVertex;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::history::{EditSnapshot, History};
+use crate::path::CameraPath;
 use crate::scene::{Scene, TransformSpec};
 use crate::ui::{hints, UiState};
 use crate::view::View;
@@ -20,6 +21,32 @@ pub fn unix_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Cheap change-detector for a camera path's drawn geometry: everything
+/// `indicators::build_path` reads, folded into one number.
+///
+/// A generation counter bumped by each path-writing method would be faster
+/// but has to be maintained at every one of them, and a missed bump is a
+/// stale drawing nobody notices for weeks. Folding the values themselves
+/// cannot go stale, and even a 40k-key path is a few thousand integer ops
+/// against a GPU buffer allocation.
+fn path_fingerprint(path: &CameraPath) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    let mut mix = |v: u32| {
+        h ^= v as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    };
+    mix(path.keys.len() as u32);
+    mix(path.closed as u32);
+    mix(path.ease.map_or(2, |e| e as u32));
+    mix(path.seconds.unwrap_or(f32::NAN).to_bits());
+    for k in &path.keys {
+        for v in [k.yaw, k.pitch, k.distance, k.roll, k.focus.x, k.focus.y, k.focus.z] {
+            mix(v.to_bits());
+        }
+    }
+    h
 }
 
 /// RGB (0-1) to HSV (h in degrees, s/v in 0-1)
@@ -270,6 +297,8 @@ enum Drag {
     Orbit,
     /// Middle-drag or shift+left-drag: pan the focus in the view plane
     Pan,
+    /// Right-drag on empty space: roll the camera about its view axis
+    Roll,
     /// Left-drag on a gizmo: edit that transform live
     Gizmo {
         transform: usize,
@@ -336,6 +365,29 @@ pub struct App {
     /// `(selected transform, matrix generation)` the indicator buffer was
     /// built for; rebuilt only when that changes.
     indicator_key: Option<(usize, u64)>,
+    /// Third line buffer: the camera path's route through space
+    /// (see `indicators::build_path`).
+    path_renderer: LineRenderer,
+    /// What the path buffer was last built for: `(key fingerprint, playhead)`,
+    /// or `None` when nothing is drawn. See `refresh_path_lines`.
+    path_lines_key: Option<(u64, Option<f32>)>,
+
+    /// The turntable, as a real camera path.
+    ///
+    /// The default motion used to be one line — `yaw += 0.18 * dt` — which
+    /// meant it was invisible, uneditable, and shared no code with the paths
+    /// the renderer can actually fly. It's a synthesized `CameraPath` now, so
+    /// it draws like any other and can be promoted into the scene and edited
+    /// (`promote_orbit_path`). Kept *out* of `scene.camera_path` until then,
+    /// or every scene would grow a path it never asked for the first time it
+    /// was saved.
+    ///
+    /// `None` means "stale, rebuild from the current framing" — set whenever
+    /// the user moves the camera by hand, so resuming continues from where
+    /// they left it rather than snapping back.
+    orbit_path: Option<CameraPath>,
+    /// Playhead along `orbit_path`, in 0..1.
+    orbit_t: f32,
 
     /// Plain-data egui UI state: which panels are open, the inspector's TRS
     /// field cache, this frame's status hint, and similar. The egui machinery
@@ -508,6 +560,7 @@ impl App {
         // Trace line renderer (empty until X is pressed)
         let line_renderer = LineRenderer::new(&gpu.device, gpu.format);
         let indicator_renderer = LineRenderer::new(&gpu.device, gpu.format);
+        let path_renderer = LineRenderer::new(&gpu.device, gpu.format);
 
         let num_transforms = scene.transforms.len();
 
@@ -536,6 +589,7 @@ impl App {
                 pitch: scene.camera_pitch,
                 distance: scene.camera_distance,
                 focus: scene.camera_focus,
+                roll: scene.camera_roll,
             },
             path_play_t: None,
             point_size,
@@ -561,6 +615,10 @@ impl App {
             line_renderer,
             indicator_renderer,
             indicator_key: None,
+            path_renderer,
+            path_lines_key: None,
+            orbit_path: None,
+            orbit_t: 0.0,
             ui_state,
             ui_build_ms: 0.0,
             present_wait_ms: 0.0,
@@ -619,6 +677,7 @@ impl App {
             v.distance,
             v.rotation,
             v.pitch,
+            v.roll,
         );
         self.point_size = v.point_size;
         // Views written before fog became one control carry only the four raw
@@ -653,12 +712,71 @@ impl App {
         }
         self.orbit_paused = true;
         self.path_play_t = None;
+        self.invalidate_orbit_path();
         log::info!("Loaded view (orbit paused; press O to resume)");
     }
 
     pub fn toggle_orbit(&mut self) {
         self.orbit_paused = !self.orbit_paused;
         log::info!("Camera orbit: {}", if self.orbit_paused { "paused" } else { "running" });
+    }
+
+    /// Angular speed of the default turntable (rad/s). Was `yaw += 0.18 * dt`
+    /// applied directly to the camera; now it only sets the synthesized
+    /// orbit path's duration.
+    const ORBIT_RATE: f32 = 0.18;
+
+    /// The synthesized turntable path, rebuilt from the current framing if
+    /// the camera has been moved by hand since it was last built.
+    fn ensure_orbit_path(&mut self) -> &CameraPath {
+        if self.orbit_path.is_none() {
+            let mut path = CameraPath::full_orbit(&self.camera);
+            path.seconds = Some(std::f32::consts::TAU / Self::ORBIT_RATE);
+            self.orbit_path = Some(path);
+            self.orbit_t = 0.0;
+        }
+        self.orbit_path.as_ref().expect("just built")
+    }
+
+    /// Mark the turntable path stale after a manual camera move, so resuming
+    /// continues from the new framing instead of snapping back to the old one.
+    fn invalidate_orbit_path(&mut self) {
+        self.orbit_path = None;
+    }
+
+    /// Set the camera's view-axis roll (the Camera window's field and its
+    /// "level" button; right-drag goes through `OrbitCamera::roll_by`).
+    pub fn set_camera_roll(&mut self, roll: f32) {
+        self.camera.roll = roll;
+        self.invalidate_orbit_path();
+    }
+
+    /// The scene's camera path and its playhead, for drawing.
+    ///
+    /// Deliberately *not* the turntable, even though that is a real
+    /// `CameraPath` now. While the turntable runs the camera is standing on
+    /// its own circle, so the drawing is a horizontal line across the top of
+    /// the view — geometrically correct, permanently present, and telling you
+    /// nothing you didn't know. "Adopt the orbit as a path" is one click away
+    /// when you want to see and edit it, and by then it *is* the scene path.
+    pub fn visible_path(&self) -> Option<(&CameraPath, Option<f32>)> {
+        let path = self.scene.camera_path.as_ref().filter(|p| p.keys.len() >= 2)?;
+        Some((path, self.path_play_t))
+    }
+
+    /// Copy the synthesized turntable into the scene as a real, editable path.
+    /// An explicit step, not an implicit one: "+ Add key" starting you off
+    /// with four keys you never asked for would be a worse surprise than
+    /// having to press a button labelled with what it does.
+    pub fn promote_orbit_path(&mut self) {
+        if self.scene.camera_path.is_some() {
+            return;
+        }
+        let path = self.ensure_orbit_path().clone();
+        let before = self.edit_snapshot();
+        self.scene.camera_path = Some(path);
+        self.commit_edit("Adopt orbit as path", None, before);
+        log::info!("Promoted the default orbit to an editable camera path");
     }
 
     /// Is the camera moving on its own right now — by either the turntable
@@ -845,6 +963,7 @@ impl App {
             scene: self.scene_path.clone(),
             rotation: self.camera.yaw,
             pitch: self.camera.pitch,
+            roll: self.camera.roll,
             distance: self.camera.distance,
             focus: self.camera.focus.to_array(),
             offset: [0.0; 3],
@@ -891,6 +1010,7 @@ impl App {
         self.scene.camera_distance = self.camera.distance;
         self.scene.camera_yaw = self.camera.yaw;
         self.scene.camera_pitch = self.camera.pitch;
+        self.scene.camera_roll = self.camera.roll;
         self.scene.point_size = self.point_size;
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
@@ -1220,6 +1340,7 @@ impl App {
             return;
         }
         self.camera.zoom(steps);
+        self.invalidate_orbit_path();
     }
 
     /// Toggle flightsim-style pitch inversion (persisted across sessions)
@@ -1255,10 +1376,16 @@ impl App {
             Drag::Orbit => {
                 let dy = if self.prefs.invert_pitch { -dy } else { dy };
                 self.camera.orbit(dx, dy);
+                self.invalidate_orbit_path();
             }
             Drag::Pan => {
                 let (_, h) = self.gpu.size();
                 self.camera.pan(dx, dy, h as f32);
+                self.invalidate_orbit_path();
+            }
+            Drag::Roll => {
+                self.camera.roll_by(dx);
+                self.invalidate_orbit_path();
             }
             Drag::Gizmo { transform, mode, start_matrix } => {
                 self.update_gizmo_drag(transform, mode, start_matrix);
@@ -1343,13 +1470,25 @@ impl App {
                 self.orbit_paused = true;
                 self.path_play_t = None;
             }
+            MouseButton::Right => {
+                // Right-drag over a gizmo is left alone: that gesture is the
+                // obvious home for a per-transform context menu, and rolling
+                // the whole camera off a click aimed at one transform would be
+                // a surprise. Rolling only starts on empty space.
+                if self.hovered.is_some() {
+                    return;
+                }
+                self.drag = Drag::Roll;
+                self.orbit_paused = true;
+                self.path_play_t = None;
+            }
             _ => {}
         }
     }
 
     pub fn on_mouse_release(&mut self, button: winit::event::MouseButton) {
         use winit::event::MouseButton;
-        if matches!(button, MouseButton::Left | MouseButton::Middle) {
+        if matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right) {
             if let Drag::Gizmo { transform, mode, start_matrix } = self.drag {
                 let spec = &self.scene.transforms[transform];
                 let t = spec.matrix.w_axis.truncate();
@@ -1604,7 +1743,9 @@ impl App {
             pitch: scene.camera_pitch,
             distance: scene.camera_distance,
             focus: scene.camera_focus,
+            roll: scene.camera_roll,
         };
+        self.invalidate_orbit_path();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
@@ -1749,6 +1890,30 @@ impl App {
         self.indicator_renderer.set_lines(&self.gpu.device, &verts);
     }
 
+    /// Rebuild the camera-path polyline, but only when it would differ.
+    ///
+    /// `LineRenderer::set_lines` allocates a fresh GPU buffer every call, so
+    /// this can't just run every frame the way the geometry is cheap enough to
+    /// suggest. A fingerprint over the keys plus the playhead is what decides:
+    /// in the steady state (a path exists, nothing playing) that's zero
+    /// rebuilds, and the one case that does rebuild per frame — an active
+    /// flythrough preview — is transient and deliberate.
+    fn refresh_path_lines(&mut self) {
+        let key = match (self.show_gizmos, self.visible_path()) {
+            (true, Some((path, playhead))) => Some((path_fingerprint(path), playhead)),
+            _ => None,
+        };
+        if key == self.path_lines_key {
+            return;
+        }
+        self.path_lines_key = key;
+        let verts = match (self.show_gizmos, self.visible_path()) {
+            (true, Some((path, playhead))) => crate::indicators::build_path(path, playhead),
+            _ => Vec::new(),
+        };
+        self.path_renderer.set_lines(&self.gpu.device, &verts);
+    }
+
     /// World-space offset of the selected transform from the origin, for the
     /// label `ui::labels` paints on the offset vector.
     pub fn selected_offset(&self) -> Option<(Vec3, f32)> {
@@ -1780,7 +1945,9 @@ impl App {
             pitch: scene.camera_pitch,
             distance: scene.camera_distance,
             focus: scene.camera_focus,
+            roll: scene.camera_roll,
         };
+        self.invalidate_orbit_path();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
@@ -2533,6 +2700,7 @@ impl App {
         self.flush_dirty_prefs();
         self.apply_pending_capacity();
         self.refresh_indicators();
+        self.refresh_path_lines();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
@@ -2554,9 +2722,13 @@ impl App {
                 _ => self.path_play_t = None,
             }
         } else if !self.orbit_paused {
-            // Time-based so the orbit speed is refresh-rate independent
-            // (0.003 rad/frame at the old 60 FPS baseline)
-            self.camera.yaw += 0.18 * dt;
+            // The turntable, flown as a path like anything else. Same motion
+            // as the `yaw += 0.18 * dt` this replaced — the synthesized path
+            // is a full turn from the current framing over TAU / 0.18 seconds
+            // — but now it's a thing on screen you can look at and take over.
+            let path = self.ensure_orbit_path().clone();
+            self.orbit_t = (self.orbit_t + dt / path.duration()).rem_euclid(1.0);
+            self.camera = path.sample(self.orbit_t);
         }
 
         if should_log {
@@ -2873,6 +3045,7 @@ impl App {
         }
         if self.show_gizmos {
             self.indicator_renderer.upload_camera(&self.gpu.queue, &camera);
+            self.path_renderer.upload_camera(&self.gpu.queue, &camera);
         }
 
         match self.render_mode {
@@ -2993,6 +3166,9 @@ impl App {
                 multiview_mask: None,
             });
             self.indicator_renderer.draw(&mut render_pass);
+            // Same pass: both are world-space decorations gated on G, and the
+            // depth rules that make the gizmos survive apply once, not twice.
+            self.path_renderer.draw(&mut render_pass);
         }
 
         // === STEP 3: RENDER GIZMOS ===

@@ -18,7 +18,8 @@ pub const HINT_AXIS: &str =
 pub const HINT_ROT_EDGE: &str =
     "drag: rotate around axis · ctrl+drag: uniform scale · scroll: chaos weight";
 /// Nothing hinted, nothing hovered: the bare-viewport default
-pub const HINT_VIEWPORT: &str = "drag: orbit · shift/middle-drag: pan · scroll: zoom";
+pub const HINT_VIEWPORT: &str =
+    "drag: orbit · shift/middle-drag: pan · right-drag: roll · scroll: zoom";
 
 /// Wrap a widget response so that, while hovered, it both shows a tooltip
 /// and sets this frame's status-bar hint. Every interactive Phase 2+ control
