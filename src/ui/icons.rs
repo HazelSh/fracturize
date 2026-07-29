@@ -24,3 +24,7 @@ pub const SLIDERS: &str = "\u{E432}";
 pub const KEYBOARD: &str = "\u{E2D8}";
 /// Browser (legacy scene browser overlay) toggle
 pub const FOLDER_OPEN: &str = "\u{E256}";
+/// Transform row eye toggle: enabled
+pub const EYE: &str = "\u{E220}";
+/// Transform row eye toggle: disabled
+pub const EYE_SLASH: &str = "\u{E224}";

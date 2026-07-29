@@ -58,6 +58,15 @@ pub struct UiState {
     /// taken) by `status_bar::draw`, which falls back to gizmo-hover /
     /// viewport-default hints when nothing set it.
     pub status_hint: Option<String>,
+    /// Transforms window inspector: cached decomposed TRS fields (or raw
+    /// matrix grid) for the selected transform, keyed by
+    /// `(transform_index, matrix_generation)` — the jitter guard from the
+    /// plan. `None` forces a fresh decompose next draw.
+    pub trs_cache: Option<transforms::TrsCache>,
+    /// Transforms window list: the row currently being renamed inline (via
+    /// its right-click context menu), and its in-progress text buffer. Only
+    /// one row can be mid-rename at a time.
+    pub renaming_transform: Option<(usize, String)>,
 }
 
 impl UiState {
@@ -66,6 +75,8 @@ impl UiState {
             legacy_entries: Vec::new(),
             panels,
             status_hint: None,
+            trs_cache: None,
+            renaming_transform: None,
         }
     }
 }

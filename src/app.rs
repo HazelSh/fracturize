@@ -356,6 +356,12 @@ pub struct App {
     transform_enabled: Vec<bool>,
     /// Variation slot targeted by the variation-editing keys
     selected_variation: usize,
+    /// Bumped by every matrix-writing path (gizmo drags, mutation, undo/
+    /// redo/apply_snapshot, add/duplicate/delete, inspector edits). The
+    /// Transforms window's inspector caches its decomposed TRS fields keyed
+    /// by (transform_index, matrix_generation) so live typing/dragging in
+    /// an inspector field isn't clobbered by a same-frame re-decompose.
+    matrix_generation: u64,
 
     // Scene browser overlay (B)
     pub show_browser: bool,
@@ -537,6 +543,7 @@ impl App {
             selected_transform: Some(0),
             transform_enabled: vec![true; num_transforms],
             selected_variation: 0,
+            matrix_generation: 0,
             show_browser: false,
             browser_files: Vec::new(),
             browser_selected: 0,
@@ -774,7 +781,53 @@ impl App {
         self.point_size = snap.point_size;
         self.color_falloff = snap.color_falloff;
         self.color_contrast = snap.color_contrast;
+        self.bump_matrix_generation();
         self.after_scene_shape_change();
+    }
+
+    /// Bump the matrix-generation counter — called from every path that can
+    /// write a transform's matrix (gizmo drags, mutation, undo/redo, add/
+    /// duplicate/delete, inspector edits) so the Transforms window's TRS
+    /// field cache (`UiState`) knows to re-decompose.
+    fn bump_matrix_generation(&mut self) {
+        self.matrix_generation = self.matrix_generation.wrapping_add(1);
+    }
+
+    /// Current matrix generation, for the Transforms window's TRS field
+    /// cache key (see `bump_matrix_generation`).
+    pub fn matrix_generation(&self) -> u64 {
+        self.matrix_generation
+    }
+
+    /// Selected transform index — two-way synced with the Transforms
+    /// window's list (row click) and gizmo-click selection / Up-Down keys.
+    pub fn selected_transform(&self) -> Option<usize> {
+        self.selected_transform
+    }
+
+    /// Select a transform from the Transforms window's list (or clear the
+    /// selection). Gizmo clicks and Up/Down go through `selected_transform`
+    /// directly; this is the same field, so both stay in sync automatically.
+    pub fn select_transform(&mut self, idx: Option<usize>) {
+        self.selected_transform = idx;
+    }
+
+    /// Whether a transform is enabled, for the Transforms window's list and
+    /// inspector (defaults to enabled for an out-of-range index, matching
+    /// the HUD's historical behavior).
+    pub fn is_transform_enabled(&self, idx: usize) -> bool {
+        self.transform_enabled.get(idx).copied().unwrap_or(true)
+    }
+
+    /// Variation slot targeted by the -/= keys and E/Shift+E cycling — also
+    /// settable from the Transforms window's variation editor so clicking a
+    /// row there keeps keyboard cycling in sync (per the plan).
+    pub fn selected_variation(&self) -> usize {
+        self.selected_variation
+    }
+
+    pub fn set_selected_variation(&mut self, slot: usize) {
+        self.selected_variation = slot.min(crate::scene::NUM_VARIATIONS - 1);
     }
 
     /// Undo the most recent history entry (Ctrl+Z, Shift+U, the Explore
@@ -1199,6 +1252,7 @@ impl App {
         };
 
         self.scene.transforms[transform].matrix = new_matrix;
+        self.bump_matrix_generation();
         self.sync_transforms_to_gpu();
     }
 
@@ -1475,6 +1529,7 @@ impl App {
 
         let log = crate::mutate::mutate(&mut self.scene, &mut rand::thread_rng(), self.prefs.mutate_strength);
         log::info!("Mutation: {}", log.join("; "));
+        self.bump_matrix_generation();
         self.after_scene_shape_change();
 
         // Label from the op log, truncated so the history list stays tidy
@@ -1553,6 +1608,7 @@ impl App {
         self.scene.colors.push(color);
         self.transform_enabled.push(true);
         self.selected_transform = Some(self.scene.transforms.len() - 1);
+        self.bump_matrix_generation();
         self.scene.regenerate_colormap();
         self.rebuild_pipelines();
         log::info!("Added transform T{}", self.scene.transforms.len() - 1);
@@ -1574,6 +1630,7 @@ impl App {
         self.transform_enabled.remove(idx);
         self.selected_transform = Some(idx.min(self.scene.transforms.len() - 1));
         self.drag = Drag::None;
+        self.bump_matrix_generation();
         self.scene.regenerate_colormap();
         self.rebuild_pipelines();
         log::info!("Deleted transform T{}", idx);
@@ -1655,6 +1712,162 @@ impl App {
         self.commit_edit(
             format!("{} T{}", vname, idx),
             Some(&format!("varweight:T{}:{}", idx, self.selected_variation)),
+            before,
+        );
+    }
+
+    // === Transforms window inspector (Phase 4) ===
+    //
+    // These mirror the shape of `adjust_weight`/`adjust_color` above but act
+    // on an explicit index (the inspector always edits the selected
+    // transform, but list-row actions like Duplicate/Delete/eye-toggle can
+    // target any row) and share the same coalesce-key naming scheme
+    // (`insp:t{idx}:{field}`) the Phase 3 outcome notes call for.
+
+    /// Replace a transform's matrix wholesale — the inspector's TRS fields
+    /// (recomposed from position/rotation/scale), the non-TRS matrix grid,
+    /// and "Orthogonalize -> TRS" all funnel through this.
+    pub fn set_transform_matrix(
+        &mut self,
+        idx: usize,
+        matrix: Mat4,
+        label: impl Into<String>,
+        coalesce_key: Option<String>,
+    ) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.transforms[idx].matrix = matrix;
+        self.bump_matrix_generation();
+        self.sync_transforms_to_gpu();
+        self.commit_edit(label, coalesce_key.as_deref(), before);
+    }
+
+    /// Discard any shear/mirroring in a transform's matrix by rebuilding it
+    /// from its own (possibly approximate) scale/rotation/translation
+    /// decomposition — the inspector's "Orthogonalize -> TRS" button. Always
+    /// its own history entry (no coalescing), since it's an explicit,
+    /// infrequent action.
+    pub fn orthogonalize_transform(&mut self, idx: usize) {
+        let Some(spec) = self.scene.transforms.get(idx) else { return };
+        let (scale, rotation, translation) = spec.matrix.to_scale_rotation_translation();
+        let orthogonalized = Mat4::from_scale_rotation_translation(scale, rotation, translation);
+        self.set_transform_matrix(idx, orthogonalized, format!("Orthogonalize T{}", idx), None);
+    }
+
+    /// Rename a transform (inspector name field / list row's inline rename).
+    pub fn rename_transform(&mut self, idx: usize, name: Option<String>) {
+        if idx >= self.scene.transform_names.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.transform_names[idx] = name;
+        self.commit_edit(
+            format!("Rename T{}", idx),
+            Some(&format!("insp:t{}:name", idx)),
+            before,
+        );
+    }
+
+    /// Duplicate an arbitrary transform (list row context menu), regardless
+    /// of what's currently selected. Reuses `add_transform`'s nudge-and-copy
+    /// path and label, and leaves the new copy selected.
+    pub fn duplicate_transform_at(&mut self, idx: usize) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        self.selected_transform = Some(idx);
+        self.add_transform(false);
+    }
+
+    /// Delete an arbitrary transform (list row context menu).
+    pub fn delete_transform_at(&mut self, idx: usize) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        self.selected_transform = Some(idx);
+        self.delete_selected_transform();
+    }
+
+    /// Set a transform's chaos-game weight directly (inspector/list
+    /// DragValue) — same coalesce key as `adjust_weight`/scroll-weight so
+    /// they merge into one history entry regardless of which UI drove it.
+    pub fn set_transform_weight(&mut self, idx: usize, weight: f32) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.transforms[idx].weight = weight.clamp(0.01, 100.0);
+        self.sync_transforms_to_gpu();
+        self.commit_edit(
+            format!("Weight T{}", idx),
+            Some(&format!("weight:T{}", idx)),
+            before,
+        );
+    }
+
+    /// Set a transform's gradient color directly (inspector color picker).
+    pub fn set_transform_color(&mut self, idx: usize, color: Vec3) {
+        if idx >= self.scene.colors.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.colors[idx] = color;
+        self.scene.regenerate_colormap();
+        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.commit_edit(
+            format!("Recolor T{}", idx),
+            Some(&format!("insp:t{}:color", idx)),
+            before,
+        );
+    }
+
+    /// Set a transform's explicit colormap index (inspector color_value
+    /// slider).
+    pub fn set_transform_color_value(&mut self, idx: usize, value: f32) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.transforms[idx].color_value = value.clamp(0.0, 1.0);
+        self.sync_transforms_to_gpu();
+        self.commit_edit(
+            format!("Color value T{}", idx),
+            Some(&format!("insp:t{}:color_value", idx)),
+            before,
+        );
+    }
+
+    /// Set (or clear) a transform's explicit color_speed override (inspector
+    /// checkbox + slider).
+    pub fn set_transform_explicit_color_speed(&mut self, idx: usize, speed: Option<f32>) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.transforms[idx].explicit_color_speed = speed;
+        self.refresh_color_speeds();
+        self.commit_edit(
+            format!("Color speed T{}", idx),
+            Some(&format!("insp:t{}:color_speed", idx)),
+            before,
+        );
+    }
+
+    /// Set a transform's weight for one variation slot (inspector variation
+    /// editor row / add-variation combo box).
+    pub fn set_transform_variation(&mut self, idx: usize, slot: usize, weight: f32) {
+        if idx >= self.scene.transforms.len() || slot >= crate::scene::NUM_VARIATIONS {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.transforms[idx].variations[slot] = weight.clamp(-4.0, 4.0);
+        self.sync_transforms_to_gpu();
+        let vname = crate::scene::VARIATION_NAMES[slot];
+        self.commit_edit(
+            format!("{} T{}", vname, idx),
+            Some(&format!("insp:t{}:var{}", idx, slot)),
             before,
         );
     }
@@ -1844,6 +2057,14 @@ impl App {
 
     pub fn toggle_selected_transform(&mut self) {
         let Some(idx) = self.selected_transform else { return };
+        self.toggle_transform_enabled(idx);
+    }
+
+    /// Enable/disable a transform by index. Shared by the Enter-key path
+    /// (acts on the selection) and the Transforms window's eye toggle (acts
+    /// on whichever row was clicked) — the plan requires these to behave
+    /// identically, including the guard below.
+    pub fn toggle_transform_enabled(&mut self, idx: usize) {
         if idx >= self.transform_enabled.len() { return }
 
         // Guard: don't disable the last enabled transform
@@ -2436,69 +2657,14 @@ impl App {
             });
         }
 
-        // === Right-side transform list ===
-        let right_x = width - 250.0;
-        let mut y = 10.0;
-        entries.push(TextEntry {
-            text: "Transforms".to_string(),
-            x: right_x,
-            y,
-            color: white,
-            font_size: 14.0,
-        });
-        y += 20.0;
-
-        for (i, spec) in self.scene.transforms.iter().enumerate() {
-            let name = self.scene.transform_names
-                .get(i)
-                .and_then(|n| n.as_deref())
-                .unwrap_or("");
-            let label = if name.is_empty() {
-                format!("T{}", i)
-            } else {
-                format!("T{}: {}", i, name)
-            };
-
-            let translation = spec.matrix.w_axis.truncate();
-            let scale = spec.matrix.x_axis.length();
-
-            let is_selected = self.selected_transform == Some(i);
-            let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
-
-            let sel = if is_selected { ">" } else { " " };
-            let on = if is_enabled { " " } else { "×" };
-
-            let summary = spec.variation_summary();
-            let var_info = if summary == "linear" {
-                String::new()
-            } else {
-                format!(" [{}]", summary)
-            };
-            let line = format!(
-                "{}{} {} p=({:.2},{:.2},{:.2}) s={:.2} w={:.1}{}",
-                sel, on, label, translation.x, translation.y, translation.z, scale, spec.weight, var_info,
-            );
-
-            // Use colormap color for this transform, dim if disabled
-            let cm_idx = (spec.color_value * 255.0).clamp(0.0, 255.0) as usize;
-            let cm = self.scene.colormap[cm_idx];
-            let alpha: u8 = if is_enabled { 220 } else { 80 };
-            let color = [
-                (cm[0] * 255.0) as u8,
-                (cm[1] * 255.0) as u8,
-                (cm[2] * 255.0) as u8,
-                alpha,
-            ];
-
-            entries.push(TextEntry {
-                text: line,
-                x: right_x,
-                y,
-                color,
-                font_size: 12.0,
-            });
-            y += 16.0;
-        }
+        // The per-transform list used to render here as a right-side text
+        // block (name/position/scale/weight/variations per row). Phase 4
+        // replaced it with the Transforms window's list + inspector (see
+        // src/ui/transforms.rs), which shows the same information plus
+        // live editing — so it's retired rather than kept in parallel. The
+        // point-size / targeted-variation-slot line above and the
+        // world-space gizmo name labels below are unrelated HUD elements
+        // and stay (the labels are explicitly Phase 6 scope per the plan).
 
         // === World-space gizmo labels ===
         for (i, spec) in self.scene.transforms.iter().enumerate() {

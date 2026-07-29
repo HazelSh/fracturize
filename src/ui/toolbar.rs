@@ -18,7 +18,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Transforms — list + inspector (coming in Phase 4)",
+                "Transforms — list + inspector",
                 "toggle the Transforms window",
             );
 
