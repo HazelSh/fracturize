@@ -36,6 +36,12 @@ pub struct Prefs {
     /// Strength multiplier for U's random mutation (Explore window slider)
     #[serde(default = "default_mutate_strength")]
     pub mutate_strength: f32,
+    /// Point-buffer capacity chosen in the Render window. A performance
+    /// setting that follows the person rather than the artwork, so it wins
+    /// over a scene file's `point_count` at startup — but loses to an
+    /// explicit `--points`. `None` = never set one, defer to the scene.
+    #[serde(default)]
+    pub point_count: Option<usize>,
 }
 
 impl Default for Prefs {
@@ -44,6 +50,7 @@ impl Default for Prefs {
             invert_pitch: false,
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
+            point_count: None,
         }
     }
 }

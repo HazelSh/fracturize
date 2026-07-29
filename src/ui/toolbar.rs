@@ -35,7 +35,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Camera — orbit, views, paths (coming in Phase 5)",
+                "Camera — framing, saved views, paths, render output",
                 "toggle the Camera window",
             );
 
@@ -43,7 +43,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Render — exposure, point size",
+                "Render — renderer, point size + count, color, fog",
                 "toggle the Render window",
             );
 

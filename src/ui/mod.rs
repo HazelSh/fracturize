@@ -75,6 +75,11 @@ pub struct UiState {
     /// list only via their explicit remove button. Reset when the selected
     /// transform changes.
     pub variation_rows: (usize, Vec<usize>),
+    /// Render window: the point count (in millions) currently typed into the
+    /// DragValue but not yet applied. Held separately from the live capacity
+    /// because applying it reallocates the point buffer and restarts warmup,
+    /// so it happens on the Apply button rather than on every drag frame.
+    pub pending_point_count: Option<f32>,
     /// Bottom edge of the top toolbar in *physical* pixels, recorded by
     /// `toolbar::draw` and read by `App::build_text_entries` so the legacy
     /// HUD lines start below the toolbar instead of underneath it. One frame
@@ -92,6 +97,7 @@ impl UiState {
             trs_cache: None,
             renaming_transform: None,
             variation_rows: (usize::MAX, Vec::new()),
+            pending_point_count: None,
             // Sensible pre-first-frame value; overwritten by the toolbar on
             // frame 1, before the HUD is ever visible.
             viewport_top_px: 28.0,

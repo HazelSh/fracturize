@@ -222,7 +222,14 @@ impl ApplicationHandler for AppWrapper {
                 default_scene()
             }
         };
+        // Point count is a render property, not scene data (todo.txt): the
+        // Render window edits it and persists it to prefs, so it follows the
+        // person across scenes. Precedence: --points > prefs > the scene
+        // file's own point_count > the built-in default. `App::new` re-reads
+        // prefs for its own copy; this read is only for the decision.
         if let Some(n) = self.args.points {
+            scene.point_count = n;
+        } else if let Some(n) = crate::prefs::Prefs::load().point_count {
             scene.point_count = n;
         }
 

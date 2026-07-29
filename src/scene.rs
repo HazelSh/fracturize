@@ -559,7 +559,13 @@ impl Scene {
                 color_speed: tidy(self.color_speed),
                 color_falloff: tidy(self.color_falloff),
                 color_contrast: tidy(self.color_contrast),
-                point_count: Some(self.point_count),
+                // Point count is a render property chosen in the Render
+                // window and persisted to prefs, not part of the artwork, so
+                // saving no longer writes it. `None` also means the merge
+                // path leaves an existing `point_count =` line in a hand-
+                // authored file exactly as it found it; loading still honours
+                // it (below prefs, above the default).
+                point_count: None,
             },
             camera: Some({
                 // A 1-key path is a transient in-app authoring state; the
@@ -1098,8 +1104,18 @@ color = [0.0, 1.0, 1.0]
         let reloaded = Scene::load(&saved_path).unwrap();
 
         assert_eq!(reloaded.name, scene.name);
-        assert_eq!(reloaded.point_count, scene.point_count);
         assert_eq!(reloaded.color_falloff, scene.color_falloff);
+        // point_count is deliberately *not* round-tripped: it's a render
+        // property owned by the Render window and prefs, so saving to a fresh
+        // file omits it and the reload falls back to the default. Loading a
+        // hand-authored file that still carries one keeps honouring it —
+        // which is exactly what `scene` (loaded from `src`) shows.
+        assert_eq!(scene.point_count, 123456);
+        assert_eq!(reloaded.point_count, DEFAULT_POINT_COUNT);
+        assert!(
+            !std::fs::read_to_string(&saved_path).unwrap().contains("point_count"),
+            "saving must not write point_count into a new scene file"
+        );
         assert_eq!(reloaded.transform_names, scene.transform_names);
         assert_eq!(reloaded.transforms.len(), scene.transforms.len());
         for (a, b) in scene.transforms.iter().zip(reloaded.transforms.iter()) {

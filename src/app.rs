@@ -561,31 +561,57 @@ impl App {
         // Apply a saved view, if given. Pause the orbit so the loaded
         // framing holds exactly (press O to resume).
         if let Some(v) = view {
-            // Fold any legacy eye offset into the on-sphere camera
-            app.camera = OrbitCamera::from_legacy(
-                Vec3::from(v.focus),
-                Vec3::from(v.offset),
-                v.distance,
-                v.rotation,
-                v.pitch,
-            );
-            app.point_size = v.point_size;
-            app.fog_near = v.fog_near;
-            app.fog_far = v.fog_far;
-            app.fog_brightness = v.fog_brightness;
-            app.fog_saturation = v.fog_saturation;
-            if let Some(c) = v.color_contrast {
-                app.color_contrast = c;
-            }
-            if let Some(f) = v.color_falloff {
-                app.color_falloff = f;
-                app.refresh_color_speeds();
-            }
-            app.orbit_paused = true;
-            log::info!("Loaded view (orbit paused; press O to resume)");
+            // Startup already honoured `--splat` / `--exposure` over the
+            // view's own renderer fields, so don't let apply_view re-apply
+            // them here.
+            app.apply_view(&v, false);
         }
 
         app
+    }
+
+    /// Restore a saved view: camera framing, point size, fog, and color
+    /// falloff/contrast. Shared by the `--view` startup path and the Camera
+    /// window's saved-view list. Pauses the orbit so the loaded framing holds
+    /// exactly.
+    ///
+    /// `with_renderer` also restores the view's renderer mode and exposure —
+    /// wanted when loading a view interactively, but not at startup, where
+    /// `--splat`/`--exposure` have already had their say.
+    pub fn apply_view(&mut self, v: &View, with_renderer: bool) {
+        // Fold any legacy eye offset into the on-sphere camera
+        self.camera = OrbitCamera::from_legacy(
+            Vec3::from(v.focus),
+            Vec3::from(v.offset),
+            v.distance,
+            v.rotation,
+            v.pitch,
+        );
+        self.point_size = v.point_size;
+        self.fog_near = v.fog_near;
+        self.fog_far = v.fog_far;
+        self.fog_brightness = v.fog_brightness;
+        self.fog_saturation = v.fog_saturation;
+        if let Some(c) = v.color_contrast {
+            self.color_contrast = c;
+        }
+        if let Some(f) = v.color_falloff {
+            self.color_falloff = f;
+            self.refresh_color_speeds();
+        }
+        if with_renderer {
+            self.render_mode = if v.is_splat() {
+                RenderMode::Splat
+            } else {
+                RenderMode::Points
+            };
+            if let Some(e) = v.exposure {
+                self.exposure = e;
+            }
+        }
+        self.orbit_paused = true;
+        self.path_play_t = None;
+        log::info!("Loaded view (orbit paused; press O to resume)");
     }
 
     pub fn toggle_orbit(&mut self) {
@@ -657,8 +683,63 @@ impl App {
         }
     }
 
+    /// Remove one path keypoint by index (Camera window row ✕). The keyboard
+    /// path (Shift+Y) only ever pops the last one.
+    pub fn remove_path_key_at(&mut self, idx: usize) {
+        let Some(path) = &mut self.scene.camera_path else { return };
+        if idx >= path.keys.len() {
+            return;
+        }
+        path.keys.remove(idx);
+        if path.keys.is_empty() {
+            self.scene.camera_path = None;
+            self.path_play_t = None;
+            log::info!("Camera path removed");
+        } else {
+            log::info!("Camera path keypoint {} removed ({} left)", idx, path.keys.len());
+        }
+    }
+
+    /// Set the path's playback duration in seconds; `None` restores the
+    /// default of 3s per segment.
+    pub fn set_path_seconds(&mut self, seconds: Option<f32>) {
+        if let Some(path) = &mut self.scene.camera_path {
+            path.seconds = seconds.map(|s| s.max(0.1));
+        }
+    }
+
+    /// Saved views for the current scene: `views/<slug>-*.toml`, newest
+    /// first. Returns (display name, path). Missing directory = empty list.
+    pub fn saved_views(&self) -> Vec<(String, std::path::PathBuf)> {
+        let prefix = format!("{}-", self.scene_slug());
+        let Ok(entries) = std::fs::read_dir("views") else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, std::path::PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .filter_map(|p| {
+                let stem = p.file_stem()?.to_str()?.to_string();
+                stem.starts_with(&prefix).then_some((stem, p))
+            })
+            .collect();
+        // Names end in a unix timestamp, so a reverse lexical sort is
+        // newest-first for as long as timestamps keep their digit count.
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out
+    }
+
+    /// Load one of `saved_views()` back onto the current scene.
+    pub fn load_saved_view(&mut self, path: &std::path::Path) {
+        match View::load(path) {
+            Ok(v) => self.apply_view(&v, true),
+            Err(e) => log::error!("{}", e),
+        }
+    }
+
     /// Filesystem-safe slug of the scene name
-    fn scene_slug(&self) -> String {
+    pub fn scene_slug(&self) -> String {
         let slug: String = self
             .scene
             .name
@@ -1434,8 +1515,10 @@ impl App {
         self.orbit_paused = true;
 
         let mut scene = self.scene.clone();
-        // Scale the point budget up from the interactive count
-        scene.point_count = (scene.point_count * 4).clamp(8_000_000, 40_000_000);
+        // Scale the point budget up from the interactive count. Read from
+        // `buffer_capacity`, not `scene.point_count` — the Render window's
+        // capacity control owns that number now (see `set_point_capacity`).
+        scene.point_count = (self.buffer_capacity as usize * 4).clamp(8_000_000, 40_000_000);
 
         let view = self.current_view();
 
@@ -2025,6 +2108,96 @@ impl App {
         self.color_contrast = (self.color_contrast * factor).clamp(0.25, 16.0);
         log::info!("Color contrast: {:.2}", self.color_contrast);
         self.commit_edit("Color contrast", Some("color_contrast"), before);
+    }
+
+    // === Render window (Phase 5) ===
+    //
+    // Absolute-value setters for the controls that own a slider, alongside
+    // the relative `adjust_*` nudges the keybinds use. Which of these commit
+    // history is deliberate and follows Phase 3: parameters that get written
+    // back into the scene TOML by Ctrl+S (point size, color falloff, color
+    // contrast) are edits; view-only knobs (renderer mode, exposure, fog) are
+    // not, matching the keyboard paths exactly.
+
+    pub fn set_render_mode(&mut self, mode: RenderMode) {
+        if self.render_mode != mode {
+            self.render_mode = mode;
+            log::info!(
+                "Renderer: {}",
+                match mode {
+                    RenderMode::Points => "points",
+                    RenderMode::Splat => "splat (additive log-density)",
+                }
+            );
+        }
+    }
+
+    pub fn set_point_size(&mut self, size: f32) {
+        let before = self.edit_snapshot();
+        self.point_size = size.clamp(0.0001, 0.1);
+        self.commit_edit("Point size", Some("point_size"), before);
+    }
+
+    pub fn set_color_falloff(&mut self, falloff: f32) {
+        let before = self.edit_snapshot();
+        self.color_falloff = falloff.clamp(0.0, 4.0);
+        self.refresh_color_speeds();
+        self.commit_edit("Color falloff", Some("color_falloff"), before);
+    }
+
+    pub fn set_color_contrast(&mut self, contrast: f32) {
+        let before = self.edit_snapshot();
+        self.color_contrast = contrast.clamp(0.25, 16.0);
+        self.commit_edit("Color contrast", Some("color_contrast"), before);
+    }
+
+    /// Points the chaos game keeps in flight. Raising this costs GPU memory
+    /// and a warmup, so the panel applies it explicitly rather than live.
+    pub fn point_capacity(&self) -> u32 {
+        self.buffer_capacity
+    }
+
+    /// Largest capacity this device can bind: the point buffer is a storage
+    /// buffer of 16-byte `Point`s (vec3 position + packed color index), so
+    /// the binding-size limit divided by 16 is the hard ceiling.
+    pub fn max_point_capacity(&self) -> u32 {
+        let limit = self.gpu.device.limits().max_storage_buffer_binding_size;
+        ((limit / 16) as u32).max(100_000)
+    }
+
+    /// Reallocate the point buffer. Not a history entry (it's a performance
+    /// setting, not part of the artwork) but it *is* persisted to prefs, so
+    /// the count follows the person across scenes and restarts.
+    pub fn set_point_capacity(&mut self, count: u32) {
+        let count = count.clamp(100_000, self.max_point_capacity());
+        if count == self.buffer_capacity {
+            return;
+        }
+        // Deliberately does *not* write `scene.point_count`: after startup
+        // `buffer_capacity` is the single source of truth. `scene` rides
+        // inside every history snapshot, so keeping a second copy there would
+        // let an undo across a capacity change silently desync the two.
+        self.buffer_capacity = count;
+        log::info!("Point buffer capacity: {} (restarting warmup)", count);
+        self.rebuild_pipelines();
+        self.prefs.point_count = Some(count as usize);
+        self.prefs.save();
+    }
+
+    /// Whether the pitch-inversion preference is on (Camera window checkbox
+    /// mirrors the I keybind).
+    pub fn invert_pitch(&self) -> bool {
+        self.prefs.invert_pitch
+    }
+
+    /// Whether a camera-path flythrough is currently playing.
+    pub fn path_playing(&self) -> bool {
+        self.path_play_t.is_some()
+    }
+
+    /// Whether a background HQ render (P) is still running.
+    pub fn hq_render_busy(&self) -> bool {
+        self.hq_render_in_flight.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn toggle_gizmos(&mut self) {
