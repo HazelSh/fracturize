@@ -27,20 +27,58 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Transforms, "Transforms")
         .open(&mut open)
         .show(ctx, |ui| {
-            draw_list(ui, app);
-            ui.separator();
-            draw_inspector(ui, app);
+            // Master-detail as a vertical tab rail, not a list stacked above
+            // fields. Stacking leaves the relationship between the two halves
+            // carried by proximity alone — nothing says *these* fields belong
+            // to *that* row. A tab whose fill continues into the pane, with no
+            // border between them, says it structurally.
+            // Reserve the rail's backdrop before the columns are laid out so
+            // it paints under them, then size it to the *full* height of the
+            // row once both are placed. A rail that stops where its tabs stop
+            // breaks the illusion — the strip has to run the height of the
+            // pane for the active tab to read as continuous with it.
+            let rail_bg_idx = ui.painter().add(egui::Shape::Noop);
+            let row = ui.horizontal_top(|ui| {
+                draw_rail(ui, app);
+                draw_detail(ui, app);
+            });
+            let full = row.response.rect;
+            ui.painter().set(
+                rail_bg_idx,
+                egui::Shape::rect_filled(
+                    egui::Rect::from_min_size(full.min, egui::vec2(RAIL_WIDTH, full.height())),
+                    0.0,
+                    rail_fill(ui),
+                ),
+            );
         });
 
     super::remember(ctx, app, super::WindowKey::Transforms);
     app.ui_state.panels.transforms_open = open;
 }
 
-// === List ===
+/// Width of the tab rail in points. Narrow on purpose: it carries identity
+/// (colour, name, enabled) and relative weight, and nothing else.
+const RAIL_WIDTH: f32 = 132.0;
+/// Height of one tab, including its weight bar.
+const TAB_HEIGHT: f32 = 30.0;
 
-/// Snapshot of one row's display data, taken before the row loop so the loop
-/// body is free to call `&mut App` methods without fighting the borrow
-/// checker over `app.scene`.
+/// The rail's backdrop: recessed relative to the detail pane, so the active
+/// tab (which is filled with the *pane's* colour) reads as lifted out of it.
+fn rail_fill(ui: &egui::Ui) -> egui::Color32 {
+    let base = ui.visuals().window_fill;
+    egui::Color32::from_rgb(
+        (base.r() as f32 * 0.72) as u8,
+        (base.g() as f32 * 0.72) as u8,
+        (base.b() as f32 * 0.72) as u8,
+    )
+}
+
+// === Tab rail ===
+
+/// Snapshot of one tab's display data, taken before the loop so the loop body
+/// is free to call `&mut App` methods without fighting the borrow checker
+/// over `app.scene`.
 struct RowData {
     name: String,
     color: Vec3,
@@ -51,101 +89,105 @@ struct RowData {
     summary: String,
 }
 
-fn draw_list(ui: &mut egui::Ui, app: &mut App) {
+fn row_data(app: &App, i: usize) -> RowData {
+    let spec = &app.scene.transforms[i];
+    let p = spec.matrix.w_axis.truncate();
+    RowData {
+        name: app
+            .scene
+            .transform_names
+            .get(i)
+            .and_then(|n| n.clone())
+            .unwrap_or_default(),
+        color: app.scene.colors.get(i).copied().unwrap_or(Vec3::ONE),
+        weight: spec.weight,
+        enabled: app.is_transform_enabled(i),
+        summary: format!(
+            "p=({:.2},{:.2},{:.2}) s={:.2} [{}]\nclick: select · right-click: menu",
+            p.x,
+            p.y,
+            p.z,
+            spec.matrix.x_axis.truncate().length(),
+            spec.variation_summary(),
+        ),
+    }
+}
+
+fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
     let n = app.scene.transforms.len();
-    ui.label(egui::RichText::new(format!("{} transform{}", n, if n == 1 { "" } else { "s" })).strong());
-
-    let rows: Vec<RowData> = (0..n)
-        .map(|i| {
-            let spec = &app.scene.transforms[i];
-            let p = spec.matrix.w_axis.truncate();
-            RowData {
-                name: app
-                    .scene
-                    .transform_names
-                    .get(i)
-                    .and_then(|n| n.clone())
-                    .unwrap_or_default(),
-                color: app.scene.colors.get(i).copied().unwrap_or(Vec3::ONE),
-                weight: spec.weight,
-                enabled: app.is_transform_enabled(i),
-                summary: format!(
-                    "p=({:.2},{:.2},{:.2}) s={:.2} [{}]\nclick: select · right-click: menu",
-                    p.x,
-                    p.y,
-                    p.z,
-                    spec.matrix.x_axis.truncate().length(),
-                    spec.variation_summary(),
-                ),
-            }
-        })
-        .collect();
-
     let selected = app.selected_transform();
+    // Weights are shown as bars relative to the largest, so "which transform
+    // dominates the chaos game" stays readable at a glance even though the
+    // editable field lives over in the detail pane.
+    let max_weight = app
+        .scene
+        .transforms
+        .iter()
+        .map(|t| t.weight)
+        .fold(0.01f32, f32::max);
 
-    egui::ScrollArea::vertical()
-        .max_height(180.0)
-        .show(ui, |ui| {
-            for (i, row) in rows.into_iter().enumerate() {
-                draw_row(ui, app, i, row, selected == Some(i));
-            }
-        });
+    ui.vertical(|ui| {
+        ui.set_width(RAIL_WIDTH);
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(0, 4))
+            .show(ui, |ui| {
+                ui.set_width(RAIL_WIDTH);
+                // Virtualized: L-system scenes reach tens of thousands of
+                // transforms, and laying every tab out per frame would cost
+                // more than the whole rest of the UI.
+                egui::ScrollArea::vertical()
+                    .id_salt("fracturize_transform_rail")
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show_rows(ui, TAB_HEIGHT, n, |ui, range| {
+                        for i in range {
+                            let row = row_data(app, i);
+                            draw_tab(ui, app, i, row, selected == Some(i), max_weight);
+                        }
+                    });
 
-    ui.horizontal(|ui| {
-        let resp = ui.button("+ Add");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Add a fresh transform (Shift+A)",
-            "click: add a new transform",
-        );
-        if resp.clicked() {
-            app.add_transform(true);
-        }
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    let resp = ui.small_button("+ add");
+                    let resp = hinted(
+                        resp,
+                        &mut app.ui_state,
+                        "Add a fresh transform (Shift+A)",
+                        "click: add a new transform",
+                    );
+                    if resp.clicked() {
+                        app.add_transform(true);
+                    }
 
-        let resp = ui.add_enabled(selected.is_some(), egui::Button::new("Duplicate"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Duplicate the selected transform (A)",
-            "click: duplicate selected transform",
-        );
-        if resp.clicked() {
-            if let Some(i) = selected {
-                app.duplicate_transform_at(i);
-            }
-        }
-
-        let resp = ui.add_enabled(selected.is_some() && n > 1, egui::Button::new("Delete"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Delete the selected transform (Del)",
-            "click: delete selected transform",
-        );
-        if resp.clicked() {
-            if let Some(i) = selected {
-                app.delete_transform_at(i);
-            }
-        }
+                    let resp = ui.add_enabled(selected.is_some(), egui::Button::new("dup").small());
+                    let resp = hinted(
+                        resp,
+                        &mut app.ui_state,
+                        "Duplicate the selected transform (A)",
+                        "click: duplicate selected transform",
+                    );
+                    if resp.clicked() {
+                        if let Some(i) = selected {
+                            app.duplicate_transform_at(i);
+                        }
+                    }
+                });
+            });
     });
 }
 
-fn color32_from_vec3(c: Vec3) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        (c.x.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (c.y.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (c.z.clamp(0.0, 1.0) * 255.0).round() as u8,
-    )
-}
-
-/// One list row. The whole row is the select target — built as a
-/// `scope_builder` `Ui` that senses clicks, because egui registers a
-/// container's own sense *below* its children's: the eye button and the
-/// weight DragValue inside still get their clicks first, and only the
-/// leftover row area selects. (A plain `ui.interact` over the finished rect
-/// registers last and would swallow both.)
-fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: bool) {
+/// One tab. The selected tab is filled with the *detail pane's* colour and
+/// extends past the rail's right edge, so it reads as continuous with the
+/// pane rather than as a highlighted row in a separate list.
+fn draw_tab(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    i: usize,
+    row: RowData,
+    selected: bool,
+    max_weight: f32,
+) {
     let is_renaming = app
         .ui_state
         .renaming_transform
@@ -163,44 +205,28 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
     } else {
         egui::Sense::click()
     };
+    let pane_fill = ui.visuals().window_fill;
+    let accent = color32_from_vec3(row.color);
 
-    let row_resp = ui
+    let tab_resp = ui
         .scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
             ui.set_width(ui.available_width());
-
-            // Reserve the background shapes now (so they paint *under* the
-            // row's widgets) but size them after the content is laid out —
-            // `max_rect()` here is every remaining point in the window, not
-            // this row, so filling it directly bleeds the selection colour
-            // down over everything below.
+            // Reserved now, sized after layout: `max_rect()` is all remaining
+            // space, not this tab.
             let bg_idx = ui.painter().add(egui::Shape::Noop);
             let accent_idx = ui.painter().add(egui::Shape::Noop);
+            let bar_idx = ui.painter().add(egui::Shape::Noop);
 
             ui.horizontal(|ui| {
-                ui.add_space(6.0);
-                let (swatch, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().rect_filled(swatch, 2.0, color32_from_vec3(row.color));
-
-                let eye_icon = if row.enabled { icons::EYE } else { icons::EYE_SLASH };
-                let eye_resp = ui.add(egui::Button::new(eye_icon).small().frame(false));
-                let eye_resp = hinted(
-                    eye_resp,
-                    &mut app.ui_state,
-                    if row.enabled {
-                        "Disable this transform (Enter)"
-                    } else {
-                        "Enable this transform (Enter)"
-                    },
-                    "click: toggle enabled",
-                );
-                if eye_resp.clicked() {
-                    app.toggle_transform_enabled(i);
-                }
+                ui.add_space(8.0);
+                let (swatch, _) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().rect_filled(swatch, 2.0, accent);
 
                 if is_renaming {
                     let resp = {
                         let (_, buf) = app.ui_state.renaming_transform.as_mut().unwrap();
-                        ui.add(egui::TextEdit::singleline(buf).desired_width(96.0))
+                        ui.add(egui::TextEdit::singleline(buf).desired_width(70.0))
                     };
                     resp.request_focus();
                     let enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
@@ -209,7 +235,10 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
                         app.ui_state.renaming_transform = None;
                     } else if enter || resp.lost_focus() {
                         if let Some((idx, name)) = app.ui_state.renaming_transform.take() {
-                            app.rename_transform(idx, if name.trim().is_empty() { None } else { Some(name) });
+                            app.rename_transform(
+                                idx,
+                                if name.trim().is_empty() { None } else { Some(name) },
+                            );
                         }
                     }
                 } else {
@@ -221,54 +250,69 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
                     } else {
                         text.color(ui.visuals().text_color())
                     };
-                    ui.add(egui::Label::new(text).selectable(false));
+                    ui.add(egui::Label::new(text).truncate().selectable(false));
                 }
 
-                // Weight sits at the trailing edge so the rows line up as a
-                // column regardless of name length.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(6.0);
-                    let mut w = row.weight;
-                    let speed = (w.abs().max(0.01) * 0.05) as f64;
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut w)
-                            .speed(speed)
-                            .range(0.01..=100.0),
-                    );
-                    let resp = hinted(
-                        resp,
+                    let eye_icon = if row.enabled { icons::EYE } else { icons::EYE_SLASH };
+                    let eye_resp = ui.add(egui::Button::new(eye_icon).small().frame(false));
+                    let eye_resp = hinted(
+                        eye_resp,
                         &mut app.ui_state,
-                        "Chaos-game selection weight (, / .)",
-                        "drag: adjust weight · click: type exact value",
+                        if row.enabled {
+                            "Disable this transform (Enter)"
+                        } else {
+                            "Enable this transform (Enter)"
+                        },
+                        "click: toggle enabled",
                     );
-                    if resp.changed() {
-                        app.set_transform_weight(i, w);
+                    if eye_resp.clicked() {
+                        app.toggle_transform_enabled(i);
                     }
                 });
             });
 
-            // Selection reads as a filled row with an accent bar down its
-            // leading edge, hover as a dimmer fill — the same visual grammar
-            // as a list selection anywhere else, so the list is legible as
-            // "one of these is active" rather than "these are buttons".
-            let rect = ui.min_rect().expand2(egui::vec2(0.0, 2.0));
-            let visuals = ui.visuals();
+            let mut rect = ui.min_rect();
+            rect.max.y = rect.min.y + TAB_HEIGHT - 4.0;
+            // Selected tabs run past the rail's right edge so no border or gap
+            // separates them from the detail pane.
             if selected {
-                ui.painter()
-                    .set(bg_idx, egui::Shape::rect_filled(rect, 3.0, visuals.selection.bg_fill));
+                let mut fill_rect = rect;
+                fill_rect.max.x += 6.0;
+                ui.painter().set(
+                    bg_idx,
+                    egui::Shape::rect_filled(fill_rect, 3.0, pane_fill),
+                );
                 ui.painter().set(
                     accent_idx,
                     egui::Shape::rect_filled(
                         egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
                         1.0,
-                        visuals.selection.stroke.color,
+                        accent,
                     ),
                 );
             } else if ui.response().hovered() {
                 ui.painter().set(
                     bg_idx,
-                    egui::Shape::rect_filled(rect, 3.0, visuals.widgets.hovered.bg_fill),
+                    egui::Shape::rect_filled(rect, 3.0, ui.visuals().widgets.hovered.bg_fill),
                 );
+            }
+
+            // Relative chaos weight, as a bar along the tab's bottom edge.
+            let frac = (row.weight / max_weight).clamp(0.0, 1.0);
+            let bar_w = (rect.width() - 16.0) * frac;
+            if bar_w > 0.5 {
+                let bar = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x + 8.0, rect.max.y - 3.0),
+                    egui::vec2(bar_w, 2.0),
+                );
+                let color = if row.enabled {
+                    accent.gamma_multiply(0.8)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                ui.painter().set(bar_idx, egui::Shape::rect_filled(bar, 1.0, color));
             }
         })
         .response;
@@ -277,16 +321,16 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
         return;
     }
 
-    let row_resp = hinted(
-        row_resp,
+    let tab_resp = hinted(
+        tab_resp,
         &mut app.ui_state,
         row.summary.as_str(),
         "click: select this transform · right-click: menu",
     );
-    if row_resp.clicked() {
+    if tab_resp.clicked() {
         app.select_transform(Some(i));
     }
-    row_resp.context_menu(|ui| {
+    tab_resp.context_menu(|ui| {
         if ui.button("Duplicate").clicked() {
             app.duplicate_transform_at(i);
             ui.close();
@@ -305,6 +349,23 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
             ui.close();
         }
     });
+}
+
+/// The detail pane: everything about the selected transform.
+fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
+    ui.vertical(|ui| {
+        ui.set_min_width(280.0);
+        ui.add_space(4.0);
+        draw_inspector(ui, app);
+    });
+}
+
+fn color32_from_vec3(c: Vec3) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (c.x.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.y.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.z.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
 }
 
 // === Inspector ===
@@ -417,11 +478,25 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("T{}", idx));
     let color = app.scene.colors.get(idx).copied().unwrap_or(Vec3::ONE);
+    let n = app.scene.transforms.len();
     ui.horizontal(|ui| {
         let (swatch, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
         ui.painter().rect_filled(swatch, 2.0, color32_from_vec3(color));
         ui.label(egui::RichText::new(&name).strong());
         ui.label(egui::RichText::new(format!("(T{})", idx)).weak().small());
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let resp = ui.add_enabled(n > 1, egui::Button::new(icons::X).small().frame(false));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Delete this transform (Del)",
+                "click: delete this transform",
+            );
+            if resp.clicked() {
+                app.delete_transform_at(idx);
+            }
+        });
     });
     ui.add_space(2.0);
 
@@ -536,6 +611,23 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
             &mut app.ui_state,
             "Lock per-axis scale to change together (ctrl+drag any gizmo part)",
             "click: toggle uniform-scale link",
+        );
+
+        // How much smaller this copy is than the grey identity cell drawn in
+        // the viewport — the number the reference gizmo is there to convey,
+        // stated rather than left to be eyeballed.
+        let contraction = app.scene.transforms[idx].contraction();
+        let resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("×{:.3}", contraction)).weak().small(),
+            )
+            .sense(egui::Sense::hover()),
+        );
+        hinted(
+            resp,
+            &mut app.ui_state,
+            "Contraction: linear size of this copy relative to the grey identity cell (cube root of |det|). Below 1 the IFS converges.",
+            "the transform's contraction against the identity cell",
         );
     });
     let mut scale_changed_axis: Option<usize> = None;

@@ -133,16 +133,19 @@ impl WindowKey {
 /// this — it's only what you get before you've moved anything.
 fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2) {
     let top = 60.0;
-    let right_col_w = 300.0;
+    // The Transforms window is the widest by some way: it holds a tab rail
+    // *and* a detail pane side by side. The right column is sized to it so
+    // Camera lines up underneath.
+    let right_col_w = 450.0;
     let right_x = (screen.right() - right_col_w - 20.0).max(20.0);
     match key {
         WindowKey::Render => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
         WindowKey::Explore => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 220.0)),
-        WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(300.0, 420.0)),
-        WindowKey::Keybinds => (egui::pos2(640.0, top), egui::vec2(380.0, 420.0)),
-        WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 420.0)),
+        WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(280.0, 420.0)),
+        WindowKey::Keybinds => (egui::pos2(620.0, top), egui::vec2(360.0, 420.0)),
+        WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),
         WindowKey::Camera => (
-            egui::pos2(right_x, top + 450.0),
+            egui::pos2(right_x, top + 460.0),
             egui::vec2(right_col_w, 300.0),
         ),
     }
