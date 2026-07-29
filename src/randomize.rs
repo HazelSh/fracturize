@@ -120,19 +120,55 @@ fn build_candidate(rng: &mut impl Rng) -> Candidate {
         }
     }
 
-    // Variations: a good fraction of flames are best left purely affine
-    // (Sierpinski-family forms), so only reach for nonlinearity sometimes.
-    if rng.r#gen::<f32>() >= 0.4 {
-        let touched = rng.gen_range(1..=2.min(n));
-        for _ in 0..touched {
-            let idx = rng.gen_range(0..n);
-            let name = FRIENDLY[rng.gen_range(0..FRIENDLY.len())];
-            let slot = VARIATION_NAMES.iter().position(|&v| v == name).unwrap();
-            let w = rng.gen_range(0.25..0.8);
+    // Variations. Purely affine IFS are a real and worthwhile family, but a
+    // *random* one is almost always a dull Sierpinski variant — the good ones
+    // come from deliberate symmetry, not dice. So every roll carries some
+    // nonlinearity, and only rarely stays affine.
+    //
+    // The flame gets one characteristic variation, applied to a subset of its
+    // transforms at independently-rolled strengths. Picking a single kind per
+    // flame (rather than one per transform) is what makes the result read as
+    // a coherent form instead of a pile of unrelated distortions; varying the
+    // strength per transform is what keeps it from looking uniform.
+    if rng.r#gen::<f32>() >= 0.08 {
+        let name = FRIENDLY[rng.gen_range(0..FRIENDLY.len())];
+        let slot = VARIATION_NAMES.iter().position(|&v| v == name).unwrap();
+
+        // How many transforms carry it. All of them reads as a global warp;
+        // one reads as an accent. Both are good, so roll it.
+        let touched = rng.gen_range(1..=n);
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            order.swap(i, rng.gen_range(0..=i));
+        }
+
+        // Mostly-low strengths with an occasional strong one: at high blend a
+        // nonlinear variation tends to swamp the affine structure, and the
+        // interesting flames usually live where the two are still arguing.
+        for &idx in order.iter().take(touched) {
+            let w = if rng.r#gen::<f32>() < 0.25 {
+                rng.gen_range(0.55..1.0)
+            } else {
+                rng.gen_range(0.12..0.55)
+            };
+            let w = if rng.r#gen::<f32>() < 0.15 { -w } else { w };
             transforms[idx].variations[slot] = w;
             // Keep the total blend near 1 so the transform's overall scale
             // stays in the range the contraction check just established.
-            transforms[idx].variations[0] = 1.0 - w;
+            transforms[idx].variations[0] = 1.0 - w.abs();
+        }
+
+        // Occasionally a second kind on one transform, for flames that need
+        // somewhere for the eye to catch.
+        if n >= 3 && rng.r#gen::<f32>() < 0.3 {
+            let other = FRIENDLY[rng.gen_range(0..FRIENDLY.len())];
+            let other_slot = VARIATION_NAMES.iter().position(|&v| v == other).unwrap();
+            if other_slot != slot {
+                let idx = rng.gen_range(0..n);
+                let w = rng.gen_range(0.15..0.5);
+                transforms[idx].variations[other_slot] = w;
+                transforms[idx].variations[0] = (transforms[idx].variations[0] - w).max(0.0);
+            }
         }
     }
 

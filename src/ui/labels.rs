@@ -15,7 +15,10 @@ use crate::camera::world_to_screen;
 const FONT_SIZE: f32 = 12.0;
 
 pub fn draw(ctx: &egui::Context, app: &App) {
-    if !app.show_text {
+    // Labels live and die with the gizmos (G): they name the very things the
+    // gizmos draw, and a separate toggle for "the gizmo's caption" was a
+    // distinction without a difference.
+    if !app.show_gizmos {
         return;
     }
 

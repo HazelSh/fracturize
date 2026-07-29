@@ -106,8 +106,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Overlays",
         &[
             ("H / ?", "toggle this window", Some(HelpAction::ToggleHelp)),
-            ("T", "toggle transform name labels", Some(HelpAction::ToggleText)),
-            ("G", "toggle transform gizmos", Some(HelpAction::ToggleGizmos)),
+            ("G", "toggle transform gizmos + labels", Some(HelpAction::ToggleGizmos)),
             ("Esc", "quit", None),
         ],
     ),
@@ -119,21 +118,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    // Default to the right edge: the left side is where the HUD lines and the
-    // Transforms window live, and a reference table is something you read
-    // beside your work rather than on top of it.
-    let default_pos = egui::pos2((ctx.content_rect().right() - 400.0).max(24.0), 60.0);
-
-    egui::Window::new("Keybinds")
-        .id(egui::Id::new("fracturize_shortcuts_window"))
+    super::window(ctx, app, super::WindowKey::Keybinds, "Keybinds")
         .open(&mut open)
-        .default_pos(default_pos)
-        .default_width(380.0)
-        // Deliberately short by default: the window must fit inside a small
-        // viewport and scroll, not run off the bottom the way the old
-        // block-glyph panel did.
-        .default_height(420.0)
-        .resizable(true)
         .show(ctx, |ui| {
             ui.label(
                 egui::RichText::new("Rows with a key binding are clickable — shift+click runs the second variant.")
@@ -165,6 +151,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 }
             });
         });
+
+    super::remember(ctx, app, super::WindowKey::Keybinds);
 
     // Only the window's own close button writes back. A row action can be
     // `ToggleHelp`, which already cleared `show_help` inside the closure —

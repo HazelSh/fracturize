@@ -4,6 +4,7 @@
 //! Stored at $XDG_CONFIG_HOME/fracturize/prefs.toml (~/.config fallback).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Which of the Phase 2 `egui::Window` panels are open. Toggled from the top
@@ -25,7 +26,7 @@ fn default_mutate_strength() -> f32 {
     1.0
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Prefs {
     /// Flightsim-style: drag down to tilt the scene's top toward you
     #[serde(default)]
@@ -42,6 +43,12 @@ pub struct Prefs {
     /// explicit `--points`. `None` = never set one, defer to the scene.
     #[serde(default)]
     pub point_count: Option<usize>,
+    /// Where each panel window was left, keyed by its `ui::WindowKey` name:
+    /// `[x, y, width, height]` in egui points. Panels you've arranged stay
+    /// arranged across launches; anything absent falls back to the
+    /// screen-relative default layout in `ui::default_layout`.
+    #[serde(default)]
+    pub window_geometry: BTreeMap<String, [f32; 4]>,
 }
 
 impl Default for Prefs {
@@ -51,6 +58,7 @@ impl Default for Prefs {
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
             point_count: None,
+            window_geometry: BTreeMap::new(),
         }
     }
 }

@@ -209,7 +209,6 @@ pub enum HelpAction {
     Reset,
     Zoom,
     ToggleSelected,
-    ToggleText,
     ToggleGizmos,
     ToggleOrbit,
     SaveView,
@@ -307,7 +306,6 @@ pub struct App {
     pub ctrl_held: bool,
 
     pub show_gizmos: bool,
-    pub show_text: bool,
     pub show_help: bool,
 
     // Fog parameters
@@ -335,6 +333,18 @@ pub struct App {
     /// itself (`EguiLayer`) lives on `AppWrapper` in main.rs instead, so the
     /// UI closure can hold `&mut App`.
     pub ui_state: UiState,
+    /// Smoothed cost of building the egui frame, in ms (see record_ui_time)
+    ui_build_ms: f32,
+    /// When prefs last changed without being written yet (window drags churn
+    /// geometry every frame; see flush_dirty_prefs)
+    prefs_dirty_since: Option<std::time::Instant>,
+    /// Cached `views/` scan for the Camera panel (see saved_views)
+    saved_views_cache: Option<Vec<(String, std::path::PathBuf)>>,
+    /// Point capacity the Render slider is asking for but that hasn't been
+    /// applied yet, and when the last reallocation happened (see
+    /// request_point_capacity / apply_pending_capacity)
+    pending_capacity: Option<u32>,
+    last_capacity_change: Instant,
 
     /// Which renderer draws the fractal (R toggles)
     pub render_mode: RenderMode,
@@ -520,7 +530,6 @@ impl App {
             shift_held: false,
             ctrl_held: false,
             show_gizmos: true,
-            show_text: true,
             // Env override lets automated captures verify the help overlay
             show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
             fog_near: 3.0,
@@ -536,6 +545,11 @@ impl App {
             gizmo_renderer,
             line_renderer,
             ui_state,
+            ui_build_ms: 0.0,
+            prefs_dirty_since: None,
+            saved_views_cache: None,
+            pending_capacity: None,
+            last_capacity_change: Instant::now(),
             render_mode,
             exposure,
             show_traces: false,
@@ -711,7 +725,23 @@ impl App {
 
     /// Saved views for the current scene: `views/<slug>-*.toml`, newest
     /// first. Returns (display name, path). Missing directory = empty list.
-    pub fn saved_views(&self) -> Vec<(String, std::path::PathBuf)> {
+    pub fn saved_views(&mut self) -> &[(String, std::path::PathBuf)] {
+        // Cached: the Camera panel asks for this every frame, and a
+        // directory scan per frame is a syscall storm for a list that only
+        // changes when we save a view or load a different scene.
+        if self.saved_views_cache.is_none() {
+            self.saved_views_cache = Some(self.scan_saved_views());
+        }
+        self.saved_views_cache.as_deref().unwrap_or(&[])
+    }
+
+    /// Drop the `saved_views` cache — call after anything that changes the
+    /// contents of `views/` or the scene slug we filter by.
+    pub fn invalidate_saved_views(&mut self) {
+        self.saved_views_cache = None;
+    }
+
+    fn scan_saved_views(&self) -> Vec<(String, std::path::PathBuf)> {
         let prefix = format!("{}-", self.scene_slug());
         let Ok(entries) = std::fs::read_dir("views") else {
             return Vec::new();
@@ -779,7 +809,7 @@ impl App {
     }
 
     /// Save the current view parameters to views/<scene>-<timestamp>.toml
-    pub fn save_view(&self) {
+    pub fn save_view(&mut self) {
         let view = self.current_view();
 
         let path = format!("views/{}-{}.toml", self.scene_slug(), unix_timestamp());
@@ -788,6 +818,7 @@ impl App {
             Ok(()) => log::info!("View saved to {}", path),
             Err(e) => log::error!("{}", e),
         }
+        self.invalidate_saved_views();
     }
 
     /// Write the scene (with any interactive edits) back to its TOML file.
@@ -968,6 +999,52 @@ impl App {
             }
             None => log::warn!("Not enough redo history for {} step(s)", steps),
         }
+    }
+
+    /// Persisted geometry for a panel window, if it has ever been moved.
+    pub fn window_geometry(&self, key: &str) -> Option<[f32; 4]> {
+        self.prefs.window_geometry.get(key).copied()
+    }
+
+    /// Remember where a panel window is now. Called every frame for every
+    /// open panel, so it only marks prefs dirty on a real change and defers
+    /// the disk write to `flush_dirty_prefs` — otherwise dragging a window
+    /// would rewrite prefs.toml once per frame.
+    pub fn set_window_geometry(&mut self, key: &str, rect: [f32; 4]) {
+        let changed = match self.prefs.window_geometry.get(key) {
+            Some(old) => old
+                .iter()
+                .zip(rect.iter())
+                .any(|(a, b)| (a - b).abs() > 0.5),
+            None => true,
+        };
+        if changed {
+            self.prefs.window_geometry.insert(key.to_string(), rect);
+            self.prefs_dirty_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Write deferred prefs changes once they've been quiet for a moment.
+    /// Called from `update()`.
+    fn flush_dirty_prefs(&mut self) {
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(800);
+        if self.prefs_dirty_since.is_some_and(|t| t.elapsed() >= QUIET) {
+            self.prefs_dirty_since = None;
+            self.prefs.save();
+        }
+    }
+
+    /// Record how long building this frame's UI took (egui `run_ui` +
+    /// `tessellate`), smoothed. Kept separate from the frametime tracker so
+    /// the status bar can say whether an FPS drop is the panels' fault or the
+    /// chaos game's.
+    pub fn record_ui_time(&mut self, ms: f32) {
+        self.ui_build_ms = self.ui_build_ms * 0.9 + ms * 0.1;
+    }
+
+    /// Smoothed UI build time in milliseconds.
+    pub fn ui_ms(&self) -> f32 {
+        self.ui_build_ms
     }
 
     /// (fps, avg frametime ms, p99 frametime ms) for the status bar.
@@ -1460,6 +1537,7 @@ impl App {
         self.hovered = None;
         self.scene = scene;
         self.scene_path = Some(path.to_string_lossy().into_owned());
+        self.invalidate_saved_views();
         self.history.clear();
         self.rebuild_pipelines();
     }
@@ -1603,6 +1681,7 @@ impl App {
         // A rolled flame has no file behind it: Ctrl+S should write a new
         // scenes/untitled-*.toml rather than overwrite whatever was loaded.
         self.scene_path = None;
+        self.invalidate_saved_views();
         self.bump_matrix_generation();
         self.after_scene_shape_change();
         self.commit_edit("Random flame", None, before);
@@ -2165,6 +2244,49 @@ impl App {
         ((limit / 16) as u32).max(100_000)
     }
 
+    /// Ask for a new point-buffer capacity. The Render window calls this
+    /// while you drag, and `update()` applies it at most a few times a
+    /// second (see `apply_pending_capacity`).
+    ///
+    /// The old design was a value box plus an Apply button, which is exactly
+    /// the wrong shape for the one control that decides whether the machine
+    /// stays responsive: you commit blind to a number, and if it's too big
+    /// you're already in trouble before you can react. Applying live means
+    /// the frame counter and the fan tell you you've gone too far while
+    /// you're still holding the mouse and can drag back.
+    pub fn request_point_capacity(&mut self, count: u32) {
+        let count = count.clamp(100_000, self.max_point_capacity());
+        // Ignore jitter: a log slider emits a slightly different value every
+        // pixel, and reallocating for a 1% change is pure churn.
+        let ratio = count as f32 / self.buffer_capacity.max(1) as f32;
+        if (0.98..=1.02).contains(&ratio) {
+            self.pending_capacity = None;
+            return;
+        }
+        self.pending_capacity = Some(count);
+    }
+
+    /// The capacity the slider is asking for, if it hasn't landed yet.
+    pub fn pending_point_capacity(&self) -> Option<u32> {
+        self.pending_capacity
+    }
+
+    /// Apply a requested capacity change, no more often than
+    /// `CAPACITY_RATE_LIMIT`. Reallocating the point buffer is a real stall
+    /// (it rebuilds the compute pipeline and restarts warmup), so a drag that
+    /// sweeps two orders of magnitude must not try to do it every frame — but
+    /// it should still land often enough that the drag feels connected.
+    fn apply_pending_capacity(&mut self) {
+        const CAPACITY_RATE_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
+        let Some(count) = self.pending_capacity else { return };
+        if self.last_capacity_change.elapsed() < CAPACITY_RATE_LIMIT {
+            return;
+        }
+        self.pending_capacity = None;
+        self.last_capacity_change = Instant::now();
+        self.set_point_capacity(count);
+    }
+
     /// Reallocate the point buffer. Not a history entry (it's a performance
     /// setting, not part of the artwork) but it *is* persisted to prefs, so
     /// the count follows the person across scenes and restarts.
@@ -2181,7 +2303,7 @@ impl App {
         log::info!("Point buffer capacity: {} (restarting warmup)", count);
         self.rebuild_pipelines();
         self.prefs.point_count = Some(count as usize);
-        self.prefs.save();
+        self.prefs_dirty_since = Some(std::time::Instant::now());
     }
 
     /// Whether the pitch-inversion preference is on (Camera window checkbox
@@ -2200,6 +2322,10 @@ impl App {
         self.hq_render_in_flight.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Toggle the transform gizmos *and* their name labels (G). These used to
+    /// be two bindings; a separate toggle for "the gizmo's caption" was a
+    /// distinction without a difference once the panels took over every other
+    /// overlay readout.
     pub fn toggle_gizmos(&mut self) {
         self.show_gizmos = !self.show_gizmos;
         log::info!("Gizmos: {}", if self.show_gizmos { "on" } else { "off" });
@@ -2207,16 +2333,6 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
-    }
-
-    /// Toggle the world-anchored transform name labels (T). Since the panels
-    /// took over every other overlay readout, this is all `show_text` still
-    /// gates — and it no longer clears the selection on the way out: with a
-    /// real Transforms panel, losing your selected transform just because you
-    /// hid the viewport labels is a surprise, not a feature.
-    pub fn toggle_text_overlay(&mut self) {
-        self.show_text = !self.show_text;
-        log::info!("Transform labels: {}", if self.show_text { "on" } else { "off" });
     }
 
     pub fn select_prev_transform(&mut self) {
@@ -2289,6 +2405,8 @@ impl App {
         let dt = now.duration_since(self.last_update).as_secs_f32().min(0.1);
         self.last_update = now;
         self.frame_dt = dt;
+        self.flush_dirty_prefs();
+        self.apply_pending_capacity();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
@@ -2504,7 +2622,6 @@ impl App {
             HelpAction::Reset => self.reset(),
             HelpAction::Zoom => if shift { self.zoom_out() } else { self.zoom_in() },
             HelpAction::ToggleSelected => self.toggle_selected_transform(),
-            HelpAction::ToggleText => self.toggle_text_overlay(),
             HelpAction::ToggleGizmos => self.toggle_gizmos(),
             HelpAction::ToggleOrbit => self.toggle_orbit(),
             HelpAction::PathPlay => self.toggle_path_play(),

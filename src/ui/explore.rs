@@ -14,11 +14,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    egui::Window::new("Explore")
-        .id(egui::Id::new("fracturize_explore_window"))
+    super::window(ctx, app, super::WindowKey::Explore, "Explore")
         .open(&mut open)
-        .default_pos(egui::pos2(20.0, 60.0))
-        .default_width(240.0)
         .show(ctx, |ui| {
             let resp = ui.button(format!("{}  New random flame", super::icons::DICE));
             let resp = hinted(
@@ -156,5 +153,6 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             }
         });
 
+    super::remember(ctx, app, super::WindowKey::Explore);
     app.ui_state.panels.explore_open = open;
 }

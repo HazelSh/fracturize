@@ -59,11 +59,11 @@ pub struct UiState {
     /// list only via their explicit remove button. Reset when the selected
     /// transform changes.
     pub variation_rows: (usize, Vec<usize>),
-    /// Render window: the point count (in millions) currently typed into the
-    /// DragValue but not yet applied. Held separately from the live capacity
-    /// because applying it reallocates the point buffer and restarts warmup,
-    /// so it happens on the Apply button rather than on every drag frame.
-    pub pending_point_count: Option<f32>,
+    /// Which browser row the list has already scrolled into view. Scrolling
+    /// to the selection on *every* frame makes the list impossible to scroll
+    /// by hand — it snaps back the instant the selection leaves the viewport
+    /// — so it only happens on the frame the selection actually moves.
+    pub browser_scrolled_to: Option<usize>,
 }
 
 impl UiState {
@@ -74,7 +74,7 @@ impl UiState {
             trs_cache: None,
             renaming_transform: None,
             variation_rows: (usize::MAX, Vec::new()),
-            pending_point_count: None,
+            browser_scrolled_to: None,
         }
     }
 }
@@ -93,6 +93,87 @@ impl UiState {
     }
 }
 
+/// Stable identifier for a panel window: the egui `Id` salt, the prefs key
+/// its geometry is stored under, and what `default_layout` keys off. Adding a
+/// panel means adding a variant here and a case to `default_layout`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WindowKey {
+    Render,
+    Explore,
+    Scenes,
+    Keybinds,
+    Transforms,
+    Camera,
+}
+
+impl WindowKey {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Render => "render",
+            Self::Explore => "explore",
+            Self::Scenes => "scenes",
+            Self::Keybinds => "keybinds",
+            Self::Transforms => "transforms",
+            Self::Camera => "camera",
+        }
+    }
+
+    fn id(self) -> egui::Id {
+        egui::Id::new(("fracturize_window", self.name()))
+    }
+}
+
+/// Default position and size for a panel, as a function of the viewport so
+/// the right-hand column tracks the window edge instead of sitting at a fixed
+/// x that only works at one size.
+///
+/// The layout is Hazel's: Render top-left with Explore beneath it, then Scenes
+/// and Keybinds filling the middle, and Transforms top-right with Camera
+/// beneath it against the right edge. Persisted geometry always wins over
+/// this — it's only what you get before you've moved anything.
+fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2) {
+    let top = 60.0;
+    let right_col_w = 300.0;
+    let right_x = (screen.right() - right_col_w - 20.0).max(20.0);
+    match key {
+        WindowKey::Render => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
+        WindowKey::Explore => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 220.0)),
+        WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(300.0, 420.0)),
+        WindowKey::Keybinds => (egui::pos2(640.0, top), egui::vec2(380.0, 420.0)),
+        WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 420.0)),
+        WindowKey::Camera => (
+            egui::pos2(right_x, top + 450.0),
+            egui::vec2(right_col_w, 300.0),
+        ),
+    }
+}
+
+/// Start a panel window at its persisted geometry, or the default layout.
+pub fn window(ctx: &egui::Context, app: &crate::app::App, key: WindowKey, title: &str) -> egui::Window<'static> {
+    let (default_pos, default_size) = default_layout(key, ctx.content_rect());
+    let stored = app.window_geometry(key.name());
+    let (pos, size) = match stored {
+        Some([x, y, w, h]) => (egui::pos2(x, y), egui::vec2(w, h)),
+        None => (default_pos, default_size),
+    };
+    egui::Window::new(title.to_owned())
+        .id(key.id())
+        .default_pos(pos)
+        .default_size(size)
+        .resizable(true)
+}
+
+/// Read a panel's current rect back out of egui and remember it, so the
+/// arrangement survives a restart. Called right after the window is shown.
+pub fn remember(ctx: &egui::Context, app: &mut crate::app::App, key: WindowKey) {
+    if let Some(rect) = ctx.memory(|m| m.area_rect(key.id())) {
+        app.set_window_geometry(
+            key.name(),
+            [rect.min.x, rect.min.y, rect.width(), rect.height()],
+        );
+    }
+}
+
 /// Build this frame's egui UI: toolbar, panel windows, status bar, gizmo
 /// labels — in that order. The status bar must draw after the toolbar and
 /// windows so it can read any `hinted()` hover hint they set this frame.
@@ -107,16 +188,52 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     app.ui_state.status_hint = None;
     let ctx = ui.ctx().clone();
 
-    toolbar::draw(ui, app);
-    explore::draw(&ctx, app);
-    render_panel::draw(&ctx, app);
-    transforms::draw(&ctx, app);
-    camera_panel::draw(&ctx, app);
-    browser::draw(&ctx, app);
-    shortcuts::draw(&ctx, app);
-    status_bar::draw(ui, app);
+    // Env lookup once, not per frame.
+    static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let profile = *PROFILE.get_or_init(|| std::env::var_os("FRACTURIZE_UI_PROFILE").is_some());
+    let mut timings: Vec<(&str, f32)> = Vec::new();
+    let step = |name: &'static str, t: std::time::Instant, timings: &mut Vec<(&str, f32)>| {
+        if profile {
+            timings.push((name, t.elapsed().as_secs_f32() * 1000.0));
+        }
+    };
 
+    let t = std::time::Instant::now();
+    toolbar::draw(ui, app);
+    step("toolbar", t, &mut timings);
+    let t = std::time::Instant::now();
+    explore::draw(&ctx, app);
+    step("explore", t, &mut timings);
+    let t = std::time::Instant::now();
+    render_panel::draw(&ctx, app);
+    step("render", t, &mut timings);
+    let t = std::time::Instant::now();
+    transforms::draw(&ctx, app);
+    step("transforms", t, &mut timings);
+    let t = std::time::Instant::now();
+    camera_panel::draw(&ctx, app);
+    step("camera", t, &mut timings);
+    let t = std::time::Instant::now();
+    browser::draw(&ctx, app);
+    step("browser", t, &mut timings);
+    let t = std::time::Instant::now();
+    shortcuts::draw(&ctx, app);
+    step("shortcuts", t, &mut timings);
+    let t = std::time::Instant::now();
+    status_bar::draw(ui, app);
+    step("status_bar", t, &mut timings);
+    let t = std::time::Instant::now();
     labels::draw(&ctx, app);
+    step("labels", t, &mut timings);
+
+    if profile && app.frame_count % 120 == 0 {
+        let parts: Vec<String> = timings
+            .iter()
+            .filter(|(_, ms)| *ms > 0.02)
+            .map(|(n, ms)| format!("{} {:.2}", n, ms))
+            .collect();
+        log::info!("ui panels (ms): {}", parts.join(", "));
+    }
 
     // Persist panel open/closed state the instant it changes (toolbar
     // toggle or a window's close button) — same pattern as invert_pitch.

@@ -32,20 +32,11 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .collect();
     let selected = app.browser_selected();
     let current = app.scene_path.clone();
+    let scroll_to_selection = app.ui_state.browser_scrolled_to != Some(selected);
+    app.ui_state.browser_scrolled_to = Some(selected);
 
-    // Centred rather than tucked in a corner: this is a transient picker you
-    // open, choose from and dismiss, and the top-left is where the Explore
-    // and Render windows live.
-    let screen = ctx.content_rect();
-    let default_pos = egui::pos2((screen.center().x - 150.0).max(24.0), 80.0);
-
-    egui::Window::new("Scenes")
-        .id(egui::Id::new("fracturize_browser_window"))
+    super::window(ctx, app, super::WindowKey::Scenes, "Scenes")
         .open(&mut open)
-        .default_pos(default_pos)
-        .default_width(300.0)
-        .default_height(420.0)
-        .resizable(true)
         .show(ctx, |ui| {
             ui.label(
                 egui::RichText::new("Up/Down to walk, Enter to load — or click a row.")
@@ -76,9 +67,12 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                             },
                             "click: load this scene",
                         );
-                        // Keep the keyboard selection visible as Up/Down walks
-                        // past the edge of the viewport.
-                        if i == selected {
+                        // Follow the keyboard selection into view — but only
+                        // on the frame it actually moves. Doing it every frame
+                        // fights the scrollbar: any scroll that takes the
+                        // selection off-screen snaps straight back, which
+                        // makes the list unscrollable by hand.
+                        if i == selected && scroll_to_selection {
                             resp.scroll_to_me(None);
                         }
                         if resp.clicked() {
@@ -92,6 +86,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 app.browser_load_selected();
             }
         });
+
+    super::remember(ctx, app, super::WindowKey::Scenes);
 
     // `browser_load_selected` closes the browser itself; don't let a stale
     // `open` from before the load reopen it.

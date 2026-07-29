@@ -17,11 +17,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    egui::Window::new("Render")
-        .id(egui::Id::new("fracturize_render_window"))
+    super::window(ctx, app, super::WindowKey::Render, "Render")
         .open(&mut open)
-        .default_pos(egui::pos2(20.0, 300.0))
-        .default_width(280.0)
         .show(ctx, |ui| {
             draw_renderer(ui, app);
             ui.separator();
@@ -32,6 +29,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             draw_fog(ui, app);
         });
 
+    super::remember(ctx, app, super::WindowKey::Render);
     app.ui_state.panels.render_open = open;
 }
 
@@ -103,60 +101,57 @@ fn draw_points(ui: &mut egui::Ui, app: &mut App) {
         app.set_point_size(size);
     }
 
-    // Point count is a *render* property, not scene data: it's edited here in
-    // millions, persisted to prefs, and applied explicitly — raising it
-    // reallocates the point buffer and restarts the chaos-game warmup, which
-    // is not something to do live on every drag frame.
+    // Point count is a *render* property, not scene data: edited here,
+    // persisted to prefs, never written to the scene TOML.
+    //
+    // Logarithmic and live, deliberately. This is the one control that
+    // decides whether the machine stays responsive, and the previous
+    // value-box-plus-Apply shape was exactly wrong for that: you committed
+    // blind to a number and only found out afterwards. Dragging a log slider
+    // moves you by a constant *factor* per pixel, so 0.5M to 50M is a short
+    // sweep rather than an eternity, and because it applies as you go (rate-
+    // limited in `App::apply_pending_capacity`) you watch the FPS and p99
+    // readouts degrade under your hand and can back off without committing.
     let applied = app.point_capacity();
     let max_m = app.max_point_capacity() as f32 / 1e6;
-    // Held in a local for the duration of the row so the widget closures can
-    // still take `&mut App`; written back to `UiState` at the end.
-    let mut pending = app
-        .ui_state
-        .pending_point_count
-        .unwrap_or(applied as f32 / 1e6);
+    let pending = app.pending_point_capacity();
+    // While a change is in flight, keep showing the value the drag asked for
+    // rather than snapping back to the applied one between reallocations.
+    let mut millions = pending.unwrap_or(applied) as f32 / 1e6;
 
-    ui.horizontal(|ui| {
-        ui.label("points");
-        let resp = ui.add(
-            egui::DragValue::new(&mut pending)
-                .speed(0.05)
-                .range(0.1..=max_m as f64)
-                .suffix("M"),
-        );
-        let pending_value = pending;
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            format!(
-                "Points held in flight by the chaos game (max {:.1}M on this GPU). Applied on demand — it reallocates the buffer and restarts warmup.",
-                max_m
-            ),
-            "drag: choose a point count · click: type it",
-        );
-        let _ = resp;
+    let resp = ui.add(
+        egui::Slider::new(&mut millions, 0.1..=max_m)
+            .logarithmic(true)
+            .custom_formatter(|v, _| {
+                if v < 1.0 {
+                    format!("{:.0}k", v * 1000.0)
+                } else {
+                    format!("{:.2}M", v)
+                }
+            })
+            .text("points"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        format!(
+            "Points the chaos game keeps in flight — the main quality/performance dial (max {:.0}M on this GPU). \
+             Applies as you drag, a few times a second, so watch the FPS and p99 readouts move.",
+            max_m
+        ),
+        "drag: adjust point count — watch the frame stats",
+    );
+    if resp.changed() {
+        app.request_point_capacity((millions * 1e6).round() as u32);
+    }
 
-        let target = (pending_value * 1e6).round() as u32;
-        let dirty = target != applied;
-        let resp = ui.add_enabled(dirty, egui::Button::new("Apply"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            if dirty {
-                "Reallocate the point buffer and restart warmup"
-            } else {
-                "Already at this count"
-            },
-            "click: apply the new point count",
+    if pending.is_some() {
+        ui.label(
+            egui::RichText::new("reallocating…")
+                .small()
+                .weak(),
         );
-        if resp.clicked() {
-            app.set_point_capacity(target);
-            // Snap back to whatever the clamp actually gave us.
-            pending = app.point_capacity() as f32 / 1e6;
-        }
-    });
-
-    app.ui_state.pending_point_count = Some(pending);
+    }
 }
 
 fn draw_color(ui: &mut egui::Ui, app: &mut App) {

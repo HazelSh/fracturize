@@ -149,8 +149,7 @@ yaw/pitch/distance at load time and no longer written to files.
 | Space | re-seed points (reset) |
 | Up / Down | zoom in / out (selects transform when a transform is selected) |
 | Enter | enable/disable selected transform |
-| T | toggle world-anchored transform name labels |
-| G | toggle transform gizmos |
+| G | toggle transform gizmos and their name labels |
 | O | pause / resume camera orbit |
 | Z | play / stop camera-path flythrough preview |
 | Y / Shift+Y | add current framing as a path keypoint / remove last keypoint |
@@ -236,10 +235,21 @@ Conventions worth keeping:
 - **Variation weights may be negative** (Apophysis-style: the blend is
   `out += w * f(p)`), and a row stays put at 0 so a drag can pass through it.
 - **Point count is a render property, not scene data.** `App::buffer_capacity`
-  owns it; the Render window applies changes explicitly (reallocating the
-  buffer restarts warmup) and persists to prefs. Startup precedence is
-  `--points` > prefs > the scene file > default. The offline `--render` path
-  never reads prefs, so CLI renders stay reproducible from flags plus scene.
+  owns it and it persists to prefs. Startup precedence is `--points` > prefs >
+  the scene file > default. The offline `--render` path never reads prefs, so
+  CLI renders stay reproducible from flags plus scene. The Render window's
+  control is a *logarithmic slider that applies live*, rate-limited to one
+  reallocation per 250ms: it's the dial that decides whether the machine stays
+  responsive, so you must be able to feel it load up under your hand and drag
+  back, not commit blind to a number and find out afterwards.
+- **Panel geometry persists** to `prefs.window_geometry` (see `ui::WindowKey` /
+  `ui::remember`); `ui::default_layout` is only what you get before you've
+  moved anything. Writes are deferred by `App::flush_dirty_prefs` so dragging a
+  window doesn't rewrite prefs.toml every frame.
+- **The status bar's `ui Xms`** is egui's own build+tessellate cost. Note that
+  it rises when the *GPU* is saturated too (at 110M points it went 2.4ms ->
+  27ms), so a high reading isn't automatically the panels' fault. For a
+  per-panel breakdown run with `FRACTURIZE_UI_PROFILE=1 RUST_LOG=info`.
 - **All edits funnel through `App::commit_edit`** (`src/history.rs`), which
   coalesces same-key edits inside 1s so a held key or a whole drag is one
   undo step. Camera moves are deliberately *not* history entries.

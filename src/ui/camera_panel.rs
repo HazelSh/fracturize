@@ -16,11 +16,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    egui::Window::new("Camera")
-        .id(egui::Id::new("fracturize_camera_window"))
+    super::window(ctx, app, super::WindowKey::Camera, "Camera")
         .open(&mut open)
-        .default_pos(egui::pos2(630.0, 60.0))
-        .default_width(300.0)
         .show(ctx, |ui| {
             draw_framing(ui, app);
             ui.separator();
@@ -31,6 +28,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             draw_output(ui, app);
         });
 
+    super::remember(ctx, app, super::WindowKey::Camera);
     app.ui_state.panels.camera_open = open;
 }
 
@@ -110,7 +108,10 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 
-    let views = app.saved_views();
+    // Cloned out of the cache so the row bodies below can take `&mut App`
+    // (clicking one loads a view). The clone is a handful of small strings
+    // and only happens while the panel is open.
+    let views: Vec<(String, std::path::PathBuf)> = app.saved_views().to_vec();
     if views.is_empty() {
         ui.label(
             egui::RichText::new("No saved views for this scene yet.")

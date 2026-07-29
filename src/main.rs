@@ -365,7 +365,7 @@ impl ApplicationHandler for AppWrapper {
                         PhysicalKey::Code(KeyCode::ArrowUp) => {
                             if app.show_browser {
                                 app.browser_move(false);
-                            } else if app.show_text {
+                            } else if app.selected_transform().is_some() {
                                 app.select_prev_transform();
                             } else {
                                 app.zoom_in();
@@ -375,7 +375,7 @@ impl ApplicationHandler for AppWrapper {
                         PhysicalKey::Code(KeyCode::ArrowDown) => {
                             if app.show_browser {
                                 app.browser_move(true);
-                            } else if app.show_text {
+                            } else if app.selected_transform().is_some() {
                                 app.select_next_transform();
                             } else {
                                 app.zoom_out();
@@ -385,7 +385,7 @@ impl ApplicationHandler for AppWrapper {
                         PhysicalKey::Code(KeyCode::Enter) => {
                             if app.show_browser {
                                 app.browser_load_selected();
-                            } else if app.show_text {
+                            } else if app.selected_transform().is_some() {
                                 app.toggle_selected_transform();
                             }
                             return;
@@ -429,9 +429,6 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "g" | "G" => {
                                 app.toggle_gizmos();
-                            }
-                            "t" | "T" => {
-                                app.toggle_text_overlay();
                             }
                             "h" | "H" | "?" => {
                                 app.toggle_help();
@@ -547,13 +544,32 @@ impl ApplicationHandler for AppWrapper {
                 // Frame flow: gather input -> run the egui pass -> hand
                 // platform output back -> tessellate -> render (egui pass
                 // replaces the old text-overlay pass inside App::render).
+                let ui_start = std::time::Instant::now();
                 let raw_input = egui.state.take_egui_input(&app.window);
                 let full_output = egui.ctx.run_ui(raw_input, |ui| {
                     ui::draw(ui, app);
                 });
+                let t_run = ui_start.elapsed();
                 egui.state.handle_platform_output(&app.window, full_output.platform_output);
+                let t_plat = ui_start.elapsed();
                 let pixels_per_point = full_output.pixels_per_point;
                 let paint_jobs = egui.ctx.tessellate(full_output.shapes, pixels_per_point);
+                static UI_PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let ui_profile =
+                    *UI_PROFILE.get_or_init(|| std::env::var_os("FRACTURIZE_UI_PROFILE").is_some());
+                if ui_profile && app.frame_count % 120 == 0 {
+                    let t_tess = ui_start.elapsed();
+                    log::info!(
+                        "ui: run_ui {:.2}ms, platform_output {:.2}ms, tessellate {:.2}ms",
+                        t_run.as_secs_f32() * 1000.0,
+                        (t_plat - t_run).as_secs_f32() * 1000.0,
+                        (t_tess - t_plat).as_secs_f32() * 1000.0,
+                    );
+                }
+                // The UI's own CPU cost, surfaced in the status bar: this is a
+                // performance-sensitive app and "are the panels costing me
+                // frames?" needs an answer you can read, not guess at.
+                app.record_ui_time(ui_start.elapsed().as_secs_f32() * 1000.0);
 
                 match app.render(
                     &mut egui.renderer,

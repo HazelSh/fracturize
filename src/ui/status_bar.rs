@@ -44,7 +44,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
                     ui.add_space(6.0);
                     let (fps, avg_ms, p99_ms) = app.fps_stats();
-                    ui.label(format!("{:.0} FPS · {:.1}ms · p99 {:.1}ms", fps, avg_ms, p99_ms));
+                    ui.label(format!(
+                        "{:.0} FPS · {:.1}ms · p99 {:.1}ms · ui {:.1}ms",
+                        fps,
+                        avg_ms,
+                        p99_ms,
+                        app.ui_ms(),
+                    ));
 
                     // Which variation slot E / - / = are pointed at. The one
                     // piece of the retired HUD with no home in a panel: the
