@@ -19,7 +19,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     egui::Window::new("Camera")
         .id(egui::Id::new("fracturize_camera_window"))
         .open(&mut open)
-        .default_pos(egui::pos2(600.0, 60.0))
+        .default_pos(egui::pos2(630.0, 60.0))
         .default_width(300.0)
         .show(ctx, |ui| {
             draw_framing(ui, app);

@@ -27,7 +27,10 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     egui::Window::new("Transforms")
         .id(egui::Id::new("fracturize_transforms_window"))
         .open(&mut open)
-        .default_pos(egui::pos2(260.0, 60.0))
+        // Default layout is a three-column strip that doesn't overlap at
+        // the startup window size: Explore/Render at x=20 (w 280), this at
+        // x=315, Camera at x=630. All are draggable from there.
+        .default_pos(egui::pos2(315.0, 60.0))
         .default_width(300.0)
         .show(ctx, |ui| {
             draw_list(ui, app);
