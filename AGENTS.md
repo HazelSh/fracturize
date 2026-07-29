@@ -16,13 +16,14 @@ src/
   main.rs        # CLI args, winit event loop + egui event gating, keybinds, default scene
   app.rs         # App state, mouse/edit handling, render orchestration, screenshots
   history.rs     # Unified snapshot undo/redo behind App::commit_edit (all edits)
+  indicators.rs  # Offset-vector / rotation-axis line geometry for the selection
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
     toolbar.rs     # Top icon strip: panel toggles + scene name
     status_bar.rs  # Bottom bar: context hints, FPS/p99 sparkline, point stats
     hints.rs       # hinted(): tooltip + status-bar hint on one widget response
-    transforms.rs  # Transform list + selected-transform inspector (Mat4 <-> TRS)
+    transforms.rs  # Transform tab rail + selected-transform detail pane
     explore.rs     # Random flame, mutate + strength, undo/redo, history list
     render_panel.rs# Renderer mode, exposure, point size + count, color, fog
     camera_panel.rs# Framing, saved views, camera paths, HQ render / screenshot
@@ -212,7 +213,7 @@ aspect and picking math are unaffected by which panels are open.
 
 | Window | What lives there |
 |--------|------------------|
-| Transforms | Row per transform (color swatch, eye toggle, weight, right-click menu), plus an inspector for the selected one: position/rotation/scale, weight, color, variations |
+| Transforms | Vertical tab rail (colour swatch, name, eye toggle, relative-weight bar) plus a detail pane for the selected transform: position/rotation/scale, weight, colour, variations |
 | Explore | New random flame, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
 | Render | Renderer mode, exposure, point size, point count, color falloff/contrast, fog |
 | Camera | Framing, saved views, camera-path keypoints + playback, HQ render / screenshot / save scene |
@@ -228,6 +229,18 @@ Conventions worth keeping:
 - **The status bar's right side is the performance instrument**: FPS, mean
   frametime, p99 frametime and a 120-sample sparkline, plus live point stats.
   p99 is the number to watch — mean FPS hides the stutters.
+- **The Transforms panel is a tab rail, not a list above fields.** The active
+  tab is filled with the detail pane's own colour and runs past the rail's
+  right edge, with the rail recessed behind it — that continuity is what makes
+  it read as selector-and-detail. Don't reduce it to a highlighted row; a
+  highlight that never touches the fields can't say which fields it owns.
+- **Gizmo indicators** (`src/indicators.rs`) draw the selected transform's
+  relationship to the grey identity cell: an offset vector from the world
+  origin with an arrowhead and a length label, and the rotation as an axis
+  through the origin plus an arc sweeping its angle. Euler angles remain the
+  *editable* representation (three fields you can type into); axis-and-arc is
+  the *readable* one. The indicator pass must store depth, not discard it —
+  the gizmo pass depth-tests against the same buffer right after.
 - **Inspector fields are Mat4 <-> TRS.** A matrix that doesn't decompose
   faithfully (shear, or a mirrored det<0 matrix) routes to a raw 3x4 grid
   plus an "Orthogonalize -> TRS" button. Mutations produce such matrices, so

@@ -327,6 +327,13 @@ pub struct App {
     splat_renderer: SplatRenderer,
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
+    /// Second line buffer for the selected transform's offset/rotation
+    /// indicators (see src/indicators.rs). Separate from `line_renderer`
+    /// because traces are rebuilt on demand and these follow the selection.
+    indicator_renderer: LineRenderer,
+    /// `(selected transform, matrix generation)` the indicator buffer was
+    /// built for; rebuilt only when that changes.
+    indicator_key: Option<(usize, u64)>,
 
     /// Plain-data egui UI state: which panels are open, the inspector's TRS
     /// field cache, this frame's status hint, and similar. The egui machinery
@@ -495,6 +502,7 @@ impl App {
 
         // Trace line renderer (empty until X is pressed)
         let line_renderer = LineRenderer::new(&gpu.device, gpu.format);
+        let indicator_renderer = LineRenderer::new(&gpu.device, gpu.format);
 
         let num_transforms = scene.transforms.len();
 
@@ -544,6 +552,8 @@ impl App {
             splat_renderer,
             gizmo_renderer,
             line_renderer,
+            indicator_renderer,
+            indicator_key: None,
             ui_state,
             ui_build_ms: 0.0,
             prefs_dirty_since: None,
@@ -1645,6 +1655,32 @@ impl App {
         log::info!("Traces: {} walkers × {} steps ({} segments)", TRACES, STEPS, segments);
     }
 
+    /// Rebuild the selected transform's offset/rotation indicator lines when
+    /// the selection or its matrix changes. Cheap (a few dozen segments) but
+    /// pointless to redo every frame.
+    fn refresh_indicators(&mut self) {
+        let key = self.selected_transform.map(|i| (i, self.matrix_generation));
+        if key == self.indicator_key {
+            return;
+        }
+        self.indicator_key = key;
+        let verts = match key {
+            Some((i, _)) if i < self.scene.transforms.len() => {
+                crate::indicators::build(self.scene.transforms[i].matrix)
+            }
+            _ => Vec::new(),
+        };
+        self.indicator_renderer.set_lines(&self.gpu.device, &verts);
+    }
+
+    /// World-space offset of the selected transform from the origin, for the
+    /// label `ui::labels` paints on the offset vector.
+    pub fn selected_offset(&self) -> Option<(Vec3, f32)> {
+        let i = self.selected_transform?;
+        let t = self.scene.transforms.get(i)?.matrix.w_axis.truncate();
+        (t.length() > 1e-4).then(|| (t, t.length()))
+    }
+
     // === Evolutionary exploration (U / Shift+U) ===
 
     /// Apply a random mutation to the scene (undoable with Ctrl+Z / Shift+U).
@@ -2407,6 +2443,7 @@ impl App {
         self.frame_dt = dt;
         self.flush_dirty_prefs();
         self.apply_pending_capacity();
+        self.refresh_indicators();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
@@ -2738,6 +2775,9 @@ impl App {
         if self.show_traces {
             self.line_renderer.upload_camera(&self.gpu.queue, &camera);
         }
+        if self.show_gizmos {
+            self.indicator_renderer.upload_camera(&self.gpu.queue, &camera);
+        }
 
         match self.render_mode {
             RenderMode::Points => {
@@ -2822,6 +2862,41 @@ impl App {
                 multiview_mask: None,
             });
             self.line_renderer.draw(&mut render_pass);
+        }
+
+        // === STEP 2.6: SELECTED-TRANSFORM INDICATORS ===
+        // Offset vector and rotation axis/arc for the selected transform
+        // (src/indicators.rs) — the relationship between it and the grey
+        // identity cell, drawn instead of left to be read off Euler fields.
+        if self.show_gizmos {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("indicator_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        // Store, not Discard: the gizmo pass runs after this
+                        // one and depth-tests against the same buffer.
+                        // Discarding here leaves its contents undefined and
+                        // the gizmos disappear.
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.indicator_renderer.draw(&mut render_pass);
         }
 
         // === STEP 3: RENDER GIZMOS ===

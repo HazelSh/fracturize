@@ -37,6 +37,20 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     let font = egui::FontId::proportional(FONT_SIZE);
     let selected = app.selected_transform();
 
+    // Offset magnitude, printed at the midpoint of the offset vector
+    // src/indicators.rs draws from the origin to the selected transform.
+    if let Some((offset, len)) = app.selected_offset() {
+        if let Some((sx, sy)) = world_to_screen(offset * 0.5, view_proj, w as f32, h as f32) {
+            painter.text(
+                egui::pos2(sx / ppp + 6.0, sy / ppp),
+                egui::Align2::LEFT_CENTER,
+                format!("{:.2}", len),
+                egui::FontId::proportional(FONT_SIZE - 1.0),
+                egui::Color32::from_rgb(255, 199, 89),
+            );
+        }
+    }
+
     for (i, spec) in app.scene.transforms.iter().enumerate() {
         let origin = spec.matrix.w_axis.truncate();
         let Some((sx, sy)) = world_to_screen(origin, view_proj, w as f32, h as f32) else {

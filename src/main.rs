@@ -3,6 +3,7 @@ mod avif;
 mod camera;
 mod gpu;
 mod history;
+mod indicators;
 mod mutate;
 mod offline;
 mod path;
