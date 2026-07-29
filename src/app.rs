@@ -23,6 +23,100 @@ pub fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// A running render job, as the dialog needs to see it: what was asked for,
+/// where it has got to, and the two switches that stop it.
+///
+/// The job itself lives on another thread with its own wgpu device; this is
+/// the near side of a channel, refreshed once per frame by `App::poll_job`.
+pub struct JobHandle {
+    pub params: crate::render_job::JobParams,
+    events: std::sync::mpsc::Receiver<crate::render_job::JobEvent>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    pause: Arc<std::sync::atomic::AtomicBool>,
+    pub started: Instant,
+    pub phase: &'static str,
+    pub done: u32,
+    pub total: u32,
+    pub log: Vec<String>,
+    /// When the first click of the two-step cancel landed. A long render is
+    /// expensive to lose to a misclick, so the button arms rather than fires,
+    /// and disarms itself if it isn't confirmed.
+    pub cancel_armed_at: Option<Instant>,
+    /// When the current pause began, and how long previous pauses lasted.
+    ///
+    /// Kept so the time estimate can run on *working* time. Without it,
+    /// wall-clock elapsed keeps climbing while progress is frozen and the
+    /// projected remaining time climbs with it — a countdown that goes up,
+    /// which is worse than no countdown at all.
+    paused_at: Option<Instant>,
+    paused_total: Duration,
+}
+
+/// How long an armed cancel stays armed before it goes back to being a button
+/// that does nothing dangerous.
+pub const CANCEL_ARM_WINDOW: Duration = Duration::from_secs(4);
+
+impl JobHandle {
+    pub fn paused(&self) -> bool {
+        self.pause.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        if paused {
+            self.paused_at.get_or_insert_with(Instant::now);
+        } else if let Some(at) = self.paused_at.take() {
+            self.paused_total += at.elapsed();
+        }
+        self.pause.store(paused, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Time the job has actually spent working — wall clock minus every pause,
+    /// including the one in progress.
+    pub fn working_elapsed(&self) -> f32 {
+        let paused_now = self.paused_at.map_or(Duration::ZERO, |at| at.elapsed());
+        (self.started.elapsed().saturating_sub(self.paused_total + paused_now)).as_secs_f32()
+    }
+
+    pub fn cancelling(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the cancel button is currently armed (first click landed,
+    /// still inside the window).
+    pub fn cancel_armed(&self) -> bool {
+        self.cancel_armed_at
+            .is_some_and(|t| t.elapsed() < CANCEL_ARM_WINDOW)
+    }
+
+    /// First click arms, second confirms. A cancelled job also un-pauses, or
+    /// it would sit in the pause loop never noticing.
+    pub fn click_cancel(&mut self) {
+        if self.cancel_armed() {
+            self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.set_paused(false);
+        } else {
+            self.cancel_armed_at = Some(Instant::now());
+        }
+    }
+
+    /// Fraction complete within the current phase, when it reports one.
+    pub fn fraction(&self) -> Option<f32> {
+        (self.total > 0).then(|| (self.done as f32 / self.total as f32).clamp(0.0, 1.0))
+    }
+
+    /// Seconds remaining, extrapolated from observed progress. `None` until
+    /// there is enough progress for the extrapolation to mean anything —
+    /// a countdown from one sample is a random number.
+    pub fn remaining_secs(&self) -> Option<f32> {
+        let f = self.fraction()?;
+        if f < 0.05 {
+            return None;
+        }
+        let working = self.working_elapsed();
+        Some((working / f - working).max(0.0))
+    }
+}
+
 /// Cheap change-detector for a camera path's drawn geometry: everything
 /// `indicators::build_path` reads, folded into one number.
 ///
@@ -371,6 +465,15 @@ pub struct App {
     /// or `None` when nothing is drawn. See `refresh_path_lines`.
     path_lines_key: Option<(u64, Option<f32>)>,
 
+    /// The running render job, if any (see `start_job`). One at a time.
+    job: Option<JobHandle>,
+    /// The last finished job's outcome, kept so the dialog can report it
+    /// after the handle is gone.
+    job_done: Option<Result<std::path::PathBuf, String>>,
+    /// Why the last launch was refused (memory limit, bad size) — set instead
+    /// of starting, so the dialog can say why rather than doing nothing.
+    job_error: Option<String>,
+
     /// The turntable, as a real camera path.
     ///
     /// The default motion used to be one line — `yaw += 0.18 * dt` — which
@@ -617,6 +720,9 @@ impl App {
             indicator_key: None,
             path_renderer,
             path_lines_key: None,
+            job: None,
+            job_done: None,
+            job_error: None,
             orbit_path: None,
             orbit_t: 0.0,
             ui_state,
@@ -1822,55 +1928,215 @@ impl App {
     /// Kick off an offline render of the current framing on a background
     /// thread (own wgpu device, so the realtime view keeps running). Pauses
     /// the auto-orbit so the rendered framing is the one on screen.
-    pub fn start_hq_render(&mut self) {
+    /// Launch a render job on its own thread and its own wgpu device.
+    ///
+    /// One at a time. A queue was explicitly deferred in the previous plan and
+    /// stays deferred: two jobs sharing a GPU makes both slower and the
+    /// estimates meaningless, and the interesting question ("did my render
+    /// finish?") is answerable without one.
+    pub fn start_job(&mut self, params: crate::render_job::JobParams) {
         use std::sync::atomic::Ordering;
+        use crate::render_job::{JobEvent, JobControl, JobKind};
 
-        if self.hq_render_in_flight.load(Ordering::SeqCst) {
-            log::warn!("HQ render already running");
+        if self.job.is_some() {
+            log::warn!("A render job is already running");
             return;
         }
+        if let Some(reason) = params.rejection(self.max_point_capacity() as u64 * 16) {
+            self.job_error = Some(reason);
+            return;
+        }
+        self.job_error = None;
         self.orbit_paused = true;
 
-        let mut scene = self.scene.clone();
-        // Scale the point budget up from the interactive count. Read from
-        // `buffer_capacity`, not `scene.point_count` — the Render window's
-        // capacity control owns that number now (see `set_point_capacity`).
-        scene.point_count = (self.buffer_capacity as usize * 4).clamp(8_000_000, 40_000_000);
+        // A view descriptor renders nothing — it's the "note down this
+        // framing, render it later" case — so it completes inline rather than
+        // spinning up a device and a thread to write one small file.
+        if matches!(params.kind, JobKind::ViewDescriptor) {
+            let view = self.current_view();
+            let result = view
+                .save(&params.out_path)
+                .map(|()| params.out_path.clone())
+                .map_err(|e| e.to_string());
+            match &result {
+                Ok(p) => log::info!("View descriptor written: {}", p.display()),
+                Err(e) => log::error!("View descriptor failed: {}", e),
+            }
+            self.job_done = Some(result);
+            return;
+        }
 
+        let mut scene = self.scene.clone();
+        // Job-scoped: the interactive buffer keeps whatever the Render window
+        // set, so exploring stays comfortable while a big render runs.
+        scene.point_count = params.points;
         let view = self.current_view();
 
-        let splat = self.render_mode == RenderMode::Splat;
-        let exposure = self.exposure;
-        let transparent = self.transparent_render;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let control = JobControl {
+            events: tx,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let handle = JobHandle {
+            params: params.clone(),
+            events: rx,
+            cancel: control.cancel.clone(),
+            pause: control.pause.clone(),
+            started: Instant::now(),
+            phase: "starting",
+            done: 0,
+            total: 0,
+            log: Vec::new(),
+            cancel_armed_at: None,
+            paused_at: None,
+            paused_total: Duration::ZERO,
+        };
 
-        let out = format!("renders/{}-{}.png", self.scene_slug(), unix_timestamp());
         let flag = self.hq_render_in_flight.clone();
         flag.store(true, Ordering::SeqCst);
+        let out = params.out_path.clone();
+        let kind = params.kind;
+        let (splat, exposure, transparent, accumulate) =
+            (params.splat, params.exposure, params.transparent, params.accumulate);
+
         log::info!(
-            "HQ render started: {} ({} points, 2560x1440) — timing prints when done",
-            out, scene.point_count,
+            "Render job started: {} ({}, {} points)",
+            out.display(),
+            kind.label(),
+            params.points,
         );
 
         std::thread::spawn(move || {
-            let result = crate::offline::render(crate::offline::OfflineParams {
+            control.phase("setting up");
+            let base = crate::offline::OfflineParams {
                 scene,
                 view: Some(view),
-                width: 2560,
-                height: 1440,
-                out_path: Path::new(&out),
-                accumulate: 96,
-                fog_enabled: false, // view carries the real fog settings
+                width: kind.size().0,
+                height: kind.size().1,
+                out_path: &out,
+                accumulate,
+                fog_enabled: false, // the view carries the real fog settings
                 grid: crate::offline::GridMode::Single,
                 splat,
                 exposure,
                 transparent,
-            });
-            match result {
-                Ok(()) => log::info!("HQ render finished: {}", out),
-                Err(e) => log::error!("HQ render failed: {}", e),
-            }
+                control: Some(control.clone()),
+            };
+            let result = match kind {
+                JobKind::Still { .. } => crate::offline::render(base),
+                JobKind::Animation { fps, seconds, quality, .. } => {
+                    crate::offline::render_animation(
+                        base,
+                        crate::offline::AnimParams { fps, seconds: Some(seconds), quality },
+                    )
+                }
+                JobKind::ViewDescriptor => Ok(()), // handled inline above
+            };
+            let _ = control.events.send(JobEvent::Done(
+                result.map(|()| out.clone()).map_err(|e| e.to_string()),
+            ));
             flag.store(false, Ordering::SeqCst);
         });
+
+        self.job = Some(handle);
+    }
+
+    /// Drain the running job's event queue into the handle the dialog reads.
+    /// Called once per frame from `update`.
+    fn poll_job(&mut self) {
+        use crate::render_job::{JobEvent, CANCELLED};
+        let Some(job) = &mut self.job else { return };
+        let mut finished = None;
+        while let Ok(event) = job.events.try_recv() {
+            match event {
+                JobEvent::Phase(p) => {
+                    job.phase = p;
+                    job.done = 0;
+                    job.total = 0;
+                    job.log.push(format!("— {}", p));
+                }
+                JobEvent::Progress { done, total } => {
+                    job.done = done;
+                    job.total = total;
+                }
+                JobEvent::Log(msg) => job.log.push(msg),
+                JobEvent::Done(result) => finished = Some(result),
+            }
+        }
+        // Keep the log bounded: a long animation logs per phase, but a future
+        // chattier job shouldn't be able to grow this without limit.
+        if job.log.len() > 200 {
+            let excess = job.log.len() - 200;
+            job.log.drain(0..excess);
+        }
+        if let Some(result) = finished {
+            match &result {
+                Ok(p) => log::info!("Render job finished: {}", p.display()),
+                Err(e) if e == CANCELLED => log::info!("Render job cancelled"),
+                Err(e) => log::error!("Render job failed: {}", e),
+            }
+            self.job = None;
+            self.job_done = Some(result);
+        }
+    }
+
+    /// The running job, for the dialog to display.
+    pub fn job(&self) -> Option<&JobHandle> {
+        self.job.as_ref()
+    }
+
+    pub fn job_mut(&mut self) -> Option<&mut JobHandle> {
+        self.job.as_mut()
+    }
+
+    /// The last finished job's outcome, shown until the next one starts.
+    pub fn job_done(&self) -> Option<&Result<std::path::PathBuf, String>> {
+        self.job_done.as_ref()
+    }
+
+    /// Why the last launch attempt was refused, if it was.
+    pub fn job_error(&self) -> Option<&str> {
+        self.job_error.as_deref()
+    }
+
+    /// Measured chaos-game throughput in points per second, for the dialog's
+    /// time estimate. The only real measurement of this machine available
+    /// without running the job first.
+    ///
+    /// Crucially it's frame time *minus the present wait*. With vsync on, most
+    /// of a frame is spent parked in `get_current_texture` doing nothing (see
+    /// `present_wait_ms`), so the raw frame time says this GPU is about six
+    /// times slower than it is — and an estimate built on that would quote
+    /// minutes for a job that takes seconds. What's left after the wait is
+    /// still an over-estimate of the chaos game alone, since it includes the
+    /// render pass and the UI, which is the direction to be wrong in.
+    pub fn measured_throughput(&self) -> Option<f32> {
+        let working_ms = self.fps_tracker.current_frametime_ms - self.present_wait_ms;
+        if working_ms <= 0.05 || self.buffer_capacity == 0 {
+            return None;
+        }
+        Some(self.buffer_capacity as f32 / (working_ms / 1000.0))
+    }
+
+    /// P, and the Camera window's button: the previous one-click HQ render,
+    /// now expressed as a job with the parameters it always implied.
+    pub fn start_hq_render(&mut self) {
+        use crate::render_job::{JobKind, JobParams};
+        let params = JobParams {
+            kind: JobKind::Still { width: 2560, height: 1440 },
+            out_path: std::path::PathBuf::from(format!(
+                "renders/{}-{}.png",
+                self.scene_slug(),
+                unix_timestamp()
+            )),
+            points: (self.buffer_capacity as usize * 4).clamp(8_000_000, 40_000_000),
+            accumulate: 96,
+            splat: self.render_mode == RenderMode::Splat,
+            exposure: self.exposure,
+            transparent: self.transparent_render,
+        };
+        self.start_job(params);
     }
 
     // === Chaos-game traces (X) ===
@@ -2759,6 +3025,7 @@ impl App {
         self.apply_pending_capacity();
         self.refresh_indicators();
         self.refresh_path_lines();
+        self.poll_job();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;

@@ -22,6 +22,7 @@ use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
 use crate::scene::Scene;
+use crate::render_job::{JobControl, CANCELLED};
 use crate::view::View;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -74,6 +75,10 @@ pub struct OfflineParams<'a> {
     /// Write an alpha channel: the background clears to transparent and the
     /// fractal carries its own coverage, so the render can be composited.
     pub transparent: bool,
+    /// Progress reporting and pause/cancel, when the render was started from
+    /// the app's render-job dialog. `None` for the CLI paths, which are
+    /// blocking by design and have a terminal to print to.
+    pub control: Option<JobControl>,
 }
 
 /// Evenly spaced values in [-1, 1] (a single sample sits at 0)
@@ -189,12 +194,16 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
 
 /// Run the chaos game until the point buffer is full plus `accumulate`
 /// frames. Returns the compute pipeline and the valid point count.
+/// Run the chaos game until the point buffer is full and then some. The long
+/// phase of any job, and the first of the three places a job can be paused or
+/// cancelled — `Err(CANCELLED)` means the caller should clean up and stop.
 fn fill_points(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     scene: &Scene,
     accumulate: u32,
-) -> (PointCompute, u32) {
+    control: Option<&JobControl>,
+) -> Result<(PointCompute, u32), String> {
     let mut compute = PointCompute::new(
         device,
         &scene.transforms,
@@ -206,6 +215,15 @@ fn fill_points(
         "Filling {} point buffer: {} warmup + {} accumulation frames",
         scene.point_count, compute.warmup_frames, accumulate.max(1)
     );
+    if let Some(c) = control {
+        c.phase("filling points");
+        c.log(format!(
+            "chaos game: {} points, {} warmup + {} accumulation frames",
+            scene.point_count,
+            compute.warmup_frames,
+            accumulate.max(1)
+        ));
+    }
     let mut point_count = 0;
     for i in 0..total_frames {
         point_count = compute.advance_frame(queue, 1.0 / 60.0);
@@ -217,10 +235,22 @@ fn fill_points(
         if i % 16 == 15 {
             // Let the queue drain so we don't buffer unbounded work
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            // Checked on the same cadence: the drain is where this loop has
+            // already given up its latency, so pausing or cancelling here
+            // costs nothing extra and can't leave submitted work orphaned.
+            if let Some(c) = control {
+                c.progress(i + 1, total_frames);
+                if c.should_stop() {
+                    return Err(CANCELLED.to_string());
+                }
+            }
         }
     }
     let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-    (compute, point_count)
+    if let Some(c) = control {
+        c.progress(total_frames, total_frames);
+    }
+    Ok((compute, point_count))
 }
 
 /// Base camera and render params from a view file, or scene defaults
@@ -497,6 +527,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         splat,
         exposure,
         transparent,
+        control,
     } = params;
     let t_start = Instant::now();
 
@@ -516,7 +547,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate);
+    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
@@ -535,7 +566,20 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let sheet_h = height * rows;
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
 
+    if let Some(c) = &control {
+        c.phase("rendering");
+    }
     for (idx, tile) in tiles.iter().enumerate() {
+        // Second cancel point. A grid sheet is many tiles; a single still is
+        // one, and cancelling then falls through to the fill-points check
+        // having already done the expensive part — which is the honest
+        // outcome, not something to pretend around.
+        if let Some(c) = &control {
+            c.progress(idx as u32, tiles.len() as u32);
+            if c.should_stop() {
+                return Err(CANCELLED.to_string());
+            }
+        }
         let camera = CameraUniforms::new(
             tile.view_proj, height as f32, point_size, aspect, 1.0,
             fog.0, fog.1, fog.2, fog.3, color_contrast,
@@ -553,6 +597,9 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     }
     let t_render = Instant::now();
 
+    if let Some(c) = &control {
+        c.phase("saving");
+    }
     save_sheet(out_path, &sheet, sheet_w, sheet_h)?;
     let t_done = Instant::now();
 
@@ -623,6 +670,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         splat,
         exposure,
         transparent,
+        control,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -642,7 +690,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate);
+    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
@@ -674,7 +722,19 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     let target = TileTarget::new(&device, width, height, clear);
     let mut frame_buf = vec![0u8; (width * height * 4) as usize];
 
+    if let Some(c) = &control {
+        c.phase("rendering frames");
+        c.log(format!("{} frames at {} fps, {:.1}s", frames, anim.fps, seconds));
+    }
     for i in 0..frames {
+        // Third cancel point, and the one that matters most: an animation is
+        // minutes of work and every frame is a natural place to stop.
+        if let Some(c) = &control {
+            c.progress(i, frames);
+            if c.should_stop() {
+                return Err(CANCELLED.to_string());
+            }
+        }
         // Closed paths exclude t=1 so the loop wraps without a repeated frame
         let t = if path.closed {
             i as f32 / frames as f32
@@ -696,6 +756,13 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     }
     let t_render = Instant::now();
 
+    // rav1e defers most of its work to the flush, so the frame loop hitting
+    // 100% is not the job being nearly done. Say so, rather than leaving the
+    // dialog parked at a full bar for another ten seconds.
+    if let Some(c) = &control {
+        c.phase("encoding");
+        c.log("flushing the AV1 encoder and muxing");
+    }
     encoder.finish(out_path)?;
     let t_done = Instant::now();
 
@@ -736,6 +803,7 @@ pub fn render_mutations(
         splat,
         exposure,
         transparent,
+        control,
     } = params;
     let t_start = Instant::now();
 
@@ -795,7 +863,8 @@ pub fn render_mutations(
     for (idx, (variant, label)) in variants.iter().enumerate() {
         let t0 = Instant::now();
         // Each variant is a different IFS: refill the point buffer
-        let (compute, point_count) = fill_points(&device, &queue, variant, accumulate);
+        let (compute, point_count) =
+            fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
         let mut renderer =
             TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,

@@ -19,6 +19,7 @@ src/
   fog.rs         # Depth-cue fog: one amount, band and falloffs derived
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
+  render_job.rs  # Render job model: params, events, pause/cancel, estimates
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
     toolbar.rs     # Top icon strip: panel toggles + scene name
@@ -28,6 +29,7 @@ src/
     explore.rs     # Random flame, mutate + strength, undo/redo, history list
     render_panel.rs# Renderer mode, exposure, point size + count, color, fog, output
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
+  render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
     camera_panel.rs# Framing, saved views, camera paths, HQ render / screenshot
     browser.rs     # Scene picker (B)
     shortcuts.rs   # Keybind reference window (H)
@@ -480,6 +482,40 @@ Scene-design notes learned the hard way:
   (cyclic: large stretches also rotate hues when the mean index is off-center).
   Both are keybind-tunable live (D / C) and saved into view files.
 
+## Render Jobs
+
+`P` and the Camera window's "HQ render" still fire the old one-click render;
+"Render job…" opens the dialog (`src/ui/render_job.rs`) for everything else.
+The model is `src/render_job.rs`; the work runs on a second wgpu device, so the
+app stays at full framerate while a job goes (measured: 119 FPS with a 240-frame
+animation rendering).
+
+- **Modes**: still (PNG), animation (AVIF along the camera path), or view
+  descriptor — write a `.toml` view of this framing and render it later.
+- **Quality is job-scoped.** Points, accumulate, splat, exposure and
+  transparency are the job's own; the interactive `buffer_capacity` and prefs
+  are untouched. That separation is the whole point — render at 100M and keep
+  exploring at 6M.
+- **Estimates.** Memory is exact and is checked against
+  `max_storage_buffer_binding_size` *before* anything allocates, because the
+  alternative failure mode is a device-lost panic several seconds in. Time is a
+  range, from this session's own measured throughput (frame time minus
+  `present_wait_ms` — raw frame time under vsync says the GPU is ~6x slower
+  than it is) plus a measured per-pixel encode cost, then replaced by a figure
+  extrapolated from real progress once the job is running.
+- **Pause / cancel.** `JobControl` is checked in three loops in `offline.rs`:
+  the `fill_points` accumulation frames, the per-tile loop, and the animation
+  frame loop. Pause is a sleep loop — crude but correct, since the work is
+  already chunked and the job's device is its own. Cancel takes two clicks
+  (armed for 4s), returns `Err(CANCELLED)`, and leaves no partial file, since
+  both writers only touch the output at the end.
+- The time estimate runs on *working* time, not wall clock: pauses are
+  subtracted, or the projected remaining time climbs while progress is frozen,
+  which is a countdown that goes up.
+- One job at a time. A queue was deferred in the first plan and stays deferred.
+
+The CLI paths pass `control: None` and are unchanged.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
@@ -531,9 +567,12 @@ external tools. Cannot combine with grid/mutation sheets. Options:
   else 3s per spline segment), `--quality 0-100` (default 60).
 - Closed paths omit the final frame so the loop wraps without a stutter.
 - Odd `--width`/`--height` are rounded down (4:2:0 chroma needs even sizes).
-- Budget: encoding dominates and scales with pixels — the desktop does
-  960x540 at ~1.6s/frame, so a 14s 24fps loop is ~9 minutes. Preview cheap
-  first: `--width 480 --height 270 --fps 12 --effort low` is ~0.4s/frame.
+- Budget: encoding dominates and scales with pixels — measured at ~6e-7
+  s/pixel on the desktop (0.34s/frame at 960x540, 0.53s at 720p, 1.08s at
+  1080p), so a 14s 24fps 720p loop is ~3 minutes. Most of that lands in
+  rav1e's final flush rather than the per-frame push. The Render job dialog
+  estimates from this same figure; preview cheap first with
+  `--width 480 --height 270 --fps 12 --effort low`.
   Verify output with `ffprobe` / extract frames with `ffmpeg`.
 
 **Mutation sheets** (evolutionary exploration): `--mutations N` renders the

@@ -337,6 +337,18 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
             ui.spinner();
         }
 
+        let resp = ui.button("Render job…");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Set up a batch render: still or animation, its own quality settings, \
+             with estimates, progress and a way to stop it",
+            "click: open the render job dialog",
+        );
+        if resp.clicked() {
+            super::render_job::open(app);
+        }
+
         let resp = ui.button("Screenshot");
         let resp = hinted(
             resp,

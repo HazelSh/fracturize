@@ -38,6 +38,19 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         if warming { " (warming)" } else { "" },
                     ));
 
+                    // A running job is worth seeing without the dialog open —
+                    // it's using the GPU this readout is measuring.
+                    if let Some(job) = app.job() {
+                        let text = match job.fraction() {
+                            Some(f) => format!("render {}: {:.0}%", job.phase, f * 100.0),
+                            None => format!("render {}", job.phase),
+                        };
+                        let text = if job.paused() { format!("{} (paused)", text) } else { text };
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new(text).color(ui.visuals().warn_fg_color));
+                        ui.spinner();
+                    }
+
                     ui.add_space(6.0);
                     let (_, _, p99_ms) = app.fps_stats();
                     draw_sparkline(ui, &app.frametime_sparkline(), p99_ms);

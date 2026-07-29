@@ -13,6 +13,7 @@ mod trace;
 mod pick;
 mod scene;
 mod randomize;
+mod render_job;
 mod ui;
 mod view;
 
@@ -762,6 +763,7 @@ fn main() {
             splat,
             exposure,
             transparent: args.transparent,
+            control: None,
         };
         let animated = std::path::Path::new(out)
             .extension()

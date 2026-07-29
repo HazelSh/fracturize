@@ -24,6 +24,7 @@ pub mod explore;
 pub mod hints;
 pub mod icons;
 pub mod labels;
+pub mod render_job;
 pub mod render_panel;
 pub mod save_as;
 pub mod shortcuts;
@@ -67,6 +68,10 @@ pub struct UiState {
     pub browser_scrolled_to: Option<usize>,
     /// "Save scene as…" dialog: open state and in-progress filename.
     pub save_as: save_as::SaveAsState,
+    /// Render-job dialog: the in-progress form. Kept whole (rather than
+    /// rebuilt from `JobParams`) so switching output modes doesn't discard
+    /// the settings of the mode you switched away from.
+    pub render_job: render_job::RenderJobForm,
 }
 
 impl UiState {
@@ -79,6 +84,7 @@ impl UiState {
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,
             save_as: save_as::SaveAsState::default(),
+            render_job: render_job::RenderJobForm::default(),
         }
     }
 }
@@ -229,6 +235,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     save_as::draw(&ctx, app);
     step("save_as", t, &mut timings);
+    let t = std::time::Instant::now();
+    render_job::draw(&ctx, app);
+    step("render_job", t, &mut timings);
     let t = std::time::Instant::now();
     status_bar::draw(ui, app);
     step("status_bar", t, &mut timings);
