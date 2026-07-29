@@ -9,7 +9,8 @@ use super::hints::hinted;
 use super::icons;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
-    egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
+    let ppp = ui.ctx().pixels_per_point();
+    let panel = egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -59,7 +60,26 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             if resp.clicked() {
                 app.toggle_browser();
             }
+
+            // Scene identity, right-aligned — this used to be the HUD's
+            // first line, which sat underneath this very panel.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                let resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{} — {}", app.scene.name, app.scene.author)).weak(),
+                    )
+                    .truncate()
+                    .selectable(false),
+                );
+                let path = app.scene_path.clone().unwrap_or_else(|| "(unsaved scene)".to_string());
+                hinted(resp, &mut app.ui_state, &path, "the scene currently loaded");
+            });
         });
         ui.add_space(2.0);
     });
+
+    // Hand the toolbar's bottom edge (physical px) to the legacy HUD so its
+    // remaining lines start below us. See `UiState::viewport_top_px`.
+    app.ui_state.viewport_top_px = panel.response.rect.bottom() * ppp;
 }

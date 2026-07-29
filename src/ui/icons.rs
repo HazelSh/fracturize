@@ -28,3 +28,7 @@ pub const FOLDER_OPEN: &str = "\u{E256}";
 pub const EYE: &str = "\u{E220}";
 /// Transform row eye toggle: disabled
 pub const EYE_SLASH: &str = "\u{E224}";
+/// Remove / dismiss (inspector variation rows). The obvious "✕" U+2715 isn't
+/// in Envy Code R or egui's built-in fonts and renders as tofu, so use
+/// Phosphor's.
+pub const X: &str = "\u{E4F6}";

@@ -21,6 +21,7 @@ pub mod explore;
 pub mod hints;
 pub mod icons;
 pub mod render_panel;
+pub mod shortcuts;
 pub mod status_bar;
 pub mod toolbar;
 pub mod transforms;
@@ -67,6 +68,19 @@ pub struct UiState {
     /// its right-click context menu), and its in-progress text buffer. Only
     /// one row can be mid-rename at a time.
     pub renaming_transform: Option<(usize, String)>,
+    /// Variation slots the inspector keeps showing for the transform in
+    /// `.0` even at weight 0 — dragging a weight to zero must not make its
+    /// row vanish mid-gesture (and blocking the drag there would put
+    /// Apophysis-style negative weights out of mouse reach). Rows leave the
+    /// list only via their explicit remove button. Reset when the selected
+    /// transform changes.
+    pub variation_rows: (usize, Vec<usize>),
+    /// Bottom edge of the top toolbar in *physical* pixels, recorded by
+    /// `toolbar::draw` and read by `App::build_text_entries` so the legacy
+    /// HUD lines start below the toolbar instead of underneath it. One frame
+    /// stale (the HUD is built before the UI runs), which is invisible for a
+    /// value that only changes with DPI.
+    pub viewport_top_px: f32,
 }
 
 impl UiState {
@@ -77,6 +91,10 @@ impl UiState {
             status_hint: None,
             trs_cache: None,
             renaming_transform: None,
+            variation_rows: (usize::MAX, Vec::new()),
+            // Sensible pre-first-frame value; overwritten by the toolbar on
+            // frame 1, before the HUD is ever visible.
+            viewport_top_px: 28.0,
         }
     }
 }
@@ -104,8 +122,12 @@ pub fn draw_legacy_text(ctx: &egui::Context, entries: &[TextEntry], pixels_per_p
     if entries.is_empty() {
         return;
     }
+    // `Order::Background`, not `Foreground`: these are viewport decorations
+    // (HUD readouts, world-anchored gizmo labels) that belong *under* the
+    // panels. On Foreground a gizmo label whose transform happened to sit
+    // behind the Transforms window painted straight across the inspector.
     let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
+        egui::Order::Background,
         egui::Id::new("fracturize_legacy_text_shim"),
     ));
     for entry in entries {
@@ -136,11 +158,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     app.ui_state.status_hint = None;
     let ctx = ui.ctx().clone();
 
+
     toolbar::draw(ui, app);
     explore::draw(&ctx, app);
     render_panel::draw(&ctx, app);
     transforms::draw(&ctx, app);
     camera_panel::draw(&ctx, app);
+    shortcuts::draw(&ctx, app);
     status_bar::draw(ui, app);
 
     draw_legacy_text(&ctx, &app.ui_state.legacy_entries, ctx.pixels_per_point());
@@ -231,6 +255,14 @@ impl EguiLayer {
     pub fn new(window: &Arc<Window>, device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let ctx = egui::Context::default();
         install_fonts(&ctx);
+        // This is a tool UI, not a document: labels are captions on controls,
+        // not prose to copy out. egui's cross-widget text selection is on by
+        // default, and left enabled a drag starting on any panel label paints
+        // a selection band across every row it crosses — worse, it competes
+        // with the gestures that matter here (drag a transform row to select
+        // it, drag a DragValue to change it). Set once, not per frame:
+        // `all_styles_mut` clones the shared `Style` behind an `Arc`.
+        ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
         let viewport_id = egui::ViewportId::ROOT;
         let state = egui_winit::State::new(
             ctx.clone(),

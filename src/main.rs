@@ -202,7 +202,9 @@ impl ApplicationHandler for AppWrapper {
 
         let window_attrs = WindowAttributes::default()
             .with_title("Fracturize - 3D IFS Fractal Renderer")
-            .with_inner_size(PhysicalSize::new(1280u32, 720u32));
+            // Roomy enough for the toolbar, a couple of floating panels and
+            // the status bar without eating a 1080p desktop whole.
+            .with_inner_size(PhysicalSize::new(1440u32, 860u32));
 
         let window = Arc::new(
             event_loop

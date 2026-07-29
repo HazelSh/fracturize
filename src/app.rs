@@ -201,9 +201,10 @@ enum GizmoDragMode {
     Scale { start_y: f32 },
 }
 
-/// Actions dispatchable by clicking a help-panel row
+/// Actions dispatchable by clicking a row in the Keybinds window
+/// (`src/ui/shortcuts.rs`).
 #[derive(Clone, Copy, Debug)]
-enum HelpAction {
+pub enum HelpAction {
     ToggleHelp,
     Reset,
     Zoom,
@@ -346,7 +347,7 @@ pub struct App {
     /// Ctrl+S writes it back to disk
     pub scene: Scene,
     /// Scene file path (save target; also recorded in saved view files)
-    scene_path: Option<String>,
+    pub scene_path: Option<String>,
     /// Point buffer capacity for HUD
     buffer_capacity: u32,
 
@@ -1068,11 +1069,11 @@ impl App {
         use winit::event::MouseButton;
         match button {
             MouseButton::Left => {
-                // Overlay panels swallow clicks when open
+                // Overlay panels swallow clicks when open. (The keybinds
+                // panel used to need the same treatment; it's a real egui
+                // window now — see src/ui/shortcuts.rs — so egui's own
+                // pointer gating in main.rs keeps its clicks away from us.)
                 if self.try_click_browser() {
-                    return;
-                }
-                if self.try_click_help() {
                     return;
                 }
                 if let Some(drag) = self.try_grab_gizmo() {
@@ -2326,98 +2327,9 @@ impl App {
         self.pending_screenshot = false;
     }
 
-    /// Rows of the help panel: key label, description, and what a click on
-    /// the row does (None = informational only). Click = the first-listed
-    /// binding, shift+click = the second.
-    const HELP_ROWS: &'static [(&'static str, &'static str, Option<HelpAction>)] = &[
-        ("H / ?", "toggle this help", Some(HelpAction::ToggleHelp)),
-        ("Esc", "quit", None),
-        ("drag", "orbit camera (pauses auto-orbit)", None),
-        ("shift+drag", "pan focus (middle-drag works too)", None),
-        ("scroll", "zoom", None),
-        ("", "", None),
-        ("drag gizmo dot", "select + move in view plane", None),
-        ("drag O-axis edge", "move along that axis", None),
-        ("drag outer edge", "rotate around third axis", None),
-        ("ctrl+drag gizmo", "uniform scale", None),
-        ("A / Shift+A", "duplicate selected / add new transform", Some(HelpAction::AddTransform)),
-        ("Del", "delete selected transform", Some(HelpAction::DeleteTransform)),
-        (". / ,", "selected weight up / down", Some(HelpAction::Weight)),
-        ("J / Shift+J", "color hue up / down", Some(HelpAction::Hue)),
-        ("K / Shift+K", "color saturation up / down", Some(HelpAction::Sat)),
-        ("L / Shift+L", "color value up / down", Some(HelpAction::Val)),
-        ("E / Shift+E", "next / prev variation slot", Some(HelpAction::CycleVariation)),
-        ("= / -", "variation weight up / down", Some(HelpAction::VariationWeight)),
-        ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
-        ("U / Shift+U", "random mutation / undo it", Some(HelpAction::Mutate)),
-        ("Ctrl+Z / Ctrl+Shift+Z", "undo / redo any edit", Some(HelpAction::Undo)),
-        ("X / Shift+X", "chaos traces: show+re-roll / hide", Some(HelpAction::Traces)),
-        ("I", "invert mouse pitch (saved to prefs)", Some(HelpAction::InvertPitch)),
-        ("scroll on gizmo", "adjust that transform's weight", None),
-        ("B", "browse + load scenes", Some(HelpAction::Browse)),
-        ("P", "HQ render current view (background)", Some(HelpAction::HqRender)),
-        ("", "", None),
-        ("Space", "re-seed points (reset)", Some(HelpAction::Reset)),
-        ("Up / Down", "zoom in / out", Some(HelpAction::Zoom)),
-        ("", "(select transform when overlay is on)", None),
-        ("Enter", "enable/disable selected transform", Some(HelpAction::ToggleSelected)),
-        ("T", "toggle info overlay", Some(HelpAction::ToggleText)),
-        ("G", "toggle transform gizmos", Some(HelpAction::ToggleGizmos)),
-        ("O", "pause / resume camera orbit", Some(HelpAction::ToggleOrbit)),
-        ("Z", "play / stop camera path flythrough", Some(HelpAction::PathPlay)),
-        ("Y / Shift+Y", "add / remove camera path keypoint", Some(HelpAction::PathKey)),
-        ("Ctrl+Y", "toggle camera path loop", None),
-        ("V", "save current view to views/", Some(HelpAction::SaveView)),
-        ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
-        ("R", "renderer: points / splat (log-density)", Some(HelpAction::RenderMode)),
-        ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
-        ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
-        ("D / Shift+D", "finer / coarser color detail (falloff)", Some(HelpAction::ColorFalloff)),
-        ("C / Shift+C", "less / more color contrast", Some(HelpAction::ColorContrast)),
-        ("F / Shift+F", "more / less fog", Some(HelpAction::FogIntensity)),
-        ("N / Shift+N", "fog start closer / farther", Some(HelpAction::FogNear)),
-        ("M / Shift+M", "fog end closer / farther", Some(HelpAction::FogFar)),
-    ];
-
-    const HELP_FONT_SIZE: f32 = 13.0;
-    const HELP_LINE_HEIGHT: f32 = Self::HELP_FONT_SIZE * 1.2;
-    const HELP_X: f32 = 6.0;
-
-    /// Top of the help panel background for the given window height
-    fn help_panel_y(&self, height: f32) -> f32 {
-        // +3 lines: title, subtitle, trailing spacer
-        let panel_lines = Self::HELP_ROWS.len() + 3;
-        (height - panel_lines as f32 * Self::HELP_LINE_HEIGHT) * 0.5
-    }
-
-    /// If the cursor sits on a clickable help row, run its action.
-    /// Returns true when the click hit the panel (even a dead row).
-    fn try_click_help(&mut self) -> bool {
-        if !self.show_help {
-            return false;
-        }
-        let (w, h) = self.gpu.size();
-        let (_w, h) = (w as f32, h as f32);
-        let panel_y = self.help_panel_y(h);
-        // Panel text is ~68 monospace-ish chars; be generous on width
-        let panel_w = 420.0;
-        let panel_h = (Self::HELP_ROWS.len() + 3) as f32 * Self::HELP_LINE_HEIGHT;
-        let (cx, cy) = self.cursor;
-        if cx < Self::HELP_X || cx > Self::HELP_X + panel_w || cy < panel_y || cy > panel_y + panel_h {
-            return false;
-        }
-        // Text starts half a line into the panel; rows follow title + subtitle
-        let row = ((cy - panel_y - Self::HELP_LINE_HEIGHT * 0.5) / Self::HELP_LINE_HEIGHT).floor() as i32 - 2;
-        if row >= 0 {
-            if let Some((_, _, Some(action))) = Self::HELP_ROWS.get(row as usize) {
-                self.run_help_action(*action, self.shift_held);
-            }
-        }
-        true
-    }
-
-    /// Dispatch a clicked help row. `shift` selects the second-listed binding.
-    fn run_help_action(&mut self, action: HelpAction, shift: bool) {
+    /// Dispatch a clicked keybind row. `shift` selects the second-listed
+    /// binding (so a row reading "J / Shift+J" runs the Shift variant).
+    pub fn run_help_action(&mut self, action: HelpAction, shift: bool) {
         match action {
             HelpAction::ToggleHelp => self.toggle_help(),
             HelpAction::Reset => self.reset(),
@@ -2474,102 +2386,31 @@ impl App {
         }
     }
 
-    /// Keybind help panel, shown when `show_help` is on
-    fn build_help_entries(&self, height: f32) -> Vec<TextEntry> {
-        let font_size = Self::HELP_FONT_SIZE;
-        let line_height = Self::HELP_LINE_HEIGHT;
-        let panel_lines = Self::HELP_ROWS.len() + 3;
-        let panel_y = self.help_panel_y(height);
-
-        let text: String = [
-            "Keybinds".to_string(),
-            "(rows are clickable; shift+click = second binding)".to_string(),
-        ]
-        .into_iter()
-        .chain(
-            Self::HELP_ROWS
-                .iter()
-                .map(|(key, desc, _)| format!("{:<13} {}", key, desc)),
-        )
-        .collect::<Vec<_>>()
-        .join("\n");
-
-        // Dark block-character backdrop so the panel reads over a bright fractal
-        let bg_width = 4 + text.lines().map(|l| l.len()).max().unwrap_or(0);
-        let bg: String = vec!["\u{2588}".repeat(bg_width); panel_lines].join("\n");
-
-        vec![
-            TextEntry {
-                text: bg,
-                x: Self::HELP_X,
-                y: panel_y,
-                color: [10, 10, 20, 215],
-                font_size,
-            },
-            TextEntry {
-                text,
-                x: Self::HELP_X + font_size, // ~2 block chars of left padding
-                y: panel_y + line_height * 0.5,
-                color: [235, 235, 245, 255],
-                font_size,
-            },
-        ]
-    }
-
     fn build_text_entries(&self, view_proj: Mat4, width: f32, height: f32) -> Vec<TextEntry> {
         let mut entries = Vec::new();
 
         if self.show_browser {
             entries.extend(self.build_browser_entries(height));
-        } else if self.show_help {
-            entries.extend(self.build_help_entries(height));
-        } else {
-            // Discoverability hint, bottom-left
-            entries.push(TextEntry {
-                text: "[H] keybinds".to_string(),
-                x: 10.0,
-                y: height - 24.0,
-                color: [160, 160, 170, 180],
-                font_size: 12.0,
-            });
         }
 
         if !self.show_text {
             return entries;
         }
 
-        let white = [255, 255, 255, 255];
         let grey = [180, 180, 180, 220];
 
         // === Top-left HUD ===
-        let point_count = self.point_compute.valid_point_count();
-
-        // Scene name + author
-        entries.push(TextEntry {
-            text: format!("{} — {}", self.scene.name, self.scene.author),
-            x: 10.0,
-            y: 10.0,
-            color: grey,
-            font_size: 12.0,
-        });
-
-        // Performance + point stats
-        entries.push(TextEntry {
-            text: format!(
-                "{:.0} FPS | {:.1}ms | {}k / {}k points",
-                self.fps_tracker.current_fps,
-                self.fps_tracker.current_frametime_ms,
-                point_count / 1000,
-                self.buffer_capacity / 1000,
-            ),
-            x: 10.0,
-            y: 26.0,
-            color: white,
-            font_size: 14.0,
-        });
+        //
+        // Three lines retired here rather than kept in parallel with the new
+        // chrome: the scene name/author moved to the toolbar's right end, the
+        // FPS/point-count line is in the status bar (with p99 and a
+        // sparkline), and the "[H] keybinds" hint is now the toolbar's
+        // keyboard icon. What's left starts *below* the toolbar — the panel
+        // is opaque and drawn over, so a fixed y=10 start put these lines
+        // underneath it.
+        let mut param_y = self.ui_state.viewport_top_px + 6.0;
 
         // Camera params
-        let mut param_y = 48.0;
         entries.push(TextEntry {
             text: format!(
                 "cam: d={:.1} yaw={:.2} pitch={:.2} focus=({:.1},{:.1},{:.1})",

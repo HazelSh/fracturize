@@ -141,6 +141,12 @@ fn color32_from_vec3(c: Vec3) -> egui::Color32 {
     )
 }
 
+/// One list row. The whole row is the select target — built as a
+/// `scope_builder` `Ui` that senses clicks, because egui registers a
+/// container's own sense *below* its children's: the eye button and the
+/// weight DragValue inside still get their clicks first, and only the
+/// leftover row area selects. (A plain `ui.interact` over the finished rect
+/// registers last and would swallow both.)
 fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: bool) {
     let is_renaming = app
         .ui_state
@@ -148,27 +154,37 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
         .as_ref()
         .is_some_and(|(idx, _)| *idx == i);
 
-    let bg = if selected {
-        ui.visuals().selection.bg_fill
-    } else {
-        egui::Color32::TRANSPARENT
-    };
     let display_name = if row.name.is_empty() {
         format!("T{}", i)
     } else {
         row.name.clone()
     };
 
-    let frame_resp = egui::Frame::NONE
-        .fill(bg)
-        .inner_margin(egui::Margin::symmetric(4, 2))
-        .show(ui, |ui| {
+    let sense = if is_renaming {
+        egui::Sense::hover()
+    } else {
+        egui::Sense::click()
+    };
+
+    let row_resp = ui
+        .scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
+            ui.set_width(ui.available_width());
+
+            // Reserve the background shapes now (so they paint *under* the
+            // row's widgets) but size them after the content is laid out —
+            // `max_rect()` here is every remaining point in the window, not
+            // this row, so filling it directly bleeds the selection colour
+            // down over everything below.
+            let bg_idx = ui.painter().add(egui::Shape::Noop);
+            let accent_idx = ui.painter().add(egui::Shape::Noop);
+
             ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, color32_from_vec3(row.color));
+                ui.add_space(6.0);
+                let (swatch, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(swatch, 2.0, color32_from_vec3(row.color));
 
                 let eye_icon = if row.enabled { icons::EYE } else { icons::EYE_SLASH };
-                let eye_resp = ui.add(egui::Button::new(eye_icon).small());
+                let eye_resp = ui.add(egui::Button::new(eye_icon).small().frame(false));
                 let eye_resp = hinted(
                     eye_resp,
                     &mut app.ui_state,
@@ -199,52 +215,80 @@ fn draw_row(ui: &mut egui::Ui, app: &mut App, i: usize, row: RowData, selected: 
                         }
                     }
                 } else {
-                    let text_color = if row.enabled {
-                        ui.visuals().text_color()
+                    let text = egui::RichText::new(&display_name);
+                    let text = if !row.enabled {
+                        text.color(ui.visuals().weak_text_color()).strikethrough()
+                    } else if selected {
+                        text.color(ui.visuals().strong_text_color()).strong()
                     } else {
-                        ui.visuals().weak_text_color()
+                        text.color(ui.visuals().text_color())
                     };
-                    ui.label(egui::RichText::new(&display_name).color(text_color));
+                    ui.add(egui::Label::new(text).selectable(false));
                 }
 
-                let mut w = row.weight;
-                let speed = (w.abs().max(0.01) * 0.05) as f64;
-                let resp = ui.add(
-                    egui::DragValue::new(&mut w)
-                        .speed(speed)
-                        .range(0.01..=100.0),
-                );
-                let resp = hinted(
-                    resp,
-                    &mut app.ui_state,
-                    "Chaos-game selection weight (, / .)",
-                    "drag: adjust weight · click: type exact value",
-                );
-                if resp.changed() {
-                    app.set_transform_weight(i, w);
-                }
+                // Weight sits at the trailing edge so the rows line up as a
+                // column regardless of name length.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    let mut w = row.weight;
+                    let speed = (w.abs().max(0.01) * 0.05) as f64;
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut w)
+                            .speed(speed)
+                            .range(0.01..=100.0),
+                    );
+                    let resp = hinted(
+                        resp,
+                        &mut app.ui_state,
+                        "Chaos-game selection weight (, / .)",
+                        "drag: adjust weight · click: type exact value",
+                    );
+                    if resp.changed() {
+                        app.set_transform_weight(i, w);
+                    }
+                });
             });
-        });
+
+            // Selection reads as a filled row with an accent bar down its
+            // leading edge, hover as a dimmer fill — the same visual grammar
+            // as a list selection anywhere else, so the list is legible as
+            // "one of these is active" rather than "these are buttons".
+            let rect = ui.min_rect().expand2(egui::vec2(0.0, 2.0));
+            let visuals = ui.visuals();
+            if selected {
+                ui.painter()
+                    .set(bg_idx, egui::Shape::rect_filled(rect, 3.0, visuals.selection.bg_fill));
+                ui.painter().set(
+                    accent_idx,
+                    egui::Shape::rect_filled(
+                        egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+                        1.0,
+                        visuals.selection.stroke.color,
+                    ),
+                );
+            } else if ui.response().hovered() {
+                ui.painter().set(
+                    bg_idx,
+                    egui::Shape::rect_filled(rect, 3.0, visuals.widgets.hovered.bg_fill),
+                );
+            }
+        })
+        .response;
 
     if is_renaming {
         return;
     }
 
-    let row_click = ui.interact(
-        frame_resp.response.rect,
-        ui.id().with(("transform_row", i)),
-        egui::Sense::click(),
-    );
-    let row_click = hinted(
-        row_click,
+    let row_resp = hinted(
+        row_resp,
         &mut app.ui_state,
         row.summary.as_str(),
         "click: select this transform · right-click: menu",
     );
-    if row_click.clicked() {
+    if row_resp.clicked() {
         app.select_transform(Some(i));
     }
-    row_click.context_menu(|ui| {
+    row_resp.context_menu(|ui| {
         if ui.button("Duplicate").clicked() {
             app.duplicate_transform_at(i);
             ui.close();
@@ -352,14 +396,42 @@ impl TrsCache {
 
 fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     let Some(idx) = app.selected_transform() else {
-        ui.label(egui::RichText::new("No transform selected.").weak());
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Select a transform above to edit it here.")
+                .weak()
+                .italics(),
+        );
         return;
     };
     if idx >= app.scene.transforms.len() {
         return;
     }
 
-    ui.label(egui::RichText::new(format!("Inspector — T{}", idx)).strong());
+    // Header repeats the selected row's swatch and name so it's unambiguous
+    // which row the fields below belong to — the list is a selector, and this
+    // is the detail view for whatever it has selected.
+    let name = app
+        .scene
+        .transform_names
+        .get(idx)
+        .and_then(|n| n.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("T{}", idx));
+    let color = app.scene.colors.get(idx).copied().unwrap_or(Vec3::ONE);
+    ui.horizontal(|ui| {
+        let (swatch, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        ui.painter().rect_filled(swatch, 2.0, color32_from_vec3(color));
+        ui.label(egui::RichText::new(&name).strong());
+        ui.label(egui::RichText::new(format!("(T{})", idx)).weak().small());
+    });
+    ui.add_space(2.0);
+
+    // Variation rows are remembered per selected transform; moving the
+    // selection starts a fresh set (see `UiState::variation_rows`).
+    if app.ui_state.variation_rows.0 != idx {
+        app.ui_state.variation_rows = (idx, Vec::new());
+    }
 
     let key = (idx, app.matrix_generation());
     let needs_refresh = match &app.ui_state.trs_cache {
@@ -718,13 +790,22 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let weights = app.scene.transforms[idx].variations;
     let selected_slot = app.selected_variation();
 
-    let mut change: Option<(usize, f32)> = None;
+    // A row is shown when the slot carries weight, or when it's been pinned:
+    // either freshly added, or dragged down to zero. Zero is a perfectly
+    // ordinary place to pass through — the blend is `out += w * f(p)`, so
+    // sweeping a weight from +0.6 to -0.6 is a continuous exploration, and a
+    // row that vanished at the origin would both interrupt the gesture and
+    // make negative weights unreachable by mouse. Rows leave only via their
+    // own ✕.
+    let pinned = app.ui_state.variation_rows.1.clone();
+    let shown: Vec<usize> = (0..NUM_VARIATIONS)
+        .filter(|&s| weights[s] != 0.0 || pinned.contains(&s))
+        .collect();
 
-    for slot in 0..NUM_VARIATIONS {
-        let w = weights[slot];
-        if w == 0.0 {
-            continue;
-        }
+    let mut change: Option<(usize, f32)> = None;
+    let mut remove: Option<usize> = None;
+
+    for &slot in &shown {
         ui.horizontal(|ui| {
             let text = if selected_slot == slot {
                 egui::RichText::new(VARIATION_NAMES[slot]).strong()
@@ -742,27 +823,49 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                 app.set_selected_variation(slot);
             }
 
-            let mut v = w;
-            let resp = ui.add(egui::DragValue::new(&mut v).speed(0.05).range(-4.0..=4.0));
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                "Variation blend weight (- / = on the targeted slot)",
-                "drag: adjust weight · click: type exact value",
-            );
-            if resp.changed() {
-                // Snap through zero cleanly, matching adjust_variation_weight
-                let snapped = (v * 100.0).round() / 100.0;
-                change = Some((slot, snapped));
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let x_resp = ui.add(egui::Button::new(icons::X).small().frame(false));
+                let x_resp = hinted(
+                    x_resp,
+                    &mut app.ui_state,
+                    "Remove this variation from the transform",
+                    "click: remove this variation",
+                );
+                if x_resp.clicked() {
+                    remove = Some(slot);
+                }
+
+                let mut v = weights[slot];
+                let resp = ui.add(egui::DragValue::new(&mut v).speed(0.05).range(-4.0..=4.0));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Variation blend weight, Apophysis-style — negative inverts the variation's contribution (- / = on the targeted slot)",
+                    "drag: adjust weight · click: type exact value",
+                );
+                if resp.changed() {
+                    // Snap through zero cleanly, matching adjust_variation_weight
+                    let snapped = (v * 100.0).round() / 100.0;
+                    change = Some((slot, snapped));
+                }
+            });
         });
     }
 
+    if let Some(slot) = remove {
+        app.set_transform_variation(idx, slot, 0.0);
+        app.ui_state.variation_rows.1.retain(|&s| s != slot);
+    }
     if let Some((slot, w)) = change {
         app.set_transform_variation(idx, slot, w);
+        // Pin on the way through zero so the row the user is dragging stays
+        // put for the rest of the gesture.
+        if !app.ui_state.variation_rows.1.contains(&slot) {
+            app.ui_state.variation_rows.1.push(slot);
+        }
     }
 
-    let unused: Vec<usize> = (0..NUM_VARIATIONS).filter(|&s| weights[s] == 0.0).collect();
+    let unused: Vec<usize> = (0..NUM_VARIATIONS).filter(|&s| !shown.contains(&s)).collect();
     if !unused.is_empty() {
         let mut chosen: Option<usize> = None;
         let combo_resp = egui::ComboBox::new(("add_variation", idx), "add variation")
@@ -784,6 +887,7 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         if let Some(slot) = chosen {
             app.set_transform_variation(idx, slot, 0.35);
             app.set_selected_variation(slot);
+            app.ui_state.variation_rows.1.push(slot);
         }
     }
 }
