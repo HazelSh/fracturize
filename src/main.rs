@@ -1,6 +1,7 @@
 mod app;
 mod avif;
 mod camera;
+mod fog;
 mod gpu;
 mod history;
 mod indicators;
@@ -422,12 +423,6 @@ impl ApplicationHandler for AppWrapper {
                             "c" | "C" => {
                                 app.adjust_color_contrast(app.shift_held);
                             }
-                            "n" | "N" => {
-                                app.adjust_fog_near(!app.shift_held);
-                            }
-                            "m" | "M" => {
-                                app.adjust_fog_far(!app.shift_held);
-                            }
                             "g" | "G" => {
                                 app.toggle_gizmos();
                             }
@@ -640,6 +635,7 @@ fn default_scene() -> Scene {
         color_speed: 0.5,
         color_falloff: 0.0,
         color_contrast: 1.0,
+        fog: 0.0,
         transform_names: vec![None; 4],
         colors: colors.to_vec(),
         transforms: [

@@ -80,8 +80,6 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
             ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
             ("F / Shift+F", "more / less fog", Some(HelpAction::FogIntensity)),
-            ("N / Shift+N", "fog start closer / farther", Some(HelpAction::FogNear)),
-            ("M / Shift+M", "fog end closer / farther", Some(HelpAction::FogFar)),
             ("Space", "re-seed points (reset)", Some(HelpAction::Reset)),
         ],
     ),

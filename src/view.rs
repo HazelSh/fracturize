@@ -25,10 +25,23 @@ pub struct View {
     /// Added to orbital camera position
     pub offset: [f32; 3],
     pub point_size: f32,
+    /// The four values the shader wants, always written. They are derived
+    /// from `fog` below when a view is saved; they remain the wire format
+    /// because the offline renderer consumes them directly and because views
+    /// written before `fog` existed carry nothing else.
     pub fog_near: f32,
     pub fog_far: f32,
     pub fog_brightness: f32,
     pub fog_saturation: f32,
+    /// Fog amount 0–1 (see `crate::fog`). `None` on views saved before the
+    /// single-control rework — `App::apply_view` recovers an equivalent
+    /// amount from `fog_brightness` in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fog: Option<f32>,
+    /// Whether the fog band above was pinned by hand rather than auto-ranged
+    /// off the camera distance. Only meaningful alongside `fog`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog_band_pinned: bool,
     /// Scale-aware color accumulation exponent; None = use the scene's value
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_falloff: Option<f32>,
@@ -88,6 +101,8 @@ mod tests {
             fog_far: 4.5,
             fog_brightness: 0.4,
             fog_saturation: 0.3,
+            fog: Some(0.68),
+            fog_band_pinned: false,
             color_falloff: Some(0.6),
             color_contrast: Some(2.0),
             renderer: Some("splat".to_string()),

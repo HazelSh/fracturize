@@ -34,3 +34,7 @@ pub const EYE_SLASH: &str = "\u{E224}";
 pub const X: &str = "\u{E4F6}";
 /// Roll a new random flame (Explore window) — Phosphor `dice-five`
 pub const DICE: &str = "\u{E1EE}";
+/// Camera transport: motion is stopped, click to start
+pub const PLAY: &str = "\u{E3D0}";
+/// Camera transport: motion is running, click to stop
+pub const PAUSE: &str = "\u{E39E}";

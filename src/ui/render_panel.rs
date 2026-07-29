@@ -33,31 +33,36 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.render_open = open;
 }
 
+/// The points/splat segmented toggle, shared by this panel and the toolbar.
+pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
+    let mode = app.render_mode;
+    let resp = ui.selectable_label(mode == RenderMode::Points, "points");
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "One additive splat per point — crisp, dusty edges (R)",
+        "click: switch to the points renderer",
+    );
+    if resp.clicked() {
+        app.set_render_mode(RenderMode::Points);
+    }
+
+    let resp = ui.selectable_label(mode == RenderMode::Splat, "splat");
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Log-density accumulation — smoother tonemapping, exposure applies (R)",
+        "click: switch to the splat renderer",
+    );
+    if resp.clicked() {
+        app.set_render_mode(RenderMode::Splat);
+    }
+}
+
 fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.label("Renderer");
-        let mode = app.render_mode;
-        let resp = ui.selectable_label(mode == RenderMode::Points, "points");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "One additive splat per point — crisp, dusty edges (R)",
-            "click: switch to the points renderer",
-        );
-        if resp.clicked() {
-            app.set_render_mode(RenderMode::Points);
-        }
-
-        let resp = ui.selectable_label(mode == RenderMode::Splat, "splat");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Log-density accumulation — smoother tonemapping, exposure applies (R)",
-            "click: switch to the splat renderer",
-        );
-        if resp.clicked() {
-            app.set_render_mode(RenderMode::Splat);
-        }
+        render_mode(ui, app);
     });
 
     let splat = app.render_mode == RenderMode::Splat;
@@ -101,17 +106,26 @@ fn draw_points(ui: &mut egui::Ui, app: &mut App) {
         app.set_point_size(size);
     }
 
-    // Point count is a *render* property, not scene data: edited here,
-    // persisted to prefs, never written to the scene TOML.
-    //
-    // Logarithmic and live, deliberately. This is the one control that
-    // decides whether the machine stays responsive, and the previous
-    // value-box-plus-Apply shape was exactly wrong for that: you committed
-    // blind to a number and only found out afterwards. Dragging a log slider
-    // moves you by a constant *factor* per pixel, so 0.5M to 50M is a short
-    // sweep rather than an eternity, and because it applies as you go (rate-
-    // limited in `App::apply_pending_capacity`) you watch the FPS and p99
-    // readouts degrade under your hand and can back off without committing.
+    point_count(ui, app);
+}
+
+/// The point-count slider, shared by this panel and the toolbar's quick
+/// control. Deliberately one widget rather than two: the rate limiting,
+/// in-flight display and prefs persistence all hang off it, and two copies
+/// would drift.
+///
+/// Point count is a *render* property, not scene data: edited here, persisted
+/// to prefs, never written to the scene TOML.
+///
+/// Logarithmic and live, deliberately. This is the one control that decides
+/// whether the machine stays responsive, and the previous value-box-plus-Apply
+/// shape was exactly wrong for that: you committed blind to a number and only
+/// found out afterwards. Dragging a log slider moves you by a constant *factor*
+/// per pixel, so 0.5M to 50M is a short sweep rather than an eternity, and
+/// because it applies as you go (rate-limited in `App::apply_pending_capacity`)
+/// you watch the FPS and p99 readouts degrade under your hand and can back off
+/// without committing.
+pub fn point_count(ui: &mut egui::Ui, app: &mut App) {
     let applied = app.point_capacity();
     let max_m = app.max_point_capacity() as f32 / 1e6;
     let pending = app.pending_point_capacity();
@@ -184,66 +198,84 @@ fn draw_color(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// One slider, and a disclosure for the band it normally works out itself.
+/// The four raw shader knobs this replaced are documented in `src/fog.rs`,
+/// along with why exposing them was the mistake.
 fn draw_fog(ui: &mut egui::Ui, app: &mut App) {
-    ui.label(egui::RichText::new("Fog").strong());
+    let mut amount = app.fog_amount;
+    let resp = ui.add(
+        egui::Slider::new(&mut amount, 0.0..=1.0)
+            .fixed_decimals(2)
+            .text("fog"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Depth cue: fades distant points toward the background so you can read \
+         which arm is in front. The band it fades across follows the camera \
+         distance automatically (F / Shift+F)",
+        "drag: adjust fog",
+    );
+    if resp.changed() {
+        app.set_fog_amount(amount);
+    }
 
-    ui.horizontal(|ui| {
-        let mut near = app.fog_near;
-        let resp = ui.add(
-            egui::DragValue::new(&mut near)
-                .speed(0.1)
-                .range(0.1..=(app.fog_far - 1.0) as f64)
-                .prefix("near: "),
-        );
+    ui.collapsing("fog band", |ui| {
+        let (auto_near, auto_far) = crate::fog::auto_band(app.camera.distance);
+        let mut pinned = app.fog_band.is_some();
+        let resp = ui.checkbox(&mut pinned, "pin the band");
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Distance where fog starts (N / Shift+N)",
-            "drag: move the fog's near plane",
+            "Off: the fog band tracks the camera distance, so it keeps working \
+             as you zoom. On: hold it at fixed world-space distances.",
+            "click: pin or unpin the fog band",
         );
         if resp.changed() {
-            app.fog_near = near.clamp(0.1, app.fog_far - 1.0);
+            // Pinning starts from whatever the auto band currently is, so
+            // the picture doesn't jump the moment you take control.
+            app.fog_band = pinned.then_some((auto_near, auto_far));
         }
 
-        let mut far = app.fog_far;
-        let resp = ui.add(
-            egui::DragValue::new(&mut far)
-                .speed(0.1)
-                .range((app.fog_near + 1.0) as f64..=30.0)
-                .prefix("far: "),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Distance where fog reaches full strength (M / Shift+M)",
-            "drag: move the fog's far plane",
-        );
-        if resp.changed() {
-            app.fog_far = far.clamp(app.fog_near + 1.0, 30.0);
-        }
+        // Shown disabled rather than hidden when auto: the resolved band is
+        // worth being able to read, and hiding it would leave "pin the band"
+        // with nothing to say what it would pin.
+        let (mut near, mut far) = app.fog_range();
+        ui.add_enabled_ui(pinned, |ui| {
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::DragValue::new(&mut near)
+                        .speed(0.05)
+                        .range(0.01..=(far - 0.05) as f64)
+                        .prefix("near: "),
+                );
+                let changed_near = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "World distance where the fade starts",
+                    "drag: move the fog's near plane",
+                )
+                .changed();
+
+                let resp = ui.add(
+                    egui::DragValue::new(&mut far)
+                        .speed(0.05)
+                        .range((near + 0.05) as f64..=100.0)
+                        .prefix("far: "),
+                );
+                let changed_far = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "World distance where the fade reaches full strength",
+                    "drag: move the fog's far plane",
+                )
+                .changed();
+
+                if changed_near || changed_far {
+                    app.fog_band = Some((near.min(far - 0.05), far));
+                }
+            });
+        });
+
     });
-
-    let mut brightness = app.fog_brightness;
-    let resp = ui.add(egui::Slider::new(&mut brightness, 0.05..=1.0).text("brightness"));
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "How much brightness survives at the fog's far plane — 1.0 is no fog (F / Shift+F moves both)",
-        "drag: adjust fog brightness falloff",
-    );
-    if resp.changed() {
-        app.fog_brightness = brightness.clamp(0.05, 1.0);
-    }
-
-    let mut saturation = app.fog_saturation;
-    let resp = ui.add(egui::Slider::new(&mut saturation, 0.05..=1.0).text("saturation"));
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "How much color survives at the fog's far plane — 1.0 is no desaturation (F / Shift+F moves both)",
-        "drag: adjust fog saturation falloff",
-    );
-    if resp.changed() {
-        app.fog_saturation = saturation.clamp(0.05, 1.0);
-    }
 }

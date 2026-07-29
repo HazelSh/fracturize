@@ -226,8 +226,6 @@ pub enum HelpAction {
     ColorFalloff,
     ColorContrast,
     FogIntensity,
-    FogNear,
-    FogFar,
     Mutate,
     Undo,
     Browse,
@@ -308,11 +306,15 @@ pub struct App {
     pub show_gizmos: bool,
     pub show_help: bool,
 
-    // Fog parameters
-    pub fog_near: f32,
-    pub fog_far: f32,
-    pub fog_brightness: f32,
-    pub fog_saturation: f32,
+    // Fog. One control; see `src/fog.rs` for why the shader's four
+    // parameters are not the user's four parameters.
+    /// Depth-cue strength, 0 (off) to 1. Scene data — saved by Ctrl+S and
+    /// undoable, like the other look parameters the scene file carries.
+    pub fog_amount: f32,
+    /// Pinned fog band in world units, or `None` to auto-range off the camera
+    /// distance. Only the Render window's advanced disclosure and legacy view
+    /// files set this; auto is the default and the case worth optimising for.
+    pub fog_band: Option<(f32, f32)>,
 
     // Color accumulation / rendering parameters
     /// Scale-aware color accumulation exponent (0 = classic fixed-rate EMA)
@@ -509,11 +511,15 @@ impl App {
 
         let num_transforms = scene.transforms.len();
 
-        // Fog settings
-        let (fog_brightness, fog_saturation) = if fog_enabled {
-            (0.4, 0.3)
+        // `--fog` is a legacy on-switch: it predates fog being scene data, so
+        // it means "turn it on at the old default strength" and the scene's
+        // own value wins whenever it has one.
+        let fog_amount = if scene.fog > 0.0 {
+            scene.fog
+        } else if fog_enabled {
+            crate::fog::amount_from_brightness(0.4)
         } else {
-            (1.0, 1.0)
+            0.0
         };
 
         let prefs = crate::prefs::Prefs::load();
@@ -543,10 +549,8 @@ impl App {
             show_gizmos: true,
             // Env override lets automated captures verify the help overlay
             show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
-            fog_near: 3.0,
-            fog_far: 4.5,
-            fog_brightness,
-            fog_saturation,
+            fog_amount,
+            fog_band: None,
             color_falloff: scene.color_falloff,
             color_contrast: scene.color_contrast,
             fps_tracker: FpsTracker::new(),
@@ -617,10 +621,19 @@ impl App {
             v.pitch,
         );
         self.point_size = v.point_size;
-        self.fog_near = v.fog_near;
-        self.fog_far = v.fog_far;
-        self.fog_brightness = v.fog_brightness;
-        self.fog_saturation = v.fog_saturation;
+        // Views written before fog became one control carry only the four raw
+        // shader values; recover an equivalent amount from them and treat
+        // their band as pinned, since it was chosen by hand.
+        match v.fog {
+            Some(amount) => {
+                self.fog_amount = amount.clamp(0.0, 1.0);
+                self.fog_band = v.fog_band_pinned.then_some((v.fog_near, v.fog_far));
+            }
+            None => {
+                self.fog_amount = crate::fog::amount_from_brightness(v.fog_brightness);
+                self.fog_band = Some((v.fog_near, v.fog_far));
+            }
+        }
         if let Some(c) = v.color_contrast {
             self.color_contrast = c;
         }
@@ -646,6 +659,37 @@ impl App {
     pub fn toggle_orbit(&mut self) {
         self.orbit_paused = !self.orbit_paused;
         log::info!("Camera orbit: {}", if self.orbit_paused { "paused" } else { "running" });
+    }
+
+    /// Is the camera moving on its own right now — by either the turntable
+    /// orbit or a path flythrough?
+    ///
+    /// The two motions are separate systems today (`orbit_paused` vs
+    /// `path_play_t`), but from the outside there is only one question worth
+    /// asking, so the transport control asks it here rather than knowing
+    /// which one is driving. Phase 2 folds the turntable into a synthesized
+    /// path and this collapses to one flag; callers won't have to change.
+    pub fn camera_moving(&self) -> bool {
+        self.path_play_t.is_some() || !self.orbit_paused
+    }
+
+    /// Start or stop whatever motion applies: the path flythrough if the
+    /// scene has a playable path, the turntable otherwise.
+    pub fn toggle_camera_motion(&mut self) {
+        if self.path_play_t.is_some() {
+            self.toggle_path_play();
+            return;
+        }
+        let has_path = self
+            .scene
+            .camera_path
+            .as_ref()
+            .is_some_and(|p| p.keys.len() >= 2);
+        if has_path && self.orbit_paused {
+            self.toggle_path_play();
+        } else {
+            self.toggle_orbit();
+        }
     }
 
     /// Play / stop the camera-path flythrough preview (Z)
@@ -805,10 +849,15 @@ impl App {
             focus: self.camera.focus.to_array(),
             offset: [0.0; 3],
             point_size: self.point_size,
-            fog_near: self.fog_near,
-            fog_far: self.fog_far,
-            fog_brightness: self.fog_brightness,
-            fog_saturation: self.fog_saturation,
+            // The band is resolved rather than stored raw, so a view of an
+            // auto-ranged scene renders offline at the framing it was saved
+            // at even though the offline path knows nothing about auto-ranging.
+            fog_near: self.fog_range().0,
+            fog_far: self.fog_range().1,
+            fog_brightness: self.fog_falloff().0,
+            fog_saturation: self.fog_falloff().1,
+            fog: Some(self.fog_amount),
+            fog_band_pinned: self.fog_band.is_some(),
             color_falloff: Some(self.color_falloff),
             color_contrast: Some(self.color_contrast),
             renderer: match self.render_mode {
@@ -845,6 +894,7 @@ impl App {
         self.scene.point_size = self.point_size;
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
+        self.scene.fog = self.fog_amount;
 
         let path = self
             .scene_path
@@ -891,6 +941,7 @@ impl App {
             point_size: self.point_size,
             color_falloff: self.color_falloff,
             color_contrast: self.color_contrast,
+            fog_amount: self.fog_amount,
         }
     }
 
@@ -909,6 +960,7 @@ impl App {
         self.point_size = snap.point_size;
         self.color_falloff = snap.color_falloff;
         self.color_contrast = snap.color_contrast;
+        self.fog_amount = snap.fog_amount;
         self.bump_matrix_generation();
         self.after_scene_shape_change();
     }
@@ -2187,26 +2239,14 @@ impl App {
         self.commit_edit("Point size", Some("point_size"), before);
     }
 
+    /// F / Shift+F. The near/far keys that used to sit beside this (N and M)
+    /// are gone: the band auto-ranges off the camera now, so nudging it by
+    /// half a world unit at a time no longer means anything.
     pub fn adjust_fog_intensity(&mut self, more_fog: bool) {
-        let factor = if more_fog { 0.7 } else { 1.4 };
-        let old_b = self.fog_brightness;
-        let old_s = self.fog_saturation;
-        self.fog_brightness = (self.fog_brightness * factor).clamp(0.05, 1.0);
-        self.fog_saturation = (self.fog_saturation * factor).clamp(0.05, 1.0);
-        log::info!("Fog intensity: brightness {:.2}->{:.2}, saturation {:.2}->{:.2}",
-            old_b, self.fog_brightness, old_s, self.fog_saturation);
-    }
-
-    pub fn adjust_fog_near(&mut self, closer: bool) {
-        let delta = if closer { -0.5 } else { 0.5 };
-        self.fog_near = (self.fog_near + delta).clamp(0.1, self.fog_far - 1.0);
-        log::info!("Fog near: {:.1}", self.fog_near);
-    }
-
-    pub fn adjust_fog_far(&mut self, closer: bool) {
-        let delta = if closer { -1.0 } else { 1.0 };
-        self.fog_far = (self.fog_far + delta).clamp(self.fog_near + 1.0, 30.0);
-        log::info!("Fog far: {:.1}", self.fog_far);
+        let delta = if more_fog { 0.1 } else { -0.1 };
+        let old = self.fog_amount;
+        self.set_fog_amount(self.fog_amount + delta);
+        log::info!("Fog: {:.2} -> {:.2}", old, self.fog_amount);
     }
 
     /// Re-resolve per-transform color speeds from the current falloff and
@@ -2282,6 +2322,31 @@ impl App {
         self.color_falloff = falloff.clamp(0.0, 4.0);
         self.refresh_color_speeds();
         self.commit_edit("Color falloff", Some("color_falloff"), before);
+    }
+
+    /// Fog band in world units: the pinned one, or auto-ranged off the
+    /// current camera distance so it tracks the framing.
+    pub fn fog_range(&self) -> (f32, f32) {
+        self.fog_band
+            .unwrap_or_else(|| crate::fog::auto_band(self.camera.distance))
+    }
+
+    /// `(brightness, saturation)` survival at the far plane, from the amount.
+    pub fn fog_falloff(&self) -> (f32, f32) {
+        crate::fog::falloff(self.fog_amount)
+    }
+
+    /// The four values the shader actually wants, in `CameraUniforms` order.
+    pub fn fog_uniforms(&self) -> (f32, f32, f32, f32) {
+        let (near, far) = self.fog_range();
+        let (brightness, saturation) = self.fog_falloff();
+        (near, far, brightness, saturation)
+    }
+
+    pub fn set_fog_amount(&mut self, amount: f32) {
+        let before = self.edit_snapshot();
+        self.fog_amount = amount.clamp(0.0, 1.0);
+        self.commit_edit("Fog", Some("fog"), before);
     }
 
     pub fn set_color_contrast(&mut self, contrast: f32) {
@@ -2525,16 +2590,17 @@ impl App {
         let aspect = SCREENSHOT_WIDTH as f32 / SCREENSHOT_HEIGHT as f32;
         let mvp = self.camera.view_proj(aspect);
 
+        let fog = self.fog_uniforms();
         let camera = CameraUniforms::new(
             mvp,
             SCREENSHOT_HEIGHT as f32,
             self.point_size,
             aspect,
             1.0,
-            self.fog_near,
-            self.fog_far,
-            self.fog_brightness,
-            self.fog_saturation,
+            fog.0,
+            fog.1,
+            fog.2,
+            fog.3,
             self.color_contrast,
         );
 
@@ -2708,8 +2774,6 @@ impl App {
             HelpAction::ColorFalloff => self.adjust_color_falloff(!shift),
             HelpAction::ColorContrast => self.adjust_color_contrast(shift),
             HelpAction::FogIntensity => self.adjust_fog_intensity(!shift),
-            HelpAction::FogNear => self.adjust_fog_near(!shift),
-            HelpAction::FogFar => self.adjust_fog_far(!shift),
             HelpAction::Mutate => {
                 if shift {
                     self.undo()
@@ -2790,16 +2854,17 @@ impl App {
         self.point_compute.dispatch(&mut encoder);
 
         // === STEP 2: RENDER POINTS ===
+        let fog = self.fog_uniforms();
         let camera = CameraUniforms::new(
             view_proj,
             height as f32,
             self.point_size,
             aspect,
             1.0,
-            self.fog_near,
-            self.fog_far,
-            self.fog_brightness,
-            self.fog_saturation,
+            fog.0,
+            fog.1,
+            fog.2,
+            fog.3,
             self.color_contrast,
         );
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);

@@ -1,12 +1,17 @@
-//! Top toolbar: a thin strip of icon toggle buttons for the four Phase 2+
-//! window skeletons, plus Shortcuts/Browser buttons that drive the legacy
-//! overlays (same code paths as the H/B keys) until Phase 6 gives them real
-//! windows of their own.
+//! Top toolbar: a thin strip of icon toggle buttons for the six panel
+//! windows, then the quick controls — the handful of settings you reach for
+//! often enough that opening a panel to get at them is friction.
+//!
+//! Quick controls delegate to the panels' own widgets (`render_panel::
+//! render_mode`, `render_panel::point_count`) rather than reimplementing
+//! them, so the rate limiting, hints and persistence can't drift between the
+//! two places you can change the same value from.
 
 use crate::app::App;
 
 use super::hints::hinted;
 use super::icons;
+use super::render_panel;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
@@ -60,6 +65,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 app.toggle_browser();
             }
 
+            ui.separator();
+            draw_quick_controls(ui, app);
+
             // Scene identity, right-aligned — this used to be the HUD's
             // first line, which sat underneath this very panel.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -77,4 +85,53 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         });
         ui.add_space(2.0);
     });
+}
+
+/// Renderer mode, point count and camera transport — the three settings that
+/// get changed most often mid-exploration.
+fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
+    render_panel::render_mode(ui, app);
+
+    // A readout, not a slider: the toolbar has no room for a log slider wide
+    // enough to be draggable, and a cramped one would be worse than none. The
+    // popup gets the real widget.
+    let capacity = app.pending_point_capacity().unwrap_or(app.point_capacity());
+    let label = if capacity < 1_000_000 {
+        format!("{:.0}k pts", capacity as f32 / 1e3)
+    } else {
+        format!("{:.1}M pts", capacity as f32 / 1e6)
+    };
+    let resp = ui.button(label);
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Points the chaos game keeps in flight — click for the slider",
+        "click: open the point count slider",
+    );
+    egui::Popup::menu(&resp)
+        // The default menu behaviour closes on any click inside, which would
+        // dismiss the popup the instant you grabbed the slider.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(280.0)
+        .show(|ui| render_panel::point_count(ui, app));
+
+    let moving = app.camera_moving();
+    let resp = ui.button(if moving { icons::PAUSE } else { icons::PLAY });
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if moving {
+            "Stop the camera moving (O, or Z for a path)"
+        } else {
+            "Start the camera moving (O, or Z for a path)"
+        },
+        if moving {
+            "click: stop the camera"
+        } else {
+            "click: start the camera moving"
+        },
+    );
+    if resp.clicked() {
+        app.toggle_camera_motion();
+    }
 }

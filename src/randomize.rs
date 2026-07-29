@@ -379,6 +379,11 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
         color_speed,
         color_falloff,
         color_contrast: 1.0,
+        // A little fog by default. A freshly rolled flame is a form nobody has
+        // seen before, and with no shading and no occlusion there is nothing
+        // else telling you which arm is in front — hand-authored scenes can opt
+        // in, but a random one has no author to make that call.
+        fog: 0.35,
         transforms: c.transforms,
         transform_names: c.names,
         colors: c.colors,

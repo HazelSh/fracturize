@@ -176,8 +176,6 @@ yaw/pitch/distance at load time and no longer written to files.
 | D / Shift+D | finer / coarser color detail (color_falloff) |
 | C / Shift+C | less / more color contrast |
 | F / Shift+F | more / less fog |
-| N / Shift+N | fog start closer / farther |
-| M / Shift+M | fog end closer / farther |
 
 The Keybinds window (H) is clickable: each row triggers its first-listed
 binding, shift+click the second. `I` persists to
@@ -283,6 +281,26 @@ kept so the button always returns something.
 way, so an interesting roll can always be recovered. `spherical` is never
 rolled (its 1/r^2 inversion blows scenes out — fine by hand, bad by dice).
 A rolled flame is a normal history entry: one Ctrl+Z restores what was there.
+
+## Fog
+
+Depth cue, and the only one this renderer has — additive point clouds have no
+shading and no occlusion, so nothing else says which arm is in front. One
+control (`src/fog.rs`), `fog` 0–1, scene data, undoable, saved by Ctrl+S. The
+shader's four parameters are *not* the user's parameters:
+
+- the near/far band auto-ranges off the camera distance (`fog::auto_band`), so
+  it follows the framing instead of being re-dialled on every zoom. The Render
+  window's "fog band" disclosure can pin it to fixed world units;
+- brightness and saturation falloff come from the amount (`fog::falloff`).
+  Brightness carries the cue; the desaturation is deliberately much gentler
+  than the old `--fog` defaults, which drained the colour out of the image
+  rather than pushing anything backwards.
+
+`--fog` is a legacy on-switch meaning "on at the old default strength"; a
+scene's own `fog` wins over it. Views written before this carry the four raw
+values and are converted on load (`fog::amount_from_brightness`). Random
+flames get a little fog by default; hand-authored scenes default to none.
 
 ## Scene Files (TOML)
 
@@ -423,7 +441,8 @@ encode+save | total`) to stdout so you can budget effort. Options:
   Point count is a *render* property, not a scene property: the scene's
   `point_count` is just the interactive default (16 bytes/point of GPU memory).
 - `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
-- `--view <path>` for exact framing (views store yaw + pitch), `--fog`.
+- `--view <path>` for exact framing (views store yaw + pitch), `--fog`
+  (legacy on-switch; a scene's own `fog` value wins over it).
 - `--splat [--exposure X]` — render with the splat renderer (also implied by a
   view saved in splat mode; explicit flags win). Works with all grid modes.
   Exposure is capacity-normalized, so the same value looks the same at every

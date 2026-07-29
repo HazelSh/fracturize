@@ -243,7 +243,19 @@ fn base_setup(view: &Option<View>, scene: &Scene, fog_enabled: bool) -> (OrbitCa
             (v.fog_near, v.fog_far, v.fog_brightness, v.fog_saturation),
         ),
         None => {
-            let (fb, fs) = if fog_enabled { (0.4, 0.3) } else { (1.0, 1.0) };
+            // `--fog` predates fog being scene data and now just means "on at
+            // the old default strength"; the scene's own value wins. Same
+            // precedence as `App::new`, so a `--render` matches what the
+            // window shows.
+            let amount = if scene.fog > 0.0 {
+                scene.fog
+            } else if fog_enabled {
+                crate::fog::amount_from_brightness(0.4)
+            } else {
+                0.0
+            };
+            let (near, far) = crate::fog::auto_band(scene.camera_distance);
+            let (fb, fs) = crate::fog::falloff(amount);
             (
                 OrbitCamera {
                     yaw: scene.camera_yaw,
@@ -252,7 +264,7 @@ fn base_setup(view: &Option<View>, scene: &Scene, fog_enabled: bool) -> (OrbitCa
                     focus: scene.camera_focus,
                 },
                 scene.point_size,
-                (3.0, 4.5, fb, fs),
+                (near, far, fb, fs),
             )
         }
     }

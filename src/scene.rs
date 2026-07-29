@@ -163,6 +163,14 @@ pub struct SceneMeta {
     /// wrapping cyclically. Compensates the wash-out from low color_falloff.
     #[serde(default = "default_color_contrast")]
     pub color_contrast: f64,
+    /// Depth-cue fog strength, 0 (off) to 1. A single amount rather than the
+    /// four raw shader knobs: the near/far band auto-ranges off the camera
+    /// distance (see `App::fog_range`) and the brightness/saturation falloffs
+    /// are derived from this (see `App::fog_falloff`), so there is exactly one
+    /// number worth keeping with the artwork. Defaults to 0, which leaves
+    /// every scene authored before this existed looking exactly as it did.
+    #[serde(default)]
+    pub fog: f64,
     /// Total point buffer size for the simple point renderer.
     /// If unset, defaults to 500k.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,6 +330,8 @@ pub struct Scene {
     pub color_falloff: f32,
     /// Render-time cyclic contrast stretch of the colormap index
     pub color_contrast: f32,
+    /// Depth-cue fog strength, 0 (off) to 1 — see `SceneMeta::fog`
+    pub fog: f32,
     /// IFS transforms (affine matrix + variation blend weights)
     pub transforms: Vec<TransformSpec>,
     /// Human-readable name per transform (from scene file)
@@ -480,6 +490,7 @@ impl Scene {
             color_speed: scene_file.meta.color_speed as f32,
             color_falloff: (scene_file.meta.color_falloff as f32).max(0.0),
             color_contrast: (scene_file.meta.color_contrast as f32).max(0.0),
+            fog: (scene_file.meta.fog as f32).clamp(0.0, 1.0),
             transforms,
             transform_names,
             colors: transform_colors,
@@ -559,6 +570,7 @@ impl Scene {
                 color_speed: tidy(self.color_speed),
                 color_falloff: tidy(self.color_falloff),
                 color_contrast: tidy(self.color_contrast),
+                fog: tidy(self.fog),
                 // Point count is a render property chosen in the Render
                 // window and persisted to prefs, not part of the artwork, so
                 // saving no longer writes it. `None` also means the merge
@@ -784,6 +796,7 @@ fn merge_scene_into_document(
         set_f64(meta, "color_speed", file.meta.color_speed, Some(0.5));
         set_f64(meta, "color_falloff", file.meta.color_falloff, Some(0.0));
         set_f64(meta, "color_contrast", file.meta.color_contrast, Some(1.0));
+        set_f64(meta, "fog", file.meta.fog, Some(0.0));
         if let Some(pc) = file.meta.point_count {
             set_i64(meta, "point_count", pc as i64, None);
         }
@@ -1071,6 +1084,7 @@ point_size = 0.002
 color_speed = 0.4
 color_falloff = 0.8
 color_contrast = 2.0
+fog = 0.35
 point_count = 123456
 
 [camera]
@@ -1105,6 +1119,7 @@ color = [0.0, 1.0, 1.0]
 
         assert_eq!(reloaded.name, scene.name);
         assert_eq!(reloaded.color_falloff, scene.color_falloff);
+        assert!((reloaded.fog - 0.35).abs() < 1e-4, "fog {}", reloaded.fog);
         // point_count is deliberately *not* round-tripped: it's a render
         // property owned by the Render window and prefs, so saving to a fresh
         // file omits it and the reload falls back to the default. Loading a
