@@ -106,7 +106,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Overlays",
         &[
             ("H / ?", "toggle this window", Some(HelpAction::ToggleHelp)),
-            ("T", "toggle info overlay", Some(HelpAction::ToggleText)),
+            ("T", "toggle transform name labels", Some(HelpAction::ToggleText)),
             ("G", "toggle transform gizmos", Some(HelpAction::ToggleGizmos)),
             ("Esc", "quit", None),
         ],

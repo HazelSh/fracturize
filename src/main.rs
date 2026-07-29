@@ -10,6 +10,7 @@ mod prefs;
 mod trace;
 mod pick;
 mod scene;
+mod randomize;
 mod ui;
 mod view;
 
@@ -139,6 +140,30 @@ struct Args {
     /// value). W / Shift+W adjust it in-app.
     #[arg(long)]
     exposure: Option<f32>,
+
+    /// Start from a randomly generated flame instead of a scene file.
+    /// Quality-checked on the CPU before it's handed back, so it always
+    /// renders. Pair with --seed to reproduce a roll (the seed used is
+    /// always logged); combine with --render to explore offline.
+    #[arg(long, conflicts_with = "scene")]
+    random: bool,
+}
+
+/// Roll a random flame for `--random`, honouring `--seed` and logging the
+/// seed either way so any roll can be reproduced exactly.
+fn random_scene(seed: Option<u64>) -> Scene {
+    use rand::SeedableRng;
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    });
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let scene = randomize::random_flame(&mut rng);
+    log::info!("Random flame seed: {} (reproduce with --random --seed {})", seed, seed);
+    println!("Random flame seed: {}", seed);
+    scene
 }
 
 /// Named effort presets for offline rendering: (points, accumulate frames).
@@ -217,6 +242,7 @@ impl ApplicationHandler for AppWrapper {
             Some(path) => Scene::load(path).unwrap_or_else(|e| {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
+            None if self.args.random => random_scene(self.args.seed),
             None => {
                 log::info!("No scene specified, using built-in default");
                 default_scene()
@@ -641,6 +667,7 @@ fn main() {
             Some(path) => Scene::load(path).unwrap_or_else(|e| {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
+            None if args.random => random_scene(args.seed),
             None => default_scene(),
         };
 

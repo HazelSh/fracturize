@@ -45,6 +45,24 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     ui.add_space(6.0);
                     let (fps, avg_ms, p99_ms) = app.fps_stats();
                     ui.label(format!("{:.0} FPS · {:.1}ms · p99 {:.1}ms", fps, avg_ms, p99_ms));
+
+                    // Which variation slot E / - / = are pointed at. The one
+                    // piece of the retired HUD with no home in a panel: the
+                    // Transforms inspector bolds the targeted row, but that
+                    // panel is often closed while the keys are still live.
+                    if let Some(idx) = app.selected_transform() {
+                        let slot = app.selected_variation();
+                        let weight = app.scene.transforms[idx].variations[slot];
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "[E] {} {:+.2}",
+                                crate::scene::VARIATION_NAMES[slot],
+                                weight
+                            ))
+                            .weak(),
+                        );
+                    }
                 });
             });
         });

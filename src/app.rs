@@ -6,16 +6,16 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Vec3};
 use winit::window::Window;
 
-use crate::camera::{world_to_screen, OrbitCamera};
+use crate::camera::OrbitCamera;
 use crate::gpu::lines::LineVertex;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::history::{EditSnapshot, History};
 use crate::scene::{Scene, TransformSpec};
-use crate::ui::{hints, TextEntry, UiState};
+use crate::ui::{hints, UiState};
 use crate::view::View;
 
 /// Seconds since the epoch, for unique output filenames
-fn unix_timestamp() -> u64 {
+pub fn unix_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -330,9 +330,10 @@ pub struct App {
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
 
-    /// Plain-data egui UI state (open panels, drag caches, ... — grows in
-    /// later phases). Phase 1 only uses `legacy_entries`, the TextEntry shim
-    /// stash rebuilt every `update()`.
+    /// Plain-data egui UI state: which panels are open, the inspector's TRS
+    /// field cache, this frame's status hint, and similar. The egui machinery
+    /// itself (`EguiLayer`) lives on `AppWrapper` in main.rs instead, so the
+    /// UI closure can hold `&mut App`.
     pub ui_state: UiState,
 
     /// Which renderer draws the fractal (R toggles)
@@ -1141,22 +1142,25 @@ impl App {
     }
 
     /// Current view-projection matrix for the window surface
-    fn current_view_proj(&self) -> Mat4 {
+    pub fn current_view_proj(&self) -> Mat4 {
         let (w, h) = self.gpu.size();
         self.camera.view_proj(w as f32 / h as f32)
+    }
+
+    /// Surface size in physical pixels — `ui::labels` needs it to project
+    /// transform origins to screen space.
+    pub fn surface_size(&self) -> (u32, u32) {
+        self.gpu.size()
     }
 
     pub fn on_mouse_press(&mut self, button: winit::event::MouseButton) {
         use winit::event::MouseButton;
         match button {
             MouseButton::Left => {
-                // Overlay panels swallow clicks when open. (The keybinds
-                // panel used to need the same treatment; it's a real egui
-                // window now — see src/ui/shortcuts.rs — so egui's own
-                // pointer gating in main.rs keeps its clicks away from us.)
-                if self.try_click_browser() {
-                    return;
-                }
+                // The keybinds and scene-browser overlays used to hand-roll
+                // click hit-testing here. Both are real egui windows now
+                // (src/ui/shortcuts.rs, src/ui/browser.rs), so egui's own
+                // pointer gating in main.rs keeps their clicks away from us.
                 if let Some(drag) = self.try_grab_gizmo() {
                     // A gizmo grab always yields Drag::Gizmo; snapshot now so
                     // the whole drag commits as one history entry at release.
@@ -1383,6 +1387,24 @@ impl App {
         self.show_browser = true;
     }
 
+    /// Scenes found by the last `toggle_browser` scan, for the browser
+    /// window's list.
+    pub fn browser_files(&self) -> &[std::path::PathBuf] {
+        &self.browser_files
+    }
+
+    /// Index the Up/Down keys are currently on.
+    pub fn browser_selected(&self) -> usize {
+        self.browser_selected
+    }
+
+    /// Move the keyboard selection to a clicked row, so the two stay in sync.
+    pub fn set_browser_selected(&mut self, idx: usize) {
+        if idx < self.browser_files.len() {
+            self.browser_selected = idx;
+        }
+    }
+
     pub fn browser_move(&mut self, down: bool) {
         let n = self.browser_files.len();
         if n == 0 {
@@ -1400,37 +1422,6 @@ impl App {
             self.load_scene_file(&path);
         }
         self.show_browser = false;
-    }
-
-    /// Browser panel geometry: (x, y of first row, line height)
-    fn browser_panel_geometry(&self, height: f32) -> (f32, f32, f32) {
-        let line_height = 16.0f32;
-        let panel_lines = self.browser_files.len() + 2;
-        let y = (height - panel_lines as f32 * line_height) * 0.5;
-        (6.0, y, line_height)
-    }
-
-    /// Click a browser row to load that scene. Returns true if the click was
-    /// consumed by the panel.
-    fn try_click_browser(&mut self) -> bool {
-        if !self.show_browser {
-            return false;
-        }
-        let (_, h) = self.gpu.size();
-        let (px, py, lh) = self.browser_panel_geometry(h as f32);
-        let (cx, cy) = self.cursor;
-        let panel_h = (self.browser_files.len() + 2) as f32 * lh;
-        if cx < px || cx > px + 380.0 || cy < py || cy > py + panel_h {
-            // Clicking outside closes the browser
-            self.show_browser = false;
-            return true;
-        }
-        let row = ((cy - py - lh * 0.5) / lh).floor() as i32 - 1;
-        if row >= 0 && (row as usize) < self.browser_files.len() {
-            self.browser_selected = row as usize;
-            self.browser_load_selected();
-        }
-        true
     }
 
     /// Replace the current scene with one loaded from disk, rebuilding the
@@ -1454,7 +1445,14 @@ impl App {
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
-        self.buffer_capacity = scene.point_count as u32;
+        // Same precedence as startup: a point count the person chose in the
+        // Render window follows them across scene loads; otherwise take the
+        // scene file's own.
+        self.buffer_capacity = self
+            .prefs
+            .point_count
+            .map(|n| n as u32)
+            .unwrap_or(scene.point_count as u32);
         self.transform_enabled = vec![true; scene.transforms.len()];
         self.selected_transform = Some(0);
         self.selected_variation = 0;
@@ -1464,40 +1462,6 @@ impl App {
         self.scene_path = Some(path.to_string_lossy().into_owned());
         self.history.clear();
         self.rebuild_pipelines();
-    }
-
-    /// Text overlay for the scene browser
-    fn build_browser_entries(&self, height: f32) -> Vec<TextEntry> {
-        let (px, py, lh) = self.browser_panel_geometry(height);
-        let font_size = 13.0;
-
-        let mut lines = vec!["Scenes  (Enter/click = load, Esc/B = close)".to_string()];
-        for (i, f) in self.browser_files.iter().enumerate() {
-            let stem = f.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
-            let sel = if i == self.browser_selected { ">" } else { " " };
-            let cur = if self.scene_path.as_deref() == Some(&f.to_string_lossy() as &str) {
-                "*"
-            } else {
-                " "
-            };
-            lines.push(format!("{}{} {}", sel, cur, stem));
-        }
-        let text = lines.join("\n");
-
-        let bg_width = 4 + text.lines().map(|l| l.len()).max().unwrap_or(0);
-        let bg: String =
-            vec!["\u{2588}".repeat(bg_width); self.browser_files.len() + 2].join("\n");
-
-        vec![
-            TextEntry { text: bg, x: px, y: py, color: [10, 10, 20, 225], font_size },
-            TextEntry {
-                text,
-                x: px + font_size,
-                y: py + lh * 0.5,
-                color: [235, 235, 245, 255],
-                font_size,
-            },
-        ]
     }
 
     // === High-quality background render (P) ===
@@ -1608,6 +1572,42 @@ impl App {
     /// Apply a random mutation to the scene (undoable with Ctrl+Z / Shift+U).
     /// Repeated presses walk the scene through mutation space; Ctrl+S keeps
     /// a variant you like.
+    /// Replace the whole scene with a freshly generated random flame
+    /// (`src/randomize.rs`). Unlike loading a scene file this is an *edit*,
+    /// so it goes on the history stack and one Ctrl+Z brings back whatever
+    /// was on screen — exploration you can back out of.
+    pub fn random_flame(&mut self) {
+        let before = self.edit_snapshot();
+        let scene = crate::randomize::random_flame(&mut rand::thread_rng());
+        log::info!(
+            "Random flame: {} transforms, camera distance {:.2}",
+            scene.transforms.len(),
+            scene.camera_distance
+        );
+
+        self.camera = OrbitCamera {
+            yaw: scene.camera_yaw,
+            pitch: scene.camera_pitch,
+            distance: scene.camera_distance,
+            focus: scene.camera_focus,
+        };
+        self.point_size = scene.point_size;
+        self.color_falloff = scene.color_falloff;
+        self.color_contrast = scene.color_contrast;
+        self.transform_enabled = vec![true; scene.transforms.len()];
+        self.selected_transform = Some(0);
+        self.selected_variation = 0;
+        self.drag = Drag::None;
+        self.hovered = None;
+        self.scene = scene;
+        // A rolled flame has no file behind it: Ctrl+S should write a new
+        // scenes/untitled-*.toml rather than overwrite whatever was loaded.
+        self.scene_path = None;
+        self.bump_matrix_generation();
+        self.after_scene_shape_change();
+        self.commit_edit("Random flame", None, before);
+    }
+
     pub fn mutate_scene(&mut self) {
         let before = self.edit_snapshot();
 
@@ -2209,10 +2209,14 @@ impl App {
         self.show_help = !self.show_help;
     }
 
+    /// Toggle the world-anchored transform name labels (T). Since the panels
+    /// took over every other overlay readout, this is all `show_text` still
+    /// gates — and it no longer clears the selection on the way out: with a
+    /// real Transforms panel, losing your selected transform just because you
+    /// hid the viewport labels is a surprise, not a feature.
     pub fn toggle_text_overlay(&mut self) {
         self.show_text = !self.show_text;
-        self.selected_transform = if self.show_text { Some(0) } else { None };
-        log::info!("Text overlay: {}", if self.show_text { "on" } else { "off" });
+        log::info!("Transform labels: {}", if self.show_text { "on" } else { "off" });
     }
 
     pub fn select_prev_transform(&mut self) {
@@ -2330,14 +2334,6 @@ impl App {
             );
         }
 
-        // Rebuild the legacy TextEntry shim (HUD, help panel, browser,
-        // gizmo labels) for this frame; ui::draw_legacy_text paints it via
-        // an egui foreground layer once RedrawRequested runs ctx.run_ui.
-        let (width, height) = self.gpu.size();
-        let aspect = width as f32 / height as f32;
-        let view_proj = self.camera.view_proj(aspect);
-        self.ui_state.legacy_entries =
-            self.build_text_entries(view_proj, width as f32, height as f32);
     }
 
     pub fn take_screenshot(&mut self) {
@@ -2557,176 +2553,6 @@ impl App {
             HelpAction::RenderMode => self.toggle_render_mode(),
             HelpAction::Exposure => self.adjust_exposure(!shift),
         }
-    }
-
-    fn build_text_entries(&self, view_proj: Mat4, width: f32, height: f32) -> Vec<TextEntry> {
-        let mut entries = Vec::new();
-
-        if self.show_browser {
-            entries.extend(self.build_browser_entries(height));
-        }
-
-        if !self.show_text {
-            return entries;
-        }
-
-        let grey = [180, 180, 180, 220];
-
-        // === Top-left HUD ===
-        //
-        // Three lines retired here rather than kept in parallel with the new
-        // chrome: the scene name/author moved to the toolbar's right end, the
-        // FPS/point-count line is in the status bar (with p99 and a
-        // sparkline), and the "[H] keybinds" hint is now the toolbar's
-        // keyboard icon. What's left starts *below* the toolbar — the panel
-        // is opaque and drawn over, so a fixed y=10 start put these lines
-        // underneath it.
-        let mut param_y = self.ui_state.viewport_top_px + 6.0;
-
-        // Camera params
-        entries.push(TextEntry {
-            text: format!(
-                "cam: d={:.1} yaw={:.2} pitch={:.2} focus=({:.1},{:.1},{:.1})",
-                self.camera.distance, self.camera.yaw, self.camera.pitch,
-                self.camera.focus.x, self.camera.focus.y, self.camera.focus.z,
-            ),
-            x: 10.0,
-            y: param_y,
-            color: grey,
-            font_size: 12.0,
-        });
-        param_y += 16.0;
-
-        // Camera path status (only when a path exists)
-        if let Some(path) = &self.scene.camera_path {
-            let status = match self.path_play_t {
-                Some(t) => format!("playing {:.0}%", t * 100.0),
-                None => "Z plays".to_string(),
-            };
-            entries.push(TextEntry {
-                text: format!(
-                    "path: {} keys, {}, {:.1}s | {}",
-                    path.keys.len(),
-                    if path.closed { "loop" } else { "open" },
-                    path.duration(),
-                    status,
-                ),
-                x: 10.0,
-                y: param_y,
-                color: grey,
-                font_size: 12.0,
-            });
-            param_y += 16.0;
-        }
-
-        // Point size + variation editing target
-        let var_weight = self
-            .selection()
-            .map_or(0.0, |i| self.scene.transforms[i].variations[self.selected_variation]);
-        let splat_info = match self.render_mode {
-            RenderMode::Points => String::new(),
-            RenderMode::Splat => format!(" | splat [R] exp={:.2}", self.exposure),
-        };
-        entries.push(TextEntry {
-            text: format!(
-                "pt size={:.4} | var slot [E]: {} {:+.2}{}",
-                self.point_size,
-                crate::scene::VARIATION_NAMES[self.selected_variation],
-                var_weight,
-                splat_info,
-            ),
-            x: 10.0,
-            y: param_y,
-            color: grey,
-            font_size: 12.0,
-        });
-        param_y += 16.0;
-
-        // Color params (only if not default)
-        if self.color_falloff > 0.0 || self.color_contrast != 1.0 {
-            entries.push(TextEntry {
-                text: format!(
-                    "color: falloff={:.2} contrast={:.2}",
-                    self.color_falloff, self.color_contrast,
-                ),
-                x: 10.0,
-                y: param_y,
-                color: grey,
-                font_size: 12.0,
-            });
-            param_y += 16.0;
-        }
-
-        // Fog params (only if not default)
-        if self.fog_brightness < 1.0 || self.fog_saturation < 1.0 {
-            entries.push(TextEntry {
-                text: format!(
-                    "fog: near={:.1} far={:.1} b={:.2} s={:.2}",
-                    self.fog_near, self.fog_far, self.fog_brightness, self.fog_saturation,
-                ),
-                x: 10.0,
-                y: param_y,
-                color: grey,
-                font_size: 12.0,
-            });
-        }
-
-        // The per-transform list used to render here as a right-side text
-        // block (name/position/scale/weight/variations per row). Phase 4
-        // replaced it with the Transforms window's list + inspector (see
-        // src/ui/transforms.rs), which shows the same information plus
-        // live editing — so it's retired rather than kept in parallel. The
-        // point-size / targeted-variation-slot line above and the
-        // world-space gizmo name labels below are unrelated HUD elements
-        // and stay (the labels are explicitly Phase 6 scope per the plan).
-
-        // === World-space gizmo labels ===
-        for (i, spec) in self.scene.transforms.iter().enumerate() {
-            let is_enabled = self.transform_enabled.get(i).copied().unwrap_or(true);
-            let is_selected = self.selected_transform == Some(i);
-            let origin = spec.matrix.w_axis.truncate();
-            if let Some((sx, sy)) = world_to_screen(origin, view_proj, width, height) {
-                let name = self.scene.transform_names
-                    .get(i)
-                    .and_then(|n| n.as_deref())
-                    .unwrap_or("");
-                let label = if name.is_empty() {
-                    format!("T{}", i)
-                } else {
-                    name.to_string()
-                };
-
-                if is_selected {
-                    // Draw background highlight for selected label
-                    let bg_chars: String = "\u{2588}".repeat(label.len() + 2);
-                    entries.push(TextEntry {
-                        text: bg_chars,
-                        x: sx + 4.0,
-                        y: sy - 7.0,
-                        color: [255, 255, 255, 200],
-                        font_size: 13.0,
-                    });
-                    entries.push(TextEntry {
-                        text: format!(" {} ", label),
-                        x: sx + 4.0,
-                        y: sy - 6.0,
-                        color: [0, 0, 0, 255],
-                        font_size: 13.0,
-                    });
-                } else {
-                    let alpha: u8 = if is_enabled { 200 } else { 80 };
-                    entries.push(TextEntry {
-                        text: label,
-                        x: sx + 8.0,
-                        y: sy - 6.0,
-                        color: [255, 255, 255, alpha],
-                        font_size: 13.0,
-                    });
-                }
-            }
-        }
-
-        entries
     }
 
     /// Render one frame, including the egui pass (`egui_renderer`/`paint_jobs`/

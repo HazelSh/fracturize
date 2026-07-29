@@ -1,0 +1,439 @@
+//! Random flame generator: a whole new `Scene` from nothing, for the Explore
+//! window's dice button.
+//!
+//! Randomising an IFS is easy; randomising one that *renders* is not. Most
+//! random parameter sets either collapse to a point or diverge to a haze, so
+//! every candidate is run through a short CPU chaos game (the same `trace.rs`
+//! walkers the GPU shader mirrors) and rejected unless it settles into a
+//! bounded attractor with real extent on more than one axis. Up to
+//! `MAX_ATTEMPTS` tries; the last candidate is kept if none pass, so the
+//! button always produces something rather than hanging.
+
+use glam::{Mat4, Quat, Vec3};
+use rand::Rng;
+
+use crate::path::CameraPath;
+use crate::scene::{
+    generate_colormap, resolve_color_speeds, Scene, TransformSpec, NUM_VARIATIONS,
+    VARIATION_NAMES,
+};
+use crate::trace::{Walker, BURN_IN_STEPS};
+
+/// Variations that stay bounded under repeated application in 3D. Notably
+/// absent: `spherical`, whose 1/r² inversion reliably blows scenes out (see
+/// AGENTS.md) — it's a fine thing to reach for by hand, a bad thing to roll.
+const FRIENDLY: &[&str] = &[
+    "sinusoidal",
+    "swirl",
+    "bubble",
+    "fisheye",
+    "julia",
+    "horseshoe",
+    "disc",
+    "spiral",
+    "bulb",
+];
+
+const MAX_ATTEMPTS: usize = 20;
+/// Chaos-game steps per quality check. Still cheap: ~4k steps over ≤5
+/// transforms, and the occupancy measure below wants the sample count.
+const QC_STEPS: usize = 4_000;
+/// Attractor radius bounds. Below the floor it's collapsed to a speck, above
+/// the ceiling it's a diverging haze that no camera framing will save.
+const MIN_RADIUS: f32 = 0.15;
+const MAX_RADIUS: f32 = 8.0;
+/// Per-axis standard deviation under which the attractor is degenerate (a
+/// point or a line rather than a form). At least two axes must clear it.
+const MIN_AXIS_SPREAD: f32 = 0.02;
+/// Occupancy grid resolution for the "is this just a blob" test.
+const OCCUPANCY_CELLS: usize = 10;
+/// Fraction of the bounding box's cells the attractor may fill before it
+/// reads as a solid lump rather than a fractal. A set that fills space
+/// uniformly puts a point in nearly every cell at this sample count; the
+/// dusty, self-similar structure this renderer exists for does not.
+const MAX_OCCUPANCY: f32 = 0.22;
+/// The second-widest axis must be at least this fraction of the widest.
+/// The absolute floor above only catches literal degeneracy; this catches
+/// the far more common near-miss — a thin ribbon or filament that technically
+/// has extent on two axes but reads as a line on screen.
+const MIN_AXIS_RATIO: f32 = 0.25;
+
+/// Build a random flame that passes the quality gate.
+pub fn random_flame(rng: &mut impl Rng) -> Scene {
+    let mut last = build_candidate(rng);
+    for attempt in 0..MAX_ATTEMPTS {
+        if let Some(stats) = attractor_stats(&last.transforms) {
+            log::debug!(
+                "Random flame attempt {}: r95 {:.3}, spread {:?}, occupancy {:.3} -> {}",
+                attempt,
+                stats.radius,
+                stats.spread,
+                stats.occupancy,
+                if stats.acceptable() { "accept" } else { "reject" },
+            );
+            if stats.acceptable() {
+                return finish(last, stats.center, stats.radius);
+            }
+        }
+        last = build_candidate(rng);
+    }
+    // Nothing passed — hand back the last roll anyway with a neutral framing
+    // rather than looping forever or returning an error the UI can't act on.
+    log::warn!("Random flame: no candidate passed the quality gate in {} tries", MAX_ATTEMPTS);
+    finish(last, Vec3::ZERO, 1.0)
+}
+
+/// A candidate before quality checking: just the parts the chaos game needs.
+struct Candidate {
+    transforms: Vec<TransformSpec>,
+    names: Vec<Option<String>>,
+    colors: Vec<Vec3>,
+}
+
+fn build_candidate(rng: &mut impl Rng) -> Candidate {
+    // Transform count: 3 and 4 are the sweet spot for legible structure.
+    let roll: f32 = rng.r#gen();
+    let n = match roll {
+        r if r < 0.15 => 2,
+        r if r < 0.55 => 3,
+        r if r < 0.85 => 4,
+        _ => 5,
+    };
+
+    let mut transforms = Vec::with_capacity(n);
+    for _ in 0..n {
+        transforms.push(random_transform(rng));
+    }
+
+    // An IFS only converges if it contracts on average. Rescale everything if
+    // the mean linear contraction is too close to 1.
+    let mean: f32 = transforms
+        .iter()
+        .map(|t| mean_singular_value(t.matrix))
+        .sum::<f32>()
+        / n as f32;
+    if mean > 0.85 {
+        let fix = 0.75 / mean;
+        for t in &mut transforms {
+            let (s, r, p) = t.matrix.to_scale_rotation_translation();
+            t.matrix = Mat4::from_scale_rotation_translation(s * fix, r, p);
+        }
+    }
+
+    // Variations: a good fraction of flames are best left purely affine
+    // (Sierpinski-family forms), so only reach for nonlinearity sometimes.
+    if rng.r#gen::<f32>() >= 0.4 {
+        let touched = rng.gen_range(1..=2.min(n));
+        for _ in 0..touched {
+            let idx = rng.gen_range(0..n);
+            let name = FRIENDLY[rng.gen_range(0..FRIENDLY.len())];
+            let slot = VARIATION_NAMES.iter().position(|&v| v == name).unwrap();
+            let w = rng.gen_range(0.25..0.8);
+            transforms[idx].variations[slot] = w;
+            // Keep the total blend near 1 so the transform's overall scale
+            // stays in the range the contraction check just established.
+            transforms[idx].variations[0] = 1.0 - w;
+        }
+    }
+
+    // Palette: one base hue plus a scheme, so the colors relate rather than
+    // clash. color_value spreads the transforms around the gradient.
+    let base_hue: f32 = rng.gen_range(0.0..360.0);
+    let scheme = rng.gen_range(0..3);
+    let colors: Vec<Vec3> = (0..n)
+        .map(|i| {
+            let offset = match scheme {
+                0 => rng.gen_range(-25.0..25.0),                  // analogous
+                1 => if i % 2 == 0 { 0.0 } else { 180.0 },        // complementary
+                _ => (i % 3) as f32 * 120.0,                      // triadic
+            };
+            hsv_to_rgb(
+                base_hue + offset,
+                rng.gen_range(0.6..1.0),
+                rng.gen_range(0.7..1.0),
+            )
+        })
+        .collect();
+
+    for (i, t) in transforms.iter_mut().enumerate() {
+        t.color_value = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
+    }
+
+    Candidate {
+        transforms,
+        names: (0..n).map(|i| Some(format!("t{}", i))).collect(),
+        colors,
+    }
+}
+
+fn random_transform(rng: &mut impl Rng) -> TransformSpec {
+    // Translation: uniform-ish inside a ball, so transforms don't all pile up
+    // near the origin the way independent per-axis ranges would.
+    let dir = Vec3::new(
+        rng.gen_range(-1.0..1.0),
+        rng.gen_range(-1.0..1.0),
+        rng.gen_range(-1.0..1.0),
+    );
+    let dir = if dir.length_squared() < 1e-6 { Vec3::X } else { dir.normalize() };
+    let translation = dir * rng.gen_range(0.0f32..0.9).cbrt() * 0.9;
+
+    let rotation = random_quat(rng);
+
+    // Log-uniform so 0.35 and 0.75 are equally likely to be *interesting*,
+    // rather than the top of the range dominating.
+    let base = (rng.gen_range(0.35f32.ln()..0.75f32.ln())).exp();
+    let scale = if rng.r#gen::<f32>() < 0.3 {
+        // Squash one axis: this is what turns blobs into sheets and ribbons.
+        let mut s = Vec3::splat(base);
+        s[rng.gen_range(0..3)] = base * rng.gen_range(0.15..0.6);
+        s
+    } else {
+        Vec3::splat(base)
+    };
+
+    let mut variations = [0.0f32; NUM_VARIATIONS];
+    variations[0] = 1.0;
+
+    TransformSpec {
+        matrix: Mat4::from_scale_rotation_translation(scale, rotation, translation),
+        color_value: 0.5,
+        weight: rng.gen_range(0.5..2.0),
+        color_speed: 0.5,
+        explicit_color_speed: None,
+        variations,
+    }
+}
+
+/// Uniformly-distributed random rotation (Shoemake's subgroup method).
+fn random_quat(rng: &mut impl Rng) -> Quat {
+    let u1: f32 = rng.r#gen();
+    let u2: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
+    let u3: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
+    let (s1, s2) = ((1.0 - u1).sqrt(), u1.sqrt());
+    Quat::from_xyzw(s1 * u2.sin(), s1 * u2.cos(), s2 * u3.sin(), s2 * u3.cos())
+}
+
+/// Geometric mean of a matrix's axis lengths — a cheap stand-in for "how much
+/// does this map shrink space", good enough for the contraction check.
+fn mean_singular_value(m: Mat4) -> f32 {
+    let (s, _, _) = m.to_scale_rotation_translation();
+    (s.x.abs() * s.y.abs() * s.z.abs()).cbrt()
+}
+
+struct Stats {
+    /// Centroid of the visited points — the attractor rarely sits on the
+    /// origin, and framing the camera there instead pushes it off to one
+    /// side of the view.
+    center: Vec3,
+    /// 95th-percentile distance from the centroid. Deliberately *not* the
+    /// maximum: chaos-game walkers throw occasional far outliers, and framing
+    /// the camera on those leaves the actual form a speck in the middle of an
+    /// empty frame.
+    radius: f32,
+    /// Per-axis standard deviation of the visited points
+    spread: Vec3,
+    /// Fraction of the bounding box's cells that contain any point
+    occupancy: f32,
+}
+
+impl Stats {
+    fn acceptable(&self) -> bool {
+        if !(self.radius.is_finite() && (MIN_RADIUS..=MAX_RADIUS).contains(&self.radius)) {
+            return false;
+        }
+        // A form, not a point or a line: at least two axes with real extent,
+        // both in absolute terms and relative to the widest one.
+        let mut axes = [self.spread.x, self.spread.y, self.spread.z];
+        axes.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        if axes[1] <= MIN_AXIS_SPREAD || axes[0] <= 0.0 {
+            return false;
+        }
+        if axes[1] / axes[0] < MIN_AXIS_RATIO {
+            return false;
+        }
+        // Structure, not a lump.
+        self.occupancy <= MAX_OCCUPANCY
+    }
+}
+
+/// Run the CPU chaos game and measure where it lands. `None` when no walker
+/// can be built (all weights zero) or the orbit goes non-finite.
+fn attractor_stats(transforms: &[TransformSpec]) -> Option<Stats> {
+    // Fixed seed: the *candidate* is random, but the acceptance test should
+    // be deterministic, so a flame that passes here can't fail on a re-roll.
+    let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
+    let enabled = vec![true; transforms.len()];
+    let mut walker = Walker::new(transforms, &enabled, &mut rng)?;
+
+    for _ in 0..BURN_IN_STEPS {
+        walker.step(&mut rng);
+    }
+
+    let mut points = Vec::with_capacity(QC_STEPS);
+    let mut sum = Vec3::ZERO;
+    let mut sum_sq = Vec3::ZERO;
+    for _ in 0..QC_STEPS {
+        walker.step(&mut rng);
+        let p = walker.pos;
+        if !p.is_finite() {
+            return None;
+        }
+        sum += p;
+        sum_sq += p * p;
+        points.push(p);
+    }
+
+    let n = QC_STEPS as f32;
+    let mean = sum / n;
+    let var = (sum_sq / n - mean * mean).max(Vec3::ZERO);
+
+    let mut radii: Vec<f32> = points.iter().map(|p| (*p - mean).length()).collect();
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let radius = radii[(radii.len() as f32 * 0.95) as usize % radii.len()];
+
+    Some(Stats {
+        center: mean,
+        radius,
+        spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
+        occupancy: occupancy(&points, mean, radius),
+    })
+}
+
+/// Fraction of a coarse grid over the attractor's core that holds any point.
+/// Points beyond `radius` (the 5% outlier tail) are ignored so a few stray
+/// walkers can't inflate the box and make a blob look sparse.
+fn occupancy(points: &[Vec3], center: Vec3, radius: f32) -> f32 {
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    let cells = OCCUPANCY_CELLS;
+    let mut filled = vec![false; cells * cells * cells];
+    let scale = cells as f32 / (2.0 * radius);
+    for p in points {
+        let local = (*p - center) * scale + Vec3::splat(cells as f32 * 0.5);
+        if local.min_element() < 0.0 || local.max_element() >= cells as f32 {
+            continue;
+        }
+        let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
+        filled[(z * cells + y) * cells + x] = true;
+    }
+    filled.iter().filter(|&&f| f).count() as f32 / (cells * cells * cells) as f32
+}
+
+/// Wrap an accepted candidate up as a full `Scene`, framed for its size.
+fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
+    let color_speed = 0.5;
+    let color_falloff = if rand::thread_rng().r#gen::<f32>() < 0.4 {
+        rand::thread_rng().gen_range(0.6..1.2)
+    } else {
+        0.0
+    };
+    resolve_color_speeds(&mut c.transforms, color_speed, color_falloff);
+    let colormap = generate_colormap(&c.colors);
+
+    Scene {
+        name: format!("random-{}", crate::app::unix_timestamp()),
+        author: "fracturize random flame".to_string(),
+        // Scale the dot size with the attractor: the same point size that
+        // looks dusty on a radius-3 form is a solid mass on a radius-0.3 one.
+        point_size: (radius * 0.0018).clamp(0.0008, 0.012),
+        points_per_frame: 100_000,
+        point_count: 500_000,
+        decay: 0.8,
+        color_speed,
+        color_falloff,
+        color_contrast: 1.0,
+        transforms: c.transforms,
+        transform_names: c.names,
+        colors: c.colors,
+        colormap,
+        camera_focus: center,
+        // ~2.4x the 95th-percentile radius fills the frame without clipping
+        // the tail. Framing on the raw maximum instead left most flames a
+        // speck in the middle of an empty view.
+        camera_distance: (radius * 2.4).clamp(0.8, 12.0),
+        camera_yaw: 0.0,
+        camera_pitch: 0.3,
+        camera_path: None::<CameraPath>,
+    }
+}
+
+/// HSV (h in degrees, s/v in 0-1) to linear RGB (0-1). Mirrors the private
+/// helper in app.rs; kept local so this module stays free of UI deps.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Vec3::new(r, g, b) + Vec3::splat(v - c)
+}
+
+use rand::SeedableRng;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    /// The generator's whole job is to not hand back garbage. Roll a batch
+    /// across different seeds and hold every one to the same bar the gate
+    /// applies — no panics, no NaN, no collapsed or exploded attractors.
+    #[test]
+    fn random_flames_are_renderable() {
+        for seed in 0..12u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let scene = random_flame(&mut rng);
+
+            assert!(
+                (2..=5).contains(&scene.transforms.len()),
+                "seed {}: transform count {} out of range",
+                seed,
+                scene.transforms.len()
+            );
+            assert_eq!(scene.colors.len(), scene.transforms.len());
+            assert_eq!(scene.transform_names.len(), scene.transforms.len());
+            assert!(scene.point_size > 0.0 && scene.point_size.is_finite());
+            assert!(scene.camera_distance.is_finite() && scene.camera_distance > 0.0);
+
+            for t in &scene.transforms {
+                assert!(
+                    t.matrix.to_cols_array().iter().all(|v| v.is_finite()),
+                    "seed {}: non-finite matrix",
+                    seed
+                );
+                assert!(t.weight > 0.0, "seed {}: non-positive weight", seed);
+            }
+
+            let stats = attractor_stats(&scene.transforms)
+                .unwrap_or_else(|| panic!("seed {}: no walker could be built", seed));
+            assert!(
+                stats.acceptable(),
+                "seed {}: attractor radius {:.3}, spread {:?} — the gate let a bad flame through",
+                seed,
+                stats.radius,
+                stats.spread
+            );
+        }
+    }
+
+    #[test]
+    fn spherical_is_never_rolled() {
+        // Guard the AGENTS.md rule: spherical's 1/r^2 inversion blows scenes
+        // out, so it must never appear in a rolled flame.
+        let slot = VARIATION_NAMES.iter().position(|&v| v == "spherical").unwrap();
+        for seed in 0..24u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let scene = random_flame(&mut rng);
+            for t in &scene.transforms {
+                assert_eq!(t.variations[slot], 0.0, "seed {}: rolled spherical", seed);
+            }
+        }
+    }
+}

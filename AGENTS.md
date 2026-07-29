@@ -13,8 +13,23 @@ blend), writing positions into a circular point buffer that is rendered every fr
 
 ```
 src/
-  main.rs        # CLI args, winit event loop, keybinds, default scene
-  app.rs         # App state, mouse/edit handling, render orchestration, HUD, screenshots
+  main.rs        # CLI args, winit event loop + egui event gating, keybinds, default scene
+  app.rs         # App state, mouse/edit handling, render orchestration, screenshots
+  history.rs     # Unified snapshot undo/redo behind App::commit_edit (all edits)
+  randomize.rs   # Random flame generator with a CPU chaos-game quality gate
+  ui/            # egui layer (see "Human Interface" below)
+    mod.rs         # EguiLayer, UiState, per-frame draw order, font install
+    toolbar.rs     # Top icon strip: panel toggles + scene name
+    status_bar.rs  # Bottom bar: context hints, FPS/p99 sparkline, point stats
+    hints.rs       # hinted(): tooltip + status-bar hint on one widget response
+    transforms.rs  # Transform list + selected-transform inspector (Mat4 <-> TRS)
+    explore.rs     # Random flame, mutate + strength, undo/redo, history list
+    render_panel.rs# Renderer mode, exposure, point size + count, color, fog
+    camera_panel.rs# Framing, saved views, camera paths, HQ render / screenshot
+    browser.rs     # Scene picker (B)
+    shortcuts.rs   # Keybind reference window (H)
+    labels.rs      # World-anchored transform name labels
+    icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
   path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
   avif.rs        # Animated AVIF writer: rav1e AV1 encode + minimal ISOBMFF muxer
@@ -32,7 +47,6 @@ src/
       splat.rs     # Splat mode: additive log-density accumulation + tonemap
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # Trace line-segment renderer
-    text.rs      # glyphon text overlay (HUD, transform list, help panel)
     density/     # Inactive experimental hash-grid density renderer
 shaders/
   points/chaos.wgsl   # Chaos game + the 20 variation functions
@@ -45,11 +59,14 @@ scenes/          # TOML scene files
 ## Tech Stack
 
 - **Rust 2024 edition** - `gen` is a reserved keyword, use `r#gen()` for rand
-- **wgpu 28** - Vulkan-backed; requires SHADER_F16 (fine on Intel UHD 620 + Mesa)
+- **wgpu 29** - Vulkan-backed; requires SHADER_F16 (fine on Intel UHD 620 + Mesa)
 - **winit 0.30** - ApplicationHandler pattern
-- **glyphon** (git, pinned rev) - text overlay. IMPORTANT: keep the `rev =` pin in
-  Cargo.toml; later glyphon revisions require wgpu 29 and break the build. Cargo.lock
-  is gitignored, so an unpinned git dep resolves differently on fresh checkouts.
+- **egui / egui-wgpu / egui-winit 0.35** - the entire human interface. Replaced the
+  hand-rolled glyphon overlay (deleted); these three must stay version-locked to each
+  other, and 0.35 is what pins wgpu to 29 and winit to >=0.30.13.
+- **Phosphor icons, vendored** - `assets/fonts/Phosphor.ttf` (MIT) registered as a
+  font fallback in `ui::install_fonts`, with the codepoints we use hand-copied into
+  `src/ui/icons.rs`. The `egui-phosphor` crate has no egui-0.35-compatible release.
 - **glam / bytemuck / toml + serde / clap / image** - math, GPU casts, scenes, CLI, PNG
 
 ## Rendering Approach
@@ -109,6 +126,9 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | drag an outer gizmo edge | rotate around the third local axis (edge x-y rotates around z) |
 | ctrl+drag any gizmo part | uniform scale (drag up = grow) |
 | scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
+| click a Transforms row | select that transform (two-way with gizmo selection) |
+| right-click a Transforms row | duplicate / enable-disable / delete / rename |
+| drag any panel DragValue | change the value; click it to type an exact one |
 
 Grabbable gizmo parts glow and grow on hover (edges widen and whiten, the
 origin dot enlarges) and the cursor switches to a grab hand. Gizmo drags
@@ -124,12 +144,12 @@ yaw/pitch/distance at load time and no longer written to files.
 
 | Key | Action |
 |-----|--------|
-| H / ? | toggle keybind help panel |
+| H / ? | toggle the Keybinds window |
 | Esc | quit |
 | Space | re-seed points (reset) |
-| Up / Down | zoom in / out (selects transform when overlay is on) |
+| Up / Down | zoom in / out (selects transform when a transform is selected) |
 | Enter | enable/disable selected transform |
-| T | toggle info overlay (HUD + transform list) |
+| T | toggle world-anchored transform name labels |
 | G | toggle transform gizmos |
 | O | pause / resume camera orbit |
 | Z | play / stop camera-path flythrough preview |
@@ -138,16 +158,17 @@ yaw/pitch/distance at load time and no longer written to files.
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
-| U / Shift+U | random scene mutation / undo it (32-deep undo stack) |
+| U / Shift+U | random scene mutation / undo it |
+| Ctrl+Z / Ctrl+Shift+Z | undo / redo *any* edit (see `src/history.rs`) |
 | X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
 | I | invert mouse pitch, flightsim style (persisted to prefs) |
-| B | scene browser overlay: arrows + Enter or click to load a scene in place |
+| B | Scenes window: arrows + Enter, or click a row, to load a scene in place |
 | P | background high-quality render of the current framing to renders/ (own GPU device; the realtime view keeps running; pauses orbit) |
 | A / Shift+A | duplicate selected transform / add a fresh one (rebuilds pipelines) |
 | Delete | delete selected transform |
 | , / . | selected transform's chaos weight down / up |
 | J / K / L | selected transform's color: hue / saturation / value up (+Shift = down) |
-| E / Shift+E | cycle the variation slot targeted by - / = (shown in HUD) |
+| E / Shift+E | cycle the variation slot targeted by - / = (shown in the status bar) |
 | - / = | targeted variation weight down / up (0.05 steps) on selected transform |
 | R | toggle renderer: points / splat (additive log-density) |
 | W / Shift+W | splat exposure up / down |
@@ -158,12 +179,18 @@ yaw/pitch/distance at load time and no longer written to files.
 | N / Shift+N | fog start closer / farther |
 | M / Shift+M | fog end closer / farther |
 
-The help panel (H) is clickable: each row triggers its first-listed binding,
-shift+click the second. The window is freely resizable. `I` persists to
+The Keybinds window (H) is clickable: each row triggers its first-listed
+binding, shift+click the second. `I` persists to
 `~/.config/fracturize/prefs.toml` (user preferences, not scene data).
 
+Every keybind above has a mouse equivalent in the panels (see "Human
+Interface"), and both go through the same `App` methods — neither is a
+reimplementation of the other, so they cannot drift.
+
 Ctrl+S also bakes the current camera framing, point size, and color
-falloff/contrast into the scene's defaults. **Saving preserves comments**:
+falloff/contrast into the scene's defaults. It no longer writes
+`point_count` (that's a render property now — see "Human Interface"), though
+a hand-authored `point_count` line in an existing file is preserved. **Saving preserves comments**:
 existing files are edited in place via toml_edit — only changed values are
 rewritten, so header/per-transform comments, inline `# notes`, and formatting
 like `6_000_000` survive. Two exceptions: a legacy camera `offset` key is
@@ -171,6 +198,68 @@ removed (folded into yaw/pitch/distance), and if transforms were added or
 removed the whole [[transform]] array is rebuilt (header/meta/camera comments
 still survive). Scenes with no path (built-in default) save to
 `scenes/untitled-<timestamp>.toml`.
+
+## Human Interface (egui panels)
+
+The app is Fracturize's *human* interface; scene/view TOMLs are its LLM and
+CLI interface. Both drive the same `App` methods, so an edit made by dragging
+a slider and one made by a keybind are the same edit, land in the same
+history, and save identically.
+
+Layout: a thin top toolbar of icon toggles (with the scene name at its right
+end), floating `egui::Window` panels over a full-surface viewport, and an
+Inkscape-style bottom status bar. Nothing shrinks the drawable area, so
+aspect and picking math are unaffected by which panels are open.
+
+| Window | What lives there |
+|--------|------------------|
+| Transforms | Row per transform (color swatch, eye toggle, weight, right-click menu), plus an inspector for the selected one: position/rotation/scale, weight, color, variations |
+| Explore | New random flame, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
+| Render | Renderer mode, exposure, point size, point count, color falloff/contrast, fog |
+| Camera | Framing, saved views, camera-path keypoints + playback, HQ render / screenshot / save scene |
+| Scenes (B) | Scene picker; the same selection the arrow keys walk |
+| Keybinds (H) | The table above, scrollable, rows clickable |
+
+Conventions worth keeping:
+
+- **Every interactive widget goes through `hints::hinted()`**, which attaches
+  a tooltip *and* sets the status bar's left-hand hint while hovered. The one
+  documented exception is a bare camera drag on empty viewport space, which
+  has no widget to hang a hint on and falls back to `HINT_VIEWPORT`.
+- **The status bar's right side is the performance instrument**: FPS, mean
+  frametime, p99 frametime and a 120-sample sparkline, plus live point stats.
+  p99 is the number to watch — mean FPS hides the stutters.
+- **Inspector fields are Mat4 <-> TRS.** A matrix that doesn't decompose
+  faithfully (shear, or a mirrored det<0 matrix) routes to a raw 3x4 grid
+  plus an "Orthogonalize -> TRS" button. Mutations produce such matrices, so
+  this path is load-bearing, not a corner case.
+- **Variation weights may be negative** (Apophysis-style: the blend is
+  `out += w * f(p)`), and a row stays put at 0 so a drag can pass through it.
+- **Point count is a render property, not scene data.** `App::buffer_capacity`
+  owns it; the Render window applies changes explicitly (reallocating the
+  buffer restarts warmup) and persists to prefs. Startup precedence is
+  `--points` > prefs > the scene file > default. The offline `--render` path
+  never reads prefs, so CLI renders stay reproducible from flags plus scene.
+- **All edits funnel through `App::commit_edit`** (`src/history.rs`), which
+  coalesces same-key edits inside 1s so a held key or a whole drag is one
+  undo step. Camera moves are deliberately *not* history entries.
+- When testing anything that touches prefs, set an isolated `XDG_CONFIG_HOME`
+  rather than writing the developer's real `~/.config/fracturize/prefs.toml`.
+
+## Random Flames
+
+`--random` (windowed or with `--render`) and the Explore window's dice button
+both call `randomize::random_flame`. Randomising an IFS is easy; randomising
+one that renders is not, so every candidate runs a short CPU chaos game
+(`trace.rs` walkers, the same variation port the shader uses) and is rejected
+unless it lands in a bounded attractor with real extent on two axes and
+*fractal* rather than solid occupancy. Up to 20 tries, then the last roll is
+kept so the button always returns something.
+
+`--random --seed N` is reproducible byte-for-byte; the seed is printed either
+way, so an interesting roll can always be recovered. `spherical` is never
+rolled (its 1/r^2 inversion blows scenes out — fine by hand, bad by dice).
+A rolled flame is a normal history entry: one Ctrl+Z restores what was there.
 
 ## Scene Files (TOML)
 
@@ -371,6 +460,11 @@ fracturize --scene scenes/glasshouse.toml --view views/glasshouse-123.toml \
 # evolve: original + 8 mutations, reproducible
 fracturize --scene scenes/koru.toml --render /tmp/koru_evo.png \
   --effort draft --mutations 8 --seed 42 --width 320 --height 180
+
+# roll random flames offline; --seed makes any roll reproducible, and the
+# seed used is always printed so a good one can be recovered
+fracturize --random --render /tmp/roll.png --effort low --width 480 --height 270
+fracturize --random --seed 7 --render /tmp/roll7.png --effort high
 
 # animated loop of a camera path (scenes/winze.toml authors one; see its
 # header comments) — preview small/cheap, then commit to the real encode

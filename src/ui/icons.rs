@@ -32,3 +32,5 @@ pub const EYE_SLASH: &str = "\u{E224}";
 /// in Envy Code R or egui's built-in fonts and renders as tofu, so use
 /// Phosphor's.
 pub const X: &str = "\u{E4F6}";
+/// Roll a new random flame (Explore window) — Phosphor `dice-five`
+pub const DICE: &str = "\u{E1EE}";

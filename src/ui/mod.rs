@@ -1,14 +1,16 @@
-//! egui UI layer.
+//! egui UI layer: a top icon toolbar, floating panel windows (Transforms,
+//! Explore, Render, Camera, Scenes, Keybinds), a bottom status bar with
+//! hover hints and an FPS/p99 tracker, and world-anchored gizmo labels —
+//! over vendored Phosphor icons and a best-effort Envy Code R.
 //!
-//! Phase 1 got an `EguiLayer` wired into the winit event loop and the wgpu
-//! render pass, keeping every existing overlay (HUD, help panel, browser,
-//! gizmo labels) alive via a temporary "legacy text shim". Phase 2 adds the
-//! real UI around it: a top icon toolbar, four `egui::Window` skeletons
-//! (Explore and Render wired to live controls; Transforms/Camera are
-//! placeholders until Phases 4/5), a bottom status bar with hover hints and
-//! an FPS/p99 tracker, vendored Phosphor icons, and a best-effort Envy Code R
-//! load. None of this runs on the offline (`--render`) path, which never
-//! constructs an `EguiLayer`.
+//! The viewport itself stays the full surface; nothing here shrinks it. None
+//! of this runs on the offline (`--render`) path, which never constructs an
+//! `EguiLayer`.
+//!
+//! The `TextEntry` "legacy text shim" that carried the old hand-rolled
+//! glyphon overlays through Phases 1-5 is gone: every one of its callers
+//! (HUD readouts, keybind panel, scene browser, gizmo labels) now has real
+//! widgets, in the panels and in `labels.rs`.
 
 use std::sync::Arc;
 
@@ -16,40 +18,22 @@ use winit::window::Window;
 
 use crate::prefs::PanelPrefs;
 
+pub mod browser;
 pub mod camera_panel;
 pub mod explore;
 pub mod hints;
 pub mod icons;
+pub mod labels;
 pub mod render_panel;
 pub mod shortcuts;
 pub mod status_bar;
 pub mod toolbar;
 pub mod transforms;
 
-/// A single line of legacy overlay text (HUD, help panel, browser rows,
-/// world-space gizmo labels). Positions/sizes are in *physical* pixels, as
-/// they always were; `draw_legacy_text` converts to egui's logical-point
-/// space by dividing by `pixels_per_point`. Existing app-side click
-/// hit-tests (help rows, browser rows) operate on these same physical
-/// coordinates and are unaffected.
-///
-/// Deleted along with the shim in Phase 6, once real egui panels/windows
-/// replace every one of its callers.
-pub struct TextEntry {
-    pub text: String,
-    pub x: f32,
-    pub y: f32,
-    pub color: [u8; 4],
-    pub font_size: f32,
-}
-
 /// Plain-data UI state living on `App` (not on `AppWrapper`/`EguiLayer` —
 /// those own the egui machinery itself).
 pub struct UiState {
-    /// This frame's legacy `TextEntry` list, rebuilt in `App::update()` from
-    /// `build_text_entries` and painted every frame by `draw_legacy_text`.
-    pub legacy_entries: Vec<TextEntry>,
-    /// Open/closed state of the four Phase 2 panel windows. Mirrors
+    /// Open/closed state of the four toolbar-toggled panel windows. Mirrors
     /// `Prefs::panels`; `App::panel_prefs_changed` writes back and persists
     /// the moment it differs (toolbar toggle and a window's own close
     /// button both mutate this same value, so they can't go out of sync).
@@ -80,27 +64,17 @@ pub struct UiState {
     /// because applying it reallocates the point buffer and restarts warmup,
     /// so it happens on the Apply button rather than on every drag frame.
     pub pending_point_count: Option<f32>,
-    /// Bottom edge of the top toolbar in *physical* pixels, recorded by
-    /// `toolbar::draw` and read by `App::build_text_entries` so the legacy
-    /// HUD lines start below the toolbar instead of underneath it. One frame
-    /// stale (the HUD is built before the UI runs), which is invisible for a
-    /// value that only changes with DPI.
-    pub viewport_top_px: f32,
 }
 
 impl UiState {
     fn new(panels: PanelPrefs) -> Self {
         Self {
-            legacy_entries: Vec::new(),
             panels,
             status_hint: None,
             trs_cache: None,
             renaming_transform: None,
             variation_rows: (usize::MAX, Vec::new()),
             pending_point_count: None,
-            // Sensible pre-first-frame value; overwritten by the toolbar on
-            // frame 1, before the HUD is ever visible.
-            viewport_top_px: 28.0,
         }
     }
 }
@@ -119,40 +93,9 @@ impl UiState {
     }
 }
 
-/// Paint every legacy `TextEntry` via an egui foreground-layer painter, so
-/// the HUD/help/browser/gizmo-label overlays keep rendering with no
-/// dedicated text renderer of their own. `pixels_per_point` bridges
-/// physical (entry) to logical (egui) space; this and the gizmo world-space
-/// labels are the only such bridges (see AGENTS.md / plan doc).
-pub fn draw_legacy_text(ctx: &egui::Context, entries: &[TextEntry], pixels_per_point: f32) {
-    if entries.is_empty() {
-        return;
-    }
-    // `Order::Background`, not `Foreground`: these are viewport decorations
-    // (HUD readouts, world-anchored gizmo labels) that belong *under* the
-    // panels. On Foreground a gizmo label whose transform happened to sit
-    // behind the Transforms window painted straight across the inspector.
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("fracturize_legacy_text_shim"),
-    ));
-    for entry in entries {
-        let pos = egui::pos2(entry.x / pixels_per_point, entry.y / pixels_per_point);
-        let font = egui::FontId::monospace(entry.font_size / pixels_per_point);
-        let color = egui::Color32::from_rgba_unmultiplied(
-            entry.color[0],
-            entry.color[1],
-            entry.color[2],
-            entry.color[3],
-        );
-        painter.text(pos, egui::Align2::LEFT_TOP, &entry.text, font, color);
-    }
-}
-
-/// Build this frame's egui UI: toolbar, panel windows, status bar, and the
-/// legacy-text shim (HUD/help/browser/gizmo labels), in that order — the
-/// status bar must draw after the toolbar/windows so it can read any
-/// `hinted()` hover hint they set this frame.
+/// Build this frame's egui UI: toolbar, panel windows, status bar, gizmo
+/// labels — in that order. The status bar must draw after the toolbar and
+/// windows so it can read any `hinted()` hover hint they set this frame.
 ///
 /// `ui` is the top-level root `Ui` handed to `ctx.run_ui`'s closure: egui
 /// 0.35 replaced `TopBottomPanel`/`SidePanel` with a unified `Panel` type
@@ -164,16 +107,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     app.ui_state.status_hint = None;
     let ctx = ui.ctx().clone();
 
-
     toolbar::draw(ui, app);
     explore::draw(&ctx, app);
     render_panel::draw(&ctx, app);
     transforms::draw(&ctx, app);
     camera_panel::draw(&ctx, app);
+    browser::draw(&ctx, app);
     shortcuts::draw(&ctx, app);
     status_bar::draw(ui, app);
 
-    draw_legacy_text(&ctx, &app.ui_state.legacy_entries, ctx.pixels_per_point());
+    labels::draw(&ctx, app);
 
     // Persist panel open/closed state the instant it changes (toolbar
     // toggle or a window's close button) — same pattern as invert_pitch.

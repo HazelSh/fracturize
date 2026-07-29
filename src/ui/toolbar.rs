@@ -9,8 +9,7 @@ use super::hints::hinted;
 use super::icons;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
-    let ppp = ui.ctx().pixels_per_point();
-    let panel = egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
+    egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -78,8 +77,4 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         });
         ui.add_space(2.0);
     });
-
-    // Hand the toolbar's bottom edge (physical px) to the legacy HUD so its
-    // remaining lines start below us. See `UiState::viewport_top_px`.
-    app.ui_state.viewport_top_px = panel.response.rect.bottom() * ppp;
 }

@@ -1266,7 +1266,7 @@ color = [0.9, 0.5, 0.2]
 /// Generate a 256-color gradient from transform colors
 /// Creates smooth interpolation between colors spaced evenly across the gradient
 /// Always cyclic (last color blends to first)
-fn generate_colormap(colors: &[Vec3]) -> Colormap {
+pub fn generate_colormap(colors: &[Vec3]) -> Colormap {
     let mut colormap = [[0.0f32; 4]; 256];
 
     if colors.is_empty() {

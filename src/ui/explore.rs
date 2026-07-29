@@ -20,6 +20,18 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .default_pos(egui::pos2(20.0, 60.0))
         .default_width(240.0)
         .show(ctx, |ui| {
+            let resp = ui.button(format!("{}  New random flame", super::icons::DICE));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Roll a whole new flame from nothing. Quality-checked on the CPU first, so it always renders — and it's one Ctrl+Z away from what you have now.",
+                "click: generate a random flame",
+            );
+            if resp.clicked() {
+                app.random_flame();
+            }
+            ui.separator();
+
             let mut strength = app.mutate_strength();
             let resp = ui.add(
                 egui::Slider::new(&mut strength, 0.1..=3.0)
