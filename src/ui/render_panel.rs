@@ -1,10 +1,10 @@
 //! Render window: everything that decides how the accumulated points get
 //! turned into pixels — renderer mode, exposure, point size, buffer capacity,
-//! fog, and color falloff/contrast.
+//! haze, and color falloff/contrast.
 //!
 //! Which controls commit history is deliberate (see the matching setters on
 //! `App`): parameters Ctrl+S writes back into the scene TOML are edits and
-//! are undoable; view-only knobs (mode, exposure, fog) and the performance-
+//! are undoable; view-only knobs (mode, exposure) and the performance-
 //! only point count are not, exactly matching their keybind counterparts.
 
 use crate::app::{App, RenderMode};
@@ -26,7 +26,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.separator();
             draw_color(ui, app);
             ui.separator();
-            draw_fog(ui, app);
+            draw_haze(ui, app);
             ui.separator();
             draw_output(ui, app);
         });
@@ -235,48 +235,49 @@ fn draw_color(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// One slider, and a disclosure for the band it normally works out itself.
-/// The four raw shader knobs this replaced are documented in `src/fog.rs`,
-/// along with why exposing them was the mistake.
-fn draw_fog(ui: &mut egui::Ui, app: &mut App) {
-    let mut amount = app.fog_amount;
+/// The four raw shader knobs this replaced are documented in `src/haze.rs`,
+/// along with why exposing them was the mistake — and why this is called haze
+/// rather than fog now that it thins distant material instead of darkening it.
+fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
+    let mut amount = app.haze_amount;
     let resp = ui.add(
         egui::Slider::new(&mut amount, 0.0..=1.0)
             .fixed_decimals(2)
-            .text("fog"),
+            .text("haze"),
     );
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Depth cue: fades distant points toward the background so you can read \
-         which arm is in front. The band it fades across follows the camera \
-         distance automatically (F / Shift+F)",
-        "drag: adjust fog",
+        "Aerial perspective: distant material thins toward the background and \
+         loses colour, so you can read which arm is in front. The band it fades \
+         across follows the camera distance automatically (F / Shift+F)",
+        "drag: adjust haze",
     );
     if resp.changed() {
-        app.set_fog_amount(amount);
+        app.set_haze_amount(amount);
     }
 
-    ui.collapsing("fog band", |ui| {
-        let (auto_near, auto_far) = crate::fog::auto_band(app.camera.distance);
-        let mut pinned = app.fog_band.is_some();
+    ui.collapsing("haze band", |ui| {
+        let (auto_near, auto_far) = crate::haze::auto_band(app.camera.distance);
+        let mut pinned = app.haze_band.is_some();
         let resp = ui.checkbox(&mut pinned, "pin the band");
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Off: the fog band tracks the camera distance, so it keeps working \
+            "Off: the haze band tracks the camera distance, so it keeps working \
              as you zoom. On: hold it at fixed world-space distances.",
-            "click: pin or unpin the fog band",
+            "click: pin or unpin the haze band",
         );
         if resp.changed() {
             // Pinning starts from whatever the auto band currently is, so
             // the picture doesn't jump the moment you take control.
-            app.fog_band = pinned.then_some((auto_near, auto_far));
+            app.haze_band = pinned.then_some((auto_near, auto_far));
         }
 
         // Shown disabled rather than hidden when auto: the resolved band is
         // worth being able to read, and hiding it would leave "pin the band"
         // with nothing to say what it would pin.
-        let (mut near, mut far) = app.fog_range();
+        let (mut near, mut far) = app.haze_range();
         ui.add_enabled_ui(pinned, |ui| {
             ui.horizontal(|ui| {
                 let resp = ui.add(
@@ -289,7 +290,7 @@ fn draw_fog(ui: &mut egui::Ui, app: &mut App) {
                     resp,
                     &mut app.ui_state,
                     "World distance where the fade starts",
-                    "drag: move the fog's near plane",
+                    "drag: move the haze's near plane",
                 )
                 .changed();
 
@@ -303,12 +304,12 @@ fn draw_fog(ui: &mut egui::Ui, app: &mut App) {
                     resp,
                     &mut app.ui_state,
                     "World distance where the fade reaches full strength",
-                    "drag: move the fog's far plane",
+                    "drag: move the haze's far plane",
                 )
                 .changed();
 
                 if changed_near || changed_far {
-                    app.fog_band = Some((near.min(far - 0.05), far));
+                    app.haze_band = Some((near.min(far - 0.05), far));
                 }
             });
         });

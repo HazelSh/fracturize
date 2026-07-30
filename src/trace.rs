@@ -271,6 +271,108 @@ pub fn generate_traces(
     traces
 }
 
+/// Steps sampled when measuring an attractor. Enough for a stable 95th
+/// percentile without being something you'd notice on a scene edit.
+pub const MEASURE_STEPS: usize = 4_000;
+
+/// Where a chaos game lands and how it's shaped — measured on the CPU, from
+/// the same walkers that draw the trace overlay.
+///
+/// Two callers want this and want it for different reasons, which is why it
+/// lives here with the walkers rather than with either of them:
+/// `randomize.rs` gates a rolled flame on it, and `App` uses the radius to
+/// work out how many points are worth *drawing* (see `App::drawn_points`) —
+/// an attractor that has collapsed to a speck doesn't get more legible for
+/// having six million points stacked on the same pixel, it just gets slower.
+#[derive(Clone, Copy, Debug)]
+pub struct AttractorStats {
+    /// Centroid of the visited points — the attractor rarely sits on the
+    /// origin, and framing the camera there instead pushes it off to one
+    /// side of the view.
+    pub center: Vec3,
+    /// 95th-percentile distance from the centroid. Deliberately *not* the
+    /// maximum: chaos-game walkers throw occasional far outliers, and framing
+    /// the camera on those leaves the actual form a speck in the middle of an
+    /// empty frame.
+    pub radius: f32,
+    /// Per-axis standard deviation of the visited points
+    pub spread: Vec3,
+    /// Fraction of the bounding box's cells that contain any point
+    pub occupancy: f32,
+}
+
+/// Run the CPU chaos game over the enabled transforms and measure where it
+/// lands. `None` when no walker can be built (all weights zero, nothing
+/// enabled) or the orbit goes non-finite.
+///
+/// Deterministic: a fixed seed, so the answer for a given set of transforms is
+/// always the same. `randomize.rs` needs that — a candidate that passed the
+/// quality gate must not fail it on a re-roll — and everything else benefits
+/// from a measurement that doesn't shimmer.
+pub fn measure(transforms: &[TransformSpec], enabled: &[bool]) -> Option<AttractorStats> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
+    let mut walker = Walker::new(transforms, enabled, &mut rng)?;
+
+    for _ in 0..BURN_IN_STEPS {
+        walker.step(&mut rng);
+    }
+
+    let mut points = Vec::with_capacity(MEASURE_STEPS);
+    let mut sum = Vec3::ZERO;
+    let mut sum_sq = Vec3::ZERO;
+    for _ in 0..MEASURE_STEPS {
+        walker.step(&mut rng);
+        let p = walker.pos;
+        if !p.is_finite() {
+            return None;
+        }
+        sum += p;
+        sum_sq += p * p;
+        points.push(p);
+    }
+
+    let n = MEASURE_STEPS as f32;
+    let mean = sum / n;
+    let var = (sum_sq / n - mean * mean).max(Vec3::ZERO);
+
+    let mut radii: Vec<f32> = points.iter().map(|p| (*p - mean).length()).collect();
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let radius = radii[(radii.len() as f32 * 0.95) as usize % radii.len()];
+
+    Some(AttractorStats {
+        center: mean,
+        radius,
+        spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
+        occupancy: occupancy(&points, mean, radius),
+    })
+}
+
+/// Fraction of a coarse grid over the attractor's core that holds any point.
+/// Points beyond `radius` (the 5% outlier tail) are ignored so a few stray
+/// walkers can't inflate the box and make a blob look sparse.
+fn occupancy(points: &[Vec3], center: Vec3, radius: f32) -> f32 {
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    const N: usize = 10;
+    let mut grid = [false; N * N * N];
+    let mut counted = 0usize;
+    for p in points {
+        let d = (*p - center) / radius;
+        if d.abs().max_element() > 1.0 {
+            continue;
+        }
+        let idx = |v: f32| ((v * 0.5 + 0.5) * N as f32).clamp(0.0, N as f32 - 1.0) as usize;
+        grid[idx(d.x) * N * N + idx(d.y) * N + idx(d.z)] = true;
+        counted += 1;
+    }
+    if counted == 0 {
+        return 1.0;
+    }
+    grid.iter().filter(|c| **c).count() as f32 / grid.len() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

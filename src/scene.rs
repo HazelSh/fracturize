@@ -172,14 +172,18 @@ pub struct SceneMeta {
     /// window's picker does the conversion for you.
     #[serde(default = "default_background")]
     pub background: [f64; 3],
-    /// Depth-cue fog strength, 0 (off) to 1. A single amount rather than the
+    /// Atmospheric-haze strength, 0 (off) to 1. A single amount rather than the
     /// four raw shader knobs: the near/far band auto-ranges off the camera
-    /// distance (see `App::fog_range`) and the brightness/saturation falloffs
-    /// are derived from this (see `App::fog_falloff`), so there is exactly one
-    /// number worth keeping with the artwork. Defaults to 0, which leaves
-    /// every scene authored before this existed looking exactly as it did.
-    #[serde(default)]
-    pub fog: f64,
+    /// distance (see `App::haze_range`) and the transmittance/saturation
+    /// falloffs are derived from this (see `App::haze_falloff`), so there is
+    /// exactly one number worth keeping with the artwork. Defaults to 0, which
+    /// leaves every scene authored before this existed looking as it did.
+    ///
+    /// Reads `fog` too: that's what this was called when it darkened distant
+    /// material instead of thinning it (see `src/haze.rs` for why it changed),
+    /// and scenes were saved with it.
+    #[serde(default, alias = "fog")]
+    pub haze: f64,
     /// Total point buffer size for the simple point renderer.
     /// If unset, defaults to 500k.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,8 +377,8 @@ pub struct Scene {
     pub color_falloff: f32,
     /// Render-time cyclic contrast stretch of the colormap index
     pub color_contrast: f32,
-    /// Depth-cue fog strength, 0 (off) to 1 — see `SceneMeta::fog`
-    pub fog: f32,
+    /// Atmospheric-haze strength, 0 (off) to 1 — see `SceneMeta::haze`
+    pub haze: f32,
     /// Background colour, linear RGB — see `SceneMeta::background`
     pub background: Vec3,
     /// IFS transforms (affine matrix + variation blend weights)
@@ -439,7 +443,7 @@ impl Scene {
             color_speed: default_color_speed() as f32,
             color_falloff: 0.0,
             color_contrast: default_color_contrast() as f32,
-            fog: 0.0,
+            haze: 0.0,
             transforms: vec![
                 map(0, Vec3::new(0.5, 0.5, 0.0)),
                 map(1, Vec3::new(-0.5, -0.5, 0.0)),
@@ -596,7 +600,7 @@ impl Scene {
             color_speed: scene_file.meta.color_speed as f32,
             color_falloff: (scene_file.meta.color_falloff as f32).max(0.0),
             color_contrast: (scene_file.meta.color_contrast as f32).max(0.0),
-            fog: (scene_file.meta.fog as f32).clamp(0.0, 1.0),
+            haze: (scene_file.meta.haze as f32).clamp(0.0, 1.0),
             background: Vec3::from(scene_file.meta.background.map(|v| v as f32))
                 .clamp(Vec3::ZERO, Vec3::ONE),
             transforms,
@@ -679,7 +683,7 @@ impl Scene {
                 color_speed: tidy(self.color_speed),
                 color_falloff: tidy(self.color_falloff),
                 color_contrast: tidy(self.color_contrast),
-                fog: tidy(self.fog),
+                haze: tidy(self.haze),
                 background: self.background.to_array().map(tidy),
                 // Point count is a render property chosen in the Render
                 // window and persisted to prefs, not part of the artwork, so
@@ -908,7 +912,12 @@ fn merge_scene_into_document(
         set_f64(meta, "color_speed", file.meta.color_speed, Some(0.5));
         set_f64(meta, "color_falloff", file.meta.color_falloff, Some(0.0));
         set_f64(meta, "color_contrast", file.meta.color_contrast, Some(1.0));
-        set_f64(meta, "fog", file.meta.fog, Some(0.0));
+        // `haze` was called `fog` when it darkened distant material rather
+        // than thinning it. The loader still reads either, so a file left
+        // holding both would be ambiguous — write the new key and drop the
+        // old one in the same breath.
+        meta.remove("fog");
+        set_f64(meta, "haze", file.meta.haze, Some(0.0));
         set_arr3(meta, "background", file.meta.background, Some(default_background()));
         if let Some(pc) = file.meta.point_count {
             set_i64(meta, "point_count", pc as i64, None);
@@ -1265,7 +1274,7 @@ color = [0.0, 1.0, 1.0]
 
         assert_eq!(reloaded.name, scene.name);
         assert_eq!(reloaded.color_falloff, scene.color_falloff);
-        assert!((reloaded.fog - 0.35).abs() < 1e-4, "fog {}", reloaded.fog);
+        assert!((reloaded.haze - 0.35).abs() < 1e-4, "haze {}", reloaded.haze);
         assert!(
             (reloaded.camera_roll - 0.35).abs() < 1e-4,
             "roll {}",

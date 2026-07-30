@@ -26,13 +26,24 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Camera, "Camera")
         .open(&mut open)
         .show(ctx, |ui| {
-            draw_framing(ui, app);
-            ui.separator();
-            draw_views(ui, app);
-            ui.separator();
+            // The output row is pinned to the bottom so the keypoint list in
+            // the middle gets every point of slack when the window is dragged
+            // taller. Without this the window is content-sized and resizing it
+            // just adds empty space under a 110pt list you still have to
+            // scroll — which is the one thing here that's ever long.
+            egui::Panel::bottom("fracturize_camera_output")
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    draw_output(ui, app);
+                });
+            egui::Panel::top("fracturize_camera_framing")
+                .show(ui, |ui| {
+                    draw_framing(ui, app);
+                    ui.separator();
+                    draw_views(ui, app);
+                    ui.separator();
+                });
             draw_path(ui, app);
-            ui.separator();
-            draw_output(ui, app);
         });
 
     super::remember(ctx, app, super::WindowKey::Camera);
@@ -128,7 +139,7 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Write the current framing (plus point size, fog and color) to views/ (V)",
+            "Write the current framing (plus point size, haze and color) to views/ (V)",
             "click: save this view",
         );
         if resp.clicked() {
@@ -190,10 +201,11 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
             .map(|k| (k.distance, k.yaw, k.pitch))
             .collect()
     });
-    let mut closed = app.camera_path().closed;
-    let seconds = app.camera_path().duration();
-    let explicit_seconds = app.camera_path().seconds.is_some();
-    let moving = app.camera_moving();
+    // Pinned below the list, so the list gets the slack from a taller window.
+    egui::Panel::bottom("fracturize_camera_path_controls").show(ui, |ui| {
+        ui.add_space(2.0);
+        draw_path_controls(ui, app, flying_default, authored);
+    });
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Camera path").strong());
@@ -248,10 +260,19 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         );
     }
 
+    // Every remaining point of the window goes to the list — see `draw`'s
+    // panel layout. `auto_shrink` off on the vertical axis is what makes the
+    // scroll area claim that space rather than hugging its rows.
+    //
+    // The scrollbar is pinned into the layout rather than left floating: a
+    // floating bar draws *over* the right edge of the content, which is
+    // exactly where each row's ✕ is, so removing a keypoint from a list long
+    // enough to scroll meant threading the pointer between the two.
+    ui.spacing_mut().scroll.floating = false;
     let mut remove: Option<usize> = None;
     egui::ScrollArea::vertical()
         .id_salt("fracturize_path_keys")
-        .max_height(110.0)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             for (i, (d, yaw, pitch)) in keys.iter().enumerate() {
                 ui.horizontal(|ui| {
@@ -269,7 +290,14 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
                         return;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let resp = ui.add(egui::Button::new(super::icons::X).small().frame(false));
+                        // A deliberate hit target rather than a glyph's own
+                        // ink: this is a destructive button in a scrolling
+                        // list, and it should be easy to hit on purpose.
+                        let resp = ui.add(
+                            egui::Button::new(super::icons::X)
+                                .frame(false)
+                                .min_size(egui::vec2(22.0, 18.0)),
+                        );
                         let resp = hinted(
                             resp,
                             &mut app.ui_state,
@@ -285,9 +313,11 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         });
     if let Some(i) = remove {
         app.remove_path_key_at(i);
-        return;
     }
+}
 
+/// The path's transport and shape controls, pinned below the keypoint list.
+fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, authored: bool) {
     // One key of your own isn't a path yet, and the list above doesn't show the
     // orbit that's actually flying — so say which is which.
     if authored && flying_default {
@@ -299,6 +329,11 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
             .color(ui.visuals().warn_fg_color),
         );
     }
+
+    let moving = app.camera_moving();
+    let mut closed = app.camera_path().closed;
+    let seconds = app.camera_path().duration();
+    let explicit_seconds = app.camera_path().seconds.is_some();
 
     ui.horizontal(|ui| {
         let resp = ui.button(if moving { "Stop" } else { "Play" });

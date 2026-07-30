@@ -167,12 +167,17 @@ pub struct CameraUniforms {
     pub point_size: f32,    // 4 bytes
     pub aspect_ratio: f32,  // 4 bytes (width / height)
     pub min_point_pixels: f32, // 4 bytes - minimum screen size in pixels
-    pub fog_near: f32,      // 4 bytes - distance where fog starts
-    pub fog_far: f32,       // 4 bytes - distance where fog is maximum
-    pub fog_brightness: f32, // 4 bytes - brightness reduction at max fog (0-1, 1=no change)
-    pub fog_saturation: f32, // 4 bytes - saturation reduction at max fog (0-1, 1=no change)
+    pub haze_near: f32,     // 4 bytes - distance where the haze starts
+    pub haze_far: f32,      // 4 bytes - distance where the haze is thickest
+    /// Fraction of a point's contribution that survives at `haze_far`
+    /// (1 = no haze). Not a brightness multiplier — see `src/haze.rs`.
+    pub haze_transmittance: f32, // 4 bytes
+    pub haze_saturation: f32, // 4 bytes - saturation surviving at haze_far (1 = no change)
     pub color_contrast: f32, // 4 bytes - cyclic contrast stretch of colormap index (1=off)
-    pub _pad: [f32; 3],     // 12 bytes - struct size must be a multiple of 16
+    /// The background, linear RGB. Haze fades toward it, so the shaders need
+    /// to know what it is; it sits in what used to be tail padding, which is
+    /// why this struct is still 112 bytes.
+    pub background: [f32; 3], // 12 bytes - also the struct's 16-byte round-up
 }
 
 impl CameraUniforms {
@@ -182,11 +187,12 @@ impl CameraUniforms {
         point_size: f32,
         aspect_ratio: f32,
         min_point_pixels: f32,
-        fog_near: f32,
-        fog_far: f32,
-        fog_brightness: f32,
-        fog_saturation: f32,
+        haze_near: f32,
+        haze_far: f32,
+        haze_transmittance: f32,
+        haze_saturation: f32,
         color_contrast: f32,
+        background: [f32; 3],
     ) -> Self {
         Self {
             mvp: mvp.to_cols_array_2d(),
@@ -194,12 +200,12 @@ impl CameraUniforms {
             point_size,
             aspect_ratio,
             min_point_pixels,
-            fog_near,
-            fog_far,
-            fog_brightness,
-            fog_saturation,
+            haze_near,
+            haze_far,
+            haze_transmittance,
+            haze_saturation,
             color_contrast,
-            _pad: [0.0; 3],
+            background,
         }
     }
 }

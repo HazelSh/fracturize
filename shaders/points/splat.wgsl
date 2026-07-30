@@ -12,7 +12,7 @@
 //    gradients instead of flat saturation.
 //
 // There is no depth or occlusion: the fractal is treated as pure emission
-// (fog still darkens far points, applied per-point before accumulation).
+// (haze still thins far points, applied per-point before accumulation).
 
 struct Point {
     position: vec3<f32>,
@@ -25,14 +25,15 @@ struct CameraUniforms {
     point_size: f32,
     aspect_ratio: f32,
     min_point_pixels: f32,
-    fog_near: f32,
-    fog_far: f32,
-    fog_brightness: f32,
-    fog_saturation: f32,
+    haze_near: f32,
+    haze_far: f32,
+    haze_transmittance: f32,
+    haze_saturation: f32,
     color_contrast: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    // Linear RGB, in what used to be tail padding — haze fades toward it.
+    bg_r: f32,
+    bg_g: f32,
+    bg_b: f32,
 }
 
 struct SplatParams {
@@ -59,15 +60,34 @@ fn lookup_color(color_idx: u32) -> vec3<f32> {
     return colormap[u32(stretched * 256.0) & 0xFFu].rgb;
 }
 
-// Fog is applied per point before accumulation (there is no per-pixel
-// depth in an additive framebuffer). Mirrors fs_main in render.wgsl.
-fn fog_color(color: vec3<f32>, depth: f32) -> vec3<f32> {
-    let fog_range = camera.fog_far - camera.fog_near;
-    let fog_factor = clamp((depth - camera.fog_near) / fog_range, 0.0, 1.0);
+// Haze is applied per point before accumulation — there is no per-pixel depth
+// in an additive framebuffer, so it has to ride on the point.
+//
+// Two separate effects, and keeping them separate is the whole point (see
+// `src/haze.rs`). Distance *desaturates* the colour, and it *removes
+// contribution*: a far point deposits less density, so the tonemap's coverage
+// falls and the pixel resolves toward the background — whatever colour that
+// is. Scaling the colour toward black instead, which is what this did before,
+// only looks like distance against a black background; against a pale one it
+// makes far material darker and therefore higher-contrast, which reads as
+// nearer.
+
+/// 0 at the near plane, 1 at the far plane.
+fn haze_at(depth: f32) -> f32 {
+    let range = camera.haze_far - camera.haze_near;
+    return clamp((depth - camera.haze_near) / range, 0.0, 1.0);
+}
+
+/// The palette colour, desaturated for distance.
+fn haze_color(color: vec3<f32>, depth: f32) -> vec3<f32> {
     let lum = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let sat_factor = mix(1.0, camera.fog_saturation, fog_factor);
-    let desaturated = mix(vec3<f32>(lum), color, sat_factor);
-    return desaturated * mix(1.0, camera.fog_brightness, fog_factor);
+    let sat = mix(1.0, camera.haze_saturation, haze_at(depth));
+    return mix(vec3<f32>(lum), color, sat);
+}
+
+/// The share of this point's density that survives the distance.
+fn haze_weight(depth: f32) -> f32 {
+    return mix(1.0, camera.haze_transmittance, haze_at(depth));
 }
 
 struct SplatOutput {
@@ -127,10 +147,11 @@ fn vs_splat(
         0.0,
         1.0,
     );
-    out.color = fog_color(lookup_color(point.color_idx), depth);
+    out.color = haze_color(lookup_color(point.color_idx), depth);
     out.offset = offset;
-    // Total kernel energy is 1: peak scales inversely with splat area
-    out.weight = KERNEL_NORM / (radius_px * radius_px);
+    // Total kernel energy is 1: peak scales inversely with splat area, then
+    // the haze takes its share of it.
+    out.weight = haze_weight(depth) * KERNEL_NORM / (radius_px * radius_px);
     return out;
 }
 
@@ -152,9 +173,9 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     }
 
     out.clip_position = vec4<f32>(clip.xy / clip.w, 0.0, 1.0);
-    out.color = fog_color(lookup_color(point.color_idx), depth);
+    out.color = haze_color(lookup_color(point.color_idx), depth);
     out.offset = vec2<f32>(0.0);
-    out.weight = 1.0;
+    out.weight = haze_weight(depth);
     return out;
 }
 

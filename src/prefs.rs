@@ -37,6 +37,13 @@ pub struct Prefs {
     /// Strength multiplier for U's random mutation (Explore window slider)
     #[serde(default = "default_mutate_strength")]
     pub mutate_strength: f32,
+    /// Who to credit on scenes made in-app. Scene files carry their own
+    /// author; this is only the default for one that doesn't have one yet (a
+    /// blank canvas, a random flame), so a person doesn't have to type their
+    /// name into every scene they start. `None` = never set one, leave the
+    /// author blank.
+    #[serde(default)]
+    pub author: Option<String>,
     /// Point-buffer capacity chosen in the Render window. A performance
     /// setting that follows the person rather than the artwork, so it wins
     /// over a scene file's `point_count` at startup — but loses to an
@@ -57,6 +64,7 @@ impl Default for Prefs {
             invert_pitch: false,
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
+            author: None,
             point_count: None,
             window_geometry: BTreeMap::new(),
         }

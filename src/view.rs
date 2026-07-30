@@ -1,7 +1,7 @@
 //! Saved view parameter files (TOML)
 //!
 //! A view captures everything about how the camera sees the scene — orbit
-//! angle, distance, focus, offset — plus point size and fog, so a framing
+//! angle, distance, focus, offset — plus point size and haze, so a framing
 //! found interactively can be reproduced exactly (press V to save, load
 //! with --view, render offline with --render).
 
@@ -30,22 +30,32 @@ pub struct View {
     pub offset: [f32; 3],
     pub point_size: f32,
     /// The four values the shader wants, always written. They are derived
-    /// from `fog` below when a view is saved; they remain the wire format
+    /// from `haze` below when a view is saved; they remain the wire format
     /// because the offline renderer consumes them directly and because views
-    /// written before `fog` existed carry nothing else.
-    pub fog_near: f32,
-    pub fog_far: f32,
-    pub fog_brightness: f32,
-    pub fog_saturation: f32,
-    /// Fog amount 0–1 (see `crate::fog`). `None` on views saved before the
+    /// written before the single-control rework carry nothing else.
+    ///
+    /// The `fog_*` aliases are what these were called when the effect
+    /// darkened distant material rather than thinning it (see `src/haze.rs`);
+    /// old view files still load. `haze_transmittance` in particular *means*
+    /// something different from the `fog_brightness` it reads, but it ran over
+    /// the same range from the same control, so the framing is recovered.
+    #[serde(alias = "fog_near")]
+    pub haze_near: f32,
+    #[serde(alias = "fog_far")]
+    pub haze_far: f32,
+    #[serde(alias = "fog_brightness")]
+    pub haze_transmittance: f32,
+    #[serde(alias = "fog_saturation")]
+    pub haze_saturation: f32,
+    /// Haze amount 0–1 (see `crate::haze`). `None` on views saved before the
     /// single-control rework — `App::apply_view` recovers an equivalent
-    /// amount from `fog_brightness` in that case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fog: Option<f32>,
-    /// Whether the fog band above was pinned by hand rather than auto-ranged
-    /// off the camera distance. Only meaningful alongside `fog`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub fog_band_pinned: bool,
+    /// amount from `haze_transmittance` in that case.
+    #[serde(default, alias = "fog", skip_serializing_if = "Option::is_none")]
+    pub haze: Option<f32>,
+    /// Whether the haze band above was pinned by hand rather than auto-ranged
+    /// off the camera distance. Only meaningful alongside `haze`.
+    #[serde(default, alias = "fog_band_pinned", skip_serializing_if = "std::ops::Not::not")]
+    pub haze_band_pinned: bool,
     /// Scale-aware color accumulation exponent; None = use the scene's value
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_falloff: Option<f32>,
@@ -102,12 +112,12 @@ mod tests {
             focus: [0.1, 0.2, 0.3],
             offset: [0.0, 1.0, 0.0],
             point_size: 0.002,
-            fog_near: 3.0,
-            fog_far: 4.5,
-            fog_brightness: 0.4,
-            fog_saturation: 0.3,
-            fog: Some(0.68),
-            fog_band_pinned: false,
+            haze_near: 3.0,
+            haze_far: 4.5,
+            haze_transmittance: 0.4,
+            haze_saturation: 0.3,
+            haze: Some(0.68),
+            haze_band_pinned: false,
             color_falloff: Some(0.6),
             color_contrast: Some(2.0),
             renderer: Some("splat".to_string()),
@@ -125,7 +135,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A view written before roll existed must still load, level.
+    /// A view written before roll and before the haze rework must still
+    /// load: level, and reading its `fog_*` keys into the `haze_*` fields.
     #[test]
     fn pre_roll_view_loads_level() {
         let legacy = r#"
@@ -146,7 +157,10 @@ fog_saturation = 0.3
         let v = View::load(&path).unwrap();
         assert_eq!(v.roll, 0.0);
         assert_eq!(v.pitch, 0.0);
-        assert_eq!(v.fog, None);
+        assert_eq!(v.haze, None);
+        // The legacy key names still land in the right fields.
+        assert_eq!(v.haze_near, 3.0);
+        assert_eq!(v.haze_transmittance, 0.4);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

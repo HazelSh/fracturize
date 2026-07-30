@@ -80,7 +80,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("R", "renderer: points / splat (log-density)", Some(HelpAction::RenderMode)),
             ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
             ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
-            ("F / Shift+F", "more / less fog", Some(HelpAction::FogIntensity)),
+            ("F / Shift+F", "more / less atmospheric haze (depth cue)", Some(HelpAction::HazeIntensity)),
             ("Space", "re-seed points (reset)", Some(HelpAction::Reset)),
         ],
     ),

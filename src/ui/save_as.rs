@@ -19,6 +19,12 @@ use super::hints::hinted;
 #[derive(Default)]
 pub struct SaveAsState {
     pub path: Option<String>,
+    /// The scene's new display name. Prefilled from the filename and kept in
+    /// step with it until the field is touched, at which point it's yours.
+    pub name: String,
+    /// Set once the name field has been edited by hand, so retyping the path
+    /// stops rewriting it underneath you.
+    pub name_edited: bool,
     /// Set once the user has acknowledged that the target exists.
     pub allow_overwrite: bool,
     /// Last failure, shown under the field until the path changes.
@@ -36,12 +42,36 @@ impl SaveAsState {
 /// Open the dialog, prefilled with a sensible fork name.
 pub fn open(app: &mut App) {
     let suggested = app.suggested_fork_path();
+    let name = name_from_path(&suggested);
     app.ui_state.save_as = SaveAsState {
         path: Some(suggested),
+        name,
+        name_edited: false,
         allow_overwrite: false,
         error: None,
         focus_field: true,
     };
+}
+
+/// A display name for a path: the file stem with separators turned back into
+/// spaces and each word capitalised, so `scenes/koru-v2.toml` suggests
+/// "Koru V2" rather than making you retype it.
+fn name_from_path(path: &str) -> String {
+    let stem = std::path::Path::new(path.trim())
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    stem.split(['-', '_', ' '])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
@@ -86,8 +116,38 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 // one path must not carry over to a different one.
                 app.ui_state.save_as.allow_overwrite = false;
                 app.ui_state.save_as.error = None;
+                if !app.ui_state.save_as.name_edited {
+                    app.ui_state.save_as.name = name_from_path(&path);
+                }
             }
             app.ui_state.save_as.path = Some(path.clone());
+
+            // The scene's *name* is a separate thing from its filename — it's
+            // what the toolbar shows, what render files and `views/` are named
+            // after. A fork that kept the original's name would leave the two
+            // disagreeing, so it's here, tracking the filename until you say
+            // otherwise.
+            let mut name = app.ui_state.save_as.name.clone();
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut name)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("what to call this scene"),
+                );
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "The scene's display name — shown in the toolbar, and used for \
+                     screenshot / render / view filenames. Follows the filename until \
+                     you edit it.",
+                    "type: the new scene's name",
+                );
+                if resp.changed() {
+                    app.ui_state.save_as.name_edited = true;
+                }
+            });
+            app.ui_state.save_as.name = name.clone();
 
             let trimmed = path.trim();
             let exists = !trimmed.is_empty() && std::path::Path::new(trimmed).exists();
@@ -149,7 +209,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 if (resp.clicked() || submitted) && can_save {
                     let overwrite = app.ui_state.save_as.allow_overwrite;
                     let target = trimmed.to_string();
-                    match app.save_scene_as(&target, overwrite) {
+                    match app.save_scene_as(&target, &name, overwrite) {
                         Ok(()) => close = true,
                         Err(e) => app.ui_state.save_as.error = Some(e),
                     }

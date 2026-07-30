@@ -16,7 +16,7 @@ src/
   main.rs        # CLI args, winit event loop + egui event gating, keybinds, default scene
   app.rs         # App state, mouse/edit handling, render orchestration, screenshots
   history.rs     # Unified snapshot undo/redo behind App::commit_edit (all edits)
-  fog.rs         # Depth-cue fog: one amount, band and falloffs derived
+  haze.rs        # Aerial perspective: one amount, band and falloffs derived
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
@@ -27,7 +27,7 @@ src/
     hints.rs       # hinted(): tooltip + status-bar hint on one widget response
     transforms.rs  # Transform tab rail + selected-transform detail pane
     explore.rs     # Random flame, mutate + strength, undo/redo, history list
-    render_panel.rs# Renderer mode, exposure, point size + count, color, fog, output
+    render_panel.rs# Renderer mode, exposure, point size + count, color, haze, output
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
   render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
     camera_panel.rs# Framing, saved views, the camera path, render/screenshot/save
@@ -51,7 +51,7 @@ src/
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
       splat.rs     # Splat mode: additive log-density accumulation + tonemap
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
-    lines.rs     # Trace line-segment renderer
+    lines.rs     # In-world line renderer: AA screen-space ribbons
     density/     # Inactive experimental hash-grid density renderer
 shaders/
   points/chaos.wgsl   # Chaos game + the 20 variation functions
@@ -99,20 +99,48 @@ All GPU, three passes per frame:
      Isolated points stay visible grit; overlapping ones form smooth density
      gradients instead of clipping — this is the fix for diffuse scenes that
      saturate into a pastel blob under the point renderer. No occlusion (the
-     fractal is pure emission; fog is applied per point before accumulation).
+     fractal is pure emission; haze thins each point before accumulation).
      Exposure is normalized by point capacity and resolution, so brightness is
      stable across effort levels and render sizes; `W`/`Shift+W` (or
      `--exposure`) scale it. ~75% of the point renderer's FPS.
-3. **Gizmos, traces + text**: optional overlays (see keybinds). Traces (X)
-   are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl — keep
-   them in sync!) rendered as alpha-faded line segments; they regenerate on
-   every scene edit.
+3. **Gizmos, traces + indicators**: optional overlays (see keybinds). Traces
+   (X) are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl —
+   keep them in sync!) rendered as alpha-faded line segments; they regenerate
+   on every scene edit.
+
+   **The in-world UI is anti-aliased; the artwork is not.** There is no MSAA
+   anywhere — the point cloud's aliasing *is* the look, and multisampling 1px
+   point primitives would soften exactly the grit the renderer exists to make.
+   So the UI drawn into the scene anti-aliases itself analytically instead:
+   every line is a screen-space ribbon of a fixed pixel width with a coverage
+   falloff across it (`src/gpu/lines.rs` expands the segments,
+   `shaders/trace.wgsl` widens and feathers them), and the gizmo's edges and
+   origin dots do the same in `shaders/gizmo.wgsl`. A 1px hardware line over a
+   cloud of 1px points reads as more of the cloud. Gizmo *faces* are flat
+   translucent fills and are left alone; their silhouettes are covered by the
+   AA'd edges drawn on top.
 
 The chaos churn rate is wall-clock normalized: `advance_frame` takes the
 frame dt and scales walker iterations so the buffer refreshes at the same
 real-time rate at any refresh rate (60 FPS baseline: full cycle ~13 s).
 The default camera orbit is likewise time-based (`path::ORBIT_RATE`, 0.18
 rad/s — one turn every ~35s), expressed as that path's duration.
+
+**Drawing fewer points than we have.** The live window draws
+`App::drawn_points`, not the whole buffer. Normally those are the same; the
+exception is an attractor that has collapsed to a speck, which is the state a
+scene is in for the first few seconds of being built from nothing (a single
+enabled transform has exactly one fixed point, so every point in the buffer
+lands on the same pixel). Blending is serialized per sample, so six million
+fragments on one texel is six million operations the GPU cannot overlap:
+measured on the reference desktop, **654 FPS → 46 FPS** at 6M points, scaling
+linearly with the count. The budget is the attractor's screen footprint
+(measured by `trace::measure`, the same CPU walkers `randomize.rs` gates on)
+times a generous points-per-pixel, floored well past where more points change
+anything. It restores 46 → 567 FPS and leaves real scenes untouched. Splat
+exposure is normalized by the drawn count, so brightness doesn't move either;
+the status bar says when it's engaged. `--render` and screenshots always draw
+everything — they're one-off and must stay reproducible from the parameters.
 
 Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 - ~10M points at ~38 FPS uncapped (subpixel/point-primitive path)
@@ -187,7 +215,7 @@ framing on the next save.
 | [ / ] | shrink / grow point size |
 | D / Shift+D | finer / coarser color detail (color_falloff) |
 | C / Shift+C | less / more color contrast |
-| F / Shift+F | more / less fog |
+| F / Shift+F | more / less atmospheric haze (the depth cue; see "Haze") |
 | Ctrl+Shift+S | save scene as… (fork under a new name) |
 
 The Keybinds window (H) is clickable: each row triggers its first-listed
@@ -226,7 +254,7 @@ aspect and picking math are unaffected by which panels are open.
 |--------|------------------|
 | Transforms | Vertical tab rail (colour swatch, name, eye toggle, relative-weight bar) plus a detail pane for the selected transform: position/rotation/scale, weight, colour, variations |
 | Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
-| Render | Renderer mode, exposure, point size, point count, color falloff/contrast, fog |
+| Render | Renderer mode, exposure, point size, point count, color falloff/contrast, haze |
 | Camera | Framing, saved views, the camera path (keypoints + playback), render job / screenshot / save scene |
 | Scenes (B) | Scene picker; the same selection the arrow keys walk |
 | Keybinds (H) | The table above, scrollable, rows clickable |
@@ -311,6 +339,14 @@ same menu — duplicate, enable/disable, delete, rename. A scene always keeps at
 least one transform (the chaos game needs somewhere to send the point), so the
 last Delete is disabled rather than hidden.
 
+**A scene's name and author** are editable from the toolbar: the readout on the
+right is a button, and clicking it opens fields for both. The name is not just
+a caption — it's the slug behind `views/`, screenshot and render filenames — so
+"Save as…" takes a name too, prefilled from the filename you type and following
+it until you edit it. A fork that kept the original's name would leave the
+toolbar saying "Koru" while you worked on `koru-v2.toml`. The author is
+remembered in prefs and fills itself in on scenes started in-app.
+
 ## Background & Transparent Output
 
 `background` is scene data (linear RGB, see "Scene Files"), picked in the
@@ -342,25 +378,48 @@ Save-as / fork is `Ctrl+Shift+S` or the Camera window's button — a small modal
 overwrite without an explicit tick, because undo only covers the scene you have
 open.
 
-## Fog
+## Haze
 
 Depth cue, and the only one this renderer has — additive point clouds have no
-shading and no occlusion, so nothing else says which arm is in front. One
-control (`src/fog.rs`), `fog` 0–1, scene data, undoable, saved by Ctrl+S. The
-shader's four parameters are *not* the user's parameters:
+shading and no occlusion, so nothing else says which arm is in front, and
+without it the 3D projection stops reading as one. One control
+(`src/haze.rs`), `haze` 0–1, scene data, undoable, saved by Ctrl+S.
 
-- the near/far band auto-ranges off the camera distance (`fog::auto_band`), so
+**It is aerial perspective, not fog.** Distance costs a point *transmittance*
+— it contributes less, so the pixel resolves toward the background — and
+*saturation*. It used to multiply the colour toward black instead, and that is
+only indistinguishable from distance when the background is already black:
+against a pale background it made far material darker and therefore
+higher-contrast, which reads as *nearer*. Even on the dark default it punched
+holes, since the far tail of an arm went to black, which reads as absence. The
+name changed with the behaviour; the scene key reads `fog` as an alias, and so
+do view files (`fog_near`, `fog_brightness`, …).
+
+How each renderer applies it:
+
+- **splat** scales the point's deposited *density*, so the tonemap's coverage
+  falls and the pixel composites toward the background — no knowledge of the
+  background needed;
+- **points** is opaque and depth-tested, so it mixes toward the background
+  colour directly, which is why `CameraUniforms` now carries it (in what used
+  to be tail padding; the struct is still 112 bytes). One corner: `--transparent`
+  point renders keep alpha 1, so distant points come out background-tinted
+  rather than fading to transparent. Use the splat renderer for composited
+  output — it gets this right, because thinner density *is* lower coverage.
+
+The shader's four parameters are *not* the user's parameters:
+
+- the near/far band auto-ranges off the camera distance (`haze::auto_band`), so
   it follows the framing instead of being re-dialled on every zoom. The Render
-  window's "fog band" disclosure can pin it to fixed world units;
-- brightness and saturation falloff come from the amount (`fog::falloff`).
-  Brightness carries the cue; the desaturation is deliberately much gentler
-  than the old `--fog` defaults, which drained the colour out of the image
-  rather than pushing anything backwards.
+  window's "haze band" disclosure can pin it to fixed world units;
+- transmittance and saturation falloff come from the amount
+  (`haze::falloff`). Neither bottoms out at zero: material that vanishes
+  completely reads as a hole rather than as distance.
 
 `--fog` is a legacy on-switch meaning "on at the old default strength"; a
-scene's own `fog` wins over it. Views written before this carry the four raw
-values and are converted on load (`fog::amount_from_brightness`). Random
-flames get a little fog by default; hand-authored scenes default to none.
+scene's own `haze` wins over it. Views written before this carry the four raw
+values and are converted on load (`haze::amount_from_brightness`). Random
+flames get a little haze by default; hand-authored scenes default to none.
 
 ## Scene Files (TOML)
 
@@ -376,7 +435,8 @@ point_count = 4_000_000   # circular point buffer capacity (default 500k)
 color_speed = 0.5         # global color blending speed (0-1); used when color_falloff = 0
 color_falloff = 0.0       # scale-aware color accumulation exponent (0 = off, ~1 neutral)
 color_contrast = 1.0      # render-time cyclic palette contrast stretch (1 = off)
-fog = 0.0                 # depth cue, 0-1 (see "Fog")
+haze = 0.0                # aerial-perspective depth cue, 0-1 (see "Haze";
+                          # reads `fog` as an alias, its old name)
 background = [0.02, 0.02, 0.05]   # LINEAR rgb behind the fractal. Linear, not
                           # sRGB: this is the clear value, and 0.02 reads as
                           # sRGB #282a45. Use the Render window's picker.
@@ -545,7 +605,7 @@ The CLI paths pass `control: None` and are unchanged.
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
-point size, fog, color falloff/contrast — plus `renderer = "splat"` and
+point size, haze, color falloff/contrast — plus `renderer = "splat"` and
 `exposure` when splat mode is active) to `views/<scene>-<timestamp>.toml`.
 View color params override the scene's when present. Load one with `--view <path>`;
 in windowed mode the camera starts stopped so the framing holds (press O to fly the
@@ -564,7 +624,7 @@ encode+save | total`) to stdout so you can budget effort. Options:
 - `--transparent` — RGBA output for compositing (PNG only; see "Background
   & Transparent Output").
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`
-  (legacy on-switch; a scene's own `fog` value wins over it).
+  (legacy on-switch; a scene's own `haze` value wins over it).
 - No `--scene`? `--random` rolls a flame, `--blank` opens the empty canvas
   (see "Random Flames" and "Starting From Nothing"); otherwise you get the
   built-in default. All three work windowed and with `--render`.

@@ -7,14 +7,15 @@ struct CameraUniforms {
     point_size: f32,
     aspect_ratio: f32,
     min_point_pixels: f32,
-    fog_near: f32,
-    fog_far: f32,
-    fog_brightness: f32,
-    fog_saturation: f32,
+    haze_near: f32,
+    haze_far: f32,
+    haze_transmittance: f32,
+    haze_saturation: f32,
     color_contrast: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    // Linear RGB, in what used to be tail padding — haze fades toward it.
+    bg_r: f32,
+    bg_g: f32,
+    bg_b: f32,
 }
 
 struct VertexInput {
@@ -28,7 +29,19 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) @interpolate(flat) inst_alpha: f32,
+    // Anti-aliasing coordinate, meaning set by `shape`:
+    //   edge -> (across the ribbon in -1..1, unused)
+    //   dot  -> the billboard corner, for a round disc
+    @location(2) aa: vec2<f32>,
+    // 0 = face (no coverage falloff), 1 = edge ribbon, 2 = dot disc
+    @location(3) @interpolate(flat) shape: u32,
 }
+
+// Pixels across which an edge's or a dot's coverage falls from 1 to 0. Native
+// rasterization has no coverage of its own here — these are ordinary triangles
+// — so without this the in-world UI is as jagged as the point cloud it's meant
+// to be legible against.
+const FEATHER_PX: f32 = 1.0;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<storage, read> transforms: array<mat4x4<f32>>;
@@ -72,6 +85,8 @@ fn vs_main(
     var out: VertexOutput;
     out.color = in.color;
     out.inst_alpha = alpha_mult;
+    out.aa = vec2<f32>(0.0);
+    out.shape = in.vertex_type;
 
     if in.vertex_type == 0u {
         // === FACE VERTEX: simple transform + project ===
@@ -111,8 +126,10 @@ fn vs_main(
         let edge_dir = normalize(screen_b - screen_a);
         let perp = vec2<f32>(-edge_dir.y, edge_dir.x);
 
-        // 2px width in NDC; hovered edges grow to 4.6px
-        let half_width_ndc_y = (2.0 + 2.6 * hl) / camera.screen_height;
+        // 2px width in NDC; hovered edges grow to 4.6px. Widened by the
+        // feather so the falloff has room outside the solid core.
+        let core_px = 2.0 + 2.6 * hl;
+        let half_width_ndc_y = (core_px + FEATHER_PX) / camera.screen_height;
         let half_width_ndc_x = half_width_ndc_y / camera.aspect_ratio;
         let offset = vec2<f32>(perp.x * half_width_ndc_x, perp.y * half_width_ndc_y);
 
@@ -164,6 +181,8 @@ fn vs_main(
         // Hovered edges glow toward white at full opacity
         let edge_rgb = mix(in.color.rgb, vec3<f32>(1.0), 0.55 * hl);
         out.color = vec4<f32>(edge_rgb, max(abs(in.color.a), hl));
+        // Where the solid core ends, as a fraction of the widened half-width.
+        out.aa = vec2<f32>(side, core_px / (core_px + FEATHER_PX));
 
     } else {
         // === DOT VERTEX: billboard ===
@@ -177,8 +196,9 @@ fn vs_main(
 
         let ndc = clip.xyz / clip.w;
 
-        // 6px dot; grows to 10px on hover
-        let half_size_ndc_y = (6.0 + 4.0 * hl) / camera.screen_height;
+        // 6px dot; grows to 10px on hover. Widened by the feather, as above.
+        let core_px = 6.0 + 4.0 * hl;
+        let half_size_ndc_y = (core_px + FEATHER_PX) / camera.screen_height;
         let half_size_ndc_x = half_size_ndc_y / camera.aspect_ratio;
 
         // Billboard offset encoded in edge_other.xy (-1..1 range)
@@ -189,6 +209,13 @@ fn vs_main(
             ndc.y + corner.y * half_size_ndc_y,
             ndc.z,
             1.0
+        );
+        // Radius at which the disc's solid core ends. The billboard is a
+        // square; the fragment shader carves a round dot out of it, which is
+        // what the origin handle has always looked like it was.
+        out.aa = vec2<f32>(
+            length(corner),
+            core_px / (core_px + FEATHER_PX),
         );
     }
 
@@ -202,6 +229,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Desaturate towards grey for disabled gizmos
         let lum = dot(c.rgb, vec3<f32>(0.3, 0.6, 0.1));
         c = vec4<f32>(vec3<f32>(lum), c.a * in.inst_alpha);
+    }
+    // Edges and dots fade out across their last pixel; faces are flat fills
+    // whose silhouette is the triangle itself and have nothing to feather.
+    if in.shape != 0u {
+        let core = in.aa.y;
+        c.a *= 1.0 - smoothstep(core, 1.0, abs(in.aa.x));
     }
     return c;
 }

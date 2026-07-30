@@ -109,10 +109,17 @@ impl OrbitCamera {
         self.pitch = (self.pitch - dy * 0.006).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
+    /// How many pixels one world unit spans at depth `distance` from the eye.
+    /// The perspective scale factor, in the one form everything here wants it.
+    pub fn pixels_per_world_unit(distance: f32, viewport_height: f32) -> f32 {
+        let d = distance.max(1e-4);
+        viewport_height / (2.0 * d * (FOV_Y_RADIANS * 0.5).tan())
+    }
+
     /// Mouse drag pan: moves the focus in the view plane ("grab the scene")
     pub fn pan(&mut self, dx: f32, dy: f32, viewport_height: f32) {
         // World size of one pixel at the focus distance
-        let per_pixel = 2.0 * self.distance * (FOV_Y_RADIANS * 0.5).tan() / viewport_height;
+        let per_pixel = 1.0 / Self::pixels_per_world_unit(self.distance, viewport_height);
         self.focus += (self.up() * dy - self.right() * dx) * per_pixel;
     }
 

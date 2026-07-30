@@ -1,7 +1,7 @@
 mod app;
 mod avif;
 mod camera;
-mod fog;
+mod haze;
 mod gpu;
 mod history;
 mod indicators;
@@ -51,7 +51,8 @@ struct Args {
     #[arg(long, default_value = "120")]
     delay: u32,
 
-    /// Enable fog effect for depth perception
+    /// Turn on atmospheric haze at the legacy default strength. A scene's
+    /// own `haze` value wins over this; see "Haze" in AGENTS.md.
     #[arg(long)]
     fog: bool,
 
@@ -59,7 +60,7 @@ struct Args {
     #[arg(long)]
     no_vsync: bool,
 
-    /// Load a saved view file (camera framing, point size, fog).
+    /// Load a saved view file (camera framing, point size, haze).
     /// In windowed mode the orbit starts paused; press O to resume.
     #[arg(long)]
     view: Option<String>,
@@ -437,7 +438,7 @@ impl ApplicationHandler for AppWrapper {
                                 }
                             }
                             "f" | "F" => {
-                                app.adjust_fog_intensity(!app.shift_held);
+                                app.adjust_haze_intensity(!app.shift_held);
                             }
                             "d" | "D" => {
                                 app.adjust_color_falloff(!app.shift_held);
@@ -661,7 +662,7 @@ fn default_scene() -> Scene {
         color_speed: 0.5,
         color_falloff: 0.0,
         color_contrast: 1.0,
-        fog: 0.0,
+        haze: 0.0,
         transform_names: vec![None; 4],
         colors: colors.to_vec(),
         transforms: [
@@ -770,7 +771,7 @@ fn main() {
             height: args.height,
             out_path: std::path::Path::new(out),
             accumulate,
-            fog_enabled: args.fog,
+            haze_enabled: args.fog,
             grid,
             splat,
             exposure,

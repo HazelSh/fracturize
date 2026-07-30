@@ -339,7 +339,7 @@ pub enum HelpAction {
     PointSize,
     ColorFalloff,
     ColorContrast,
-    FogIntensity,
+    HazeIntensity,
     Mutate,
     Undo,
     Browse,
@@ -429,20 +429,20 @@ pub struct App {
     pub show_gizmos: bool,
     pub show_help: bool,
 
-    // Fog. One control; see `src/fog.rs` for why the shader's four
+    // Haze. One control; see `src/haze.rs` for why the shader's four
     // parameters are not the user's four parameters.
     /// Depth-cue strength, 0 (off) to 1. Scene data — saved by Ctrl+S and
     /// undoable, like the other look parameters the scene file carries.
-    pub fog_amount: f32,
+    pub haze_amount: f32,
     /// Write an alpha channel in captured stills (S) and render jobs, so
     /// they can be composited. Session state, not scene data: it says what
     /// leaves the app, not what the artwork is. The live window is always
     /// opaque — its swapchain has nothing to composite through.
     pub transparent_render: bool,
-    /// Pinned fog band in world units, or `None` to auto-range off the camera
+    /// Pinned haze band in world units, or `None` to auto-range off the camera
     /// distance. Only the Render window's advanced disclosure and legacy view
     /// files set this; auto is the default and the case worth optimising for.
-    pub fog_band: Option<(f32, f32)>,
+    pub haze_band: Option<(f32, f32)>,
 
     // Color accumulation / rendering parameters
     /// Scale-aware color accumulation exponent (0 = classic fixed-rate EMA)
@@ -470,6 +470,15 @@ pub struct App {
     /// Fingerprint of the path the buffer was last built for, or `None` when
     /// nothing is drawn. See `refresh_path_lines`.
     path_lines_key: Option<u64>,
+
+    /// Where the chaos game lands, measured on the CPU — the input to the
+    /// drawn-point budget (see `drawn_points`). `None` until first measured,
+    /// or when no walker can be built at all.
+    attractor: Option<crate::trace::AttractorStats>,
+    /// What `attractor` was measured for (see `attractor_fingerprint`), and
+    /// when, so re-measuring is rate-limited during a drag.
+    attractor_key: u64,
+    attractor_measured_at: Instant,
 
     /// The running render job, if any (see `start_job`). One at a time.
     job: Option<JobHandle>,
@@ -566,7 +575,7 @@ impl App {
     pub async fn new(
         window: Arc<Window>,
         scene: Scene,
-        fog_enabled: bool,
+        haze_enabled: bool,
         vsync: bool,
         scene_path: Option<String>,
         view: Option<View>,
@@ -663,13 +672,13 @@ impl App {
 
         let num_transforms = scene.transforms.len();
 
-        // `--fog` is a legacy on-switch: it predates fog being scene data, so
+        // `--fog` is a legacy on-switch: it predates haze being scene data, so
         // it means "turn it on at the old default strength" and the scene's
         // own value wins whenever it has one.
-        let fog_amount = if scene.fog > 0.0 {
-            scene.fog
-        } else if fog_enabled {
-            crate::fog::amount_from_brightness(0.4)
+        let haze_amount = if scene.haze > 0.0 {
+            scene.haze
+        } else if haze_enabled {
+            crate::haze::amount_from_brightness(0.4)
         } else {
             0.0
         };
@@ -708,8 +717,8 @@ impl App {
             show_gizmos: true,
             // Env override lets automated captures verify the help overlay
             show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
-            fog_amount,
-            fog_band: None,
+            haze_amount,
+            haze_band: None,
             transparent_render: false,
             color_falloff: scene.color_falloff,
             color_contrast: scene.color_contrast,
@@ -723,6 +732,11 @@ impl App {
             indicator_key: None,
             path_renderer,
             path_lines_key: None,
+            attractor: None,
+            // Zero is not a fingerprint any real scene produces, so the first
+            // frame always measures.
+            attractor_key: 0,
+            attractor_measured_at: Instant::now(),
             job: None,
             job_done: None,
             job_error: None,
@@ -767,7 +781,7 @@ impl App {
         app
     }
 
-    /// Restore a saved view: camera framing, point size, fog, and color
+    /// Restore a saved view: camera framing, point size, haze, and color
     /// falloff/contrast. Shared by the `--view` startup path and the Camera
     /// window's saved-view list. Pauses the orbit so the loaded framing holds
     /// exactly.
@@ -786,17 +800,17 @@ impl App {
             v.roll,
         );
         self.point_size = v.point_size;
-        // Views written before fog became one control carry only the four raw
+        // Views written before haze became one control carry only the four raw
         // shader values; recover an equivalent amount from them and treat
         // their band as pinned, since it was chosen by hand.
-        match v.fog {
+        match v.haze {
             Some(amount) => {
-                self.fog_amount = amount.clamp(0.0, 1.0);
-                self.fog_band = v.fog_band_pinned.then_some((v.fog_near, v.fog_far));
+                self.haze_amount = amount.clamp(0.0, 1.0);
+                self.haze_band = v.haze_band_pinned.then_some((v.haze_near, v.haze_far));
             }
             None => {
-                self.fog_amount = crate::fog::amount_from_brightness(v.fog_brightness);
-                self.fog_band = Some((v.fog_near, v.fog_far));
+                self.haze_amount = crate::haze::amount_from_brightness(v.haze_transmittance);
+                self.haze_band = Some((v.haze_near, v.haze_far));
             }
         }
         if let Some(c) = v.color_contrast {
@@ -1111,12 +1125,12 @@ impl App {
             // The band is resolved rather than stored raw, so a view of an
             // auto-ranged scene renders offline at the framing it was saved
             // at even though the offline path knows nothing about auto-ranging.
-            fog_near: self.fog_range().0,
-            fog_far: self.fog_range().1,
-            fog_brightness: self.fog_falloff().0,
-            fog_saturation: self.fog_falloff().1,
-            fog: Some(self.fog_amount),
-            fog_band_pinned: self.fog_band.is_some(),
+            haze_near: self.haze_range().0,
+            haze_far: self.haze_range().1,
+            haze_transmittance: self.haze_falloff().0,
+            haze_saturation: self.haze_falloff().1,
+            haze: Some(self.haze_amount),
+            haze_band_pinned: self.haze_band.is_some(),
             color_falloff: Some(self.color_falloff),
             color_contrast: Some(self.color_contrast),
             renderer: match self.render_mode {
@@ -1156,7 +1170,7 @@ impl App {
         self.scene.point_size = self.point_size;
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
-        self.scene.fog = self.fog_amount;
+        self.scene.haze = self.haze_amount;
     }
 
     pub fn save_scene(&mut self) {
@@ -1171,17 +1185,26 @@ impl App {
     /// Save under a new name and continue working on *that* file — the fork
     /// point for "I like this, but I want to keep the original too".
     ///
+    /// `name` renames the scene itself. A fork that kept the original's name
+    /// would leave the toolbar, the render filenames and the `views/` lookups
+    /// all still saying "Koru" while you work on `koru-v2.toml` — two
+    /// identities for one thing, and the wrong one visible.
+    ///
     /// Deliberately refuses to overwrite: the dialog checks first and says so,
     /// and this is the backstop for the case where something appeared in
     /// between. Clobbering another scene is not recoverable from in-app —
     /// history only covers the scene you have open.
-    pub fn save_scene_as(&mut self, path: &str, overwrite: bool) -> Result<(), String> {
+    pub fn save_scene_as(&mut self, path: &str, name: &str, overwrite: bool) -> Result<(), String> {
         if !overwrite && Path::new(path).exists() {
             return Err(format!("{} already exists", path));
         }
+        let name = name.trim();
+        if !name.is_empty() {
+            self.scene.name = name.to_string();
+        }
         self.sync_scene_for_save();
         self.scene.save(path).map_err(|e| e.to_string())?;
-        log::info!("Scene saved as {}", path);
+        log::info!("Scene saved as {} ({})", path, self.scene.name);
         self.scene_path = Some(path.to_string());
         // The slug feeds views/ lookups and render filenames, and it comes
         // from the scene name, not the path — but the *saved views* cache is
@@ -1206,6 +1229,35 @@ impl App {
             }
             None => format!("scenes/{}.toml", self.scene_slug()),
         }
+    }
+
+    /// Set the scene's display name — the toolbar's label, the `views/` and
+    /// render-filename slug, and what Ctrl+S writes.
+    pub fn set_scene_name(&mut self, name: &str) {
+        if self.scene.name == name {
+            return;
+        }
+        self.scene.name = name.to_string();
+        // The slug is derived from the name, and the views cache is keyed on
+        // the slug.
+        self.invalidate_saved_views();
+    }
+
+    /// Set the scene's author, and remember it as the default for scenes made
+    /// in-app from here on — nobody wants to retype their own name.
+    pub fn set_scene_author(&mut self, author: &str) {
+        if self.scene.author == author {
+            return;
+        }
+        self.scene.author = author.to_string();
+        let trimmed = author.trim();
+        self.prefs.author = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// The remembered author, for a scene that hasn't got one.
+    fn default_author(&self) -> String {
+        self.prefs.author.clone().unwrap_or_default()
     }
 
     fn write_scene_to(&mut self, path: &str) {
@@ -1249,7 +1301,7 @@ impl App {
             point_size: self.point_size,
             color_falloff: self.color_falloff,
             color_contrast: self.color_contrast,
-            fog_amount: self.fog_amount,
+            haze_amount: self.haze_amount,
         }
     }
 
@@ -1268,7 +1320,7 @@ impl App {
         self.point_size = snap.point_size;
         self.color_falloff = snap.color_falloff;
         self.color_contrast = snap.color_contrast;
-        self.fog_amount = snap.fog_amount;
+        self.haze_amount = snap.haze_amount;
         self.bump_matrix_generation();
         self.after_scene_shape_change();
     }
@@ -1461,6 +1513,15 @@ impl App {
         let valid = self.point_compute.valid_point_count();
         let warming = self.point_compute.current_frame < self.point_compute.warmup_frames;
         (valid, self.buffer_capacity, warming)
+    }
+
+    /// How many points the drawn-point budget is holding back, if any — the
+    /// status bar says so rather than leaving a suddenly-fast frame rate and a
+    /// point count that disagree (see `drawn_points`).
+    pub fn withheld_points(&self, screen_height: f32) -> Option<(u32, u32)> {
+        let valid = self.point_compute.valid_point_count();
+        let drawn = self.drawn_points(screen_height);
+        (drawn < valid).then_some((drawn, valid))
     }
 
     /// Hint for the gizmo part currently hovered (`None` when nothing's
@@ -2050,7 +2111,7 @@ impl App {
                 height: kind.size().1,
                 out_path: &out,
                 accumulate,
-                fog_enabled: false, // the view carries the real fog settings
+                haze_enabled: false, // the view carries the real haze settings
                 grid: crate::offline::GridMode::Single,
                 splat,
                 exposure,
@@ -2279,8 +2340,13 @@ impl App {
     /// from disk (a random flame, a blank canvas). Unlike `load_scene_file`
     /// this is an *edit*: it goes on the history stack, so one Ctrl+Z brings
     /// back what was on screen.
-    fn adopt_scene(&mut self, scene: Scene, label: &str) {
+    fn adopt_scene(&mut self, mut scene: Scene, label: &str) {
         let before = self.edit_snapshot();
+        // A scene made in-app has nobody's name on it yet; put the person's
+        // there if they've told us one (see `set_scene_author`).
+        if scene.author.trim().is_empty() {
+            scene.author = self.default_author();
+        }
         self.camera = OrbitCamera {
             yaw: scene.camera_yaw,
             pitch: scene.camera_pitch,
@@ -2292,7 +2358,7 @@ impl App {
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
-        self.fog_amount = scene.fog;
+        self.haze_amount = scene.haze;
         self.transform_enabled = vec![true; scene.transforms.len()];
         self.selected_transform = Some(0);
         self.selected_variation = 0;
@@ -2751,11 +2817,11 @@ impl App {
     /// F / Shift+F. The near/far keys that used to sit beside this (N and M)
     /// are gone: the band auto-ranges off the camera now, so nudging it by
     /// half a world unit at a time no longer means anything.
-    pub fn adjust_fog_intensity(&mut self, more_fog: bool) {
-        let delta = if more_fog { 0.1 } else { -0.1 };
-        let old = self.fog_amount;
-        self.set_fog_amount(self.fog_amount + delta);
-        log::info!("Fog: {:.2} -> {:.2}", old, self.fog_amount);
+    pub fn adjust_haze_intensity(&mut self, more: bool) {
+        let delta = if more { 0.1 } else { -0.1 };
+        let old = self.haze_amount;
+        self.set_haze_amount(self.haze_amount + delta);
+        log::info!("Haze: {:.2} -> {:.2}", old, self.haze_amount);
     }
 
     /// Re-resolve per-transform color speeds from the current falloff and
@@ -2804,7 +2870,7 @@ impl App {
     // the relative `adjust_*` nudges the keybinds use. Which of these commit
     // history is deliberate and follows Phase 3: parameters that get written
     // back into the scene TOML by Ctrl+S (point size, color falloff, color
-    // contrast) are edits; view-only knobs (renderer mode, exposure, fog) are
+    // contrast) are edits; view-only knobs (renderer mode, exposure) are
     // not, matching the keyboard paths exactly.
 
     pub fn set_render_mode(&mut self, mode: RenderMode) {
@@ -2833,22 +2899,22 @@ impl App {
         self.commit_edit("Color falloff", Some("color_falloff"), before);
     }
 
-    /// Fog band in world units: the pinned one, or auto-ranged off the
+    /// Haze band in world units: the pinned one, or auto-ranged off the
     /// current camera distance so it tracks the framing.
-    pub fn fog_range(&self) -> (f32, f32) {
-        self.fog_band
-            .unwrap_or_else(|| crate::fog::auto_band(self.camera.distance))
+    pub fn haze_range(&self) -> (f32, f32) {
+        self.haze_band
+            .unwrap_or_else(|| crate::haze::auto_band(self.camera.distance))
     }
 
     /// `(brightness, saturation)` survival at the far plane, from the amount.
-    pub fn fog_falloff(&self) -> (f32, f32) {
-        crate::fog::falloff(self.fog_amount)
+    pub fn haze_falloff(&self) -> (f32, f32) {
+        crate::haze::falloff(self.haze_amount)
     }
 
     /// The four values the shader actually wants, in `CameraUniforms` order.
-    pub fn fog_uniforms(&self) -> (f32, f32, f32, f32) {
-        let (near, far) = self.fog_range();
-        let (brightness, saturation) = self.fog_falloff();
+    pub fn haze_uniforms(&self) -> (f32, f32, f32, f32) {
+        let (near, far) = self.haze_range();
+        let (brightness, saturation) = self.haze_falloff();
         (near, far, brightness, saturation)
     }
 
@@ -2860,10 +2926,10 @@ impl App {
         self.commit_edit("Background", Some("background"), before);
     }
 
-    pub fn set_fog_amount(&mut self, amount: f32) {
+    pub fn set_haze_amount(&mut self, amount: f32) {
         let before = self.edit_snapshot();
-        self.fog_amount = amount.clamp(0.0, 1.0);
-        self.commit_edit("Fog", Some("fog"), before);
+        self.haze_amount = amount.clamp(0.0, 1.0);
+        self.commit_edit("Haze", Some("haze"), before);
     }
 
     pub fn set_color_contrast(&mut self, contrast: f32) {
@@ -3032,6 +3098,83 @@ impl App {
         self.point_size * screen_height / self.camera.distance <= 1.5
     }
 
+    // === Drawing fewer points than we have, when they'd land on top of
+    //     each other ===
+
+    /// Points per pixel of the attractor's screen footprint that are worth
+    /// drawing. Generous — this is a safety valve, not a quality setting, and
+    /// it must not touch a scene that's merely dense.
+    const POINTS_PER_PIXEL: f32 = 2_000.0;
+
+    /// Never draw fewer than this, however collapsed the attractor is. Well
+    /// past the point where more points change the image.
+    const MIN_DRAWN_POINTS: u32 = 400_000;
+
+    /// How many of the buffer's points to actually draw this frame.
+    ///
+    /// Normally all of them. The exception is an attractor that has collapsed
+    /// to a speck — a single enabled transform has exactly one fixed point, so
+    /// every point in the buffer lands on the same pixel — and there the cost
+    /// is brutal in a way that isn't obvious: blending is serialized per
+    /// sample, so six million fragments on one texel is six million operations
+    /// the GPU cannot overlap. Measured on the reference desktop: 654 FPS for a
+    /// normal scene at 6M points, **46 FPS** for a one-transform scene at the
+    /// same count, scaling linearly with the count. That's the state you're in
+    /// for the first few seconds of building a scene from nothing, which is
+    /// exactly when the app should feel light.
+    ///
+    /// Drawing fewer costs nothing visually, because the points are stacked:
+    /// the image is the same dot either way. The splat renderer's exposure is
+    /// normalized by the drawn count (see `upload_params`), so brightness
+    /// doesn't move either.
+    ///
+    /// The live window only. `--render` and screenshots draw everything: they
+    /// are one-off and must stay reproducible from the parameters alone.
+    fn drawn_points(&self, screen_height: f32) -> u32 {
+        let valid = self.point_compute.valid_point_count();
+        let Some(stats) = self.attractor else { return valid };
+        let depth = (stats.center - self.camera.eye()).length();
+        let r_px = stats.radius * OrbitCamera::pixels_per_world_unit(depth, screen_height);
+        // A disc, not the dust that's actually there — an over-estimate of the
+        // covered area, which errs toward not intervening.
+        let covered = (std::f32::consts::PI * r_px * r_px).max(1.0);
+        let cap = (covered * Self::POINTS_PER_PIXEL).min(u32::MAX as f32) as u32;
+        valid.min(cap.max(Self::MIN_DRAWN_POINTS))
+    }
+
+    /// What the drawn-point budget is keyed on: any change to the maps, to
+    /// which of them are enabled, or to how many there are.
+    fn attractor_fingerprint(&self) -> u64 {
+        let mut h = self.matrix_generation
+            .wrapping_mul(0x100000001b3)
+            ^ (self.scene.transforms.len() as u64);
+        for (i, on) in self.transform_enabled.iter().enumerate() {
+            if *on {
+                h ^= (i as u64).wrapping_add(1).wrapping_mul(0x9E3779B97F4A7C15);
+            }
+        }
+        h
+    }
+
+    /// Re-measure the attractor when the IFS changed, at most a few times a
+    /// second. Rate-limited because a gizmo drag bumps `matrix_generation`
+    /// every frame and this runs a few thousand chaos steps — and because a
+    /// slightly stale *budget* costs nothing.
+    fn refresh_attractor(&mut self) {
+        let key = self.attractor_fingerprint();
+        if key == self.attractor_key {
+            return;
+        }
+        if self.attractor.is_some()
+            && self.attractor_measured_at.elapsed() < Duration::from_millis(200)
+        {
+            return;
+        }
+        self.attractor_key = key;
+        self.attractor_measured_at = Instant::now();
+        self.attractor = crate::trace::measure(&self.scene.transforms, &self.transform_enabled);
+    }
+
     pub fn update(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_update).as_secs_f32().min(0.1);
@@ -3041,6 +3184,7 @@ impl App {
         self.apply_pending_capacity();
         // Before the path lines are built, so what's drawn is what will fly.
         self.refresh_default_path();
+        self.refresh_attractor();
         self.refresh_indicators();
         self.refresh_path_lines();
         self.poll_job();
@@ -3111,18 +3255,19 @@ impl App {
         // channel worth filling in.
         let alpha = if self.transparent_render { 0.0 } else { 1.0 };
 
-        let fog = self.fog_uniforms();
+        let haze = self.haze_uniforms();
         let camera = CameraUniforms::new(
             mvp,
             SCREENSHOT_HEIGHT as f32,
             self.point_size,
             aspect,
             1.0,
-            fog.0,
-            fog.1,
-            fog.2,
-            fog.3,
+            haze.0,
+            haze.1,
+            haze.2,
+            haze.3,
             self.color_contrast,
+            self.scene.background.to_array(),
         );
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3294,7 +3439,7 @@ impl App {
             HelpAction::PointSize => self.adjust_point_size(!shift),
             HelpAction::ColorFalloff => self.adjust_color_falloff(!shift),
             HelpAction::ColorContrast => self.adjust_color_contrast(shift),
-            HelpAction::FogIntensity => self.adjust_fog_intensity(!shift),
+            HelpAction::HazeIntensity => self.adjust_haze_intensity(!shift),
             HelpAction::Mutate => {
                 if shift {
                     self.undo()
@@ -3335,8 +3480,10 @@ impl App {
         let aspect = width as f32 / height as f32;
         let view_proj = self.camera.view_proj(aspect);
 
-        // Advance circular buffer and get valid point count
-        let point_count = self.point_compute.advance_frame(&self.gpu.queue, self.frame_dt);
+        // Advance circular buffer and get valid point count. What we *draw*
+        // can be less — see `drawn_points` for the collapsed-attractor case.
+        self.point_compute.advance_frame(&self.gpu.queue, self.frame_dt);
+        let point_count = self.drawn_points(height as f32);
 
         // wgpu 29: `get_current_texture` returns `CurrentSurfaceTexture`
         // directly (no more `Result<_, SurfaceError>`, and no `OutOfMemory`
@@ -3374,18 +3521,19 @@ impl App {
         self.point_compute.dispatch(&mut encoder);
 
         // === STEP 2: RENDER POINTS ===
-        let fog = self.fog_uniforms();
+        let haze = self.haze_uniforms();
         let camera = CameraUniforms::new(
             view_proj,
             height as f32,
             self.point_size,
             aspect,
             1.0,
-            fog.0,
-            fog.1,
-            fog.2,
-            fog.3,
+            haze.0,
+            haze.1,
+            haze.2,
+            haze.3,
             self.color_contrast,
+            self.scene.background.to_array(),
         );
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
         if self.show_traces {
@@ -3436,7 +3584,12 @@ impl App {
                 self.splat_renderer.upload_params(
                     &self.gpu.queue,
                     self.exposure,
-                    self.buffer_capacity,
+                    // The *drawn* count, not the buffer's: exposure is
+                    // normalized by it, so capping the draw (see
+                    // `drawn_points`) doesn't change how bright the result is.
+                    // During warmup this is below capacity too, which is the
+                    // brightness ramp that has always been there.
+                    self.buffer_capacity.min(point_count.max(1)),
                     height as f32,
                     crate::scene::clear_color(self.scene.background, 1.0),
                     false,

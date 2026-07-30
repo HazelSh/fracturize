@@ -12,14 +12,15 @@ struct CameraUniforms {
     point_size: f32,
     aspect_ratio: f32,
     min_point_pixels: f32,
-    fog_near: f32,
-    fog_far: f32,
-    fog_brightness: f32,
-    fog_saturation: f32,
+    haze_near: f32,
+    haze_far: f32,
+    haze_transmittance: f32,
+    haze_saturation: f32,
     color_contrast: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    // Linear RGB, in what used to be tail padding — haze fades toward it.
+    bg_r: f32,
+    bg_g: f32,
+    bg_b: f32,
 }
 
 struct VertexOutput {
@@ -122,20 +123,20 @@ fn vs_point(@builtin(vertex_index) point_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Apply fog based on depth
-    let fog_range = camera.fog_far - camera.fog_near;
-    let fog_factor = clamp((in.depth - camera.fog_near) / fog_range, 0.0, 1.0);
+    // Atmospheric haze: distant material dissolves *into the background*, and
+    // loses saturation on the way. It used to multiply the colour toward black
+    // instead, which is only the same thing when the background happens to be
+    // black — put a fractal on a pale background that way and the far material
+    // gains contrast with distance, which reads as nearer, not further. See
+    // `src/haze.rs`.
+    let range = camera.haze_far - camera.haze_near;
+    let t = clamp((in.depth - camera.haze_near) / range, 0.0, 1.0);
 
-    // Desaturate with distance
     let lum = dot(in.color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let gray = vec3<f32>(lum);
+    let sat = mix(1.0, camera.haze_saturation, t);
+    let desaturated = mix(vec3<f32>(lum), in.color, sat);
 
-    let sat_factor = mix(1.0, camera.fog_saturation, fog_factor);
-    let desaturated = mix(gray, in.color, sat_factor);
-
-    // Reduce brightness with distance
-    let bright_factor = mix(1.0, camera.fog_brightness, fog_factor);
-    let final_color = desaturated * bright_factor;
-
-    return vec4<f32>(final_color, 1.0);
+    let transmittance = mix(1.0, camera.haze_transmittance, t);
+    let background = vec3<f32>(camera.bg_r, camera.bg_g, camera.bg_b);
+    return vec4<f32>(mix(background, desaturated, transmittance), 1.0);
 }

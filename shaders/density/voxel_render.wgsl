@@ -14,14 +14,15 @@ struct CameraUniforms {
     point_size: f32,
     aspect_ratio: f32,
     min_point_pixels: f32,
-    fog_near: f32,
-    fog_far: f32,
-    fog_brightness: f32,
-    fog_saturation: f32,
+    haze_near: f32,
+    haze_far: f32,
+    haze_transmittance: f32,
+    haze_saturation: f32,
     color_contrast: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    // Linear RGB, in what used to be tail padding — haze fades toward it.
+    bg_r: f32,
+    bg_g: f32,
+    bg_b: f32,
 }
 
 @group(0) @binding(0) var<storage, read> voxels: array<RenderVoxel>;
@@ -104,7 +105,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Calculate fog factor (0 = no fog, 1 = full fog)
     let fog_factor = clamp(
-        (in.view_depth - camera.fog_near) / (camera.fog_far - camera.fog_near),
+        (in.view_depth - camera.haze_near) / (camera.haze_far - camera.haze_near),
         0.0, 1.0
     );
 
@@ -113,11 +114,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let gray = vec3<f32>(lum);
 
     // Apply saturation reduction (lerp toward gray)
-    let sat_factor = mix(1.0, camera.fog_saturation, fog_factor);
+    let sat_factor = mix(1.0, camera.haze_saturation, fog_factor);
     let desaturated = mix(gray, in.color.rgb, sat_factor);
 
     // Apply brightness reduction
-    let bright_factor = mix(1.0, camera.fog_brightness, fog_factor);
+    let bright_factor = mix(1.0, camera.haze_transmittance, fog_factor);
     var final_color = desaturated * bright_factor;
 
     // Modulate by density for accumulation effect

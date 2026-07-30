@@ -66,7 +66,7 @@ pub struct OfflineParams<'a> {
     pub out_path: &'a Path,
     /// Extra chaos-game frames after the point buffer is full
     pub accumulate: u32,
-    pub fog_enabled: bool,
+    pub haze_enabled: bool,
     pub grid: GridMode,
     /// Use the additive log-density splat renderer instead of plain points
     pub splat: bool,
@@ -254,7 +254,7 @@ fn fill_points(
 }
 
 /// Base camera and render params from a view file, or scene defaults
-fn base_setup(view: &Option<View>, scene: &Scene, fog_enabled: bool) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
+fn base_setup(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
     match view {
         Some(v) => (
             OrbitCamera::from_legacy(
@@ -266,22 +266,22 @@ fn base_setup(view: &Option<View>, scene: &Scene, fog_enabled: bool) -> (OrbitCa
                 v.roll,
             ),
             v.point_size,
-            (v.fog_near, v.fog_far, v.fog_brightness, v.fog_saturation),
+            (v.haze_near, v.haze_far, v.haze_transmittance, v.haze_saturation),
         ),
         None => {
-            // `--fog` predates fog being scene data and now just means "on at
+            // `--fog` predates haze being scene data and now just means "on at
             // the old default strength"; the scene's own value wins. Same
             // precedence as `App::new`, so a `--render` matches what the
             // window shows.
-            let amount = if scene.fog > 0.0 {
-                scene.fog
-            } else if fog_enabled {
-                crate::fog::amount_from_brightness(0.4)
+            let amount = if scene.haze > 0.0 {
+                scene.haze
+            } else if haze_enabled {
+                crate::haze::amount_from_brightness(0.4)
             } else {
                 0.0
             };
-            let (near, far) = crate::fog::auto_band(scene.camera_distance);
-            let (fb, fs) = crate::fog::falloff(amount);
+            let (near, far) = crate::haze::auto_band(scene.camera_distance);
+            let (fb, fs) = crate::haze::falloff(amount);
             (
                 OrbitCamera {
                     yaw: scene.camera_yaw,
@@ -522,7 +522,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         height,
         out_path,
         accumulate,
-        fog_enabled,
+        haze_enabled,
         grid,
         splat,
         exposure,
@@ -554,7 +554,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     );
     let t_fill = Instant::now();
 
-    let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
 
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
@@ -582,7 +582,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         }
         let camera = CameraUniforms::new(
             tile.view_proj, height as f32, point_size, aspect, 1.0,
-            fog.0, fog.1, fog.2, fog.3, color_contrast,
+            haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
         );
         renderer.upload_camera(&queue, &camera);
 
@@ -665,7 +665,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         height,
         out_path,
         accumulate,
-        fog_enabled,
+        haze_enabled,
         grid: _,
         splat,
         exposure,
@@ -697,7 +697,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     );
     let t_fill = Instant::now();
 
-    let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
     // A view overrides the base framing but the scene still owns the path.
     // `path::resolve` is the same rule the app flies (see `App::camera_path`),
     // so a preview in the window and this render agree about what the camera
@@ -749,7 +749,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         let cam = path.sample(t);
         let camera = CameraUniforms::new(
             cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
-            fog.0, fog.1, fog.2, fog.3, color_contrast,
+            haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
         );
         renderer.upload_camera(&queue, &camera);
         let use_point_primitives = point_size * height as f32 / cam.distance <= 1.5;
@@ -803,7 +803,7 @@ pub fn render_mutations(
         height,
         out_path,
         accumulate,
-        fog_enabled,
+        haze_enabled,
         grid: _,
         splat,
         exposure,
@@ -848,13 +848,13 @@ pub fn render_mutations(
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
     let camera = CameraUniforms::new(
         view_proj, height as f32, point_size, aspect, 1.0,
-        fog.0, fog.1, fog.2, fog.3, color_contrast,
+        haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
     );
 
     let target = TileTarget::new(&device, width, height, clear);

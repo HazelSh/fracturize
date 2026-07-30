@@ -47,7 +47,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Render — renderer, point size + count, color, fog",
+                "Render — renderer, point size + count, color, haze",
                 "toggle the Render window",
             );
 
@@ -84,22 +84,83 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             draw_quick_controls(ui, app);
 
             // Scene identity, right-aligned — this used to be the HUD's
-            // first line, which sat underneath this very panel.
+            // first line, which sat underneath this very panel. It's also the
+            // editor for those two fields: the readout is the obvious place to
+            // change what it reads, and there was nowhere else for the author
+            // to live that wasn't a settings page for two strings.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
-                let resp = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("{} — {}", app.scene.name, app.scene.author)).weak(),
-                    )
-                    .truncate()
-                    .selectable(false),
-                );
-                let path = app.scene_path.clone().unwrap_or_else(|| "(unsaved scene)".to_string());
-                hinted(resp, &mut app.ui_state, &path, "the scene currently loaded");
+                draw_scene_identity(ui, app);
             });
         });
         ui.add_space(2.0);
     });
+}
+
+/// The scene's name and author: a readout that opens an editor for itself.
+fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
+    let author = app.scene.author.trim().to_string();
+    let label = if author.is_empty() {
+        app.scene.name.clone()
+    } else {
+        format!("{} — {}", app.scene.name, author)
+    };
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(label).weak())
+            .frame(false)
+            .truncate(),
+    );
+    let path = app.scene_path.clone().unwrap_or_else(|| "(unsaved scene)".to_string());
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        format!("{}\n\nClick to rename the scene or set its author.", path),
+        "click: edit the scene's name and author",
+    );
+
+    egui::Popup::menu(&resp)
+        // A menu that closed on the first click inside would dismiss itself
+        // the moment you put the caret in a field.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(260.0)
+        .show(|ui| {
+            let mut name = app.scene.name.clone();
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY),
+                );
+                hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Shown here, and used for screenshot / render / view filenames",
+                    "type: rename the scene",
+                );
+            });
+            app.set_scene_name(&name);
+
+            let mut author = app.scene.author.clone();
+            ui.horizontal(|ui| {
+                ui.label("By");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut author).desired_width(f32::INFINITY),
+                );
+                hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Written into the scene file. Remembered as the default for scenes \
+                     you start from here (a blank canvas, a random flame).",
+                    "type: set the author",
+                );
+            });
+            app.set_scene_author(&author);
+
+            ui.label(
+                egui::RichText::new("Ctrl+S writes both to the scene file.")
+                    .small()
+                    .weak(),
+            );
+        });
 }
 
 /// Renderer mode, point count and camera transport — the three settings that

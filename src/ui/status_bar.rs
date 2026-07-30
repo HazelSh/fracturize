@@ -31,12 +31,32 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (valid, capacity, warming) = app.point_stats();
-                    ui.label(format!(
+                    let resp = ui.label(format!(
                         "{:.1}M/{:.1}M pts{}",
                         valid as f32 / 1e6,
                         capacity as f32 / 1e6,
                         if warming { " (warming)" } else { "" },
                     ));
+                    // When the attractor has collapsed the renderer draws a
+                    // fraction of the buffer (see `App::drawn_points`). Say so
+                    // — a point count that doesn't match what's on screen is
+                    // the sort of thing you'd otherwise chase for an hour.
+                    let height = app.surface_size().1 as f32;
+                    if let Some((drawn, _)) = app.withheld_points(height) {
+                        resp.on_hover_text(format!(
+                            "Drawing {:.1}M of them.\n\nThis scene's attractor is small \
+                             enough on screen that the rest would land on pixels already \
+                             covered — they'd cost frame time and change nothing. The \
+                             chaos game still runs on the whole buffer, and brightness is \
+                             normalized, so this is invisible except in the frame rate.",
+                            drawn as f32 / 1e6,
+                        ));
+                        ui.label(
+                            egui::RichText::new(format!("(drawing {:.1}M)", drawn as f32 / 1e6))
+                                .weak()
+                                .small(),
+                        );
+                    }
 
                     // A running job is worth seeing without the dialog open —
                     // it's using the GPU this readout is measuring.

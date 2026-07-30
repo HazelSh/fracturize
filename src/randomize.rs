@@ -17,7 +17,7 @@ use crate::scene::{
     generate_colormap, resolve_color_speeds, Scene, TransformSpec, NUM_VARIATIONS,
     VARIATION_NAMES,
 };
-use crate::trace::{Walker, BURN_IN_STEPS};
+use crate::trace::{self, AttractorStats};
 
 /// Variations that stay bounded under repeated application in 3D. Notably
 /// absent: `spherical`, whose 1/r² inversion reliably blows scenes out (see
@@ -35,9 +35,6 @@ const FRIENDLY: &[&str] = &[
 ];
 
 const MAX_ATTEMPTS: usize = 20;
-/// Chaos-game steps per quality check. Still cheap: ~4k steps over ≤5
-/// transforms, and the occupancy measure below wants the sample count.
-const QC_STEPS: usize = 4_000;
 /// Attractor radius bounds. Below the floor it's collapsed to a speck, above
 /// the ceiling it's a diverging haze that no camera framing will save.
 const MIN_RADIUS: f32 = 0.15;
@@ -45,8 +42,6 @@ const MAX_RADIUS: f32 = 8.0;
 /// Per-axis standard deviation under which the attractor is degenerate (a
 /// point or a line rather than a form). At least two axes must clear it.
 const MIN_AXIS_SPREAD: f32 = 0.02;
-/// Occupancy grid resolution for the "is this just a blob" test.
-const OCCUPANCY_CELLS: usize = 10;
 /// Fraction of the bounding box's cells the attractor may fill before it
 /// reads as a solid lump rather than a fractal. A set that fills space
 /// uniformly puts a point in nearly every cell at this sample count; the
@@ -62,7 +57,7 @@ const MIN_AXIS_RATIO: f32 = 0.25;
 pub fn random_flame(rng: &mut impl Rng) -> Scene {
     let mut last = build_candidate(rng);
     for attempt in 0..MAX_ATTEMPTS {
-        if let Some(stats) = attractor_stats(&last.transforms) {
+        if let Some(stats) = measure_candidate(&last.transforms) {
             log::debug!(
                 "Random flame attempt {}: r95 {:.3}, spread {:?}, occupancy {:.3} -> {}",
                 attempt,
@@ -249,6 +244,13 @@ fn random_quat(rng: &mut impl Rng) -> Quat {
     Quat::from_xyzw(s1 * u2.sin(), s1 * u2.cos(), s2 * u3.sin(), s2 * u3.cos())
 }
 
+/// Measure a candidate flame. Everything is enabled at this point — a rolled
+/// flame has no disabled transforms — so this is just `trace::measure` with
+/// that spelled out.
+fn measure_candidate(transforms: &[TransformSpec]) -> Option<AttractorStats> {
+    trace::measure(transforms, &vec![true; transforms.len()])
+}
+
 /// Geometric mean of a matrix's axis lengths — a cheap stand-in for "how much
 /// does this map shrink space", good enough for the contraction check.
 fn mean_singular_value(m: Mat4) -> f32 {
@@ -256,23 +258,7 @@ fn mean_singular_value(m: Mat4) -> f32 {
     (s.x.abs() * s.y.abs() * s.z.abs()).cbrt()
 }
 
-struct Stats {
-    /// Centroid of the visited points — the attractor rarely sits on the
-    /// origin, and framing the camera there instead pushes it off to one
-    /// side of the view.
-    center: Vec3,
-    /// 95th-percentile distance from the centroid. Deliberately *not* the
-    /// maximum: chaos-game walkers throw occasional far outliers, and framing
-    /// the camera on those leaves the actual form a speck in the middle of an
-    /// empty frame.
-    radius: f32,
-    /// Per-axis standard deviation of the visited points
-    spread: Vec3,
-    /// Fraction of the bounding box's cells that contain any point
-    occupancy: f32,
-}
-
-impl Stats {
+impl AttractorStats {
     fn acceptable(&self) -> bool {
         if !(self.radius.is_finite() && (MIN_RADIUS..=MAX_RADIUS).contains(&self.radius)) {
             return false;
@@ -292,69 +278,6 @@ impl Stats {
     }
 }
 
-/// Run the CPU chaos game and measure where it lands. `None` when no walker
-/// can be built (all weights zero) or the orbit goes non-finite.
-fn attractor_stats(transforms: &[TransformSpec]) -> Option<Stats> {
-    // Fixed seed: the *candidate* is random, but the acceptance test should
-    // be deterministic, so a flame that passes here can't fail on a re-roll.
-    let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
-    let enabled = vec![true; transforms.len()];
-    let mut walker = Walker::new(transforms, &enabled, &mut rng)?;
-
-    for _ in 0..BURN_IN_STEPS {
-        walker.step(&mut rng);
-    }
-
-    let mut points = Vec::with_capacity(QC_STEPS);
-    let mut sum = Vec3::ZERO;
-    let mut sum_sq = Vec3::ZERO;
-    for _ in 0..QC_STEPS {
-        walker.step(&mut rng);
-        let p = walker.pos;
-        if !p.is_finite() {
-            return None;
-        }
-        sum += p;
-        sum_sq += p * p;
-        points.push(p);
-    }
-
-    let n = QC_STEPS as f32;
-    let mean = sum / n;
-    let var = (sum_sq / n - mean * mean).max(Vec3::ZERO);
-
-    let mut radii: Vec<f32> = points.iter().map(|p| (*p - mean).length()).collect();
-    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let radius = radii[(radii.len() as f32 * 0.95) as usize % radii.len()];
-
-    Some(Stats {
-        center: mean,
-        radius,
-        spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
-        occupancy: occupancy(&points, mean, radius),
-    })
-}
-
-/// Fraction of a coarse grid over the attractor's core that holds any point.
-/// Points beyond `radius` (the 5% outlier tail) are ignored so a few stray
-/// walkers can't inflate the box and make a blob look sparse.
-fn occupancy(points: &[Vec3], center: Vec3, radius: f32) -> f32 {
-    if radius <= 0.0 {
-        return 1.0;
-    }
-    let cells = OCCUPANCY_CELLS;
-    let mut filled = vec![false; cells * cells * cells];
-    let scale = cells as f32 / (2.0 * radius);
-    for p in points {
-        let local = (*p - center) * scale + Vec3::splat(cells as f32 * 0.5);
-        if local.min_element() < 0.0 || local.max_element() >= cells as f32 {
-            continue;
-        }
-        let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
-        filled[(z * cells + y) * cells + x] = true;
-    }
-    filled.iter().filter(|&&f| f).count() as f32 / (cells * cells * cells) as f32
-}
 
 /// Wrap an accepted candidate up as a full `Scene`, framed for its size.
 fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
@@ -379,11 +302,11 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
         color_speed,
         color_falloff,
         color_contrast: 1.0,
-        // A little fog by default. A freshly rolled flame is a form nobody has
+        // A little haze by default. A freshly rolled flame is a form nobody has
         // seen before, and with no shading and no occlusion there is nothing
         // else telling you which arm is in front — hand-authored scenes can opt
         // in, but a random one has no author to make that call.
-        fog: 0.35,
+        haze: 0.35,
         transforms: c.transforms,
         transform_names: c.names,
         colors: c.colors,
@@ -417,8 +340,6 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
     };
     Vec3::new(r, g, b) + Vec3::splat(v - c)
 }
-
-use rand::SeedableRng;
 
 #[cfg(test)]
 mod tests {
@@ -454,7 +375,7 @@ mod tests {
                 assert!(t.weight > 0.0, "seed {}: non-positive weight", seed);
             }
 
-            let stats = attractor_stats(&scene.transforms)
+            let stats = measure_candidate(&scene.transforms)
                 .unwrap_or_else(|| panic!("seed {}: no walker could be built", seed));
             assert!(
                 stats.acceptable(),

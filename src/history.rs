@@ -43,7 +43,7 @@ pub struct EditSnapshot {
     pub point_size: f32,
     pub color_falloff: f32,
     pub color_contrast: f32,
-    pub fog_amount: f32,
+    pub haze_amount: f32,
 }
 
 impl EditSnapshot {
@@ -246,7 +246,7 @@ mod tests {
             color_speed: 0.5,
             color_falloff: 0.0,
             color_contrast: 1.0,
-            fog: 0.0,
+            haze: 0.0,
             transforms: vec![TransformSpec {
                 matrix: Mat4::IDENTITY,
                 color_value: 0.0,
@@ -275,7 +275,7 @@ mod tests {
             point_size: 0.002,
             color_falloff: 0.0,
             color_contrast: 1.0,
-            fog_amount: 0.0,
+            haze_amount: 0.0,
         }
     }
 
