@@ -25,12 +25,12 @@ const SECTIONS: &[(&str, &[Row])] = &[
     (
         "Camera",
         &[
-            ("drag", "orbit camera (pauses auto-orbit)", None),
+            ("drag", "orbit camera (takes it off the path)", None),
             ("shift+drag", "pan focus (middle-drag works too)", None),
-            ("right-drag", "roll the camera (level it in the Camera window)", None),
+            ("right-drag", "roll the camera; over a gizmo, that transform's menu", None),
             ("scroll", "zoom", None),
             ("Up / Down", "zoom in / out", Some(HelpAction::Zoom)),
-            ("O", "pause / resume camera orbit", Some(HelpAction::ToggleOrbit)),
+            ("O / Z", "play / stop the camera flying its path", Some(HelpAction::CameraMotion)),
             ("I", "invert mouse pitch (saved to prefs)", Some(HelpAction::InvertPitch)),
             ("V", "save current view to views/", Some(HelpAction::SaveView)),
         ],
@@ -38,9 +38,9 @@ const SECTIONS: &[(&str, &[Row])] = &[
     (
         "Camera paths",
         &[
-            ("Y / Shift+Y", "add / remove camera path keypoint", Some(HelpAction::PathKey)),
-            ("Z", "play / stop camera path flythrough", Some(HelpAction::PathPlay)),
+            ("Y / Shift+Y", "add / remove a camera path keypoint of this scene's own", Some(HelpAction::PathKey)),
             ("Ctrl+Y", "toggle camera path loop", None),
+            ("", "no keypoints = a full orbit around the framing, flown the same way", None),
         ],
     ),
     (
@@ -99,7 +99,6 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
             ("Ctrl+Shift+S", "save scene as… (fork it under a new name)", None),
             ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
-            ("P", "HQ render current view (background)", Some(HelpAction::HqRender)),
         ],
     ),
     (

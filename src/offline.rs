@@ -698,12 +698,17 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     let t_fill = Instant::now();
 
     let (base_camera, point_size, fog) = base_setup(&view, &scene, fog_enabled);
-    // A view overrides the base framing but the scene still owns the path;
-    // pathless scenes get a seamless full orbit around the base framing
-    let path = scene
-        .camera_path
-        .clone()
-        .unwrap_or_else(|| CameraPath::full_orbit(&base_camera));
+    // A view overrides the base framing but the scene still owns the path.
+    // `path::resolve` is the same rule the app flies (see `App::camera_path`),
+    // so a preview in the window and this render agree about what the camera
+    // does — including for a scene with no path, which gets a seamless full
+    // orbit around the base framing.
+    let default = CameraPath::full_orbit(&base_camera);
+    let path = crate::path::resolve(scene.camera_path.as_ref(), &default).clone();
+    let is_default = std::ptr::eq(
+        crate::path::resolve(scene.camera_path.as_ref(), &default),
+        &default,
+    );
 
     let seconds = anim.seconds.unwrap_or_else(|| path.duration()).max(0.1);
     let frames = ((seconds * anim.fps as f32).round() as u32).max(2);
@@ -714,7 +719,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         anim.fps,
         path.keys.len(),
         if path.closed { "closed loop" } else { "open path" },
-        if scene.camera_path.is_none() { " (auto full orbit)" } else { "" },
+        if is_default { " (auto full orbit)" } else { "" },
     );
 
     let mut encoder = crate::avif::AnimationEncoder::new(width, height, anim.fps, anim.quality, 8)?;

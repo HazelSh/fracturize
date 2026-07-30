@@ -22,6 +22,14 @@ use glam::Vec3;
 
 use crate::camera::OrbitCamera;
 
+/// Angular speed of the default orbit, in rad/s — a full turn every ~35s.
+///
+/// This was `yaw += 0.18 * dt` applied straight to the camera, back when the
+/// turntable was its own mechanism. It survives only as [`CameraPath::
+/// full_orbit`]'s duration, which is the one place the number still means
+/// anything.
+pub const ORBIT_RATE: f32 = 0.18;
+
 /// One spline keypoint: a full orbit-camera framing
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathKey {
@@ -56,6 +64,24 @@ pub struct CameraPath {
     pub ease: Option<bool>,
     /// Suggested playback/render duration; None = 3s per segment
     pub seconds: Option<f32>,
+}
+
+/// Which path to fly: the scene's own keypoints when there are enough of them
+/// to interpolate, otherwise the default.
+///
+/// The one rule, in one place. Both the app (`App::camera_path`) and the
+/// offline animation renderer go through here, so "what does this scene's
+/// camera do" has a single answer — what you watch in the window is what
+/// `--render x.avif` writes.
+///
+/// The threshold is two keys because a spline needs two ends. One key is a
+/// scene mid-authoring: it's stored and saved, but the default still flies
+/// until it has company.
+pub fn resolve<'a>(authored: Option<&'a CameraPath>, default: &'a CameraPath) -> &'a CameraPath {
+    match authored {
+        Some(p) if p.keys.len() >= 2 => p,
+        _ => default,
+    }
 }
 
 /// Uniform Catmull-Rom: interpolate between p1 and p2 with neighbors p0, p3
@@ -96,8 +122,13 @@ impl CameraPath {
         self.ease.unwrap_or(!self.closed)
     }
 
-    /// A seamless full-turn orbit at the given base framing — the default
-    /// animation for scenes that don't author a path
+    /// A seamless full-turn orbit at the given base framing.
+    ///
+    /// This is *the* path for a scene that authors none — the same object in
+    /// the app (where it's the turntable you watch), in the viewport (where
+    /// it's drawn like any other path), and offline (where `--render x.avif`
+    /// flies it). There's no second turntable system beside the path system;
+    /// there's one path system with this as its default.
     pub fn full_orbit(base: &OrbitCamera) -> Self {
         let tau = std::f32::consts::TAU;
         let keys = (0..4)
@@ -106,7 +137,12 @@ impl CameraPath {
                 ..PathKey::from_camera(base)
             })
             .collect();
-        Self { keys, closed: true, ease: Some(false), seconds: None }
+        Self {
+            keys,
+            closed: true,
+            ease: Some(false),
+            seconds: Some(tau / ORBIT_RATE),
+        }
     }
 
     /// Yaw swept by one full loop of a closed path: the authored keys' net
@@ -278,6 +314,39 @@ mod tests {
         assert!((mid.yaw - (base.yaw + std::f32::consts::PI)).abs() < 1e-3);
         assert!((mid.pitch - base.pitch).abs() < 1e-4);
         assert!((mid.distance - base.distance).abs() < 1e-3);
+    }
+
+    #[test]
+    fn resolve_prefers_authored_keys_but_needs_two() {
+        let base = OrbitCamera { yaw: 0.0, pitch: 0.0, distance: 3.0, focus: Vec3::ZERO, roll: 0.0 };
+        let default = CameraPath::full_orbit(&base);
+
+        // No path at all, and a path still being built one key at a time: the
+        // default flies, so the camera is never stranded on an unflyable path.
+        assert!(std::ptr::eq(resolve(None, &default), &default));
+        let one_key = CameraPath {
+            keys: vec![key(1.0, 0.2, 2.0, Vec3::Z)],
+            closed: false,
+            ease: None,
+            seconds: None,
+        };
+        assert!(std::ptr::eq(resolve(Some(&one_key), &default), &default));
+
+        // Two keys is a path, and it wins.
+        let authored = linear_path(false);
+        assert!(std::ptr::eq(resolve(Some(&authored), &default), &authored));
+    }
+
+    #[test]
+    fn full_orbit_turns_at_the_orbit_rate() {
+        // The default path's duration *is* the old turntable's angular speed:
+        // one full turn of yaw, at ORBIT_RATE rad/s. Pin it, since the app and
+        // the offline animation path both take their default motion from here.
+        let base = OrbitCamera { yaw: 0.0, pitch: 0.2, distance: 3.0, focus: Vec3::ZERO, roll: 0.0 };
+        let p = CameraPath::full_orbit(&base);
+        let swept = p.sample(1.0).yaw - p.sample(0.0).yaw;
+        assert!((swept - std::f32::consts::TAU).abs() < 1e-3, "swept {}", swept);
+        assert!((swept / p.duration() - ORBIT_RATE).abs() < 1e-4);
     }
 
     #[test]

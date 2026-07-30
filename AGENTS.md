@@ -30,7 +30,7 @@ src/
     render_panel.rs# Renderer mode, exposure, point size + count, color, fog, output
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
   render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
-    camera_panel.rs# Framing, saved views, camera paths, HQ render / screenshot
+    camera_panel.rs# Framing, saved views, the camera path, render/screenshot/save
     browser.rs     # Scene picker (B)
     shortcuts.rs   # Keybind reference window (H)
     labels.rs      # World-anchored transform name labels
@@ -111,7 +111,8 @@ All GPU, three passes per frame:
 The chaos churn rate is wall-clock normalized: `advance_frame` takes the
 frame dt and scales walker iterations so the buffer refreshes at the same
 real-time rate at any refresh rate (60 FPS baseline: full cycle ~13 s).
-The auto-orbit is likewise time-based (0.18 rad/s).
+The default camera orbit is likewise time-based (`path::ORBIT_RATE`, 0.18
+rad/s — one turn every ~35s), expressed as that path's duration.
 
 Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 - ~10M points at ~38 FPS uncapped (subpixel/point-primitive path)
@@ -123,9 +124,10 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 
 | Input | Action |
 |-------|--------|
-| left-drag (empty space) | orbit camera, grab-the-scene: drag right spins it right, drag up tilts its top toward you (pauses auto-orbit) |
+| left-drag (empty space) | orbit camera, grab-the-scene: drag right spins it right, drag up tilts its top toward you (takes the camera off its path) |
 | shift+drag / middle-drag | pan the focus in the view plane |
-| right-drag (empty space) | roll the camera about its view axis (not over a gizmo — that gesture is reserved) |
+| right-drag (empty space) | roll the camera about its view axis |
+| right-click a gizmo | that transform's context menu: duplicate / enable / delete / rename — the same menu its row in the Transforms window has |
 | scroll | zoom |
 | drag a gizmo's origin dot | select + translate the transform in the view plane |
 | drag an origin→axis gizmo edge | translate along that axis |
@@ -162,9 +164,8 @@ framing on the next save.
 | Up / Down | zoom in / out (selects transform when a transform is selected) |
 | Enter | enable/disable selected transform |
 | G | toggle transform gizmos and their name labels |
-| O | pause / resume camera orbit |
-| Z | play / stop camera-path flythrough preview |
-| Y / Shift+Y | add current framing as a path keypoint / remove last keypoint |
+| O or Z | play / stop the camera flying its path (two keys, one action) |
+| Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
 | Ctrl+Y | toggle camera path closed (seamless loop) |
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
@@ -174,7 +175,7 @@ framing on the next save.
 | X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
 | I | invert mouse pitch, flightsim style (persisted to prefs) |
 | B | Scenes window: arrows + Enter, or click a row, to load a scene in place |
-| P | background high-quality render of the current framing to renders/ (own GPU device; the realtime view keeps running; pauses orbit) |
+| P | open the Render job dialog (see Render Jobs) |
 | A / Shift+A | duplicate selected transform / add a fresh one (rebuilds pipelines) |
 | Delete | delete selected transform |
 | , / . | selected transform's chaos weight down / up |
@@ -224,9 +225,9 @@ aspect and picking math are unaffected by which panels are open.
 | Window | What lives there |
 |--------|------------------|
 | Transforms | Vertical tab rail (colour swatch, name, eye toggle, relative-weight bar) plus a detail pane for the selected transform: position/rotation/scale, weight, colour, variations |
-| Explore | New random flame, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
+| Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
 | Render | Renderer mode, exposure, point size, point count, color falloff/contrast, fog |
-| Camera | Framing, saved views, camera-path keypoints + playback, HQ render / screenshot / save scene |
+| Camera | Framing, saved views, the camera path (keypoints + playback), render job / screenshot / save scene |
 | Scenes (B) | Scene picker; the same selection the arrow keys walk |
 | Keybinds (H) | The table above, scrollable, rows clickable |
 
@@ -294,6 +295,22 @@ way, so an interesting roll can always be recovered. `spherical` is never
 rolled (its 1/r^2 inversion blows scenes out — fine by hand, bad by dice).
 A rolled flame is a normal history entry: one Ctrl+Z restores what was there.
 
+## Starting From Nothing
+
+`--blank`, and the Explore window's "Blank scene", give you `Scene::blank()`:
+two plain half-scale transforms at ±(0.5, 0.5, 0), no rotation, no variations,
+default everything else. Two rather than one because a single contracting map
+converges to a point — two give a visible line of dust with each transform's
+own colour on its half, so there's something on screen to build against. Like a
+random flame it's an *edit*, so one Ctrl+Z brings back what was there.
+
+From there: `Shift+A` (or the Transforms window's "+ add") adds a transform,
+`A` / "dup" duplicates the selected one, `Delete` removes it, and right-clicking
+either a row in the Transforms window *or* a gizmo in the viewport gives the
+same menu — duplicate, enable/disable, delete, rename. A scene always keeps at
+least one transform (the chaos game needs somewhere to send the point), so the
+last Delete is disabled rather than hidden.
+
 ## Background & Transparent Output
 
 `background` is scene data (linear RGB, see "Scene Files"), picked in the
@@ -311,7 +328,7 @@ formula is ~1% RMSE, so existing scenes look the same; `--render` of a *points*
 scene is byte-identical.
 
 `--transparent` (and the Render window's checkbox, which covers `S` screenshots
-and `P` HQ renders) writes an alpha channel: the clear alpha goes to 0, the
+and render jobs) writes an alpha channel: the clear alpha goes to 0, the
 points renderer's own alpha marks where points landed, and the splat renderer
 writes straight-alpha coverage so dusty edges stay dusty instead of becoming a
 cutout. The live window is always opaque — its swapchain has nothing behind it.
@@ -384,16 +401,23 @@ path_ease = false         # smoothstep time; default: open paths ease, loops don
 # travels on its own spline so look directions blend smoothly while the eye
 # moves. Omitted fields inherit the base [camera] framing. Closed paths take
 # the shortest yaw route back to key 1. In-app: Y appends the current framing
-# as a keypoint, Shift+Y removes, Ctrl+Y toggles the loop, Z previews.
+# as a keypoint, Shift+Y removes, Ctrl+Y toggles the loop, O or Z flies it.
 #
-# Paths are drawn in the viewport when gizmos are on (G): the eye's route as
-# a green polyline, a cross at each keypoint, and a warm playhead marker with
-# a stalk pointing where that camera looks while previewing. The default
-# turntable is a synthesized `CameraPath` too, but isn't drawn — while it
-# runs the camera stands on its own circle, so the drawing would be a
-# permanent horizontal line telling you nothing. The Camera window's "Adopt
-# the orbit as a path" copies it into the scene when you want to edit it;
-# until then no scene grows a path it never asked for.
+# EVERY SCENE HAS A PATH. Omit these keypoints (or author fewer than two) and
+# the path is a seamless full orbit around the current framing, at 0.18 rad/s
+# — the "turntable". That default is not a second system: it is a real
+# `CameraPath`, it draws, it plays, and `--render x.avif` flies it, all
+# through the same code (`path::resolve`, used by both `App::camera_path` and
+# src/offline.rs). Editing it — a keypoint, the loop flag, the duration — is
+# what turns it into scene data; until then no scene grows a path it never
+# asked for, and Ctrl+S writes no [[camera.path]] block.
+#
+# Paths are drawn in the viewport when gizmos are on (G): the eye's route as a
+# green polyline with a cross at each keypoint — but only while the path ISN'T
+# playing. During playback the camera stands on the line, so drawing it is a
+# smear across the shot that says nothing; it reappears the moment you take the
+# camera back by hand, which is when the route is what you're positioning
+# against.
 [[camera.path]]
 yaw = 0.0
 pitch = 0.9
@@ -484,11 +508,13 @@ Scene-design notes learned the hard way:
 
 ## Render Jobs
 
-`P` and the Camera window's "HQ render" still fire the old one-click render;
-"Render job…" opens the dialog (`src/ui/render_job.rs`) for everything else.
-The model is `src/render_job.rs`; the work runs on a second wgpu device, so the
-app stays at full framerate while a job goes (measured: 119 FPS with a 240-frame
-animation rendering).
+`P`, and the Camera window's "Render job…", open the dialog
+(`src/ui/render_job.rs`). There is no separate one-click "HQ render" — that
+button and its keybind were folded into this dialog, which does the same job
+with its parameters visible, an estimate, and a way to stop it. The model is
+`src/render_job.rs`; the work runs on a second wgpu device, so the app stays at
+full framerate while a job goes (measured: 119 FPS with a 240-frame animation
+rendering).
 
 - **Modes**: still (PNG), animation (AVIF along the camera path), or view
   descriptor — write a `.toml` view of this framing and render it later.
@@ -522,7 +548,8 @@ Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
 point size, fog, color falloff/contrast — plus `renderer = "splat"` and
 `exposure` when splat mode is active) to `views/<scene>-<timestamp>.toml`.
 View color params override the scene's when present. Load one with `--view <path>`;
-in windowed mode the orbit starts paused so the framing holds (press O to resume).
+in windowed mode the camera starts stopped so the framing holds (press O to fly the
+path).
 
 `--render <out.png>` renders **headlessly** — no window, no event loop, no focus
 stealing — and exits, printing a timing breakdown (`setup | chaos fill | render |
@@ -538,6 +565,9 @@ encode+save | total`) to stdout so you can budget effort. Options:
   & Transparent Output").
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`
   (legacy on-switch; a scene's own `fog` value wins over it).
+- No `--scene`? `--random` rolls a flame, `--blank` opens the empty canvas
+  (see "Random Flames" and "Starting From Nothing"); otherwise you get the
+  built-in default. All three work windowed and with `--render`.
 - `--splat [--exposure X]` — render with the splat renderer (also implied by a
   view saved in splat mode; explicit flags win). Works with all grid modes.
   Exposure is capacity-normalized, so the same value looks the same at every
@@ -557,14 +587,18 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   be adopted directly into a `[camera]` block or view file.
 
 **Animation** (`--render <out.avif>`): an animated AVIF of the camera flying
-the scene's `[[camera.path]]` spline — or, when the scene has no path, a
-seamless full-turn orbit of the base framing. The point cloud is fixed, so
+the scene's path — its `[[camera.path]]` spline, or the default full-turn orbit
+of the base framing when it authors fewer than two keypoints. Same rule the app
+previews with (`path::resolve`), so what you watch in the window is what this
+writes. The point cloud is fixed, so
 this is one chaos fill plus a cheap render pass per frame; frames stream
 straight into rav1e (AV1) and a hand-rolled ISOBMFF muxer (src/avif.rs), no
 external tools. Cannot combine with grid/mutation sheets. Options:
 
 - `--fps N` (default 30), `--seconds S` (default: the path's `path_seconds`,
-  else 3s per spline segment), `--quality 0-100` (default 60).
+  else 3s per spline segment — but the *default* orbit carries its own
+  `path_seconds` of ~35s, one turn at 0.18 rad/s, so a pathless scene animates
+  a full slow turn unless you pass `--seconds`), `--quality 0-100` (default 60).
 - Closed paths omit the final frame so the loop wraps without a stutter.
 - Odd `--width`/`--height` are rounded down (4:2:0 chroma needs even sizes).
 - Budget: encoding dominates and scales with pixels — measured at ~6e-7

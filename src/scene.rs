@@ -400,6 +400,63 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// An empty canvas: the smallest scene that still renders something, for
+    /// building an IFS up from nothing rather than mutating one that exists.
+    ///
+    /// Two transforms, not one. A single contracting map has a single fixed
+    /// point, so the chaos game converges to a dot and there's nothing on
+    /// screen to work against; two opposed half-scale maps give a visible line
+    /// of dust through the origin. Both are clean axis-aligned half-scales at
+    /// ±(0.5, 0.5, 0) — no rotation, no variations, nothing to reverse-engineer
+    /// out of the inspector before you start adding your own.
+    pub fn blank() -> Self {
+        let colors = vec![Vec3::new(0.9, 0.5, 0.25), Vec3::new(0.25, 0.6, 0.9)];
+        // `generate_colormap` spreads N colours evenly around the cyclic
+        // gradient, so `i / N` is where transform i's own colour sits — each
+        // one pulls the running colour index toward itself and the two halves
+        // of the attractor read apart. Both at the same index (the default for
+        // a hand-added transform) would come out one flat colour.
+        let map = |i: usize, offset: Vec3| TransformSpec {
+            matrix: Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.5),
+                glam::Quat::IDENTITY,
+                offset,
+            ),
+            color_value: i as f32 / colors.len() as f32,
+            weight: 1.0,
+            color_speed: default_color_speed() as f32,
+            explicit_color_speed: None,
+            variations: TransformSpec::linear_variations(),
+        };
+        let colormap = generate_colormap(&colors);
+        Self {
+            name: "untitled".to_string(),
+            author: String::new(),
+            point_size: default_point_size() as f32,
+            points_per_frame: 100_000,
+            point_count: DEFAULT_POINT_COUNT,
+            decay: default_decay() as f32,
+            color_speed: default_color_speed() as f32,
+            color_falloff: 0.0,
+            color_contrast: default_color_contrast() as f32,
+            fog: 0.0,
+            transforms: vec![
+                map(0, Vec3::new(0.5, 0.5, 0.0)),
+                map(1, Vec3::new(-0.5, -0.5, 0.0)),
+            ],
+            transform_names: vec![None, None],
+            colors,
+            colormap,
+            camera_focus: Vec3::ZERO,
+            camera_distance: 3.0,
+            camera_yaw: 0.0,
+            camera_pitch: 0.3,
+            camera_roll: 0.0,
+            background: DEFAULT_BACKGROUND,
+            camera_path: None,
+        }
+    }
+
     /// Load a scene from a TOML file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let content = fs::read_to_string(path.as_ref())
@@ -1015,6 +1072,25 @@ fn inline_variation_tables(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_scene_is_a_usable_starting_point() {
+        let s = Scene::blank();
+        // Two transforms, because one contracting map converges to a single
+        // point and there'd be nothing on screen to work against.
+        assert_eq!(s.transforms.len(), 2);
+        assert_eq!(s.colors.len(), 2);
+        assert_eq!(s.transform_names.len(), 2);
+        for t in &s.transforms {
+            // Contracting, so the chaos game converges rather than diverging.
+            assert!(t.contraction() < 1.0, "contraction {}", t.contraction());
+            assert!(t.weight > 0.0);
+            // Purely affine: nothing to reverse-engineer out of the inspector.
+            assert_eq!(t.variations, TransformSpec::linear_variations());
+        }
+        assert!(s.camera_path.is_none(), "a blank scene flies the default orbit");
+        assert!(s.camera_distance > 0.0);
+    }
 
     /// The loader's rotation convention, pinned as a test: EulerRot::XYZ
     /// composes as Rx * Ry * Rz on column vectors. External generators

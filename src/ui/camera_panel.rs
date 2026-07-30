@@ -1,5 +1,12 @@
-//! Camera window: framing, saved views, camera paths, and the output actions
-//! that capture what's on screen (screenshot, HQ render, save scene).
+//! Camera window: framing, saved views, the camera path, and the output actions
+//! that capture what's on screen (screenshot, render job, save scene).
+//!
+//! There is exactly one path here, because there is exactly one path (see
+//! `App::camera_path`): a scene's own keypoints when it has two or more,
+//! otherwise the default full orbit. The panel doesn't distinguish them beyond
+//! saying which you're looking at — the same list, the same transport, the same
+//! loop and duration controls either way, and editing any of them is what turns
+//! the default into scene data.
 //!
 //! None of the camera controls are history entries — per the Phase 3 design,
 //! moving the camera isn't an edit to the artwork. Path keypoints *are* scene
@@ -34,18 +41,6 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 
 fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        let mut paused = app.orbit_paused;
-        let resp = ui.checkbox(&mut paused, "pause orbit");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Stop the automatic turntable so the framing holds still (O)",
-            "click: pause / resume the auto-orbit",
-        );
-        if resp.changed() {
-            app.toggle_orbit();
-        }
-
         let mut invert = app.invert_pitch();
         let resp = ui.checkbox(&mut invert, "invert pitch");
         let resp = hinted(
@@ -75,7 +70,9 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         );
         if resp.changed() {
             app.camera.distance = distance.clamp(0.05, 100.0);
-            app.orbit_paused = true;
+            // Setting the framing by hand means taking the camera off the path,
+            // the same as dragging in the viewport does.
+            app.stop_camera_motion();
         }
 
         // Roll's home. Right-drag sets it, but a gesture with no readout
@@ -176,54 +173,80 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
 }
 
 fn draw_path(ui: &mut egui::Ui, app: &mut App) {
+    // Which path this is looking at. With no keys of its own the scene is on
+    // the default orbit, and that's shown read-only: it isn't authored content,
+    // it's derived from the framing, and it re-derives itself as you move. Your
+    // first "+ Add key" starts a list of your own, which the ✕s can edit.
+    let own: Option<Vec<(f32, f32, f32)>> = app.scene.camera_path.as_ref().map(|p| {
+        p.keys.iter().map(|k| (k.distance, k.yaw, k.pitch)).collect()
+    });
+    let authored = own.is_some();
+    let flying_default = app.path_is_default();
+
+    let keys: Vec<(f32, f32, f32)> = own.unwrap_or_else(|| {
+        app.camera_path()
+            .keys
+            .iter()
+            .map(|k| (k.distance, k.yaw, k.pitch))
+            .collect()
+    });
+    let mut closed = app.camera_path().closed;
+    let seconds = app.camera_path().duration();
+    let explicit_seconds = app.camera_path().seconds.is_some();
+    let moving = app.camera_moving();
+
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Camera path").strong());
-        let resp = ui.button("+ Add key");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Append the current framing as a path keypoint (Y)",
-            "click: add a keypoint here",
+        ui.label(
+            egui::RichText::new(if authored { "(this scene's)" } else { "(default orbit)" })
+                .small()
+                .weak(),
         );
-        if resp.clicked() {
-            app.add_path_key();
-        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let resp = ui.add_enabled(authored, egui::Button::new("Reset"));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                if authored {
+                    "Throw away this scene's keypoints and go back to the default full orbit"
+                } else {
+                    "Already on the default orbit"
+                },
+                "click: reset to the default orbit",
+            );
+            if resp.clicked() {
+                app.reset_path_to_default();
+            }
+
+            let resp = ui.button("+ Add key");
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                if authored {
+                    "Append the current framing to this scene's path (Y)"
+                } else {
+                    "Start this scene's own path with the current framing (Y). \
+                     The default orbit keeps flying until there are two keypoints."
+                },
+                "click: add a keypoint here",
+            );
+            if resp.clicked() {
+                app.add_path_key();
+            }
+        });
     });
 
-    let Some(path) = &app.scene.camera_path else {
+    if !authored {
         ui.label(
             egui::RichText::new(
-                "No path yet — add two or more keypoints to fly between them, \
-                 or start from the turntable this scene already orbits on.",
+                "A full turn around the current framing — every scene has this \
+                 until it authors keypoints of its own.",
             )
             .small()
             .weak(),
         );
-        let resp = ui.button("Adopt the orbit as a path");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Copy the default turntable's four keypoints into the scene, ready to edit. \
-             Until you do, the orbit stays out of the scene file.",
-            "click: turn the default orbit into an editable path",
-        );
-        if resp.clicked() {
-            app.promote_orbit_path();
-        }
-        return;
-    };
-
-    // Snapshot what the rows need before the loop, so the row bodies are free
-    // to call `&mut App` methods.
-    let keys: Vec<(f32, f32, f32)> = path
-        .keys
-        .iter()
-        .map(|k| (k.distance, k.yaw, k.pitch))
-        .collect();
-    let mut closed = path.closed;
-    let seconds = path.duration();
-    let explicit_seconds = path.seconds.is_some();
-    let playing = app.path_playing();
+    }
 
     let mut remove: Option<usize> = None;
     egui::ScrollArea::vertical()
@@ -242,6 +265,9 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
                         ))
                         .small(),
                     );
+                    if !authored {
+                        return;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let resp = ui.add(egui::Button::new(super::icons::X).small().frame(false));
                         let resp = hinted(
@@ -262,31 +288,37 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         return;
     }
 
-    ui.horizontal(|ui| {
-        let can_play = keys.len() >= 2;
-        let resp = ui.add_enabled(
-            can_play,
-            egui::Button::new(if playing { "Stop" } else { "Play" }),
+    // One key of your own isn't a path yet, and the list above doesn't show the
+    // orbit that's actually flying — so say which is which.
+    if authored && flying_default {
+        ui.label(
+            egui::RichText::new(
+                "One more keypoint and this flies instead of the default orbit.",
+            )
+            .small()
+            .color(ui.visuals().warn_fg_color),
         );
+    }
+
+    ui.horizontal(|ui| {
+        let resp = ui.button(if moving { "Stop" } else { "Play" });
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            if can_play {
-                "Fly the Catmull-Rom spline through the keypoints in real time (Z)"
-            } else {
-                "Needs at least two keypoints"
-            },
-            "click: play / stop the flythrough",
+            "Fly the path in real time (O or Z). While it plays the route isn't \
+             drawn — the camera is standing on it.",
+            "click: play / stop the camera",
         );
         if resp.clicked() {
-            app.toggle_path_play();
+            app.toggle_camera_motion();
         }
 
         let resp = ui.checkbox(&mut closed, "loop");
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Close the path back to its first key, for seamless loops (Ctrl+Y)",
+            "Close the path back to its first key, for seamless loops (Ctrl+Y). \
+             Setting this on the default orbit makes it this scene's own path.",
             "click: toggle a closed loop",
         );
         if resp.changed() {
@@ -304,11 +336,11 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if explicit_seconds {
-                "Playback duration for the whole path"
+                "How long the whole path takes"
             } else {
-                "Playback duration — currently the default of 3s per segment; setting it here pins it"
+                "How long the whole path takes — currently the default of 3s per segment; setting it here pins it"
             },
-            "drag: set the flythrough duration",
+            "drag: set the path duration",
         );
         if resp.changed() {
             app.set_path_seconds(Some(secs));
@@ -318,25 +350,6 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
 
 fn draw_output(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        let busy = app.hq_render_busy();
-        let resp = ui.add_enabled(!busy, egui::Button::new("HQ render"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            if busy {
-                "A high-quality render is already running"
-            } else {
-                "Render this exact view at high quality into renders/, on a background GPU device (P)"
-            },
-            "click: start a high-quality render",
-        );
-        if resp.clicked() {
-            app.start_hq_render();
-        }
-        if busy {
-            ui.spinner();
-        }
-
         let resp = ui.button("Render job…");
         let resp = hinted(
             resp,

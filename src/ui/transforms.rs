@@ -331,24 +331,55 @@ fn draw_tab(
         app.select_transform(Some(i));
     }
     tab_resp.context_menu(|ui| {
-        if ui.button("Duplicate").clicked() {
-            app.duplicate_transform_at(i);
-            ui.close();
-        }
-        if ui.button(if row.enabled { "Disable" } else { "Enable" }).clicked() {
-            app.toggle_transform_enabled(i);
-            ui.close();
-        }
-        let can_delete = app.scene.transforms.len() > 1;
-        if ui.add_enabled(can_delete, egui::Button::new("Delete")).clicked() {
-            app.delete_transform_at(i);
-            ui.close();
-        }
-        if ui.button("Rename").clicked() {
-            app.ui_state.renaming_transform = Some((i, row.name.clone()));
+        if context_menu(ui, app, i) {
             ui.close();
         }
     });
+}
+
+/// One transform's context menu. Shared by its row in this window and by
+/// right-clicking its gizmo in the viewport (`ui::draw_transform_menu`) — the
+/// same operations wherever you find the transform, rather than two menus that
+/// drift apart. Returns true when an item was chosen, i.e. when the caller
+/// should close the menu.
+pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
+    if i >= app.scene.transforms.len() {
+        return true;
+    }
+    let name = app
+        .scene
+        .transform_names
+        .get(i)
+        .and_then(|n| n.clone())
+        .unwrap_or_default();
+    let enabled = app.is_transform_enabled(i);
+    let mut chose = false;
+
+    if ui.button("Duplicate").clicked() {
+        app.duplicate_transform_at(i);
+        chose = true;
+    }
+    if ui.button(if enabled { "Disable" } else { "Enable" }).clicked() {
+        app.toggle_transform_enabled(i);
+        chose = true;
+    }
+    // The chaos game needs somewhere to send a point, so the last transform
+    // can't go. Shown disabled rather than hidden: a menu whose items move
+    // around is harder to use than one with a greyed row.
+    let can_delete = app.scene.transforms.len() > 1;
+    let del = ui.add_enabled(can_delete, egui::Button::new("Delete"));
+    if !can_delete {
+        del.on_hover_text("A scene needs at least one transform");
+    } else if del.clicked() {
+        app.delete_transform_at(i);
+        chose = true;
+    }
+    if ui.button("Rename").clicked() {
+        app.ui_state.renaming_transform = Some((i, name));
+        app.ui_state.panels.transforms_open = true;
+        chose = true;
+    }
+    chose
 }
 
 /// The detail pane: everything about the selected transform.

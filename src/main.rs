@@ -156,6 +156,11 @@ struct Args {
     /// always logged); combine with --render to explore offline.
     #[arg(long, conflicts_with = "scene")]
     random: bool,
+
+    /// Start from a blank scene instead of a scene file: two plain half-scale
+    /// transforms and nothing else, for building an IFS up from nothing.
+    #[arg(long, conflicts_with_all = ["scene", "random"])]
+    blank: bool,
 }
 
 /// Roll a random flame for `--random`, honouring `--seed` and logging the
@@ -251,6 +256,7 @@ impl ApplicationHandler for AppWrapper {
             Some(path) => Scene::load(path).unwrap_or_else(|e| {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
+            None if self.args.blank => Scene::blank(),
             None if self.args.random => random_scene(self.args.seed),
             None => {
                 log::info!("No scene specified, using built-in default");
@@ -367,7 +373,9 @@ impl ApplicationHandler for AppWrapper {
                             // Escape quits, which makes it the worst possible
                             // key to leave unhandled while something modal is
                             // up: dismiss that first.
-                            if app.ui_state.save_as.is_open() {
+                            if app.ui_state.transform_menu.is_some() {
+                                app.ui_state.transform_menu = None;
+                            } else if app.ui_state.save_as.is_open() {
                                 app.ui_state.save_as = Default::default();
                             } else if app.show_browser {
                                 app.toggle_browser();
@@ -444,7 +452,7 @@ impl ApplicationHandler for AppWrapper {
                                 app.toggle_help();
                             }
                             "o" | "O" => {
-                                app.toggle_orbit();
+                                app.toggle_camera_motion();
                             }
                             "z" | "Z" => {
                                 // Ctrl must be checked first: Ctrl+Z / Ctrl+Shift+Z
@@ -456,7 +464,10 @@ impl ApplicationHandler for AppWrapper {
                                         app.undo();
                                     }
                                 } else {
-                                    app.toggle_path_play();
+                                    // Same action as O. One motion, so one verb
+                                    // — two keys for it, because both were in
+                                    // people's fingers before they merged.
+                                    app.toggle_camera_motion();
                                 }
                             }
                             "y" | "Y" => {
@@ -484,7 +495,7 @@ impl ApplicationHandler for AppWrapper {
                                 app.toggle_browser();
                             }
                             "p" | "P" => {
-                                app.start_hq_render();
+                                ui::render_job::open(app);
                             }
                             "i" | "I" => {
                                 app.toggle_invert_pitch();
@@ -697,6 +708,7 @@ fn main() {
             Some(path) => Scene::load(path).unwrap_or_else(|e| {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
+            None if args.blank => Scene::blank(),
             None if args.random => random_scene(args.seed),
             None => default_scene(),
         };

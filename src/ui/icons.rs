@@ -34,7 +34,14 @@ pub const EYE_SLASH: &str = "\u{E224}";
 pub const X: &str = "\u{E4F6}";
 /// Roll a new random flame (Explore window) — Phosphor `dice-five`
 pub const DICE: &str = "\u{E1EE}";
+/// Start a blank scene (Explore window) — Phosphor `file`, the empty page
+pub const FILE: &str = "\u{E230}";
 /// Camera transport: motion is stopped, click to start
 pub const PLAY: &str = "\u{E3D0}";
 /// Camera transport: motion is running, click to stop
 pub const PAUSE: &str = "\u{E39E}";
+/// Transform gizmos + labels toggle (G) — Phosphor `cube`, for the tetrahedral
+/// cells it draws. Verified by rendering, not guessed: this font's codepoints
+/// are roughly alphabetical but not reliably so, and `cube`'s neighbours in the
+/// obvious place turned out to be `circle`.
+pub const CUBE: &str = "\u{E1DA}";

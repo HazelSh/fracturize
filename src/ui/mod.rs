@@ -54,6 +54,12 @@ pub struct UiState {
     /// its right-click context menu), and its in-progress text buffer. Only
     /// one row can be mid-rename at a time.
     pub renaming_transform: Option<(usize, String)>,
+    /// A transform's context menu, opened by right-clicking its *gizmo* in the
+    /// viewport: the transform index, and where to draw the menu (filled in on
+    /// the first frame from egui's pointer position, then held so the menu
+    /// doesn't chase the cursor). The menu itself is the same one the Transforms
+    /// window's rows use — see `transforms::context_menu`.
+    pub transform_menu: Option<(usize, Option<egui::Pos2>)>,
     /// Variation slots the inspector keeps showing for the transform in
     /// `.0` even at weight 0 — dragging a weight to zero must not make its
     /// row vanish mid-gesture (and blocking the drag there would put
@@ -81,6 +87,7 @@ impl UiState {
             status_hint: None,
             trs_cache: None,
             renaming_transform: None,
+            transform_menu: None,
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,
             save_as: save_as::SaveAsState::default(),
@@ -244,6 +251,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     labels::draw(&ctx, app);
     step("labels", t, &mut timings);
+    let t = std::time::Instant::now();
+    draw_transform_menu(&ctx, app);
+    step("transform_menu", t, &mut timings);
 
     if profile && app.frame_count % 120 == 0 {
         let parts: Vec<String> = timings
@@ -257,6 +267,70 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     // Persist panel open/closed state the instant it changes (toolbar
     // toggle or a window's close button) — same pattern as invert_pitch.
     app.panel_prefs_changed(app.ui_state.panels);
+}
+
+/// The context menu for a transform right-clicked in the *viewport*, on its
+/// gizmo (`App::on_mouse_press` opens it; `transforms::context_menu` is the
+/// body, shared with the Transforms window's rows).
+///
+/// Hand-rolled as an `Area` rather than egui's `Response::context_menu`,
+/// because there is no egui widget under the pointer to hang it off — the
+/// thing that was clicked is a tetrahedron in a 3D scene, picked by
+/// `src/pick.rs`. Everything else about it behaves like a menu: it appears
+/// where you clicked, and it goes away on Escape or a click outside.
+fn draw_transform_menu(ctx: &egui::Context, app: &mut crate::app::App) {
+    let Some((idx, stored_pos)) = app.ui_state.transform_menu else {
+        return;
+    };
+    // Pinned on the first frame: a menu that tracked the cursor would run away
+    // from the pointer coming to click it.
+    let pos = match stored_pos {
+        Some(p) => p,
+        None => {
+            let p = ctx.pointer_latest_pos().unwrap_or_else(|| ctx.content_rect().center());
+            app.ui_state.transform_menu = Some((idx, Some(p)));
+            p
+        }
+    };
+
+    let mut close = false;
+    let area = egui::Area::new(egui::Id::new("fracturize_transform_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .constrain(true)
+        .show(ctx, |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                ui.set_max_width(150.0);
+                let name = app
+                    .scene
+                    .transform_names
+                    .get(idx)
+                    .and_then(|n| n.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| format!("T{}", idx));
+                ui.label(egui::RichText::new(name).strong().small());
+                ui.separator();
+                close |= transforms::context_menu(ui, app, idx);
+            });
+        });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        close = true;
+    }
+    // Any click that isn't on the menu dismisses it, the way a real menu does.
+    // Not on the frame it opened: the right-click that *asked* for the menu is
+    // still in this frame's input, and the menu isn't laid out yet to say the
+    // pointer is over it.
+    let just_opened = stored_pos.is_none();
+    if !just_opened
+        && ctx.input(|i| i.pointer.any_pressed())
+        && !area.response.contains_pointer()
+    {
+        close = true;
+    }
+    if close {
+        app.ui_state.transform_menu = None;
+    }
 }
 
 /// Register fonts: the vendored Phosphor icon set (always) as a fallback on

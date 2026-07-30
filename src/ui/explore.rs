@@ -17,16 +17,32 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Explore, "Explore")
         .open(&mut open)
         .show(ctx, |ui| {
-            let resp = ui.button(format!("{}  New random flame", super::icons::DICE));
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                "Roll a whole new flame from nothing. Quality-checked on the CPU first, so it always renders — and it's one Ctrl+Z away from what you have now.",
-                "click: generate a random flame",
-            );
-            if resp.clicked() {
-                app.random_flame();
-            }
+            // The two ways to start from nothing, side by side: roll one, or
+            // build one. Both are history entries, so either is one Ctrl+Z away
+            // from whatever was on screen.
+            ui.horizontal(|ui| {
+                let resp = ui.button(format!("{}  Random flame", super::icons::DICE));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Roll a whole new flame from nothing. Quality-checked on the CPU first, so it always renders — and it's one Ctrl+Z away from what you have now.",
+                    "click: generate a random flame",
+                );
+                if resp.clicked() {
+                    app.random_flame();
+                }
+
+                let resp = ui.button(format!("{}  Blank scene", super::icons::FILE));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Start from an empty canvas: two plain half-scale transforms and nothing else, to build an IFS up by hand. One Ctrl+Z away from what you have now.",
+                    "click: start a blank scene",
+                );
+                if resp.clicked() {
+                    app.new_blank_scene();
+                }
+            });
             ui.separator();
 
             let mut strength = app.mutate_strength();

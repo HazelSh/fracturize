@@ -53,6 +53,21 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
             ui.separator();
 
+            // Not a window toggle, but it belongs with them: it's the same kind
+            // of thing — "show me this layer of the interface or don't" — and
+            // it's the one such toggle with no home in a panel, since every
+            // panel it might live in is a thing you'd have to open to reach it.
+            let resp = ui.selectable_label(app.show_gizmos, icons::CUBE);
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Transform gizmos + name labels (G)",
+                "toggle the transform gizmos",
+            );
+            if resp.clicked() {
+                app.toggle_gizmos();
+            }
+
             let resp = ui.selectable_label(app.show_help, icons::KEYBOARD);
             let resp = hinted(resp, &mut app.ui_state, "Keybind reference (H)", "toggle the keybind help panel");
             if resp.clicked() {

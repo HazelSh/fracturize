@@ -193,7 +193,7 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Write an alpha channel in screenshots (S) and HQ renders (P) so they can be \
+            "Write an alpha channel in screenshots (S) and render jobs so they can be \
              composited. The window itself stays opaque — there's nothing behind it to show \
              through. Not available for .avif output.",
             "click: toggle transparent output",

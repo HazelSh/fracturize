@@ -325,7 +325,6 @@ pub enum HelpAction {
     Zoom,
     ToggleSelected,
     ToggleGizmos,
-    ToggleOrbit,
     SaveView,
     Screenshot,
     SaveScene,
@@ -344,12 +343,13 @@ pub enum HelpAction {
     Mutate,
     Undo,
     Browse,
-    HqRender,
     Traces,
     InvertPitch,
     RenderMode,
     Exposure,
-    PathPlay,
+    /// Start / stop the camera flying its path (O, Z) — one action, because
+    /// there's one motion.
+    CameraMotion,
     PathKey,
 }
 
@@ -401,10 +401,16 @@ pub struct App {
     pub frame_count: u32,
     /// Wall-clock timestamp of the previous update (for time-based motion)
     last_update: Instant,
-    pub orbit_paused: bool,
     pub camera: OrbitCamera,
-    /// Camera-path flythrough preview: normalized path time when playing
-    path_play_t: Option<f32>,
+    /// Playhead along [`App::camera_path`] in 0..1 while the camera is flying
+    /// it; `None` when the camera is being positioned by hand.
+    ///
+    /// One flag, because there's one motion. The turntable and the camera-path
+    /// flythrough used to be separate mechanisms with a flag each (`orbit_
+    /// paused` and `path_play_t`) that had to be kept from fighting; the
+    /// turntable is now just the path a scene gets when it authors none, so
+    /// "is the camera flying the path" is the only question left.
+    path_t: Option<f32>,
     pub point_size: f32,
 
     /// Persistent user preferences (I toggles pitch inversion)
@@ -428,7 +434,7 @@ pub struct App {
     /// Depth-cue strength, 0 (off) to 1. Scene data — saved by Ctrl+S and
     /// undoable, like the other look parameters the scene file carries.
     pub fog_amount: f32,
-    /// Write an alpha channel in captured stills (S) and HQ renders (P), so
+    /// Write an alpha channel in captured stills (S) and render jobs, so
     /// they can be composited. Session state, not scene data: it says what
     /// leaves the app, not what the artwork is. The live window is always
     /// opaque — its swapchain has nothing to composite through.
@@ -461,9 +467,9 @@ pub struct App {
     /// Third line buffer: the camera path's route through space
     /// (see `indicators::build_path`).
     path_renderer: LineRenderer,
-    /// What the path buffer was last built for: `(key fingerprint, playhead)`,
-    /// or `None` when nothing is drawn. See `refresh_path_lines`.
-    path_lines_key: Option<(u64, Option<f32>)>,
+    /// Fingerprint of the path the buffer was last built for, or `None` when
+    /// nothing is drawn. See `refresh_path_lines`.
+    path_lines_key: Option<u64>,
 
     /// The running render job, if any (see `start_job`). One at a time.
     job: Option<JobHandle>,
@@ -474,22 +480,16 @@ pub struct App {
     /// of starting, so the dialog can say why rather than doing nothing.
     job_error: Option<String>,
 
-    /// The turntable, as a real camera path.
-    ///
-    /// The default motion used to be one line — `yaw += 0.18 * dt` — which
-    /// meant it was invisible, uneditable, and shared no code with the paths
-    /// the renderer can actually fly. It's a synthesized `CameraPath` now, so
-    /// it draws like any other and can be promoted into the scene and edited
-    /// (`promote_orbit_path`). Kept *out* of `scene.camera_path` until then,
-    /// or every scene would grow a path it never asked for the first time it
-    /// was saved.
-    ///
-    /// `None` means "stale, rebuild from the current framing" — set whenever
-    /// the user moves the camera by hand, so resuming continues from where
-    /// they left it rather than snapping back.
-    orbit_path: Option<CameraPath>,
-    /// Playhead along `orbit_path`, in 0..1.
-    orbit_t: f32,
+    /// The path a scene gets when it authors none: a full orbit around the
+    /// current framing. See [`App::camera_path`] — this isn't a second system
+    /// beside the camera-path system, it's that system's default value, and
+    /// it's kept out of `scene.camera_path` only so a scene doesn't grow a
+    /// path it never asked for the first time it's saved.
+    default_path: CameraPath,
+    /// Set when a manual camera move made `default_path` stale;
+    /// `refresh_default_path` rebuilds it at the top of the next frame, so
+    /// `camera_path()` can stay a plain `&self` read.
+    default_path_stale: bool,
 
     /// Plain-data egui UI state: which panels are open, the inspector's TRS
     /// field cache, this frame's status hint, and similar. The egui machinery
@@ -545,9 +545,6 @@ pub struct App {
     pub show_browser: bool,
     browser_files: Vec<std::path::PathBuf>,
     browser_selected: usize,
-
-    /// A background high-quality render is running (P)
-    hq_render_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     /// Unified undo/redo history (see src/history.rs): every scene-mutating
     /// edit path commits through `commit_edit`. Cleared on scene load.
@@ -680,20 +677,26 @@ impl App {
         let prefs = crate::prefs::Prefs::load();
         let ui_state = UiState::from_prefs(&prefs);
 
+        let camera = OrbitCamera {
+            yaw: scene.camera_yaw,
+            pitch: scene.camera_pitch,
+            distance: scene.camera_distance,
+            focus: scene.camera_focus,
+            roll: scene.camera_roll,
+        };
+
         let mut app = Self {
             gpu,
             window,
             frame_count: 0,
             last_update: Instant::now(),
-            orbit_paused: false,
-            camera: OrbitCamera {
-                yaw: scene.camera_yaw,
-                pitch: scene.camera_pitch,
-                distance: scene.camera_distance,
-                focus: scene.camera_focus,
-                roll: scene.camera_roll,
-            },
-            path_play_t: None,
+            default_path: CameraPath::full_orbit(&camera),
+            default_path_stale: false,
+            // The camera starts moving, as it always has. When the scene
+            // authored no path that's the default orbit, whose t=0 is exactly
+            // the framing it was just built from — so nothing jumps.
+            path_t: Some(0.0),
+            camera,
             point_size,
             prefs,
             frame_dt: 1.0 / 60.0,
@@ -723,8 +726,6 @@ impl App {
             job: None,
             job_done: None,
             job_error: None,
-            orbit_path: None,
-            orbit_t: 0.0,
             ui_state,
             ui_build_ms: 0.0,
             present_wait_ms: 0.0,
@@ -747,7 +748,6 @@ impl App {
             browser_selected: 0,
             history: History::new(),
             gizmo_drag_before: None,
-            hq_render_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             depth_texture,
             screenshot_texture,
             screenshot_depth,
@@ -816,129 +816,139 @@ impl App {
                 self.exposure = e;
             }
         }
-        self.orbit_paused = true;
-        self.path_play_t = None;
-        self.invalidate_orbit_path();
-        log::info!("Loaded view (orbit paused; press O to resume)");
+        self.path_t = None;
+        self.invalidate_default_path();
+        log::info!("Loaded view (camera stopped; press O to fly the path)");
     }
 
-    pub fn toggle_orbit(&mut self) {
-        self.orbit_paused = !self.orbit_paused;
-        log::info!("Camera orbit: {}", if self.orbit_paused { "paused" } else { "running" });
+    // === The camera path (one system, with a default) ===
+
+    /// The camera path. There is always one.
+    ///
+    /// A scene that authors `[[camera.path]]` keypoints flies those; one that
+    /// doesn't flies a full orbit around its current framing. The default is
+    /// not a separate turntable mechanism — it's this system's default value,
+    /// synthesized rather than authored but identical in every other respect:
+    /// it draws, it plays, it renders, and editing it is what turns it into
+    /// scene data. `src/offline.rs` has always resolved `--render x.avif` this
+    /// exact way; now the app agrees with it.
+    ///
+    /// "Authored" means two or more keys, since fewer can't be flown. So the
+    /// first `Y` stores a key while you're still orbiting, and the second is
+    /// where your own path takes over — and deleting your way back down to one
+    /// key hands the default back rather than leaving the camera stranded.
+    pub fn camera_path(&self) -> &CameraPath {
+        crate::path::resolve(self.scene.camera_path.as_ref(), &self.default_path)
     }
 
-    /// Angular speed of the default turntable (rad/s). Was `yaw += 0.18 * dt`
-    /// applied directly to the camera; now it only sets the synthesized
-    /// orbit path's duration.
-    const ORBIT_RATE: f32 = 0.18;
+    /// Whether [`camera_path`](Self::camera_path) is currently the synthesized
+    /// default rather than the scene's own keys.
+    pub fn path_is_default(&self) -> bool {
+        std::ptr::eq(self.camera_path(), &self.default_path)
+    }
 
-    /// The synthesized turntable path, rebuilt from the current framing if
-    /// the camera has been moved by hand since it was last built.
-    fn ensure_orbit_path(&mut self) -> &CameraPath {
-        if self.orbit_path.is_none() {
-            let mut path = CameraPath::full_orbit(&self.camera);
-            path.seconds = Some(std::f32::consts::TAU / Self::ORBIT_RATE);
-            self.orbit_path = Some(path);
-            self.orbit_t = 0.0;
+    /// Give the path properties (loop, duration) somewhere to be written by
+    /// turning the default into real scene data. Editing the default is what
+    /// authors it — there's no separate "adopt the orbit" step, because there's
+    /// no separate system to adopt it from.
+    ///
+    /// An existing `Some` is left alone even when it's too short to fly, so a
+    /// half-built path never loses the key it has.
+    fn author_path(&mut self) -> &mut CameraPath {
+        if self.scene.camera_path.is_none() {
+            self.refresh_default_path();
+            self.scene.camera_path = Some(self.default_path.clone());
+            log::info!("Camera path: the default orbit is now the scene's own, and editable");
         }
-        self.orbit_path.as_ref().expect("just built")
+        self.scene.camera_path.as_mut().expect("just authored")
     }
 
-    /// Mark the turntable path stale after a manual camera move, so resuming
-    /// continues from the new framing instead of snapping back to the old one.
-    fn invalidate_orbit_path(&mut self) {
-        self.orbit_path = None;
+    /// Mark the default orbit stale after a manual camera move, so it orbits
+    /// what you're actually looking at rather than snapping back.
+    fn invalidate_default_path(&mut self) {
+        self.default_path_stale = true;
+    }
+
+    /// Rebuild the default orbit around the current framing if a manual camera
+    /// move made it stale. Called at the top of `update`, which is what lets
+    /// `camera_path()` be a plain `&self` read.
+    fn refresh_default_path(&mut self) {
+        if !self.default_path_stale {
+            return;
+        }
+        self.default_path_stale = false;
+        let was_default = self.path_is_default();
+        self.default_path = CameraPath::full_orbit(&self.camera);
+        // t=0 on the new path *is* the framing it was just built from, so
+        // continuing from the old playhead would jump; continuing from 0 is
+        // seamless. Only when the default is what's flying, of course — an
+        // authored path must not restart because someone scrolled.
+        if was_default && self.path_t.is_some() {
+            self.path_t = Some(0.0);
+        }
     }
 
     /// Set the camera's view-axis roll (the Camera window's field and its
     /// "level" button; right-drag goes through `OrbitCamera::roll_by`).
     pub fn set_camera_roll(&mut self, roll: f32) {
         self.camera.roll = roll;
-        self.invalidate_orbit_path();
+        self.invalidate_default_path();
     }
 
-    /// The scene's camera path and its playhead, for drawing.
+    /// The camera path to draw, if it should be drawn at all.
     ///
-    /// Deliberately *not* the turntable, even though that is a real
-    /// `CameraPath` now. While the turntable runs the camera is standing on
-    /// its own circle, so the drawing is a horizontal line across the top of
-    /// the view — geometrically correct, permanently present, and telling you
-    /// nothing you didn't know. "Adopt the orbit as a path" is one click away
-    /// when you want to see and edit it, and by then it *is* the scene path.
-    pub fn visible_path(&self) -> Option<(&CameraPath, Option<f32>)> {
-        let path = self.scene.camera_path.as_ref().filter(|p| p.keys.len() >= 2)?;
-        Some((path, self.path_play_t))
-    }
-
-    /// Copy the synthesized turntable into the scene as a real, editable path.
-    /// An explicit step, not an implicit one: "+ Add key" starting you off
-    /// with four keys you never asked for would be a worse surprise than
-    /// having to press a button labelled with what it does.
-    pub fn promote_orbit_path(&mut self) {
-        if self.scene.camera_path.is_some() {
-            return;
+    /// Nothing while it's playing. During playback the camera is standing *on*
+    /// the line, so drawing it puts a permanent smear across the view that
+    /// tells you nothing and spoils the shot. It appears the moment you take
+    /// the camera back by hand — which is exactly when the route matters,
+    /// because that's when you're positioning against it.
+    pub fn visible_path(&self) -> Option<&CameraPath> {
+        if self.path_t.is_some() {
+            return None;
         }
-        let path = self.ensure_orbit_path().clone();
-        let before = self.edit_snapshot();
-        self.scene.camera_path = Some(path);
-        self.commit_edit("Adopt orbit as path", None, before);
-        log::info!("Promoted the default orbit to an editable camera path");
+        let path = self.camera_path();
+        (path.keys.len() >= 2).then_some(path)
     }
 
-    /// Is the camera moving on its own right now — by either the turntable
-    /// orbit or a path flythrough?
-    ///
-    /// The two motions are separate systems today (`orbit_paused` vs
-    /// `path_play_t`), but from the outside there is only one question worth
-    /// asking, so the transport control asks it here rather than knowing
-    /// which one is driving. Phase 2 folds the turntable into a synthesized
-    /// path and this collapses to one flag; callers won't have to change.
+    /// Is the camera flying the path right now?
     pub fn camera_moving(&self) -> bool {
-        self.path_play_t.is_some() || !self.orbit_paused
+        self.path_t.is_some()
     }
 
-    /// Start or stop whatever motion applies: the path flythrough if the
-    /// scene has a playable path, the turntable otherwise.
+    /// Take the camera off the path, because the framing is being set by hand.
+    /// The viewport drags do this inline; the Camera window's numeric fields
+    /// call it, since typing a distance is the same intent as dragging one.
+    pub fn stop_camera_motion(&mut self) {
+        self.path_t = None;
+    }
+
+    /// Start / stop the camera flying the path (O, Z, and the toolbar's
+    /// transport button). The one motion control there is.
     pub fn toggle_camera_motion(&mut self) {
-        if self.path_play_t.is_some() {
-            self.toggle_path_play();
+        if self.path_t.is_some() {
+            self.path_t = None;
+            log::info!("Camera: stopped");
             return;
         }
-        let has_path = self
-            .scene
-            .camera_path
-            .as_ref()
-            .is_some_and(|p| p.keys.len() >= 2);
-        if has_path && self.orbit_paused {
-            self.toggle_path_play();
-        } else {
-            self.toggle_orbit();
-        }
-    }
-
-    /// Play / stop the camera-path flythrough preview (Z)
-    pub fn toggle_path_play(&mut self) {
-        if self.path_play_t.is_some() {
-            self.path_play_t = None;
-            log::info!("Camera path: stopped");
+        let path = self.camera_path();
+        if path.keys.len() < 2 {
+            log::warn!("Camera path has too few keypoints to fly — press Y to add some");
             return;
         }
-        match &self.scene.camera_path {
-            Some(p) if p.keys.len() >= 2 => {
-                self.path_play_t = Some(0.0);
-                self.orbit_paused = true;
-                log::info!(
-                    "Camera path: playing {} keys over {:.1}s",
-                    p.keys.len(),
-                    p.duration()
-                );
-            }
-            _ => log::warn!("No camera path to play — press Y to add keypoints"),
-        }
+        log::info!(
+            "Camera: flying {} keys over {:.1}s{}",
+            path.keys.len(),
+            path.duration(),
+            if self.path_is_default() { " (default orbit)" } else { "" },
+        );
+        self.path_t = Some(0.0);
     }
 
-    /// Append the current camera framing as a path keypoint (Y)
+    /// Append the current camera framing as a keypoint of this scene's own path
+    /// (Y). Not an edit to the default orbit — the default is what you get
+    /// *until* the scene has two keypoints, and this is how it gets them.
     pub fn add_path_key(&mut self) {
+        let was_default = self.path_is_default();
         let key = crate::path::PathKey::from_camera(&self.camera);
         let path = self.scene.camera_path.get_or_insert_with(|| crate::path::CameraPath {
             keys: Vec::new(),
@@ -948,61 +958,85 @@ impl App {
         });
         path.keys.push(key);
         log::info!(
-            "Camera path keypoint {} added (Z plays, Ctrl+S saves with the scene)",
-            path.keys.len()
+            "Camera path keypoint {} added ({}; Ctrl+S saves it with the scene)",
+            path.keys.len(),
+            if path.keys.len() >= 2 {
+                "Z flies it"
+            } else {
+                "one more and it takes over from the default orbit"
+            },
         );
+        self.after_path_edit(was_default);
     }
 
     /// Remove the last path keypoint (Shift+Y)
     pub fn remove_path_key(&mut self) {
+        let was_default = self.path_is_default();
         let Some(path) = &mut self.scene.camera_path else {
-            log::warn!("No camera path");
+            log::warn!("Nothing to remove — this scene is on the default orbit");
             return;
         };
         path.keys.pop();
-        let n = path.keys.len();
-        if n == 0 {
-            self.scene.camera_path = None;
-            self.path_play_t = None;
-            log::info!("Camera path removed");
-        } else {
-            log::info!("Camera path keypoint removed ({} left)", n);
-        }
+        self.after_path_edit(was_default);
     }
 
     /// Toggle whether the path loops back to its first key (Ctrl+Y)
     pub fn toggle_path_closed(&mut self) {
-        if let Some(path) = &mut self.scene.camera_path {
-            path.closed = !path.closed;
-            log::info!("Camera path: {}", if path.closed { "closed loop" } else { "open" });
-        } else {
-            log::warn!("No camera path");
-        }
+        let path = self.author_path();
+        path.closed = !path.closed;
+        log::info!("Camera path: {}", if path.closed { "closed loop" } else { "open" });
     }
 
     /// Remove one path keypoint by index (Camera window row ✕). The keyboard
     /// path (Shift+Y) only ever pops the last one.
     pub fn remove_path_key_at(&mut self, idx: usize) {
+        let was_default = self.path_is_default();
         let Some(path) = &mut self.scene.camera_path else { return };
         if idx >= path.keys.len() {
             return;
         }
         path.keys.remove(idx);
-        if path.keys.is_empty() {
+        log::info!("Camera path keypoint {} removed", idx);
+        self.after_path_edit(was_default);
+    }
+
+    /// Housekeeping after the scene's own keypoints change. `was_default` is
+    /// [`path_is_default`](Self::path_is_default) from *before* the edit.
+    ///
+    /// An empty key list isn't a path, so it goes back to `None`: nothing
+    /// writes an empty `[[camera.path]]`, and the default orbit is what the
+    /// scene flies again. And when the edit changed *which* path flies — the
+    /// second key taking over, or a deletion handing back — the playhead means
+    /// nothing on the new route, so the camera stops instead of teleporting
+    /// partway along a path it was never on.
+    fn after_path_edit(&mut self, was_default: bool) {
+        if self.scene.camera_path.as_ref().is_some_and(|p| p.keys.is_empty()) {
             self.scene.camera_path = None;
-            self.path_play_t = None;
-            log::info!("Camera path removed");
-        } else {
-            log::info!("Camera path keypoint {} removed ({} left)", idx, path.keys.len());
+            log::info!("Camera path cleared — back to the default orbit");
+        }
+        if self.path_is_default() != was_default {
+            self.path_t = None;
         }
     }
 
     /// Set the path's playback duration in seconds; `None` restores the
     /// default of 3s per segment.
     pub fn set_path_seconds(&mut self, seconds: Option<f32>) {
-        if let Some(path) = &mut self.scene.camera_path {
-            path.seconds = seconds.map(|s| s.max(0.1));
+        self.author_path().seconds = seconds.map(|s| s.max(0.1));
+    }
+
+    /// Discard the scene's own keypoints and go back to the default orbit —
+    /// the counterpart to the first edit that authored them.
+    pub fn reset_path_to_default(&mut self) {
+        if self.scene.camera_path.is_none() {
+            return;
         }
+        let before = self.edit_snapshot();
+        self.scene.camera_path = None;
+        self.path_t = None;
+        self.invalidate_default_path();
+        self.commit_edit("Reset camera path", None, before);
+        log::info!("Camera path reset to the default orbit");
     }
 
     /// Saved views for the current scene: `views/<slug>-*.toml`, newest
@@ -1063,7 +1097,7 @@ impl App {
         slug.trim_matches('-').to_string()
     }
 
-    /// The view currently on screen, for saving (V) and HQ renders (P)
+    /// The view currently on screen, for saving (V) and for render jobs
     fn current_view(&self) -> View {
         View {
             scene: self.scene_path.clone(),
@@ -1494,7 +1528,7 @@ impl App {
             return;
         }
         self.camera.zoom(steps);
-        self.invalidate_orbit_path();
+        self.invalidate_default_path();
     }
 
     /// Toggle flightsim-style pitch inversion (persisted across sessions)
@@ -1530,16 +1564,16 @@ impl App {
             Drag::Orbit => {
                 let dy = if self.prefs.invert_pitch { -dy } else { dy };
                 self.camera.orbit(dx, dy);
-                self.invalidate_orbit_path();
+                self.invalidate_default_path();
             }
             Drag::Pan => {
                 let (_, h) = self.gpu.size();
                 self.camera.pan(dx, dy, h as f32);
-                self.invalidate_orbit_path();
+                self.invalidate_default_path();
             }
             Drag::Roll => {
                 self.camera.roll_by(dx);
-                self.invalidate_orbit_path();
+                self.invalidate_default_path();
             }
             Drag::Gizmo { transform, mode, start_matrix } => {
                 self.update_gizmo_drag(transform, mode, start_matrix);
@@ -1614,27 +1648,29 @@ impl App {
                     return;
                 }
                 self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
-                // Manual orbiting shouldn't fight the auto-orbit or a
-                // playing path flythrough
-                self.orbit_paused = true;
-                self.path_play_t = None;
+                // Taking the camera by hand stops it flying the path — they'd
+                // fight over the same framing otherwise.
+                self.path_t = None;
             }
             MouseButton::Middle => {
                 self.drag = Drag::Pan;
-                self.orbit_paused = true;
-                self.path_play_t = None;
+                self.path_t = None;
             }
             MouseButton::Right => {
-                // Right-drag over a gizmo is left alone: that gesture is the
-                // obvious home for a per-transform context menu, and rolling
-                // the whole camera off a click aimed at one transform would be
-                // a surprise. Rolling only starts on empty space.
-                if self.hovered.is_some() {
+                // Over a gizmo, right-click is that transform's context menu —
+                // the same menu its row in the Transforms window has, opened on
+                // the thing itself. Rolling the whole camera off a click aimed
+                // at one transform would be a surprise, so rolling only starts
+                // on empty space.
+                if let Some(hit) = self.hovered {
+                    self.selected_transform = Some(hit.transform);
+                    // Position is filled in by `ui::draw` from egui's own
+                    // pointer, which is already in logical points.
+                    self.ui_state.transform_menu = Some((hit.transform, None));
                     return;
                 }
                 self.drag = Drag::Roll;
-                self.orbit_paused = true;
-                self.path_play_t = None;
+                self.path_t = None;
             }
             _ => {}
         }
@@ -1899,7 +1935,7 @@ impl App {
             focus: scene.camera_focus,
             roll: scene.camera_roll,
         };
-        self.invalidate_orbit_path();
+        self.invalidate_default_path();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
@@ -1923,19 +1959,17 @@ impl App {
         self.rebuild_pipelines();
     }
 
-    // === High-quality background render (P) ===
+    // === Render jobs ===
 
-    /// Kick off an offline render of the current framing on a background
-    /// thread (own wgpu device, so the realtime view keeps running). Pauses
-    /// the auto-orbit so the rendered framing is the one on screen.
-    /// Launch a render job on its own thread and its own wgpu device.
+    /// Launch a render job on its own thread and its own wgpu device, so the
+    /// realtime view keeps running. Stops the camera, so the framing being
+    /// rendered is the one on screen.
     ///
     /// One at a time. A queue was explicitly deferred in the previous plan and
     /// stays deferred: two jobs sharing a GPU makes both slower and the
     /// estimates meaningless, and the interesting question ("did my render
     /// finish?") is answerable without one.
     pub fn start_job(&mut self, params: crate::render_job::JobParams) {
-        use std::sync::atomic::Ordering;
         use crate::render_job::{JobEvent, JobControl, JobKind};
 
         if self.job.is_some() {
@@ -1947,7 +1981,9 @@ impl App {
             return;
         }
         self.job_error = None;
-        self.orbit_paused = true;
+        // Stop the camera: a still job renders the framing that's on screen,
+        // and it shouldn't be a moving target.
+        self.path_t = None;
 
         // A view descriptor renders nothing — it's the "note down this
         // framing, render it later" case — so it completes inline rather than
@@ -1993,8 +2029,6 @@ impl App {
             paused_total: Duration::ZERO,
         };
 
-        let flag = self.hq_render_in_flight.clone();
-        flag.store(true, Ordering::SeqCst);
         let out = params.out_path.clone();
         let kind = params.kind;
         let (splat, exposure, transparent, accumulate) =
@@ -2036,7 +2070,6 @@ impl App {
             let _ = control.events.send(JobEvent::Done(
                 result.map(|()| out.clone()).map_err(|e| e.to_string()),
             ));
-            flag.store(false, Ordering::SeqCst);
         });
 
         self.job = Some(handle);
@@ -2119,26 +2152,6 @@ impl App {
         Some(self.buffer_capacity as f32 / (working_ms / 1000.0))
     }
 
-    /// P, and the Camera window's button: the previous one-click HQ render,
-    /// now expressed as a job with the parameters it always implied.
-    pub fn start_hq_render(&mut self) {
-        use crate::render_job::{JobKind, JobParams};
-        let params = JobParams {
-            kind: JobKind::Still { width: 2560, height: 1440 },
-            out_path: std::path::PathBuf::from(format!(
-                "renders/{}-{}.png",
-                self.scene_slug(),
-                unix_timestamp()
-            )),
-            points: (self.buffer_capacity as usize * 4).clamp(8_000_000, 40_000_000),
-            accumulate: 96,
-            splat: self.render_mode == RenderMode::Splat,
-            exposure: self.exposure,
-            transparent: self.transparent_render,
-        };
-        self.start_job(params);
-    }
-
     // === Chaos-game traces (X) ===
 
     /// X: show traces (re-rolling new random walkers each press);
@@ -2210,13 +2223,14 @@ impl App {
     ///
     /// `LineRenderer::set_lines` allocates a fresh GPU buffer every call, so
     /// this can't just run every frame the way the geometry is cheap enough to
-    /// suggest. A fingerprint over the keys plus the playhead is what decides:
-    /// in the steady state (a path exists, nothing playing) that's zero
-    /// rebuilds, and the one case that does rebuild per frame — an active
-    /// flythrough preview — is transient and deliberate.
+    /// suggest. A fingerprint over the keys is what decides. Now that a playing
+    /// path isn't drawn at all, the only thing that rebuilds per frame is
+    /// dragging the camera around a *default* orbit, which re-synthesizes the
+    /// path as you go — and that's the one case where seeing it move is the
+    /// point.
     fn refresh_path_lines(&mut self) {
         let key = match (self.show_gizmos, self.visible_path()) {
-            (true, Some((path, playhead))) => Some((path_fingerprint(path), playhead)),
+            (true, Some(path)) => Some(path_fingerprint(path)),
             _ => None,
         };
         if key == self.path_lines_key {
@@ -2224,7 +2238,7 @@ impl App {
         }
         self.path_lines_key = key;
         let verts = match (self.show_gizmos, self.visible_path()) {
-            (true, Some((path, playhead))) => crate::indicators::build_path(path, playhead),
+            (true, Some(path)) => crate::indicators::build_path(path),
             _ => Vec::new(),
         };
         self.path_renderer.set_lines(&self.gpu.device, &verts);
@@ -2240,22 +2254,33 @@ impl App {
 
     // === Evolutionary exploration (U / Shift+U) ===
 
-    /// Apply a random mutation to the scene (undoable with Ctrl+Z / Shift+U).
-    /// Repeated presses walk the scene through mutation space; Ctrl+S keeps
-    /// a variant you like.
     /// Replace the whole scene with a freshly generated random flame
-    /// (`src/randomize.rs`). Unlike loading a scene file this is an *edit*,
-    /// so it goes on the history stack and one Ctrl+Z brings back whatever
-    /// was on screen — exploration you can back out of.
+    /// (`src/randomize.rs`) — see `adopt_scene` for why that's an edit rather
+    /// than a load.
     pub fn random_flame(&mut self) {
-        let before = self.edit_snapshot();
         let scene = crate::randomize::random_flame(&mut rand::thread_rng());
         log::info!(
             "Random flame: {} transforms, camera distance {:.2}",
             scene.transforms.len(),
             scene.camera_distance
         );
+        self.adopt_scene(scene, "Random flame");
+    }
 
+    /// Start over on an empty canvas (`Scene::blank`) — the build-from-nothing
+    /// workflow's entry point. An *edit*, like a random flame: one Ctrl+Z
+    /// brings back whatever was on screen, so it's safe to reach for.
+    pub fn new_blank_scene(&mut self) {
+        log::info!("New blank scene");
+        self.adopt_scene(Scene::blank(), "New blank scene");
+    }
+
+    /// Replace the whole scene with one generated in-app rather than loaded
+    /// from disk (a random flame, a blank canvas). Unlike `load_scene_file`
+    /// this is an *edit*: it goes on the history stack, so one Ctrl+Z brings
+    /// back what was on screen.
+    fn adopt_scene(&mut self, scene: Scene, label: &str) {
+        let before = self.edit_snapshot();
         self.camera = OrbitCamera {
             yaw: scene.camera_yaw,
             pitch: scene.camera_pitch,
@@ -2263,23 +2288,24 @@ impl App {
             focus: scene.camera_focus,
             roll: scene.camera_roll,
         };
-        self.invalidate_orbit_path();
+        self.invalidate_default_path();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
+        self.fog_amount = scene.fog;
         self.transform_enabled = vec![true; scene.transforms.len()];
         self.selected_transform = Some(0);
         self.selected_variation = 0;
         self.drag = Drag::None;
         self.hovered = None;
         self.scene = scene;
-        // A rolled flame has no file behind it: Ctrl+S should write a new
+        // A scene made in-app has no file behind it: Ctrl+S should write a new
         // scenes/untitled-*.toml rather than overwrite whatever was loaded.
         self.scene_path = None;
         self.invalidate_saved_views();
         self.bump_matrix_generation();
         self.after_scene_shape_change();
-        self.commit_edit("Random flame", None, before);
+        self.commit_edit(label, None, before);
     }
 
     pub fn mutate_scene(&mut self) {
@@ -2928,16 +2954,6 @@ impl App {
         self.prefs.invert_pitch
     }
 
-    /// Whether a camera-path flythrough is currently playing.
-    pub fn path_playing(&self) -> bool {
-        self.path_play_t.is_some()
-    }
-
-    /// Whether a background HQ render (P) is still running.
-    pub fn hq_render_busy(&self) -> bool {
-        self.hq_render_in_flight.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// Toggle the transform gizmos *and* their name labels (G). These used to
     /// be two bindings; a separate toggle for "the gizmo's caption" was a
     /// distinction without a difference once the panels took over every other
@@ -3023,37 +3039,42 @@ impl App {
         self.frame_dt = dt;
         self.flush_dirty_prefs();
         self.apply_pending_capacity();
+        // Before the path lines are built, so what's drawn is what will fly.
+        self.refresh_default_path();
         self.refresh_indicators();
         self.refresh_path_lines();
         self.poll_job();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
-        if let Some(t) = self.path_play_t {
-            // Path flythrough preview: fly the spline in real time
-            match &self.scene.camera_path {
-                Some(path) if path.keys.len() >= 2 => {
-                    let t = t + dt / path.duration();
-                    if !path.closed && t >= 1.0 {
-                        self.camera = path.sample(1.0);
-                        self.path_play_t = None;
-                        log::info!("Camera path: finished");
-                    } else {
-                        let t = if path.closed { t.rem_euclid(1.0) } else { t };
-                        self.camera = path.sample(t);
-                        self.path_play_t = Some(t);
-                    }
+        // One motion: the camera flies the path. Which path — the scene's own
+        // keys or the default orbit — is `camera_path`'s business, not this
+        // loop's, so the turntable and a hand-authored flythrough are the same
+        // three lines of code and behave identically.
+        if let Some(t) = self.path_t {
+            let (duration, closed, playable) = {
+                let p = self.camera_path();
+                (p.duration(), p.closed, p.keys.len() >= 2)
+            };
+            if !playable {
+                self.path_t = None;
+            } else {
+                let t = t + dt / duration;
+                let ended = !closed && t >= 1.0;
+                let t = if ended {
+                    1.0
+                } else if closed {
+                    t.rem_euclid(1.0)
+                } else {
+                    t
+                };
+                let cam = self.camera_path().sample(t);
+                self.camera = cam;
+                self.path_t = if ended { None } else { Some(t) };
+                if ended {
+                    log::info!("Camera path: finished");
                 }
-                _ => self.path_play_t = None,
             }
-        } else if !self.orbit_paused {
-            // The turntable, flown as a path like anything else. Same motion
-            // as the `yaw += 0.18 * dt` this replaced — the synthesized path
-            // is a full turn from the current framing over TAU / 0.18 seconds
-            // — but now it's a thing on screen you can look at and take over.
-            let path = self.ensure_orbit_path().clone();
-            self.orbit_t = (self.orbit_t + dt / path.duration()).rem_euclid(1.0);
-            self.camera = path.sample(self.orbit_t);
         }
 
         if should_log {
@@ -3251,8 +3272,7 @@ impl App {
             HelpAction::Zoom => if shift { self.zoom_out() } else { self.zoom_in() },
             HelpAction::ToggleSelected => self.toggle_selected_transform(),
             HelpAction::ToggleGizmos => self.toggle_gizmos(),
-            HelpAction::ToggleOrbit => self.toggle_orbit(),
-            HelpAction::PathPlay => self.toggle_path_play(),
+            HelpAction::CameraMotion => self.toggle_camera_motion(),
             HelpAction::PathKey => {
                 if shift {
                     self.remove_path_key()
@@ -3290,7 +3310,6 @@ impl App {
                 }
             }
             HelpAction::Browse => self.toggle_browser(),
-            HelpAction::HqRender => self.start_hq_render(),
             HelpAction::Traces => self.toggle_traces(shift),
             HelpAction::InvertPitch => self.toggle_invert_pitch(),
             HelpAction::RenderMode => self.toggle_render_mode(),

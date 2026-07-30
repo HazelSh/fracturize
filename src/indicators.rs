@@ -59,26 +59,25 @@ pub fn build(matrix: Mat4) -> Vec<LineVertex> {
 const PATH_COLOR: [f32; 4] = [0.4, 0.95, 0.55, 0.7];
 /// Keypoint marker colour — brighter than the line so keys stand out on it.
 const PATH_KEY_COLOR: [f32; 4] = [0.65, 1.0, 0.75, 0.95];
-/// The moving playhead, warm against the green so it's findable at a glance.
-const PLAYHEAD_COLOR: [f32; 4] = [1.0, 0.85, 0.4, 0.95];
-/// Spline samples per segment. The path is drawn every frame the camera moves
-/// (the playhead marker changes), so this is a per-frame vertex budget, not a
-/// one-off — 16 is smooth at any sane path length without being wasteful.
+/// Spline samples per segment. Rebuilt only when the path changes (see
+/// `App::refresh_path_lines`), so 16 is smooth at any sane path length.
 const PATH_SAMPLES_PER_SEGMENT: usize = 16;
 
-/// Build the line list for a camera path: the eye's route as a polyline,
-/// a cross at every keypoint, and — while playing — a cross at the playhead
-/// with a stalk pointing where that camera is looking.
+/// Build the line list for a camera path: the eye's route as a polyline, with
+/// a cross at every keypoint.
 ///
-/// Everything is drawn at the eye positions rather than the focus positions:
-/// the path is a route through space, and where it *looks* is the one thing
-/// the polyline alone can't show, which is what the playhead's stalk is for.
-pub fn build_path(path: &CameraPath, playhead: Option<f32>) -> Vec<LineVertex> {
+/// Drawn at the eye positions rather than the focus positions: the path is a
+/// route through space, and that's the thing you're positioning against when
+/// this is on screen. There's deliberately no playhead marker — the path is
+/// only ever drawn while it *isn't* playing (see `App::visible_path`), because
+/// during playback the camera is standing on the line and drawing it just
+/// smears the shot.
+pub fn build_path(path: &CameraPath) -> Vec<LineVertex> {
     if path.keys.len() < 2 {
         return Vec::new();
     }
     let samples = path.segments() * PATH_SAMPLES_PER_SEGMENT;
-    let mut verts = Vec::with_capacity(2 * (samples + path.keys.len() * 3 + 4));
+    let mut verts = Vec::with_capacity(2 * (samples + path.keys.len() * 3));
 
     // Marker size scales with the path's own radius so it stays legible for
     // both a close-in fly-through and a wide orbit.
@@ -104,13 +103,6 @@ pub fn build_path(path: &CameraPath, playhead: Option<f32>) -> Vec<LineVertex> {
             roll: key.roll,
         };
         push_cross(&mut verts, cam.eye(), tick, PATH_KEY_COLOR);
-    }
-
-    if let Some(t) = playhead {
-        let cam = path.sample(t);
-        let eye = cam.eye();
-        push_cross(&mut verts, eye, tick * 1.8, PLAYHEAD_COLOR);
-        seg(&mut verts, eye, eye + cam.forward() * tick * 4.0, PLAYHEAD_COLOR);
     }
 
     verts
