@@ -583,6 +583,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         let camera = CameraUniforms::new(
             tile.view_proj, height as f32, point_size, aspect, 1.0,
             haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
+            transparent,
         );
         renderer.upload_camera(&queue, &camera);
 
@@ -750,6 +751,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         let camera = CameraUniforms::new(
             cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
             haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
+            transparent,
         );
         renderer.upload_camera(&queue, &camera);
         let use_point_primitives = point_size * height as f32 / cam.distance <= 1.5;
@@ -855,6 +857,7 @@ pub fn render_mutations(
     let camera = CameraUniforms::new(
         view_proj, height as f32, point_size, aspect, 1.0,
         haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
+        transparent,
     );
 
     let target = TileTarget::new(&device, width, height, clear);

@@ -21,6 +21,11 @@ struct CameraUniforms {
     bg_r: f32,
     bg_g: f32,
     bg_b: f32,
+    // 1 when this pass writes an image with an alpha channel to keep.
+    transparent: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 struct VertexOutput {
@@ -138,5 +143,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let transmittance = mix(1.0, camera.haze_transmittance, t);
     let background = vec3<f32>(camera.bg_r, camera.bg_g, camera.bg_b);
+
+    if camera.transparent > 0.5 {
+        // Writing a file with an alpha channel: the point's own colour, and
+        // the haze spent as *transparency* rather than as a fade toward a
+        // background that isn't going to be there. This is what makes a
+        // transparent render composite correctly — fading to the background
+        // colour at alpha 1 would bake the background into the far material,
+        // which is exactly what you asked for transparency to avoid. The pass
+        // clears to alpha 0, so pixels with no point in them stay empty.
+        return vec4<f32>(desaturated, transmittance);
+    }
     return vec4<f32>(mix(background, desaturated, transmittance), 1.0);
 }

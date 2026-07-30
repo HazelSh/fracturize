@@ -35,10 +35,17 @@ const NEAR_FRAC: f32 = 1.0 - 1.0 / 2.4;
 const FAR_FRAC: f32 = 1.0 + 1.0 / 2.4;
 
 /// How much of a point's contribution survives at the far plane at full
-/// strength. Not zero: material that vanishes completely reads as a hole in
-/// the form rather than as distance, and the far tail of a fractal arm is
-/// exactly where that matters.
-const MIN_TRANSMITTANCE: f32 = 0.12;
+/// strength.
+///
+/// Zero — the far plane can dissolve completely into the background. This was
+/// floored at 0.12 on the theory that material which vanishes reads as a hole
+/// rather than as distance, but that reasoning belonged to the old darkening
+/// model, where "gone" meant a black patch. Fading to the *background* is what
+/// real distance looks like, so there's nothing to protect against, and
+/// stopping short of it just put the far end of the range out of reach. The
+/// amount slider is the control: 1.0 means gone, and anything less leaves as
+/// much as you asked for.
+const MIN_TRANSMITTANCE: f32 = 0.0;
 
 /// How much *saturation* survives there.
 ///
@@ -99,11 +106,19 @@ mod tests {
     }
 
     #[test]
-    fn full_haze_still_leaves_something_there() {
-        // A far point that vanished entirely would read as a hole in the form
-        // rather than as distance.
-        let (t, s) = falloff(1.0);
-        assert!(t > 0.0 && s > 0.0, "transmittance {t}, saturation {s}");
+    fn full_haze_dissolves_completely() {
+        // The far plane reaches the background exactly — the top of the slider
+        // is "gone", not "nearly gone".
+        let (t, _) = falloff(1.0);
+        assert_eq!(t, 0.0, "full haze must reach zero transmittance");
+    }
+
+    #[test]
+    fn partial_haze_leaves_a_proportional_share() {
+        // Half strength leaves half the contribution: the control is linear in
+        // what survives, so "a bit of depth cue" is reachable.
+        let (t, _) = falloff(0.5);
+        assert!((t - 0.5).abs() < 1e-6, "transmittance {t}");
     }
 
     #[test]

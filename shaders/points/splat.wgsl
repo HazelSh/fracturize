@@ -34,6 +34,11 @@ struct CameraUniforms {
     bg_r: f32,
     bg_g: f32,
     bg_b: f32,
+    // 1 when this pass writes an image with an alpha channel to keep.
+    transparent: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 struct SplatParams {

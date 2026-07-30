@@ -3268,6 +3268,8 @@ impl App {
             haze.3,
             self.color_contrast,
             self.scene.background.to_array(),
+            // A screenshot is a file with an alpha channel worth filling in.
+            self.transparent_render,
         );
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3534,6 +3536,9 @@ impl App {
             haze.3,
             self.color_contrast,
             self.scene.background.to_array(),
+            // The window's swapchain has nothing behind it to composite
+            // through, so the live pass is always opaque.
+            false,
         );
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
         if self.show_traces {

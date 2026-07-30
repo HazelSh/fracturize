@@ -51,7 +51,7 @@ src/
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
       splat.rs     # Splat mode: additive log-density accumulation + tonemap
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
-    lines.rs     # In-world line renderer: AA screen-space ribbons
+    lines.rs     # In-world line renderer (traces, camera path, indicators)
     density/     # Inactive experimental hash-grid density renderer
 shaders/
   points/chaos.wgsl   # Chaos game + the 20 variation functions
@@ -108,17 +108,16 @@ All GPU, three passes per frame:
    keep them in sync!) rendered as alpha-faded line segments; they regenerate
    on every scene edit.
 
-   **The in-world UI is anti-aliased; the artwork is not.** There is no MSAA
-   anywhere — the point cloud's aliasing *is* the look, and multisampling 1px
-   point primitives would soften exactly the grit the renderer exists to make.
-   So the UI drawn into the scene anti-aliases itself analytically instead:
-   every line is a screen-space ribbon of a fixed pixel width with a coverage
-   falloff across it (`src/gpu/lines.rs` expands the segments,
-   `shaders/trace.wgsl` widens and feathers them), and the gizmo's edges and
-   origin dots do the same in `shaders/gizmo.wgsl`. A 1px hardware line over a
-   cloud of 1px points reads as more of the cloud. Gizmo *faces* are flat
-   translucent fills and are left alone; their silhouettes are covered by the
-   AA'd edges drawn on top.
+   **Nothing is anti-aliased yet, and MSAA is not the answer.** The point
+   cloud's aliasing *is* the look — multisampling 1px point primitives would
+   soften exactly the grit the renderer exists to make — but the in-world UI
+   (gizmo edges, camera path, indicators) has no reason to be jagged and
+   currently is. An analytic attempt (screen-space ribbons with a coverage
+   feather, in the shaders) was tried and reverted: without mitre joins the
+   ribbon wobbles along a polyline, and the feathered band still wrote depth,
+   punching holes in the gizmo faces behind it. The next attempt should be a
+   separate supersampled or multisampled overlay pass, so the UI is
+   anti-aliased by the rasterizer and the artwork never enters that pass.
 
 The chaos churn rate is wall-clock normalized: `advance_frame` takes the
 frame dt and scales walker iterations so the buffer refreshes at the same
@@ -401,11 +400,13 @@ How each renderer applies it:
   falls and the pixel composites toward the background — no knowledge of the
   background needed;
 - **points** is opaque and depth-tested, so it mixes toward the background
-  colour directly, which is why `CameraUniforms` now carries it (in what used
-  to be tail padding; the struct is still 112 bytes). One corner: `--transparent`
-  point renders keep alpha 1, so distant points come out background-tinted
-  rather than fading to transparent. Use the splat renderer for composited
-  output — it gets this right, because thinner density *is* lower coverage.
+  colour directly, which is why `CameraUniforms` carries the background. When
+  the pass is writing a file with an alpha channel it spends the haze as
+  *transparency* instead — the point's own colour at `alpha = transmittance`.
+  Fading toward a background that isn't going to be there would bake it into
+  the far material, which is the thing transparency exists to avoid.
+  `CameraUniforms.transparent` is how the shader knows which it's doing; the
+  window is always opaque, since its swapchain has nothing behind it.
 
 The shader's four parameters are *not* the user's parameters:
 
@@ -413,8 +414,9 @@ The shader's four parameters are *not* the user's parameters:
   it follows the framing instead of being re-dialled on every zoom. The Render
   window's "haze band" disclosure can pin it to fixed world units;
 - transmittance and saturation falloff come from the amount
-  (`haze::falloff`). Neither bottoms out at zero: material that vanishes
-  completely reads as a hole rather than as distance.
+  (`haze::falloff`), linearly: amount 0.5 leaves half the contribution, and
+  **amount 1.0 dissolves the far plane completely** — into the background for
+  an opaque render, into transparency for one with an alpha channel.
 
 `--fog` is a legacy on-switch meaning "on at the old default strength"; a
 scene's own `haze` wins over it. Views written before this carry the four raw

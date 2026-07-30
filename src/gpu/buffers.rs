@@ -158,7 +158,7 @@ impl GpuTransform {
     }
 }
 
-/// Camera uniforms (112 bytes, must be 16-byte aligned)
+/// Camera uniforms (128 bytes, must be 16-byte aligned)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CameraUniforms {
@@ -175,9 +175,14 @@ pub struct CameraUniforms {
     pub haze_saturation: f32, // 4 bytes - saturation surviving at haze_far (1 = no change)
     pub color_contrast: f32, // 4 bytes - cyclic contrast stretch of colormap index (1=off)
     /// The background, linear RGB. Haze fades toward it, so the shaders need
-    /// to know what it is; it sits in what used to be tail padding, which is
-    /// why this struct is still 112 bytes.
-    pub background: [f32; 3], // 12 bytes - also the struct's 16-byte round-up
+    /// to know what it is; it sits in what used to be tail padding.
+    pub background: [f32; 3], // 12 bytes
+    /// 1 when this pass is writing an image with an alpha channel (a
+    /// `--transparent` render or screenshot), 0 for the window. The points
+    /// renderer is opaque and depth-tested, so it has no other way to know
+    /// that the alpha it writes will be kept — see `render.wgsl`.
+    pub transparent: f32,   // 4 bytes
+    pub _pad: [f32; 3],     // 12 bytes - struct size must be a multiple of 16
 }
 
 impl CameraUniforms {
@@ -193,6 +198,7 @@ impl CameraUniforms {
         haze_saturation: f32,
         color_contrast: f32,
         background: [f32; 3],
+        transparent: bool,
     ) -> Self {
         Self {
             mvp: mvp.to_cols_array_2d(),
@@ -206,6 +212,8 @@ impl CameraUniforms {
             haze_saturation,
             color_contrast,
             background,
+            transparent: if transparent { 1.0 } else { 0.0 },
+            _pad: [0.0; 3],
         }
     }
 }
@@ -258,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_camera_uniforms_size() {
-        assert_eq!(std::mem::size_of::<CameraUniforms>(), 112, "CameraUniforms must be 112 bytes to match WGSL struct");
+        assert_eq!(std::mem::size_of::<CameraUniforms>(), 128, "CameraUniforms must be 128 bytes to match WGSL struct");
     }
 
     #[test]
