@@ -150,6 +150,7 @@ fn create_pipeline(
     layout: &wgpu::PipelineLayout,
     vertex_buffer_layout: wgpu::VertexBufferLayout<'_>,
     depth_write_enabled: bool,
+    samples: u32,
     label: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -198,7 +199,7 @@ fn create_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
         multiview_mask: None,
         cache: None,
     })
@@ -226,6 +227,7 @@ impl GizmoRenderer {
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
+        samples: u32,
         transforms: &[crate::scene::TransformSpec],
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -344,12 +346,12 @@ impl GizmoRenderer {
         let edge_dot_pipeline = create_pipeline(
             device, format, &shader, &pipeline_layout,
             vertex_buffer_layout.clone(),
-            true, "gizmo_edge_dot_pipeline",
+            true, samples, "gizmo_edge_dot_pipeline",
         );
         let face_pipeline = create_pipeline(
             device, format, &shader, &pipeline_layout,
             vertex_buffer_layout,
-            false, "gizmo_face_pipeline",
+            false, samples, "gizmo_face_pipeline",
         );
 
         let camera_buffer = create_camera_buffer(device);

@@ -24,7 +24,7 @@ pub struct LineRenderer {
 }
 
 impl LineRenderer {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("trace_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/trace.wgsl").into()),
@@ -100,7 +100,7 @@ impl LineRenderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
             multiview_mask: None,
             cache: None,
         });

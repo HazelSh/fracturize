@@ -52,6 +52,7 @@ src/
       splat.rs     # Splat mode: additive log-density accumulation + tonemap
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # In-world line renderer (traces, camera path, indicators)
+    overlay.rs   # MSAA target for the in-world UI: depth blit, composite
     density/     # Inactive experimental hash-grid density renderer
 shaders/
   points/chaos.wgsl   # Chaos game + the 20 variation functions
@@ -108,16 +109,40 @@ All GPU, three passes per frame:
    keep them in sync!) rendered as alpha-faded line segments; they regenerate
    on every scene edit.
 
-   **Nothing is anti-aliased yet, and MSAA is not the answer.** The point
-   cloud's aliasing *is* the look — multisampling 1px point primitives would
-   soften exactly the grit the renderer exists to make — but the in-world UI
-   (gizmo edges, camera path, indicators) has no reason to be jagged and
-   currently is. An analytic attempt (screen-space ribbons with a coverage
-   feather, in the shaders) was tried and reverted: without mitre joins the
-   ribbon wobbles along a polyline, and the feathered band still wrote depth,
-   punching holes in the gizmo faces behind it. The next attempt should be a
-   separate supersampled or multisampled overlay pass, so the UI is
-   anti-aliased by the rasterizer and the artwork never enters that pass.
+   **The in-world UI is multisampled; the artwork is not.** These two
+   requirements can't share a render target — the point cloud's aliasing *is*
+   the look, and multisampling 1px point primitives would soften exactly the
+   grit the renderer exists to make — so they don't. Traces, indicators, the
+   camera path and the gizmos all draw into `src/gpu/overlay.rs`'s own MSAA
+   target (2 samples where the adapter offers it, else 4) and are composited
+   over the finished frame. Three things make it work:
+
+   - the main pass's single-sample depth is **blitted** into the overlay's
+     multisampled depth by a fullscreen triangle writing `frag_depth`, so the
+     point cloud still occludes the gizmos exactly as it did when they shared
+     one buffer. This is why the main depth texture carries `TEXTURE_BINDING`;
+   - the overlay clears to transparent black, so its contents come out
+     **premultiplied** (straight-alpha shaders blending against zero leave
+     `rgb * a`), and the composite blends `One / OneMinusSrcAlpha`;
+   - the composite averages the samples in the shader rather than using a
+     hardware `resolve_target`, which would need a third full-size texture to
+     resolve into for the same arithmetic.
+
+   Cost on the reference desktop: **0.19 ms/frame** and ~20 MB at 1440x860.
+   Every pipeline that draws into it (`gizmo.rs`, `lines.rs`) takes a `samples`
+   argument and must be rebuilt if that changes.
+
+   2x MSAA is not guaranteed by the WebGPU spec — only 1 and 4 are — so the
+   device requests `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` when the adapter
+   has it, and `GpuContext::surface_sample_counts` reports only what can
+   actually be created. Don't trust `get_texture_format_features` alone; without
+   that feature wgpu holds the device to [1, 4] whatever the adapter says.
+
+   An earlier attempt anti-aliased the lines analytically instead (screen-space
+   ribbons with a coverage feather) and was reverted. It's recorded here so it
+   isn't retried: without mitre joins the ribbon wobbles along a polyline, and
+   the feathered band still wrote depth, punching a hole through the gizmo
+   faces behind it. The rasterizer knows how to do this.
 
 The chaos churn rate is wall-clock normalized: `advance_frame` takes the
 frame dt and scales walker iterations so the buffer refreshes at the same

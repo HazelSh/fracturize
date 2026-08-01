@@ -10,6 +10,7 @@ pub mod context;
 pub mod density;
 pub mod gizmo;
 pub mod lines;
+pub mod overlay;
 pub mod points;
 
 // Re-export shared types
@@ -19,4 +20,5 @@ pub use context::GpuContext;
 // Re-export the active renderer (points)
 pub use gizmo::GizmoRenderer;
 pub use lines::{LineRenderer, LineVertex};
+pub use overlay::OverlayTargets;
 pub use points::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};

@@ -11,6 +11,10 @@ pub struct GpuContext {
     pub format: TextureFormat,
     /// Whether the GPU supports f16 shaders (needed for density renderer)
     pub _has_f16: bool,
+    /// Sample counts this adapter can render the surface format at. Only 1 and
+    /// 4 are guaranteed; 2 is common but optional, and the overlay pass wants
+    /// the cheapest one that actually anti-aliases (see `src/gpu/overlay.rs`).
+    pub surface_sample_counts: Vec<u32>,
 }
 
 impl GpuContext {
@@ -47,11 +51,23 @@ impl GpuContext {
         log::info!("GPU capabilities: f16={}", has_f16);
 
         // Request f16 if available (needed for density renderer, not for points renderer)
-        let required_features = if has_f16 {
+        let mut required_features = if has_f16 {
             Features::SHADER_F16
         } else {
             Features::empty()
         };
+
+        // The overlay pass wants 2x MSAA, which the WebGPU spec doesn't
+        // guarantee for any format — only 1 and 4 are. Most desktop adapters
+        // have it, but wgpu will refuse to create the texture unless the
+        // device was asked for adapter-specific format features. Ask when it's
+        // there; `surface_sample_counts` below reports what we actually got,
+        // and `OverlayTargets::choose_samples` falls back to 4.
+        let adapter_format_features =
+            adapter_features.contains(Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+        if adapter_format_features {
+            required_features |= Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
 
         // Default limits cap storage buffer bindings at 128MiB, which caps the
         // point buffer at ~8M points. Request whatever the adapter supports.
@@ -109,6 +125,22 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
+        // Without the adapter-specific feature the device is held to the
+        // WebGPU guarantee regardless of what the adapter reports, so don't
+        // report more than we can actually create.
+        let flags = adapter.get_texture_format_features(format).flags;
+        let surface_sample_counts: Vec<u32> = [1u32, 2, 4, 8]
+            .into_iter()
+            .filter(|n| {
+                if adapter_format_features {
+                    flags.sample_count_supported(*n)
+                } else {
+                    *n == 1 || *n == 4
+                }
+            })
+            .collect();
+        log::info!("Surface MSAA sample counts: {:?}", surface_sample_counts);
+
         Self {
             device,
             queue,
@@ -116,6 +148,7 @@ impl GpuContext {
             config,
             format,
             _has_f16: has_f16,
+            surface_sample_counts,
         }
     }
 

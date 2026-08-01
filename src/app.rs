@@ -8,7 +8,7 @@ use winit::window::Window;
 
 use crate::camera::OrbitCamera;
 use crate::gpu::lines::LineVertex;
-use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, OverlayTargets, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::history::{EditSnapshot, History};
 use crate::path::CameraPath;
 use crate::scene::{Scene, TransformSpec};
@@ -196,7 +196,10 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32, label: &
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // TEXTURE_BINDING as well as RENDER_ATTACHMENT: the overlay pass
+        // samples this to seed its own multisampled depth, so the gizmos stay
+        // occluded by the point cloud (see src/gpu/overlay.rs).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }
@@ -470,6 +473,9 @@ pub struct App {
     /// Fingerprint of the path the buffer was last built for, or `None` when
     /// nothing is drawn. See `refresh_path_lines`.
     path_lines_key: Option<u64>,
+    /// Multisampled target the in-world UI is drawn into and composited from,
+    /// so the gizmos and paths are anti-aliased and the point cloud isn't.
+    overlay: OverlayTargets,
 
     /// Where the chaos game lands, measured on the CPU — the input to the
     /// drawn-point budget (see `drawn_points`). `None` until first measured,
@@ -627,16 +633,28 @@ impl App {
             .or(view.as_ref().and_then(|v| v.exposure))
             .unwrap_or(1.0);
 
+        // Everything drawn into the overlay pass shares its sample count.
+        let overlay_samples = OverlayTargets::choose_samples(&gpu.surface_sample_counts);
+
         // Create gizmo renderer
         let gizmo_renderer = GizmoRenderer::new(
             &gpu.device,
             gpu.format,
+            overlay_samples,
             &scene.transforms,
         );
 
         // Create depth texture
         let (width, height) = gpu.size();
         let depth_texture = create_depth_texture(&gpu.device, width, height, "main_depth");
+        let overlay = OverlayTargets::new(
+            &gpu.device,
+            gpu.format,
+            overlay_samples,
+            width,
+            height,
+            &depth_texture.create_view(&Default::default()),
+        );
 
         // Screenshot resources
         let screenshot_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -666,9 +684,9 @@ impl App {
         });
 
         // Trace line renderer (empty until X is pressed)
-        let line_renderer = LineRenderer::new(&gpu.device, gpu.format);
-        let indicator_renderer = LineRenderer::new(&gpu.device, gpu.format);
-        let path_renderer = LineRenderer::new(&gpu.device, gpu.format);
+        let line_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
+        let indicator_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
+        let path_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
 
         let num_transforms = scene.transforms.len();
 
@@ -732,6 +750,7 @@ impl App {
             indicator_key: None,
             path_renderer,
             path_lines_key: None,
+            overlay,
             attractor: None,
             // Zero is not a fingerprint any real scene produces, so the first
             // frame always measures.
@@ -1274,6 +1293,14 @@ impl App {
         self.gpu.resize(width, height);
         if width > 0 && height > 0 {
             self.depth_texture = create_depth_texture(&self.gpu.device, width, height, "main_depth");
+            // The overlay's depth blit reads the texture we just replaced, so
+            // its bind group has to be rebuilt with it.
+            self.overlay.resize(
+                &self.gpu.device,
+                width,
+                height,
+                &self.depth_texture.create_view(&Default::default()),
+            );
         }
     }
 
@@ -2751,6 +2778,7 @@ impl App {
         self.gizmo_renderer = GizmoRenderer::new(
             &self.gpu.device,
             self.gpu.format,
+            self.overlay.samples(),
             &self.scene.transforms,
         );
         self.point_compute.update_weights(
@@ -3612,99 +3640,29 @@ impl App {
             }
         }
 
-        // === STEP 2.5: RENDER TRACES ===
-        if self.show_traces {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("trace_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.line_renderer.draw(&mut render_pass);
-        }
-
-        // === STEP 2.6: SELECTED-TRANSFORM INDICATORS ===
-        // Offset vector and rotation axis/arc for the selected transform
-        // (src/indicators.rs) — the relationship between it and the grey
-        // identity cell, drawn instead of left to be read off Euler fields.
-        if self.show_gizmos {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("indicator_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        // Store, not Discard: the gizmo pass runs after this
-                        // one and depth-tests against the same buffer.
-                        // Discarding here leaves its contents undefined and
-                        // the gizmos disappear.
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.indicator_renderer.draw(&mut render_pass);
-            // Same pass: both are world-space decorations gated on G, and the
-            // depth rules that make the gizmos survive apply once, not twice.
-            self.path_renderer.draw(&mut render_pass);
-        }
-
-        // === STEP 3: RENDER GIZMOS ===
-        if self.show_gizmos {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("gizmo_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            self.gizmo_renderer.draw(&mut render_pass);
+        // === STEP 2.5/2.6/3: THE IN-WORLD UI, MULTISAMPLED ===
+        //
+        // Traces, the selected transform's indicators, the camera path and the
+        // gizmos all go into one multisampled target and come back as a single
+        // composite (see src/gpu/overlay.rs). They used to be three passes
+        // straight onto the swapchain, sharing the main depth buffer and its
+        // aliasing; the pass gets its own copy of that depth so the point
+        // cloud still occludes them, and its own sample count so they are the
+        // only thing anti-aliased.
+        let draw_overlay = self.show_traces || self.show_gizmos;
+        if draw_overlay {
+            {
+                let mut render_pass = self.overlay.begin(&mut encoder);
+                if self.show_traces {
+                    self.line_renderer.draw(&mut render_pass);
+                }
+                if self.show_gizmos {
+                    self.indicator_renderer.draw(&mut render_pass);
+                    self.path_renderer.draw(&mut render_pass);
+                    self.gizmo_renderer.draw(&mut render_pass);
+                }
+            }
+            self.overlay.composite(&mut encoder, &color_view);
         }
 
         // === STEP 4: RENDER EGUI OVERLAY (replaces the old text-overlay pass) ===
