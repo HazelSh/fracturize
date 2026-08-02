@@ -979,7 +979,12 @@ impl App {
             return;
         }
         let path = self.camera_path();
-        if path.keys.len() < 2 {
+        // `playable` is the rule, not a keypoint count: a zoom loop flies on a
+        // single key, because its closing segment runs to that key's own image
+        // under the symmetry. Counting to two here refused to *start* one —
+        // though a loop already in flight kept going as you deleted down to
+        // one key, which is what made it look like the spline was at fault.
+        if !path.playable() {
             log::warn!("Camera path has too few keypoints to fly — press Y to add some");
             return;
         }
@@ -1072,7 +1077,9 @@ impl App {
         // that claims to loop and doesn't.
         let Some(zoom) = self.point_compute.zoom else {
             log::warn!(
-                "A zoom loop closes under the scene's scale symmetry, and this scene                  has none. Right-click a transform → Zoom about this first."
+                "A zoom loop closes under the scene's scale symmetry, and this scene \
+                 has none. Select a transform in the Transforms window and press \
+                 \"Zoom about this\" first."
             );
             return;
         };
@@ -2113,8 +2120,7 @@ impl App {
     // === Render jobs ===
 
     /// Launch a render job on its own thread and its own wgpu device, so the
-    /// realtime view keeps running. Stops the camera, so the framing being
-    /// rendered is the one on screen.
+    /// realtime view keeps running — camera included.
     ///
     /// One at a time. A queue was explicitly deferred in the previous plan and
     /// stays deferred: two jobs sharing a GPU makes both slower and the
@@ -2132,9 +2138,11 @@ impl App {
             return;
         }
         self.job_error = None;
-        // Stop the camera: a still job renders the framing that's on screen,
-        // and it shouldn't be a moving target.
-        self.path_t = None;
+        // The camera keeps flying. The job takes a *snapshot* — `current_view`
+        // below, and a clone of the scene — and everything after that runs on
+        // its own thread and device, so there is no moving target to protect
+        // against: stopping the flyby changed nothing about what got rendered,
+        // it just interrupted what you were watching while you waited.
 
         // A view descriptor renders nothing — it's the "note down this
         // framing, render it later" case — so it completes inline rather than

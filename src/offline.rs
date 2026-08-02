@@ -272,13 +272,39 @@ fn scene_zoom(scene: &Scene) -> Result<Option<crate::renorm::Renorm>, String> {
         .transpose()
 }
 
+/// Haze for an offline render: the falloff pair, plus the band *if* a view
+/// pinned one by hand.
+///
+/// An unpinned band is resolved per frame from the camera's own distance, the
+/// same rule `App::haze_range` follows. Freezing it at the scene's authored
+/// distance was a real artifact and not a subtle one: a zoom loop's camera
+/// ends a period closer in than it started, so against a fixed band the whole
+/// image drifted out of the haze as the loop ran and snapped back at the wrap
+/// — measured on `wellspiral` as a 12% brightening across the loop undone by
+/// an 11% drop in one frame. Offline was the only renderer with the bug,
+/// which is why it showed up in a render and never in the window.
+#[derive(Clone, Copy)]
+struct Haze {
+    /// `Some` only when a view pinned the band; otherwise auto-ranged
+    pinned: Option<(f32, f32)>,
+    transmittance: f32,
+    saturation: f32,
+}
+
+impl Haze {
+    /// `(near, far)` for a camera at `distance`
+    fn band(&self, distance: f32) -> (f32, f32) {
+        self.pinned.unwrap_or_else(|| crate::haze::auto_band(distance))
+    }
+}
+
 /// Base camera and render params from a view file, or scene defaults
 fn base_setup(
     view: &Option<View>,
     scene: &Scene,
     haze_enabled: bool,
     over: CameraOverride,
-) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
+) -> (OrbitCamera, f32, Haze) {
     let (mut camera, point_size, haze) = base_setup_unwrapped(view, scene, haze_enabled);
     // Flags last: they are the most specific thing anyone said.
     over.apply(&mut camera);
@@ -295,7 +321,7 @@ fn base_setup(
     (camera, point_size, haze)
 }
 
-fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
+fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, Haze) {
     match view {
         Some(v) => (
             OrbitCamera::from_legacy(
@@ -307,7 +333,16 @@ fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) 
                 v.roll,
             ),
             v.point_size,
-            (v.haze_near, v.haze_far, v.haze_transmittance, v.haze_saturation),
+            // A view's band follows the same rule as `App::apply_view`: only
+            // a hand-pinned one overrides the auto range. A legacy view (no
+            // `haze` amount) carried raw shader values chosen by hand, so its
+            // band counts as pinned.
+            Haze {
+                pinned: (v.haze.is_none() || v.haze_band_pinned)
+                    .then_some((v.haze_near, v.haze_far)),
+                transmittance: v.haze_transmittance,
+                saturation: v.haze_saturation,
+            },
         ),
         None => {
             // `--fog` predates haze being scene data and now just means "on at
@@ -321,7 +356,6 @@ fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) 
             } else {
                 0.0
             };
-            let (near, far) = crate::haze::auto_band(scene.camera_distance);
             let (fb, fs) = crate::haze::falloff(amount);
             (
                 OrbitCamera {
@@ -332,7 +366,10 @@ fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) 
                     roll: scene.camera_roll,
                 },
                 scene.point_size,
-                (near, far, fb, fs),
+                // Auto-ranged: resolved from whichever camera ends up rendering
+                // each frame, not from the scene's authored distance. A
+                // `--distance` flag now moves the haze with it too.
+                Haze { pinned: None, transmittance: fb, saturation: fs },
             )
         }
     }
@@ -622,9 +659,14 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
                 return Err(CANCELLED.to_string());
             }
         }
+        // One band for the whole sheet, off the base framing: a contact sheet
+        // is meant to be compared tile against tile, so the haze has to be the
+        // same in each. Grid tiles only re-aim the camera anyway.
+        let (haze_near, haze_far) = haze.band(base_camera.distance);
         let camera = CameraUniforms::new(
             tile.view_proj, height as f32, point_size, aspect, 1.0,
-            haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
+            haze_near, haze_far, haze.transmittance, haze.saturation,
+            color_contrast, scene.background.to_array(),
             transparent,
         );
         renderer.upload_camera(&queue, &camera);
@@ -800,9 +842,16 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         if let Some(z) = &zoom {
             z.wrap(&mut cam);
         }
+        // After the wrap, so the band is derived from the camera that actually
+        // renders this frame. That is what closes a zoom loop: the wrapped
+        // camera and its haze scale together, so the last frame matches the
+        // first instead of the image drifting out of a band nailed to the
+        // scene's authored distance.
+        let (haze_near, haze_far) = haze.band(cam.distance);
         let camera = CameraUniforms::new(
             cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
-            haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
+            haze_near, haze_far, haze.transmittance, haze.saturation,
+            color_contrast, scene.background.to_array(),
             transparent,
         );
         renderer.upload_camera(&queue, &camera);
@@ -907,9 +956,11 @@ pub fn render_mutations(
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
+    let (haze_near, haze_far) = haze.band(base_camera.distance);
     let camera = CameraUniforms::new(
         view_proj, height as f32, point_size, aspect, 1.0,
-        haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),
+        haze_near, haze_far, haze.transmittance, haze.saturation,
+        color_contrast, scene.background.to_array(),
         transparent,
     );
 
