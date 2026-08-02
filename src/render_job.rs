@@ -41,6 +41,24 @@ pub const BYTES_PER_POINT: u64 = 16;
 /// the kind of lie an estimate must not tell.
 pub const AV1_SECS_PER_PIXEL: f32 = 6.0e-7;
 
+/// The same for one H.264 frame, for `.mp4` output.
+///
+/// Measured on `scenes/winze.toml`, 36 frames at 12 fps, across 480x270,
+/// 960x540, 1280x720 and 1920x1080: 4.7, 5.7 and 7.0e-8 s/px for the three
+/// successive pairs, so ~6e-8 over the encode-dominated part of the range.
+///
+/// It is two orders of magnitude under the AV1 figure and that is not a typo.
+/// On the same clip and machine, AV1 spent 17.2s where H.264 spent 0.35s — a
+/// ~50x gap, because openh264 at constant QP encodes on the way in and has
+/// nothing left to flush, while rav1e defers most of its work to the end.
+/// Quoting the AV1 constant for an MP4 job would overstate a 1080p animation
+/// by minutes, which is exactly the class of lie `AV1_SECS_PER_PIXEL` was
+/// introduced to stop telling — in the other direction.
+///
+/// Both figures include the per-frame render, which is small here but not
+/// zero; if this is ever re-measured on another machine, scale them together.
+pub const H264_SECS_PER_PIXEL: f32 = 6.0e-8;
+
 /// The same for a PNG: deflate on an already-rendered buffer, cheap enough
 /// that it only shows up on very large stills.
 pub const PNG_SECS_PER_PIXEL: f32 = 2.0e-8;
@@ -48,7 +66,15 @@ pub const PNG_SECS_PER_PIXEL: f32 = 2.0e-8;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum JobKind {
     Still { width: u32, height: u32 },
-    Animation { width: u32, height: u32, fps: u32, seconds: f32, quality: u8 },
+    Animation {
+        width: u32,
+        height: u32,
+        fps: u32,
+        seconds: f32,
+        quality: u8,
+        /// `.avif` (AV1) or `.mp4` (H.264) — see `src/video.rs`
+        format: crate::video::Format,
+    },
     /// No render at all: write a view file describing the current framing, to
     /// be rendered later (or by the CLI, or on another machine).
     ViewDescriptor,
@@ -58,7 +84,7 @@ impl JobKind {
     pub fn extension(&self) -> &'static str {
         match self {
             JobKind::Still { .. } => "png",
-            JobKind::Animation { .. } => "avif",
+            JobKind::Animation { format, .. } => format.extension(),
             JobKind::ViewDescriptor => "toml",
         }
     }
@@ -66,8 +92,24 @@ impl JobKind {
     pub fn label(&self) -> &'static str {
         match self {
             JobKind::Still { .. } => "still",
-            JobKind::Animation { .. } => "animation",
+            JobKind::Animation { format, .. } => match format {
+                crate::video::Format::Avif => "AVIF animation",
+                crate::video::Format::Mp4 => "MP4 animation",
+            },
             JobKind::ViewDescriptor => "view descriptor",
+        }
+    }
+
+    /// Seconds of encoding per output pixel, which is the term that dominates
+    /// an animation and differs by an order of magnitude between the codecs.
+    pub fn secs_per_pixel(&self) -> f32 {
+        match self {
+            JobKind::Still { .. } => PNG_SECS_PER_PIXEL,
+            JobKind::Animation { format, .. } => match format {
+                crate::video::Format::Avif => AV1_SECS_PER_PIXEL,
+                crate::video::Format::Mp4 => H264_SECS_PER_PIXEL,
+            },
+            JobKind::ViewDescriptor => 0.0,
         }
     }
 
@@ -307,6 +349,7 @@ mod tests {
                 fps: 0,
                 seconds: 2.0,
                 quality: 60,
+                format: crate::video::Format::Avif,
             },
             ..still(1000, 640, 480)
         };
@@ -321,6 +364,7 @@ mod tests {
             fps: 24,
             seconds: 2.5,
             quality: 60,
+            format: crate::video::Format::Avif,
         };
         assert_eq!(k.frames(), 60);
         // Even a sub-frame duration renders something playable
@@ -330,8 +374,34 @@ mod tests {
             fps: 24,
             seconds: 0.01,
             quality: 60,
+            format: crate::video::Format::Avif,
         };
         assert_eq!(tiny.frames(), 2);
+    }
+
+    /// The filename the dialog offers and the file the encoder writes are
+    /// derived from the same place, so a format that reported the wrong
+    /// extension would write an `.avif` named `.mp4` and nobody would notice
+    /// until an upload bounced.
+    #[test]
+    fn animation_format_drives_extension_and_cost() {
+        let anim = |format| JobKind::Animation {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            seconds: 4.0,
+            quality: 60,
+            format,
+        };
+        let avif = anim(crate::video::Format::Avif);
+        let mp4 = anim(crate::video::Format::Mp4);
+        assert_eq!(avif.extension(), "avif");
+        assert_eq!(mp4.extension(), "mp4");
+        assert_eq!(JobKind::Still { width: 8, height: 8 }.extension(), "png");
+        // H.264 is the cheap one; quoting AV1's figure for it was the bug the
+        // per-codec constant exists to prevent.
+        assert!(mp4.secs_per_pixel() < avif.secs_per_pixel());
+        assert!(avif.label().contains("AVIF") && mp4.label().contains("MP4"));
     }
 
     #[test]

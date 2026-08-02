@@ -44,6 +44,9 @@ pub struct RenderJobForm {
     pub fps: u32,
     pub seconds: f32,
     pub quality: u8,
+    /// Which animation file to write. Only read when `mode` is `Animation`,
+    /// but kept across a switch to Still and back so the choice sticks.
+    pub format: crate::video::Format,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,6 +73,7 @@ impl Default for RenderJobForm {
             fps: 30,
             seconds: 8.0,
             quality: 60,
+            format: crate::video::Format::Avif,
         }
     }
 }
@@ -84,6 +88,7 @@ impl RenderJobForm {
                 fps: self.fps,
                 seconds: self.seconds,
                 quality: self.quality,
+                format: self.format,
             },
             Mode::ViewDescriptor => JobKind::ViewDescriptor,
         }
@@ -118,16 +123,16 @@ pub fn open(app: &mut App) {
     if let Some(path) = app.scene.camera_path.as_ref() {
         form.seconds = path.duration();
     }
-    form.filename = default_filename(app, form.mode);
+    form.filename = default_filename(app, form.mode, form.format);
     app.ui_state.render_job = form;
 }
 
-fn default_filename(app: &App, mode: Mode) -> String {
+fn default_filename(app: &App, mode: Mode, format: crate::video::Format) -> String {
     let stamp = crate::app::unix_timestamp();
     let slug = app.scene_slug();
     // Extension from `JobKind`, so the name and the thing that decides how to
     // write the file can't disagree about what kind of file it is.
-    let kind = RenderJobForm { mode, ..RenderJobForm::default() }.kind();
+    let kind = RenderJobForm { mode, format, ..RenderJobForm::default() }.kind();
     let dir = match mode {
         Mode::ViewDescriptor => "views",
         _ => "renders",
@@ -228,31 +233,62 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
+/// The Output row is a file-kind chooser, so the two animation formats get a
+/// button each rather than hiding behind a second control. They differ by
+/// codec, not just extension (see `src/video.rs`), and which one you want is
+/// decided by where the file is going — which is exactly the kind of thing
+/// that should be visible at the top of the dialog rather than found later.
+const OUTPUTS: [(Mode, crate::video::Format, &str, &str); 4] = [
+    (
+        Mode::Still,
+        crate::video::Format::Avif, // unused for a still
+        "still",
+        "One high-quality frame (PNG)",
+    ),
+    (
+        Mode::Animation,
+        crate::video::Format::Avif,
+        "avif",
+        "Fly the camera path and encode an animated AVIF (AV1): loops like a GIF at a \
+         fraction of the size, and plays in a browser. The better file — but many upload \
+         pipelines won't take it.",
+    ),
+    (
+        Mode::Animation,
+        crate::video::Format::Mp4,
+        "mp4",
+        "Fly the camera path and encode an MP4 (H.264): bigger than the AVIF, and what \
+         platforms that loop short clips actually accept. Faststart, so it plays while it \
+         downloads.",
+    ),
+    (
+        Mode::ViewDescriptor,
+        crate::video::Format::Avif, // unused for a view file
+        "view",
+        "Save the framing to a view file instead of rendering anything",
+    ),
+];
+
 fn draw_mode(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.label("Output");
-        for (mode, label, tip) in [
-            (Mode::Still, "still", "One high-quality frame (PNG)"),
-            (
-                Mode::Animation,
-                "animation",
-                "Fly the scene's camera path and encode an AVIF. One chaos fill, one render pass per frame.",
-            ),
-            (
-                Mode::ViewDescriptor,
-                "view",
-                "Save the framing to a view file instead of rendering anything",
-            ),
-        ] {
-            let selected = app.ui_state.render_job.mode == mode;
+        for (mode, format, label, tip) in OUTPUTS {
+            // An animation button is only lit when the format matches too,
+            // otherwise both would look selected at once.
+            let selected = app.ui_state.render_job.mode == mode
+                && (mode != Mode::Animation || app.ui_state.render_job.format == format);
             let resp = ui.selectable_label(selected, label);
             let resp = hinted(resp, &mut app.ui_state, tip, "click: choose the output kind");
             if resp.clicked() && !selected {
                 app.ui_state.render_job.mode = mode;
-                // The extension has to follow the mode, but not over a name
+                if mode == Mode::Animation {
+                    app.ui_state.render_job.format = format;
+                }
+                // The extension has to follow the choice, but not over a name
                 // the user has typed — only the default gets rewritten.
                 if !app.ui_state.render_job.filename_touched {
-                    app.ui_state.render_job.filename = default_filename(app, mode);
+                    let format = app.ui_state.render_job.format;
+                    app.ui_state.render_job.filename = default_filename(app, mode, format);
                 }
             }
         }
@@ -399,7 +435,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 if animation {
-                    "Not available for animation — the AV1 muxer has no alpha plane"
+                    "Not available for animation — neither AV1 nor H.264 carries an alpha plane"
                 } else {
                     "Write an alpha channel for compositing"
                 },
@@ -438,12 +474,13 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             }
 
             let mut quality = app.ui_state.render_job.quality;
+            let codec = app.ui_state.render_job.format.codec_label();
             let resp = ui.add(egui::DragValue::new(&mut quality).range(0..=100).prefix("q "));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "AV1 quality, 0-100. Higher is better and bigger.",
-                "drag: AV1 quality",
+                format!("{} quality, 0-100. Higher is better and bigger.", codec),
+                &format!("drag: {} quality", codec),
             );
             if resp.changed() {
                 app.ui_state.render_job.quality = quality;
@@ -522,10 +559,9 @@ fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
 
     let (w, h) = params.kind.size();
     let pixels = w as f32 * h as f32;
-    let encode_per_pixel = match params.kind {
-        JobKind::Animation { .. } => crate::render_job::AV1_SECS_PER_PIXEL,
-        _ => crate::render_job::PNG_SECS_PER_PIXEL,
-    };
+    // Per-codec: H.264 encodes about an order of magnitude faster than AV1,
+    // and one shared constant would misquote whichever it wasn't measured on.
+    let encode_per_pixel = params.kind.secs_per_pixel();
     let per_frame = params.points as f32 / throughput + pixels * encode_per_pixel;
     let render = per_frame * params.kind.frames() as f32;
 

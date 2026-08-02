@@ -734,14 +734,19 @@ pub struct AnimParams {
     pub fps: u32,
     /// Duration override; None uses the path's own duration
     pub seconds: Option<f32>,
-    /// AV1 quality 0-100 (higher = better)
+    /// Encode quality 0-100 (higher = better). Means the AV1 quantizer for
+    /// AVIF and H.264's QP for MP4 — the same promise either way: pick a
+    /// fidelity and let the bitrate land where it lands.
     pub quality: u8,
+    /// Which file to write, and so which codec encodes it
+    pub format: crate::video::Format,
 }
 
-/// Render an animated AVIF: the camera flies the scene's [[camera.path]]
-/// spline (or a seamless full-turn orbit when no path is authored) while the
-/// point cloud stays fixed — one chaos fill, one cheap render pass per frame,
-/// frames streamed straight into the AV1 encoder.
+/// Render an animation: the camera flies the scene's [[camera.path]] spline
+/// (or a seamless full-turn orbit when no path is authored) while the point
+/// cloud stays fixed — one chaos fill, one cheap render pass per frame, frames
+/// streamed straight into the encoder `anim.format` selects (AV1 for .avif,
+/// H.264 for .mp4).
 pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), String> {
     let OfflineParams {
         mut scene,
@@ -808,8 +813,11 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         if path.wraps() { "loop" } else { "open path" },
         if is_default { " (auto full orbit)" } else { "" },
     );
+    println!("Encoding {} ({})", anim.format.codec_label(), anim.format.extension());
 
-    let mut encoder = crate::avif::AnimationEncoder::new(width, height, anim.fps, anim.quality, 8)?;
+    let mut encoder = crate::video::AnimationEncoder::new(
+        anim.format, width, height, anim.fps, anim.quality, 8,
+    )?;
     let aspect = width as f32 / height as f32;
     let target = TileTarget::new(&device, width, height, clear);
     let mut frame_buf = vec![0u8; (width * height * 4) as usize];
@@ -864,19 +872,23 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     }
     let t_render = Instant::now();
 
-    // rav1e defers most of its work to the flush, so the frame loop hitting
-    // 100% is not the job being nearly done. Say so, rather than leaving the
-    // dialog parked at a full bar for another ten seconds.
+    // rav1e defers most of its work to the flush, so for AVIF the frame loop
+    // hitting 100% is not the job being nearly done — say so, rather than
+    // leaving the dialog parked at a full bar for another ten seconds. H.264
+    // encodes on the way in and only has the muxing left.
     if let Some(c) = &control {
         c.phase("encoding");
-        c.log("flushing the AV1 encoder and muxing");
+        c.log(match anim.format {
+            crate::video::Format::Avif => "flushing the AV1 encoder and muxing",
+            crate::video::Format::Mp4 => "muxing the MP4",
+        });
     }
     encoder.finish(out_path)?;
     let t_done = Instant::now();
 
     println!(
-        "Rendered {}x{} animation ({} frames, {} points) -> {}",
-        width, height, frames, point_count, out_path.display(),
+        "Rendered {}x{} {} animation ({} frames, {} points) -> {}",
+        width, height, anim.format.codec_label(), frames, point_count, out_path.display(),
     );
     println!(
         "Timing: setup {:.2}s | chaos fill {:.2}s | render+encode {:.2}s | flush+mux {:.2}s | total {:.2}s",

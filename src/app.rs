@@ -2221,10 +2221,15 @@ impl App {
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),
-                JobKind::Animation { fps, seconds, quality, .. } => {
+                JobKind::Animation { fps, seconds, quality, format, .. } => {
                     crate::offline::render_animation(
                         base,
-                        crate::offline::AnimParams { fps, seconds: Some(seconds), quality },
+                        crate::offline::AnimParams {
+                            fps,
+                            seconds: Some(seconds),
+                            quality,
+                            format,
+                        },
                     )
                 }
                 JobKind::ViewDescriptor => Ok(()), // handled inline above

@@ -4,6 +4,7 @@ mod camera;
 mod haze;
 mod info;
 mod gpu;
+mod h264;
 mod history;
 mod indicators;
 mod mutate;
@@ -17,6 +18,7 @@ mod randomize;
 mod renorm;
 mod render_job;
 mod ui;
+mod video;
 mod view;
 
 use std::sync::Arc;
@@ -68,13 +70,15 @@ struct Args {
     view: Option<String>,
 
     /// Render headlessly (no window) and exit. A .png path renders stills
-    /// (and grids); a .avif path renders an animation along the scene's
-    /// [[camera.path]] (or a full-orbit loop when the scene has none).
+    /// (and grids); a .avif or .mp4 path renders an animation along the
+    /// scene's [[camera.path]] (or a full-orbit loop when the scene has none).
+    /// .avif is AV1 — small, loops like a GIF; .mp4 is H.264, which is what
+    /// upload pipelines accept.
     /// Prints camera mapping (for grids) and a timing breakdown to stdout.
     #[arg(long)]
     render: Option<String>,
 
-    /// Animation frame rate for --render <out.avif>
+    /// Animation frame rate for --render <out.avif|out.mp4>
     #[arg(long, default_value = "30")]
     fps: u32,
 
@@ -83,7 +87,8 @@ struct Args {
     #[arg(long)]
     seconds: Option<f32>,
 
-    /// Animation AV1 quality, 0-100 (higher = better quality, bigger file)
+    /// Animation quality, 0-100 (higher = better quality, bigger file).
+    /// Maps to the AV1 quantizer for .avif and to H.264's QP for .mp4.
     #[arg(long, default_value = "60")]
     quality: u8,
 
@@ -149,7 +154,7 @@ struct Args {
 
     /// Render with a transparent background: the PNG gets an alpha channel
     /// carrying the fractal's own coverage, for compositing. Not supported for
-    /// .avif output — the AV1 muxer has no alpha plane.
+    /// animation output — neither AV1 nor H.264 carries an alpha plane here.
     #[arg(long)]
     transparent: bool,
 
@@ -929,21 +934,26 @@ fn main() {
             control: None,
             camera: args.camera_override(),
         };
-        let animated = std::path::Path::new(out)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("avif"));
-        let result = if animated {
+        // The extension picks the codec as well as the container: .avif is
+        // AV1, .mp4 is H.264. Anything else is a still.
+        let format = crate::video::Format::from_path(std::path::Path::new(out));
+        let result = if let Some(format) = format {
             if !matches!(grid, offline::GridMode::Single) || args.mutations.is_some() {
-                eprintln!("animation (.avif) cannot be combined with grid or mutation sheets");
+                eprintln!(
+                    "animation (.{}) cannot be combined with grid or mutation sheets",
+                    format.extension(),
+                );
                 std::process::exit(1);
             }
             if args.transparent {
-                // Fail rather than quietly hand back opaque video: src/avif.rs
-                // reads only r/g/b converting to YUV, so there is nowhere for
-                // an alpha plane to go without muxer work.
+                // Fail rather than quietly hand back opaque video: the frames
+                // are converted to YUV with r/g/b only, and neither codec here
+                // carries an alpha plane.
                 eprintln!(
-                    "--transparent is not supported for .avif output (the AV1 muxer has no \
-                     alpha plane). Render a PNG sequence instead, or drop --transparent."
+                    "--transparent is not supported for .{} output ({} has no alpha plane \
+                     here). Render a PNG sequence instead, or drop --transparent.",
+                    format.extension(),
+                    format.codec_label(),
                 );
                 std::process::exit(1);
             }
@@ -953,6 +963,7 @@ fn main() {
                     fps: args.fps,
                     seconds: args.seconds,
                     quality: args.quality,
+                    format,
                 },
             )
         } else {

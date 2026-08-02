@@ -45,3 +45,9 @@ image = "0.25"
 # Animated AVIF encoding (already built for image's still-AVIF support via
 # ravif; keep default-features off + threading to share the same build)
 rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }
+# H.264 encoding for .mp4 output. rav1e only speaks AV1, and the platforms
+# that loop short clips want H.264 — see src/video.rs for why .mp4 is not
+# just the AVIF bitstream in a different box. Cisco's encoder, BSD-2, built
+# from vendored C by the default "source" feature (no system library, and no
+# nasm needed — it falls back to the C kernels).
+openh264 = "0.9"

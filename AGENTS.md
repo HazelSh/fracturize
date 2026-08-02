@@ -38,7 +38,9 @@ src/
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
   path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
-  avif.rs        # Animated AVIF writer: rav1e AV1 encode + minimal ISOBMFF muxer
+  video.rs       # Animation formats: Format (avif/mp4), RGBA->YUV, shared ISOBMFF muxer
+  avif.rs        # AV1 backend for .avif (rav1e)
+  h264.rs        # H.264 backend for .mp4 (openh264)
   pick.rs        # Gizmo hit-testing and drag geometry (pure math, unit-tested)
   mutate.rs      # Random scene mutation operators (U key, --mutations)
   trace.rs       # CPU chaos walkers (variation port) for the trace overlay
@@ -393,9 +395,9 @@ and render jobs) writes an alpha channel: the clear alpha goes to 0, the
 points renderer's own alpha marks where points landed, and the splat renderer
 writes straight-alpha coverage so dusty edges stay dusty instead of becoming a
 cutout. The live window is always opaque — its swapchain has nothing behind it.
-**Not supported for `.avif`**: `src/avif.rs` reads only r/g/b converting to
-YUV, so `--transparent` with an `.avif` output errors rather than quietly
-producing opaque video.
+**Not supported for animation**: frames are converted to YUV from r/g/b only,
+and neither AV1 nor H.264 carries an alpha plane here, so `--transparent` with
+an `.avif` or `.mp4` output errors rather than quietly producing opaque video.
 
 Save-as / fork is `Ctrl+Shift+S` or the Camera window's button — a small modal
 (`src/ui/save_as.rs`), not a native dialog: one text field doesn't justify an
@@ -497,7 +499,7 @@ path_zoom_loop = 1        # optional: close the loop under the [zoom] symmetry,
 # EVERY SCENE HAS A PATH. Omit these keypoints (or author fewer than two) and
 # the path is a seamless full orbit around the current framing, at 0.18 rad/s
 # — the "turntable". That default is not a second system: it is a real
-# `CameraPath`, it draws, it plays, and `--render x.avif` flies it, all
+# `CameraPath`, it draws, it plays, and `--render x.avif|x.mp4` flies it, all
 # through the same code (`path::resolve`, used by both `App::camera_path` and
 # src/offline.rs). Editing it — a keypoint, the loop flag, the duration — is
 # what turns it into scene data; until then no scene grows a path it never
@@ -806,8 +808,11 @@ with its parameters visible, an estimate, and a way to stop it. The model is
 full framerate while a job goes (measured: 119 FPS with a 240-frame animation
 rendering).
 
-- **Modes**: still (PNG), animation (AVIF along the camera path), or view
-  descriptor — write a `.toml` view of this framing and render it later.
+- **Modes**: still (PNG), animation along the camera path in either `.avif`
+  (AV1) or `.mp4` (H.264), or view descriptor — write a `.toml` view of this
+  framing and render it later. The Output row has a button per file kind, so
+  the codec choice is visible rather than buried: AVIF is the better file,
+  MP4 is the one upload pipelines accept.
 - **Quality is job-scoped.** Points, accumulate, splat, exposure and
   transparency are the job's own; the interactive `buffer_capacity` and prefs
   are untouched. That separation is the whole point — render at 100M and keep
@@ -921,26 +926,44 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   tile prints its equivalent `yaw`/`pitch`/`distance`, so a good framing can
   be adopted directly into a `[camera]` block or view file.
 
-**Animation** (`--render <out.avif>`): an animated AVIF of the camera flying
+**Animation** (`--render <out.avif|out.mp4>`): the camera flying
 the scene's path — its `[[camera.path]]` spline, or the default full-turn orbit
 of the base framing when it authors fewer than two keypoints. Same rule the app
 previews with (`path::resolve`), so what you watch in the window is what this
 writes. The point cloud is fixed, so
 this is one chaos fill plus a cheap render pass per frame; frames stream
-straight into rav1e (AV1) and a hand-rolled ISOBMFF muxer (src/avif.rs), no
-external tools. Cannot combine with grid/mutation sheets. Options:
+straight into an encoder chosen by the output extension, then a hand-rolled
+ISOBMFF muxer (src/video.rs), no external tools:
+
+- `.avif` — AV1 via rav1e (src/avif.rs). Loops like a GIF at a fraction of the
+  size, plays in a browser. The better file.
+- `.mp4` — H.264 via openh264 (src/h264.rs), constant-QP, `moov` first so it
+  plays while it downloads. Bigger, and the one that survives an upload: the
+  platforms that loop short clips want H.264, and several reject AV1. Muxing
+  our AV1 into `.mp4` would have been nearly free and would have produced a
+  file that looks right locally and bounces on upload — hence a real second
+  encoder rather than a second extension.
+
+Both go through the same RGBA -> BT.709 limited-range 4:2:0 conversion, so the
+two formats are colour-identical by construction. Cannot combine with
+grid/mutation sheets. Options:
 
 - `--fps N` (default 30), `--seconds S` (default: the path's `path_seconds`,
   else 3s per spline segment — but the *default* orbit carries its own
   `path_seconds` of ~35s, one turn at 0.18 rad/s, so a pathless scene animates
-  a full slow turn unless you pass `--seconds`), `--quality 0-100` (default 60).
+  a full slow turn unless you pass `--seconds`), `--quality 0-100` (default 60
+  — the AV1 quantizer for `.avif`, H.264's QP for `.mp4`).
 - Closed paths omit the final frame so the loop wraps without a stutter.
 - Odd `--width`/`--height` are rounded down (4:2:0 chroma needs even sizes).
 - Budget: encoding dominates and scales with pixels — measured at ~6e-7
   s/pixel on the desktop (0.34s/frame at 960x540, 0.53s at 720p, 1.08s at
   1080p), so a 14s 24fps 720p loop is ~3 minutes. Most of that lands in
-  rav1e's final flush rather than the per-frame push. The Render job dialog
-  estimates from this same figure; preview cheap first with
+  rav1e's final flush rather than the per-frame push. **`.mp4` is ~50x
+  cheaper** — measured at ~6e-8 s/pixel on the same clip (36 frames of
+  `winze` took 17.2s as AVIF and 0.35s as MP4), because openh264 at constant
+  QP encodes on the way in with nothing to flush. The Render job dialog
+  estimates from whichever figure matches the chosen format; preview cheap
+  first with
   `--width 480 --height 270 --fps 12 --effort low`.
   Verify output with `ffprobe` / extract frames with `ffmpeg`.
 
