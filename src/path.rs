@@ -101,9 +101,20 @@ impl ZoomLoop {
 /// The Y-component of a rotation, as a yaw delta. Exact for the common case of
 /// a map that twists about the vertical, and the best available answer for one
 /// that doesn't — where the eye path isn't a pure yaw sweep anyway.
+///
+/// Taken the short way round. `Quat::to_axis_angle` reports the angle in
+/// [0, 2π], so a map that twists a fraction of a degree one way comes back as
+/// very nearly a full turn the other, and the camera swung 359° to arrive
+/// where 1° would have done. Yaw is an angle: representatives 2π apart frame
+/// the identical picture, so the nearest one ends the loop on exactly the same
+/// frame while sweeping at most half a turn to get there.
+///
+/// Scaling this by the loop count stays linear, so the spline's out-of-range
+/// keys remain evenly spaced and the seam keeps its smooth Catmull-Rom
+/// treatment — see [`CameraPath::key`].
 fn angle_about_y(rot: Quat) -> f32 {
     let (axis, angle) = rot.to_axis_angle();
-    angle * axis.y
+    shortest_angle(angle * axis.y)
 }
 
 /// A spline camera path through two or more keypoints
@@ -427,6 +438,57 @@ mod tests {
         let path = zoom_loop_path(3, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
         let ratio = path.sample(SEAM).distance / 4.0;
         assert!((ratio - 0.6f32.powi(3)).abs() < 1e-3, "descended {ratio}x");
+    }
+
+    #[test]
+    fn a_barely_twisting_map_sweeps_the_short_way_round() {
+        // A map that turns half a degree one way is the *same rotation* as one
+        // that turns 359.5° the other, and `Quat::to_axis_angle` hands back the
+        // latter whenever the scalar part comes out negative. Read literally,
+        // that swung the camera almost the whole way round to arrive where a
+        // half-degree nudge would have done.
+        let path = CameraPath {
+            keys: vec![key(0.0, 0.4, 4.0, Vec3::ZERO)],
+            closed: false,
+            zoom_loop: Some(ZoomLoop {
+                periods: 1,
+                center: Vec3::ZERO,
+                scale: 0.6,
+                rot: Quat::from_rotation_y(359.5f32.to_radians()),
+            }),
+            ease: None,
+            seconds: Some(10.0),
+        };
+        let swept = path.sample(SEAM).yaw - path.sample(0.0).yaw;
+        assert!(
+            swept.abs() < 1f32.to_radians(),
+            "swept {:.1}° to make a half-degree turn",
+            swept.to_degrees()
+        );
+        assert!(swept < 0.0, "359.5° is a turn the other way, swept {:.1}°", swept.to_degrees());
+
+        // And it still closes: the two representatives are a full turn apart,
+        // so the eye ends exactly where the symmetry carries it either way.
+        let z = path.zoom_loop.unwrap();
+        let carried = z.center + z.rot * ((path.sample(0.0).eye() - z.center) * z.scale);
+        let landed = path.sample(SEAM).eye();
+        assert!(
+            (landed - carried).length() < 1e-3,
+            "ended at {landed:?}, symmetry says {carried:?}"
+        );
+    }
+
+    #[test]
+    fn one_key_plus_a_zoom_loop_is_playable() {
+        // The transport gate used to count keypoints instead of asking this,
+        // so a one-key zoom loop could be authored, drawn and flown — but not
+        // *started*, since two keys were demanded to begin playing.
+        let one = zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
+        assert!(one.playable(), "a single key closing under the symmetry is a path");
+
+        // Without the symmetry there is nothing for that key to run to.
+        let bare = CameraPath { zoom_loop: None, ..one };
+        assert!(!bare.playable(), "one key and no zoom loop is a scene mid-authoring");
     }
 
     #[test]

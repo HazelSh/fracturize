@@ -438,13 +438,31 @@ impl Renorm {
         }
     }
 
+    /// How far `rot` actually turns, in degrees: the magnitude of the shorter
+    /// of the two ways round.
+    ///
+    /// `Quat::to_axis_angle` reports the angle in [0, 2π] and carries the
+    /// direction in the axis, so reading the angle alone called a 91° twist
+    /// "269°" whenever the quaternion came back with a negative scalar part.
+    /// Every rotation past half a turn is a shorter one the other way.
+    pub fn twist_degrees(&self) -> f32 {
+        let angle = self.rot.to_axis_angle().1;
+        let angle = if angle > std::f32::consts::PI {
+            std::f32::consts::TAU - angle
+        } else {
+            angle
+        };
+        angle.to_degrees()
+    }
+
     /// A one-line report for the CLI and the status bar
     pub fn summary(&self, name: Option<&str>) -> String {
         let short = if self.band_covers_the_view() {
             String::new()
         } else {
             format!(
-                ", BAND TOO SHORT (radius {:.2}x the eye distance, needs {:.2}x) —                  material will blink out at each wrap",
+                ", BAND TOO SHORT (radius {:.2}x the eye distance, needs {:.2}x) \
+                 — material will blink out at each wrap",
                 self.radius / self.band,
                 MIN_RADIUS
             )
@@ -462,7 +480,7 @@ impl Renorm {
             name.map(|n| format!(" \"{}\"", n)).unwrap_or_default(),
             self.scale,
             self.log_scale / std::f32::consts::LN_2,
-            self.rot.to_axis_angle().1.to_degrees(),
+            self.twist_degrees(),
             self.fixed_point.x,
             self.fixed_point.y,
             self.fixed_point.z,
