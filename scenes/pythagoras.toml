@@ -1,0 +1,83 @@
+# Pythagoras Tree — the 1942 construction, taken out of the plane
+#
+# Albert Bosman drew it during the German occupation of the Netherlands, on
+# drafting paper, by hand: a square, then two squares on its upper sides
+# meeting at a right angle, then two on each of those, forever. The right
+# triangle between any square and its two children is where the name comes
+# from — the areas add, because a² + b² = c², so every generation covers the
+# same total area as the one before it and the tree has finite area and
+# infinite perimeter.
+#
+# As an IFS the two children are exactly two maps: contract by 1/√2 and turn
+# ±45°, which is `scale = 0.7071, rotation = ±45° about Z` here. That pair
+# alone is the whole classical figure — what the chaos game draws is the
+# canopy, the set the square corners accumulate on, which is the part Bosman's
+# drawing spends most of its ink on anyway.
+#
+# The 3D part is one number: ±14° of yaw added to each branch, so successive
+# generations leave the plane and the tree corkscrews instead of staying a
+# silhouette. `bough` is the L-system trunk trick — a map squashed onto a thin
+# vertical segment — which draws the branches the canopy hangs from, since the
+# classical construction draws its squares and an IFS attractor won't.
+#
+# Both branch maps are pure similarities, so either can be a scale symmetry:
+#
+#   fracturize --scene scenes/pythagoras.toml --zoom left
+#
+# gives a Pythagoras tree with no first square and no last one — branching
+# downward past where the trunk should be, and upward past the leaves, at
+# every scale at once. Bosman would, I think, have wanted to see it.
+#
+# Claude Opus 5, 2026-08-02.
+
+[meta]
+name = "Pythagoras Tree"
+author = "Claude Opus 5"
+point_size = 0.0018
+point_count = 8_000_000
+color_speed = 0.45
+color_falloff = 0.8
+color_contrast = 1.9
+haze = 0.3
+background = [0.020, 0.024, 0.030]
+
+[camera]
+distance = 5.9          # from --info's measurement; the canopy is wide
+yaw = 0.40
+pitch = 0.12
+focus = [0.45, 2.19, 0.48]
+
+# The left branch: contract by 1/√2, turn 45° anticlockwise in the plane of
+# the drawing, and land on the square's top-left corner. The 14° of yaw is the
+# only thing here Bosman didn't draw.
+[[transform]]
+name = "left"
+translation = [0.0, 1.0, 0.0]
+scale = 0.7071
+rotation = [0.0, 14.0, 45.0]
+color = [0.42, 0.74, 0.46]
+weight = 1.0
+
+# The right branch: the mirror, onto the top-right corner. Opposite yaw, so
+# the two children leave the plane in opposite directions and the tree opens
+# out instead of flattening.
+[[transform]]
+name = "right"
+translation = [0.5, 1.5, 0.0]
+scale = 0.7071
+rotation = [0.0, -14.0, -45.0]
+color = [0.86, 0.72, 0.34]
+weight = 1.0
+
+# The bough. Squashes the whole attractor onto a thin upright segment, which
+# every branch map then carries a copy of — so what gets drawn is the tree's
+# own skeleton, at every scale, in the place the squares would have been.
+[[transform]]
+name = "bough"
+translation = [0.25, 0.5, 0.0]
+scale = [0.05, 0.5, 0.05]
+rotation = [0.0, 0.0, 0.0]
+color = [0.52, 0.34, 0.28]
+# Low: the skeleton should be legible under the canopy, not the loudest thing
+# in the frame. At 0.55 the boughs blow out and you can't see the figure.
+weight = 0.28

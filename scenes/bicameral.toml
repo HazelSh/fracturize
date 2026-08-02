@@ -1,0 +1,90 @@
+# Bicameral — one object, two infinities
+#
+# A scene has at most one [zoom] at a time, but nothing says it can only have
+# one map *eligible* to be it. This one has two, deliberately, and they are
+# different in kind:
+#
+#   --zoom shaft   scale 0.5, no twist, fixed point (0, 0, 0)
+#                  1.0 octaves/period. A straight dolly. Zooming in is falling
+#                  down a stairwell: things get bigger, nothing turns.
+#
+#   --zoom gyre    scale 0.82, 47° twist, fixed point (0.053, 0.206, -0.165)
+#                  0.29 octaves/period. Zooming in is a slow corkscrew, three
+#                  and a half turns to double.
+#
+# Same points, same TOML, same attractor. Which map you nominate decides which
+# unbounded set the thing is a bounded piece of — and they are genuinely
+# different objects, not two views of one. `--info` lists both with their fixed
+# points, which is how you find where to aim.
+#
+#   fracturize --scene scenes/bicameral.toml --info
+#   fracturize --scene scenes/bicameral.toml --zoom shaft --splat --exposure 1.6
+#   fracturize --scene scenes/bicameral.toml --zoom gyre --focus 0.053,0.206,-0.165 \
+#     --splat --exposure 1.6
+#
+# With no [zoom] at all it is an ordinary bounded flame, which is the third
+# thing it is.
+#
+# Claude Opus 5, 2026-08-02.
+
+[meta]
+name = "Bicameral"
+author = "Claude Opus 5"
+point_size = 0.0024
+point_count = 8_000_000
+color_speed = 0.55
+color_falloff = 0.7
+color_contrast = 2.6
+haze = 0.4
+background = [0.016, 0.014, 0.026]
+
+[camera]
+distance = 1.85         # from --info's measurement, not from guessing
+yaw = 0.6
+pitch = 0.35
+focus = [0.13, 0.63, 0.0]
+
+# The stairwell. Zero translation puts its fixed point on the origin; a half
+# scale and no rotation make it the plainest possible symmetry — exactly one
+# octave per period, so its zoom is the doubling you'd draw on paper.
+[[transform]]
+name = "shaft"
+translation = [0.0, 0.0, 0.0]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.30, 0.52, 0.82]
+weight = 1.5
+
+# The corkscrew. Translated, so its fixed point is off somewhere and has to be
+# looked up; a gentle scale and a big twist, which is the opposite temperament
+# to the shaft in both of the ways that matter.
+[[transform]]
+name = "gyre"
+translation = [0.122, 0.037, -0.041]
+scale = 0.82
+rotation = [11.0, 47.0, 7.0]
+color = [0.93, 0.62, 0.26]
+weight = 1.6
+
+# Two struts to hang detail on, and a third and fourth answer from --info. The
+# rung is a variation blend, so it can't be inverted in closed form and is
+# refused outright. The flange contracts on all three axes but not equally, so
+# it *is* eligible — the invariant set is exact, it's just self-affine rather
+# than self-similar, and the camera wrap can't reproduce a non-uniform scale.
+# --info flags the seam rather than letting you find it in a render.
+[[transform]]
+name = "rung"
+translation = [0.54, 0.78, 0.26]
+scale = 0.30
+rotation = [24.0, -70.0, 12.0]
+color = [0.88, 0.34, 0.44]
+weight = 1.3
+variations = { linear = 0.82, sinusoidal = 0.18 }
+
+[[transform]]
+name = "flange"
+translation = [-0.40, 0.52, -0.36]
+scale = [0.10, 0.46, 0.10]
+rotation = [-34.0, 130.0, 18.0]
+color = [0.52, 0.86, 0.74]
+weight = 1.1

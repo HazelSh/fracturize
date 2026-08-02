@@ -198,11 +198,11 @@ struct Args {
     /// Override the camera's orbit angle, in radians. These five win over both
     /// the scene and any --view, so a framing can be tried without authoring a
     /// view file for it; --render prints the [camera] block it lands on.
-    #[arg(long, value_name = "RADIANS")]
+    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
     yaw: Option<f32>,
 
     /// Override the camera's elevation, in radians (positive = above)
-    #[arg(long, value_name = "RADIANS")]
+    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
     pitch: Option<f32>,
 
     /// Override the camera's orbit radius
@@ -210,11 +210,14 @@ struct Args {
     distance: Option<f32>,
 
     /// Override the camera's roll about the view axis, in radians
-    #[arg(long, value_name = "RADIANS")]
+    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
     roll: Option<f32>,
 
     /// Override the camera's look-at point, as "x,y,z"
-    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3)]
+    // allow_hyphen_values, or a focus with a negative coordinate — which is
+    // half of them — is read as a flag and the run dies on "unexpected
+    // argument '-0'".
+    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3, allow_hyphen_values = true)]
     focus: Option<Vec3>,
 }
 

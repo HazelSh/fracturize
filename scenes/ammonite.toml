@@ -1,0 +1,92 @@
+# Ammonite — the shell that is all whorl and no aperture
+#
+# A logarithmic spiral is the one curve that looks the same at every scale, and
+# it is the reason a nautilus grows by adding chambers rather than by inflating:
+# each new chamber is the last one scaled and turned, so the animal never has to
+# redesign itself. Real shells stop, because animals stop. This one doesn't.
+#
+# "whorl" contracts by 0.88 and turns 21° — a very gentle period, 0.18 octaves,
+# so a zoom in reads as a slow continuous rotation rather than a series of
+# steps. Sixty-odd periods make up one screenful of scale. Compare
+# scenes/wellspiral.toml, whose 0.6 gives you a definite sense of descending
+# past distinct things; this one just turns.
+#
+# The chambers are three copies of the same septum at increasing radius rather
+# than one, so the spiral has visible ribs at more than one phase and the eye
+# has something to track a period by.
+#
+# fracturize --scene scenes/ammonite.toml --splat --exposure 1.8
+#
+# Claude Opus 5, 2026-08-02.
+
+[meta]
+name = "Ammonite"
+author = "Claude Opus 5"
+point_size = 0.0018
+point_count = 8_000_000
+color_speed = 0.38
+color_falloff = 0.75
+color_contrast = 2.4
+haze = 0.35
+background = [0.014, 0.011, 0.008]
+
+[camera]
+distance = 3.0
+yaw = 0.0
+pitch = 1.42        # nearly down the coiling axis: the spiral reads flattest here
+focus = [0.0, 0.0, 0.0]
+
+path_closed = false
+path_seconds = 18.0
+
+[[camera.path]]
+yaw = 0.0
+pitch = 1.42
+distance = 3.0
+
+[[camera.path]]
+yaw = 0.0
+pitch = 1.42
+distance = 0.0117   # 3.0 · 0.88^43 — forty-three whorls in
+
+# The growth law. Zero translation, so its fixed point — the umbilicus — is the
+# origin, and a uniform scale, so the wrap is exact and the zoom seamless.
+[[transform]]
+name = "whorl"
+translation = [0.0, 0.0, 0.0]
+scale = 0.88
+rotation = [0.0, 21.0, 0.0]
+color = [0.86, 0.74, 0.52]
+weight = 6.0
+
+# Septa: the chamber walls. Flattened on Y so they read as plates rather than
+# blobs, and set at three radii so successive whorls interleave.
+[[transform]]
+name = "septum-near"
+translation = [0.52, 0.02, 0.0]
+scale = [0.30, 0.09, 0.30]
+rotation = [0.0, 8.0, 0.0]
+color = [0.94, 0.55, 0.24]
+weight = 1.0
+
+[[transform]]
+name = "septum-mid"
+translation = [0.30, -0.05, 0.38]
+scale = [0.26, 0.08, 0.26]
+rotation = [6.0, 62.0, 0.0]
+color = [0.62, 0.30, 0.36]
+weight = 0.85
+
+[[transform]]
+name = "septum-far"
+translation = [-0.34, 0.06, 0.30]
+scale = [0.22, 0.07, 0.22]
+rotation = [-6.0, 128.0, 0.0]
+color = [0.40, 0.58, 0.66]
+weight = 0.7
+
+[zoom]
+map = "whorl"
+radius = 1.4
+levels = 13
+octave_falloff = 2.0
