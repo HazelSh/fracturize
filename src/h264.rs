@@ -15,10 +15,10 @@
 //!   `avcC` box in the sample table, not in the samples. They are lifted out of
 //!   the first keyframe and dropped from the payload thereafter.
 //!
-//! Encoding is constant-QP with rate control off, which is the honest
-//! counterpart of the AV1 path's quantizer: the quality slider means the same
-//! thing in both formats — pick a fidelity, let the bitrate land where it
-//! lands — rather than silently becoming a bitrate target in one of them.
+//! Encoding pins the quantizer — min QP == max QP — so the quality slider
+//! means the same thing in both formats: pick a fidelity and let the bitrate
+//! land where it lands, rather than silently becoming a bitrate target in one
+//! of them.
 
 use std::path::Path;
 
@@ -77,10 +77,17 @@ impl H264Encoder {
         // The non-realtime one looks like the right choice for an offline
         // render, and openh264 refuses to initialise with it — every other
         // setting below was accepted on its own, and that one returns native
-        // error 1 (cmInitParaError) on the first encode. Constant QP is doing
-        // the quality work here anyway, so there was nothing to win.
+        // error 1 (cmInitParaError) on the first encode.
         let config = EncoderConfig::new()
-            .rate_control_mode(RateControlMode::Off)
+            // `Quality` with min QP == max QP, NOT `RateControlMode::Off`.
+            // Off sounds like the way to ask for a fixed quantizer and is a
+            // trap: this crate carries `qp` to `iMinQp`/`iMaxQp`, which
+            // openh264 only consults *under* rate control, so with Off every
+            // quality setting produced a byte-identical file — measured at
+            // 699,001 bytes for QP 10, 25 and 40 alike. Under `Quality` the
+            // same three give 1.37 MB / 758 KB / 112 KB. The target bitrate is
+            // left at its default and does not bind: QP is what's steering.
+            .rate_control_mode(RateControlMode::Quality)
             .qp(QpRange::new(qp, qp))
             // One sample per frame is a promise the sample table makes: `stts`
             // gives every sample one tick. A dropped frame would shorten the
@@ -248,6 +255,40 @@ mod tests {
     #[test]
     fn a_truncated_sps_is_refused_rather_than_indexed_into() {
         assert!(avc_decoder_config(&[0x67], &[0x68]).is_err());
+    }
+
+    /// The quality knob has to actually move the bitrate.
+    ///
+    /// This is here because the first version of this encoder used
+    /// `RateControlMode::Off`, which looks like the right way to ask for a
+    /// fixed quantizer and silently ignores it: every quality setting produced
+    /// a byte-identical file, and every other test still passed. Container
+    /// structure, frame counts and ffprobe all look perfect when the quality
+    /// slider is a no-op, so only a size comparison catches it.
+    #[test]
+    fn quality_changes_the_bitrate() {
+        // Noise, not a gradient: a gradient compresses to almost nothing at
+        // every setting and the differences vanish into the noise floor.
+        let (w, h) = (128u32, 96u32);
+        let encoded = |quality: u8| {
+            let mut enc = H264Encoder::new(w, h, 24, quality).unwrap();
+            let mut seed = 12345u32;
+            for _ in 0..15 {
+                let mut rgba = vec![0u8; (w * h * 4) as usize];
+                for px in rgba.chunks_exact_mut(4) {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    px[0] = (seed >> 24) as u8;
+                    px[1] = (seed >> 16) as u8;
+                    px[2] = (seed >> 8) as u8;
+                    px[3] = 255;
+                }
+                enc.push_frame(&rgba).unwrap();
+            }
+            enc.samples.iter().map(|s| s.data.len()).sum::<usize>()
+        };
+        let (low, mid, high) = (encoded(20), encoded(50), encoded(80));
+        assert!(low < mid, "q20 ({low}) should be smaller than q50 ({mid})");
+        assert!(mid < high, "q50 ({mid}) should be smaller than q80 ({high})");
     }
 
     /// Encode a real gradient animation and validate the container; if ffprobe
