@@ -144,10 +144,19 @@ pub fn report(scene: &Scene, source: &str) -> String {
         }
     ));
     match &scene.camera_path {
-        Some(p) if p.keys.len() >= 2 => line(format!(
-            "path: {} keypoints, {}, {:.1}s",
+        Some(p) if p.playable() => line(format!(
+            "path: {} keypoint{}, {}, {:.1}s",
             p.keys.len(),
-            if p.closed { "closed loop" } else { "open" },
+            if p.keys.len() == 1 { "" } else { "s" },
+            match (&p.zoom_loop, p.closed) {
+                (Some(z), _) => format!(
+                    "zoom loop: {} period{} down per loop, closing on an identical frame",
+                    z.periods,
+                    if z.periods == 1 { "" } else { "s" }
+                ),
+                (None, true) => "closed loop".to_string(),
+                (None, false) => "open".to_string(),
+            },
             p.duration()
         )),
         _ => line("path: none authored (the default full-turn turntable applies)".to_string()),

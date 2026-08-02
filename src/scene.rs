@@ -341,9 +341,15 @@ pub struct CameraDef {
     /// Camera path: playback/render duration in seconds (default 3s/segment)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_seconds: Option<f64>,
-    /// Camera path: ease in/out (default: open paths ease, closed don't)
+    /// Camera path: ease in/out (default: open paths ease, looping don't)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_ease: Option<bool>,
+    /// Camera path: close the loop under the scene's zoom symmetry instead of
+    /// by returning to the first key. One loop descends this many zoom
+    /// periods and lands on an identical frame, so the animation loops as an
+    /// endless zoom. Needs a `[zoom]` map. See `path::ZoomLoop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_zoom_loop: Option<u32>,
     /// Camera path spline keypoints ([[camera.path]]). Omitted fields
     /// default to the base camera's values. Must be last: TOML requires
     /// scalar keys before sub-tables.
@@ -633,8 +639,11 @@ impl Scene {
         // (folded) camera framing
         let camera_path = match &cam.path {
             Some(defs) if !defs.is_empty() => {
-                if defs.len() < 2 {
-                    return Err("camera.path needs at least 2 keypoints".to_string());
+                // A zoom loop is the one path that works with a single key:
+                // its closing segment runs to that key's own image under the
+                // symmetry, which is a real segment through real geometry.
+                if defs.len() < 2 && cam.path_zoom_loop.is_none() {
+                    return Err("camera.path needs at least 2 keypoints                                 (or one, with path_zoom_loop)".to_string());
                 }
                 Some(CameraPath {
                     keys: defs
@@ -651,12 +660,15 @@ impl Scene {
                         })
                         .collect(),
                     closed: cam.path_closed.unwrap_or(false),
+                    zoom_loop: None, // resolved below, once [zoom] is known
                     ease: cam.path_ease,
                     seconds: cam.path_seconds.map(|v| v as f32),
                 })
             }
             _ => None,
         };
+
+        let mut camera_path = camera_path;
 
         // Resolve [zoom].map, which may name a transform or index one
         let zoom = match &scene_file.zoom {
@@ -668,6 +680,22 @@ impl Scene {
             }),
             None => None,
         };
+
+        // A zoom-looping path closes under the renormalizing map, so it can
+        // only be resolved once that map is known.
+        if let Some(periods) = cam.path_zoom_loop {
+            let spec = zoom.as_ref().ok_or_else(|| {
+                "camera.path_zoom_loop needs a [zoom] map: the loop closes under                  the scene's scale symmetry, and without one there is no symmetry                  to close under".to_string()
+            })?;
+            let renorm = crate::renorm::Renorm::build(spec, &transforms, folded.distance)
+                .map_err(|e| format!("camera.path_zoom_loop: {}", e))?;
+            if let Some(path) = camera_path.as_mut() {
+                path.zoom_loop = Some(renorm.loop_similarity(periods));
+                // Closing under the symmetry and returning to key 1 are two
+                // different loops; asking for both is a contradiction.
+                path.closed = false;
+            }
+        }
 
         Ok(Scene {
             name: scene_file.meta.name,
@@ -776,7 +804,10 @@ impl Scene {
             camera: Some({
                 // A 1-key path is a transient in-app authoring state; the
                 // loader requires 2+ keys, so don't write it out
-                let path = self.camera_path.as_ref().filter(|p| p.keys.len() >= 2);
+                let path = self
+                    .camera_path
+                    .as_ref()
+                    .filter(|p| p.playable());
                 CameraDef {
                     focus: Some(self.camera_focus.to_array().map(tidy)),
                     offset: None,
@@ -785,6 +816,7 @@ impl Scene {
                     pitch: Some(tidy(self.camera_pitch)),
                     roll: (self.camera_roll != 0.0).then(|| tidy(self.camera_roll)),
                     path_closed: path.and_then(|p| p.closed.then_some(true)),
+                    path_zoom_loop: path.and_then(|p| p.zoom_loop.map(|z| z.periods)),
                     path_seconds: path.and_then(|p| p.seconds.map(tidy)),
                     path_ease: path.and_then(|p| p.ease),
                     path: path.map(|p| {

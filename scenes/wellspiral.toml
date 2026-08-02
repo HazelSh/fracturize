@@ -44,22 +44,26 @@ yaw = 0.0
 pitch = 1.15
 focus = [0.0, 0.0, 0.0]
 
-# Nine periods straight down the well. The camera is folded back to the top of
-# the band every period, so the last key's distance being a hundredth of the
-# first costs nothing: no precision is spent getting there.
-path_closed = false
+# One period straight down the well, closing on itself.
+#
+# `path_zoom_loop = 1` says the loop closes under the scene's *scale symmetry*
+# rather than by returning to the first key: one loop descends one zoom period
+# and ends on a frame identical to the one it started on, because scaling by
+# 0.6 about the origin and turning 34° is something this scene is invariant
+# under. Played on a loop, that is an endless zoom — not an approximation of
+# one, the thing itself. A fourteen-second file falls forever.
+#
+# One keypoint is enough, and is better than two: the spline's out-of-range
+# keys are that key carried by the symmetry, so log-distance and yaw come out
+# as arithmetic sequences and Catmull-Rom through them is exactly linear. The
+# descent runs at a constant rate with no ease, no wobble and no seam.
+path_zoom_loop = 1
 path_seconds = 14.0
 
 [[camera.path]]
 yaw = 0.0
 pitch = 1.15
 distance = 3.6
-focus = [0.0, 0.0, 0.0]
-
-[[camera.path]]
-yaw = 0.9
-pitch = 0.72
-distance = 0.0363   # 3.6 · 0.6^9
 focus = [0.0, 0.0, 0.0]
 
 # The scale symmetry: pure affine, contracting on all three axes, fixed point

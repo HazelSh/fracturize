@@ -18,7 +18,7 @@
 //! - Open paths ease in/out by default (smoothstep on path time); closed
 //!   paths default to constant speed so the loop seam is invisible.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::camera::OrbitCamera;
 
@@ -54,12 +54,68 @@ impl PathKey {
     }
 }
 
+/// The similarity a zoom-looping path closes under: `Aᴺ` for a path that
+/// descends `periods` zoom periods per loop.
+///
+/// A path normally loops by returning to where it started. Under infinite zoom
+/// it doesn't have to, because *the scene has a symmetry* — scaling by `s`
+/// about the fixed point and turning by the map's rotation leaves the rendered
+/// set unchanged (see `renorm.rs`). So a path whose last key is the first key
+/// carried forward by that symmetry ends on a frame **identical** to the one it
+/// started on, having descended a period. Played on a loop, that is an endless
+/// zoom: not an approximation of one, the thing itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoomLoop {
+    /// Zoom periods descended per loop, as authored
+    pub periods: u32,
+    /// The similarity, `Aᵖᵉʳⁱᵒᵈˢ`. Resolved from the scene's renormalizing map
+    /// and refreshed whenever that map is edited, so it can't go stale.
+    pub center: Vec3,
+    pub scale: f32,
+    pub rot: Quat,
+}
+
+impl ZoomLoop {
+    /// Carry a keypoint `n` loops forward (negative = backward)
+    pub fn advance(&self, key: PathKey, n: i32) -> PathKey {
+        let mut cam = OrbitCamera {
+            yaw: key.yaw,
+            pitch: key.pitch,
+            distance: key.distance,
+            focus: key.focus,
+            roll: key.roll,
+        };
+        // Powers of a similarity are closed-form, so a key twenty loops out
+        // costs the same as one loop out.
+        let scale = self.scale.powi(n);
+        let (axis, angle) = self.rot.to_axis_angle();
+        cam.apply_similarity(self.center, scale, Quat::from_axis_angle(axis, angle * n as f32));
+        // apply_similarity re-derives yaw from the eye, which wraps it into
+        // (-pi, pi]; the path convention is that yaw is unbounded, and a
+        // multi-turn loop has to keep counting. Put the turns back.
+        cam.yaw = key.yaw + angle_about_y(self.rot) * n as f32;
+        PathKey::from_camera(&cam)
+    }
+}
+
+/// The Y-component of a rotation, as a yaw delta. Exact for the common case of
+/// a map that twists about the vertical, and the best available answer for one
+/// that doesn't — where the eye path isn't a pure yaw sweep anyway.
+fn angle_about_y(rot: Quat) -> f32 {
+    let (axis, angle) = rot.to_axis_angle();
+    angle * axis.y
+}
+
 /// A spline camera path through two or more keypoints
 #[derive(Clone, Debug)]
 pub struct CameraPath {
     pub keys: Vec<PathKey>,
     /// Loop back to the first key after the last (seamless loops)
     pub closed: bool,
+    /// Close under the scene's zoom symmetry instead of by returning to the
+    /// first key: one loop descends `periods` zoom periods and lands on an
+    /// identical frame. See [`ZoomLoop`].
+    pub zoom_loop: Option<ZoomLoop>,
     /// Ease in/out (smoothstep on path time); None = default (!closed)
     pub ease: Option<bool>,
     /// Suggested playback/render duration; None = 3s per segment
@@ -79,7 +135,7 @@ pub struct CameraPath {
 /// until it has company.
 pub fn resolve<'a>(authored: Option<&'a CameraPath>, default: &'a CameraPath) -> &'a CameraPath {
     match authored {
-        Some(p) if p.keys.len() >= 2 => p,
+        Some(p) if p.playable() => p,
         _ => default,
     }
 }
@@ -102,10 +158,37 @@ fn shortest_angle(d: f32) -> f32 {
 }
 
 impl CameraPath {
-    /// Number of spline segments (closed paths add the wrap-around segment)
+    /// Whether playback loops: the last frame runs into the first.
+    ///
+    /// True for both kinds of loop — returning to the first key, and closing
+    /// under the zoom symmetry — because everything that cares about *time*
+    /// (t wrapping, dropping the duplicate final frame, not easing into a
+    /// seam) wants the same answer for both. Only the spline itself
+    /// distinguishes them.
+    pub fn wraps(&self) -> bool {
+        self.closed || self.zoom_loop.is_some()
+    }
+
+    /// Whether there is enough here to interpolate.
+    ///
+    /// Two keys, normally — a spline needs two ends, and one key is a scene
+    /// mid-authoring. A zoom loop is the exception and needs only one: its
+    /// closing segment runs to that key's own image under the symmetry, which
+    /// is a real segment through real geometry.
+    pub fn playable(&self) -> bool {
+        self.keys.len() >= 2 || (self.zoom_loop.is_some() && !self.keys.is_empty())
+    }
+
+    /// Number of spline segments (looping paths add the wrap-around segment).
+    ///
+    /// A zoom loop is the one path that can have a single key and still be a
+    /// path: its closing segment runs from that key to the key's own image
+    /// under the symmetry, which is a real segment through real geometry.
     pub fn segments(&self) -> usize {
-        match (self.keys.len(), self.closed) {
-            (0, _) | (1, _) => 0,
+        match (self.keys.len(), self.wraps()) {
+            (0, _) => 0,
+            (1, true) => 1,
+            (1, false) => 0,
             (n, true) => n,
             (n, false) => n - 1,
         }
@@ -119,7 +202,7 @@ impl CameraPath {
     }
 
     fn eased(&self) -> bool {
-        self.ease.unwrap_or(!self.closed)
+        self.ease.unwrap_or(!self.wraps())
     }
 
     /// A seamless full-turn orbit at the given base framing.
@@ -140,6 +223,7 @@ impl CameraPath {
         Self {
             keys,
             closed: true,
+            zoom_loop: None,
             ease: Some(false),
             seconds: Some(tau / ORBIT_RATE),
         }
@@ -157,12 +241,21 @@ impl CameraPath {
     /// by the loop's total winding so multi-turn loops stay monotonic.
     fn key(&self, i: isize) -> PathKey {
         let n = self.keys.len() as isize;
+        let idx = i.rem_euclid(n) as usize;
+        let turns = ((i - idx as isize) / n) as i32; // whole loops i is offset by
+
+        // A zoom loop's out-of-range keys are the in-range ones carried by the
+        // symmetry, which is what makes the spline periodic *in appearance*
+        // rather than in parameter space. It also means no clamping at the
+        // ends: the seam gets the same smooth Catmull-Rom treatment as any
+        // interior segment, so the loop has no velocity kink either.
+        if let Some(z) = &self.zoom_loop {
+            return z.advance(self.keys[idx], turns);
+        }
         if !self.closed {
             return self.keys[i.clamp(0, n - 1) as usize];
         }
-        let idx = i.rem_euclid(n) as usize;
         let mut k = self.keys[idx];
-        let turns = (i - idx as isize) / n; // whole loops i is offset by
         k.yaw += self.winding() * turns as f32;
         k
     }
@@ -189,7 +282,12 @@ impl CameraPath {
 
         // Closed paths wrap; whole loops already completed keep accumulating
         // yaw so multi-loop playback stays monotonic
-        let (t, loops) = if self.closed {
+        // A zoom loop needs no accumulation across loops: every loop renders
+        // the identical picture, and the renderer folds the camera back into
+        // the band anyway (`Renorm::wrap`), so the second pass is the first.
+        let (t, loops) = if self.zoom_loop.is_some() {
+            (t.rem_euclid(1.0), 0.0)
+        } else if self.closed {
             (t.rem_euclid(1.0), t.div_euclid(1.0))
         } else {
             (t.clamp(0.0, 1.0), 0.0)
@@ -226,6 +324,118 @@ impl CameraPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera::world_to_screen;
+
+    /// A 0.6 spiral about the origin, twisting 34° about Y — `wellspiral`'s
+    /// descent map, as a loop closing over one period.
+    fn zoom_loop_path(periods: u32, keys: Vec<PathKey>) -> CameraPath {
+        let angle = 34f32.to_radians() * periods as f32;
+        CameraPath {
+            keys,
+            closed: false,
+            zoom_loop: Some(ZoomLoop {
+                periods,
+                center: Vec3::ZERO,
+                scale: 0.6f32.powi(periods as i32),
+                rot: Quat::from_rotation_y(angle),
+            }),
+            ease: None,
+            seconds: Some(10.0),
+        }
+    }
+
+    /// `sample` wraps t, so t=1 *is* t=0 — correct for playback, since the
+    /// renderer folds the camera back into the band anyway. The seam is
+    /// therefore probed just short of it.
+    const SEAM: f32 = 1.0 - 1e-4;
+
+    #[test]
+    fn a_zoom_loop_ends_on_the_frame_it_started() {
+        // The whole claim: the last frame is not *near* the first, it is the
+        // first — because the scene is invariant under the similarity that
+        // separates them. Asserted the way the wrap test is: a point seen by
+        // the end camera lands where its image under the symmetry sat for the
+        // start camera, and the invariant set contains both.
+        let path = zoom_loop_path(1, vec![key(0.3, 0.5, 3.6, Vec3::ZERO)]);
+        let (start, end) = (path.sample(0.0), path.sample(SEAM));
+        let z = path.zoom_loop.unwrap();
+        let vp_start = start.view_proj(16.0 / 9.0);
+        let vp_end = end.view_proj(16.0 / 9.0);
+        for i in 0..25 {
+            let x = Vec3::new(
+                0.9 * (i as f32 * 1.7).sin(),
+                0.9 * (i as f32 * 0.9).cos(),
+                0.9 * (i as f32 * 2.3).sin(),
+            );
+            // The end camera is the start camera carried by the symmetry, so
+            // it sees A(x) exactly where the start camera saw x — and the
+            // invariant set contains both, so the frames match.
+            let partner = z.center + z.rot * ((x - z.center) * z.scale);
+            match (
+                world_to_screen(partner, vp_end, 1280.0, 720.0),
+                world_to_screen(x, vp_start, 1280.0, 720.0),
+            ) {
+                // One ten-thousandth of a loop short of the seam, so a pixel
+                // of slack rather than none
+                (Some(a), Some(b)) => assert!(
+                    (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0,
+                    "point {i}: end frame put it at {a:?}, start frame at {b:?}"
+                ),
+                (None, None) => {}
+                _ => panic!("point {i} changed visibility across the loop seam"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_zoom_loop_is_continuous_across_the_seam() {
+        // Carrying the last camera back by one loop must land on the first,
+        // give or take the sliver of motion we stopped short by. If this
+        // drifts, every loop of a played animation steps a little.
+        let path = zoom_loop_path(1, vec![key(0.3, 0.5, 3.6, Vec3::ZERO)]);
+        let z = path.zoom_loop.unwrap();
+        let carried = z.advance(PathKey::from_camera(&path.sample(SEAM)), -1);
+        let start = PathKey::from_camera(&path.sample(0.0));
+        assert!(
+            (carried.distance / start.distance - 1.0).abs() < 1e-3,
+            "distance {} vs {}",
+            carried.distance,
+            start.distance
+        );
+        assert!((carried.yaw - start.yaw).abs() < 1e-3, "yaw {} vs {}", carried.yaw, start.yaw);
+        assert!((carried.pitch - start.pitch).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_one_key_zoom_loop_is_a_constant_rate_zoom() {
+        // Out-of-range keys are the in-range one carried by the symmetry, so
+        // log-distance and yaw are arithmetic sequences, and Catmull-Rom
+        // through equally-spaced collinear points is exactly linear. This is
+        // why the loop has no velocity kink and needs no easing.
+        let path = zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
+        assert_eq!(path.segments(), 1, "a single key plus its image is one segment");
+        for i in 0..=20 {
+            let t = i as f32 / 20.0 * SEAM;
+            let want = 4.0f32.ln() + t * 0.6f32.ln();
+            let got = path.sample(t).distance.ln();
+            assert!((got - want).abs() < 1e-3, "t={t}: log-distance {got}, constant rate wants {want}");
+        }
+    }
+
+    #[test]
+    fn a_multi_period_zoom_loop_descends_that_many_periods() {
+        let path = zoom_loop_path(3, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
+        let ratio = path.sample(SEAM).distance / 4.0;
+        assert!((ratio - 0.6f32.powi(3)).abs() < 1e-3, "descended {ratio}x");
+    }
+
+    #[test]
+    fn a_zoom_loop_does_not_ease() {
+        // Easing parks the camera at both ends, which on a loop is a visible
+        // stall at the seam — the one place a zoom must not pause.
+        assert!(!zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]).eased());
+    }
+
 
     fn key(yaw: f32, pitch: f32, dist: f32, focus: Vec3) -> PathKey {
         PathKey { yaw, pitch, distance: dist, focus, roll: 0.0 }
@@ -239,6 +449,7 @@ mod tests {
                 key(2.0, 0.2, 3.0, Vec3::Y),
             ],
             closed,
+            zoom_loop: None,
             ease: Some(false),
             seconds: None,
         }
@@ -289,6 +500,7 @@ mod tests {
                 .map(|i| key(i as f32 * tau / 4.0, 0.2, 3.0, Vec3::ZERO))
                 .collect(),
             closed: true,
+            zoom_loop: None,
             ease: Some(false),
             seconds: None,
         };
@@ -327,6 +539,7 @@ mod tests {
         let one_key = CameraPath {
             keys: vec![key(1.0, 0.2, 2.0, Vec3::Z)],
             closed: false,
+            zoom_loop: None,
             ease: None,
             seconds: None,
         };
@@ -357,6 +570,7 @@ mod tests {
                 PathKey { yaw: 1.0, pitch: 0.0, distance: 3.0, focus: Vec3::ZERO, roll: 1.0 },
             ],
             closed: false,
+            zoom_loop: None,
             ease: Some(false),
             seconds: None,
         };
@@ -375,6 +589,7 @@ mod tests {
                 key(0.0, 0.0, 4.0, Vec3::ZERO),
             ],
             closed: false,
+            zoom_loop: None,
             ease: Some(false),
             seconds: None,
         };
@@ -395,12 +610,13 @@ mod tests {
 
     #[test]
     fn degenerate_paths_are_safe() {
-        let empty = CameraPath { keys: vec![], closed: false, ease: None, seconds: None };
+        let empty = CameraPath { keys: vec![], closed: false, zoom_loop: None, ease: None, seconds: None };
         let cam = empty.sample(0.5);
         assert!(cam.distance > 0.0);
         let single = CameraPath {
             keys: vec![key(1.0, 0.2, 2.0, Vec3::Z)],
             closed: true,
+            zoom_loop: None,
             ease: None,
             seconds: None,
         };
@@ -420,6 +636,7 @@ mod tests {
                 key(2.0 * tau, 0.0, 1.0, Vec3::ZERO),
             ],
             closed: false,
+            zoom_loop: None,
             ease: Some(false),
             seconds: None,
         };

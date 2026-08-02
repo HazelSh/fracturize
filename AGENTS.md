@@ -481,6 +481,9 @@ roll = 0.0                # optional: rotation about the view axis, radians
 path_closed = true        # optional camera path: loop back to key 1 (seamless)
 path_seconds = 14.0       # playback/render duration (default 3s per segment)
 path_ease = false         # smoothstep time; default: open paths ease, loops don't
+path_zoom_loop = 1        # optional: close the loop under the [zoom] symmetry,
+                          # descending this many zoom periods per loop, so the
+                          # animation loops as an endless zoom (see below)
 
 # Camera path spline keypoints (2+ = a path; see src/path.rs). A uniform
 # Catmull-Rom spline runs through the keys in orbit-parameter space: yaw is
@@ -711,6 +714,46 @@ fracturize --scene scenes/lsys_kelp.toml --zoom trunk --zoom-levels 16 \
 A bad map is fatal at startup rather than silently disabling the feature: a
 scene that quietly isn't infinite looks like a bug in the maths, and that is an
 expensive thing to go looking for.
+
+### Looping zoom animations
+
+An animation can loop as an *endless* zoom, and exactly rather than
+approximately, because the scene has a symmetry. `path_zoom_loop = N` closes
+the path under that symmetry instead of by returning to the first key: one loop
+descends N zoom periods and ends on a frame **identical** to the one it
+started, since scaling by `sᴺ` about the fixed point and turning by the map's
+rotation leaves the rendered set unchanged. Played on a loop, a fourteen-second
+file falls forever.
+
+```toml
+[camera]
+path_zoom_loop = 1
+path_seconds = 14.0
+
+[[camera.path]]      # one keypoint is enough — and is better than two
+yaw = 0.0
+pitch = 1.15
+distance = 3.6
+```
+
+One key is the good case. The spline's out-of-range keys are that key carried
+by the symmetry (`ZoomLoop::advance`), so log-distance and yaw come out as
+arithmetic sequences and Catmull-Rom through equally spaced collinear points is
+exactly linear — a constant-rate descent with no ease, no wobble and no
+velocity kink at the seam. Author more keys and you get a flight that closes
+one period lower; the last key is still synthesized, never written.
+
+- `path_zoom_loop` needs a `[zoom]` map, and says so if there isn't one. It is
+  resolved against the live renormalizing map, so dragging that map updates the
+  loop rather than staling it.
+- It is a *different* loop from `path_closed`, not a variant: closing back to
+  the first key would undo the descent. Setting `path_zoom_loop` clears
+  `path_closed`, and Ctrl+Y declines to touch it.
+- Like any looping path it doesn't ease (a stall at the seam is the one thing a
+  zoom must not do) and the final duplicate frame is dropped.
+- Measured on `wellspiral`: the last-frame-to-first-frame step is **1.12× the
+  median adjacent frame step** — the excess is the irreducible difference
+  between two point samples of the same structure, not a seam.
 
 ### Zoom animations
 

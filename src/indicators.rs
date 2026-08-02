@@ -73,7 +73,7 @@ const PATH_SAMPLES_PER_SEGMENT: usize = 16;
 /// during playback the camera is standing on the line and drawing it just
 /// smears the shot.
 pub fn build_path(path: &CameraPath) -> Vec<LineVertex> {
-    if path.keys.len() < 2 {
+    if !path.playable() {
         return Vec::new();
     }
     let samples = path.segments() * PATH_SAMPLES_PER_SEGMENT;

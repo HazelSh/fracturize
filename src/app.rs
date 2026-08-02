@@ -133,6 +133,10 @@ fn path_fingerprint(path: &CameraPath) -> u64 {
     };
     mix(path.keys.len() as u32);
     mix(path.closed as u32);
+    // The zoom loop changes where the closing segment goes, so the drawn
+    // polyline has to be rebuilt when it changes or when its map is dragged
+    mix(path.zoom_loop.map_or(0, |z| z.periods.wrapping_add(1)));
+    mix(path.zoom_loop.map_or(0, |z| z.scale.to_bits()));
     mix(path.ease.map_or(2, |e| e as u32));
     mix(path.seconds.unwrap_or(f32::NAN).to_bits());
     for k in &path.keys {
@@ -951,7 +955,7 @@ impl App {
             return None;
         }
         let path = self.camera_path();
-        (path.keys.len() >= 2).then_some(path)
+        path.playable().then_some(path)
     }
 
     /// Is the camera flying the path right now?
@@ -997,6 +1001,7 @@ impl App {
         let path = self.scene.camera_path.get_or_insert_with(|| crate::path::CameraPath {
             keys: Vec::new(),
             closed: false,
+            zoom_loop: None,
             ease: None,
             seconds: None,
         });
@@ -1025,8 +1030,19 @@ impl App {
     }
 
     /// Toggle whether the path loops back to its first key (Ctrl+Y)
+    /// Ctrl+Y. A path that closes under the zoom symmetry is already a loop,
+    /// and a different one: returning to the first key would undo the descent
+    /// that makes it endless. Say so rather than silently doing the other
+    /// thing, and leave the scene's choice alone.
     pub fn toggle_path_closed(&mut self) {
         let path = self.author_path();
+        if let Some(z) = path.zoom_loop {
+            log::info!(
+                "Camera path already loops, under the zoom symmetry: {} period(s) down                  per loop. Edit [camera] path_zoom_loop to change it.",
+                z.periods
+            );
+            return;
+        }
         path.closed = !path.closed;
         log::info!("Camera path: {}", if path.closed { "closed loop" } else { "open" });
     }
@@ -3318,18 +3334,20 @@ impl App {
         // loop's, so the turntable and a hand-authored flythrough are the same
         // three lines of code and behave identically.
         if let Some(t) = self.path_t {
-            let (duration, closed, playable) = {
+            let (duration, loops, playable) = {
                 let p = self.camera_path();
-                (p.duration(), p.closed, p.keys.len() >= 2)
+                (p.duration(), p.wraps(), p.playable())
             };
             if !playable {
                 self.path_t = None;
             } else {
                 let t = t + dt / duration;
-                let ended = !closed && t >= 1.0;
+                // A zoom loop wraps like a closed one: it ends on the frame it
+                // began, so there is nothing to stop for.
+                let ended = !loops && t >= 1.0;
                 let t = if ended {
                     1.0
-                } else if closed {
+                } else if loops {
                     t.rem_euclid(1.0)
                 } else {
                     t

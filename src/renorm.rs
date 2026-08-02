@@ -425,6 +425,19 @@ impl Renorm {
         self.radius >= MIN_RADIUS * self.band
     }
 
+    /// The similarity a path closes under when it loops by descending
+    /// `periods` zoom periods: `Aᵖᵉʳⁱᵒᵈˢ`, in closed form.
+    pub fn loop_similarity(&self, periods: u32) -> crate::path::ZoomLoop {
+        let n = periods.max(1) as i32;
+        let (axis, angle) = self.rot.to_axis_angle();
+        crate::path::ZoomLoop {
+            periods: periods.max(1),
+            center: self.fixed_point,
+            scale: self.scale.powi(n),
+            rot: Quat::from_axis_angle(axis, angle * n as f32),
+        }
+    }
+
     /// A one-line report for the CLI and the status bar
     pub fn summary(&self, name: Option<&str>) -> String {
         let short = if self.band_covers_the_view() {

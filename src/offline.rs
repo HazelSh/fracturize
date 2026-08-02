@@ -763,7 +763,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         seconds,
         anim.fps,
         path.keys.len(),
-        if path.closed { "closed loop" } else { "open path" },
+        if path.wraps() { "loop" } else { "open path" },
         if is_default { " (auto full orbit)" } else { "" },
     );
 
@@ -786,7 +786,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
             }
         }
         // Closed paths exclude t=1 so the loop wraps without a repeated frame
-        let t = if path.closed {
+        let t = if path.wraps() {
             i as f32 / frames as f32
         } else {
             i as f32 / (frames - 1) as f32
