@@ -32,8 +32,16 @@ pub fn hinted(
     tooltip: impl Into<egui::WidgetText>,
     hint: &str,
 ) -> egui::Response {
-    if resp.hovered() {
+    // `contains_pointer` rather than `hovered`: egui never reports a disabled
+    // widget as hovered, and a greyed control is precisely when you most want
+    // to be told what it is and why you can't have it yet.
+    if resp.contains_pointer() {
         ui_state.status_hint = Some(hint.to_string());
     }
-    resp.on_hover_text(tooltip)
+    // Enabled and disabled tooltips are separate paths in egui, and
+    // `on_hover_text` alone silently shows nothing once a widget is greyed —
+    // so every "disabled rather than hidden, because it says why" control in
+    // this UI was in fact saying nothing at all. Attach both.
+    let tooltip = tooltip.into();
+    resp.on_hover_text(tooltip.clone()).on_disabled_hover_text(tooltip)
 }

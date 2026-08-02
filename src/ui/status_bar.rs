@@ -77,7 +77,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                             app.zoom_level
                         ))
                         .on_hover_text(format!(
-                            "Infinite zoom about transform {} — {:.2} octaves per period,                              {:.0}x total.\n\nThe attractor is rendered as the set                              invariant under that map, so it has no largest or smallest                              feature. Scrolling in past the bottom of the band folds the                              camera back to the top of it; the picture is identical, so                              this counter is the only thing that moves.",
+                            "Infinite zoom about transform {} — {:.2} octaves per \
+                             period, {:.0}x total.\n\n\
+                             The attractor is rendered as the set invariant under \
+                             that map, so it has no largest or smallest feature. \
+                             Scrolling in past the bottom of the band folds the \
+                             camera back to the top of it; the picture is \
+                             identical, so this counter is the only thing that \
+                             moves.",
                             z.map,
                             z.log_scale / std::f32::consts::LN_2,
                             (1.0f32 / z.scale).powi(app.zoom_level.abs().min(30)),

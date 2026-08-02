@@ -398,9 +398,16 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
     draw_zoom_loop(ui, app, zoom, zoom_loop);
 }
 
-/// The zoom-loop row: only present when the scene has a scale symmetry to
-/// close under, because without one the control is meaningless rather than
-/// merely unavailable.
+/// The zoom-loop row: greyed, not hidden, when the scene has no scale
+/// symmetry to close under.
+///
+/// It used to vanish, on the grounds that without a zoom map the control is
+/// meaningless rather than merely unavailable. That was the wrong call, and
+/// for the same reason the `loop` checkbox above is greyed instead of hidden:
+/// a control that isn't there can't tell you it exists. Hiding it meant the
+/// only way to discover infinite zoom from the Camera window was to already
+/// know about it — so the greyed row names the feature and says where to turn
+/// it on.
 ///
 /// `S∞` is invariant under the renormalizing map, so a path whose last key is
 /// its first carried forward by that map ends on the frame it started —
@@ -412,7 +419,25 @@ fn draw_zoom_loop(
     zoom: Option<(usize, f32)>,
     current: Option<crate::path::ZoomLoop>,
 ) {
-    let Some((map, octaves)) = zoom else { return };
+    let Some((map, octaves)) = zoom else {
+        ui.horizontal(|ui| {
+            let mut off = false;
+            let resp = ui.add_enabled(false, egui::Checkbox::new(&mut off, "zoom loop"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Loop by descending one zoom period instead of returning to the first \
+                 key, so the animation plays as a zoom that never ends.\n\n\
+                 Needs a scale symmetry to close under, and this scene has none yet. \
+                 Select a transform in the Transforms window and press \"Zoom about \
+                 this\" to nominate one.",
+                // No arrow: the UI font has no U+2192, and a missing glyph in
+                // the one line that tells you where to go is worse than a comma.
+                "needs a zoom map — Transforms window, Zoom about this",
+            );
+        });
+        return;
+    };
 
     ui.horizontal(|ui| {
         let mut on = current.is_some();
@@ -421,9 +446,13 @@ fn draw_zoom_loop(
             resp,
             &mut app.ui_state,
             format!(
-                "Close the loop under this scene's zoom symmetry (transform {}, {:.2}                  octaves per period) instead of by returning to the first key.
-
-                 One loop descends a whole period and ends on the frame it started —                  the same frame, not a similar one — so the animation plays as a zoom                  that never ends. One keypoint is enough, and gives a constant-rate                  descent with no seam.",
+                "Close the loop under this scene's zoom symmetry (transform {}, \
+                 {:.2} octaves per period) instead of by returning to the first \
+                 key.\n\n\
+                 One loop descends a whole period and ends on the frame it \
+                 started — the same frame, not a similar one — so the animation \
+                 plays as a zoom that never ends. One keypoint is enough, and \
+                 gives a constant-rate descent with no seam.",
                 map, octaves
             ),
             "click: loop by descending one zoom period",
@@ -442,7 +471,9 @@ fn draw_zoom_loop(
             resp,
             &mut app.ui_state,
             format!(
-                "Zoom periods descended per loop — {:.2} octaves each, so {} of them                  is a factor of {:.0}. More makes a longer fall before it repeats;                  the loop is seamless either way.",
+                "Zoom periods descended per loop — {:.2} octaves each, so {} of \
+                 them is a factor of {:.0}. More makes a longer fall before it \
+                 repeats; the loop is seamless either way.",
                 octaves,
                 periods,
                 2f32.powf(octaves * periods as f32),

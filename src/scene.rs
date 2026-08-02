@@ -643,7 +643,9 @@ impl Scene {
                 // its closing segment runs to that key's own image under the
                 // symmetry, which is a real segment through real geometry.
                 if defs.len() < 2 && cam.path_zoom_loop.is_none() {
-                    return Err("camera.path needs at least 2 keypoints                                 (or one, with path_zoom_loop)".to_string());
+                    return Err("camera.path needs at least 2 keypoints \
+                                (or one, with path_zoom_loop)"
+                        .to_string());
                 }
                 Some(CameraPath {
                     keys: defs
@@ -685,7 +687,10 @@ impl Scene {
         // only be resolved once that map is known.
         if let Some(periods) = cam.path_zoom_loop {
             let spec = zoom.as_ref().ok_or_else(|| {
-                "camera.path_zoom_loop needs a [zoom] map: the loop closes under                  the scene's scale symmetry, and without one there is no symmetry                  to close under".to_string()
+                "camera.path_zoom_loop needs a [zoom] map: the loop closes under \
+                 the scene's scale symmetry, and without one there is no symmetry \
+                 to close under"
+                    .to_string()
             })?;
             let renorm = crate::renorm::Renorm::build(spec, &transforms, folded.distance)
                 .map_err(|e| format!("camera.path_zoom_loop: {}", e))?;

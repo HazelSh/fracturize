@@ -380,40 +380,157 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
         chose = true;
     }
 
-    // Infinite zoom lives here rather than in a panel because it is a property
-    // of *one map* — you are choosing which transform the scene's scale
-    // symmetry is — and this is the menu you already open to say something
-    // about one map. See `src/renorm.rs`.
+    // Infinite zoom is a property of *one map* — you are choosing which
+    // transform the scene's scale symmetry is — so it belongs anywhere you
+    // say something about one map: this menu, and the detail pane's action
+    // row. See `src/renorm.rs`.
     ui.separator();
+    let zoom = zoom_action(app, i);
+    let btn = ui.add_enabled(
+        zoom.enabled,
+        egui::Button::new(ZOOM_LABEL).selected(zoom.is_zoom),
+    );
+    let btn = hinted(btn, &mut app.ui_state, zoom.tooltip, zoom.hint);
+    if btn.clicked() {
+        app.set_zoom_map((!zoom.is_zoom).then_some(i));
+        chose = true;
+    }
+    chose
+}
+
+/// What the "Zoom about this" control should say and do for transform `i`.
+///
+/// Shared by the context menu and the detail pane's action row: the same
+/// operation wherever you find the transform, rather than two copies of a
+/// fiddly `Renorm::build` check that drift apart.
+struct ZoomAction {
+    /// Already the scene's zoom map, so clicking clears it
+    is_zoom: bool,
+    /// The map renormalizes, or is already the one in use
+    enabled: bool,
+    tooltip: String,
+    hint: &'static str,
+}
+
+/// The button's label. Constant, because "this is the one" is carried by
+/// `Button::selected` rather than a tick in the text: the UI font has no
+/// U+2713, so a "✓" prefix rendered as a missing-glyph box — and a highlight
+/// says *selected* more directly than a character does anyway.
+const ZOOM_LABEL: &str = "Zoom about this";
+
+fn zoom_action(app: &App, i: usize) -> ZoomAction {
     let is_zoom = app.zoom_map() == Some(i);
-    let label = if is_zoom { "✓ Zoom about this" } else { "Zoom about this" };
-    let can_zoom = crate::renorm::Renorm::build(
+    let built = crate::renorm::Renorm::build(
         &crate::renorm::ZoomSpec { map: i, ..Default::default() },
         &app.scene.transforms,
         app.scene.camera_distance,
     );
-    let btn = ui.add_enabled(is_zoom || can_zoom.is_ok(), egui::Button::new(label));
-    match (&can_zoom, btn.clicked()) {
-        (_, true) => {
-            app.set_zoom_map((!is_zoom).then_some(i));
-            chose = true;
-        }
-        (Err(why), false) => {
-            btn.on_hover_text(format!("{}\n\nInfinite zoom needs a pure affine map that contracts on all three axes; it renders the attractor as the unbounded set invariant under that map, so there is no largest or smallest feature and zoom never runs out.", why));
-        }
-        (Ok(r), false) => {
-            btn.on_hover_text(format!(
-                "Render this scene as the set invariant under this map: {:.2} octaves \
-                 per zoom period, no largest or smallest feature, zoom that never runs \
-                 out. The zoom centre is the map's fixed point, ({:.2}, {:.2}, {:.2}).",
-                r.log_scale / std::f32::consts::LN_2,
-                r.fixed_point.x,
-                r.fixed_point.y,
-                r.fixed_point.z,
-            ));
-        }
+    let octaves = |r: &crate::renorm::Renorm| r.log_scale / std::f32::consts::LN_2;
+    let tooltip = match (is_zoom, &built) {
+        (true, Ok(r)) => format!(
+            "This is the scene's zoom map: {:.2} octaves per zoom period, centred on \
+             its fixed point ({:.2}, {:.2}, {:.2}). Click to turn infinite zoom off.",
+            octaves(r),
+            r.fixed_point.x,
+            r.fixed_point.y,
+            r.fixed_point.z,
+        ),
+        // Editing a transform can break the map it used to be. Say so rather
+        // than silently greying the only control that could undo it.
+        (true, Err(why)) => format!(
+            "This is the scene's zoom map, but it no longer renormalizes: {}\n\n\
+             Click to turn infinite zoom off.",
+            why
+        ),
+        (false, Ok(r)) => format!(
+            "Render this scene as the set invariant under this map: {:.2} octaves \
+             per zoom period, no largest or smallest feature, zoom that never runs \
+             out. The zoom centre is the map's fixed point, ({:.2}, {:.2}, {:.2}).",
+            octaves(r),
+            r.fixed_point.x,
+            r.fixed_point.y,
+            r.fixed_point.z,
+        ),
+        (false, Err(why)) => format!(
+            "{}\n\nInfinite zoom needs a pure affine map that contracts on all three \
+             axes; it renders the attractor as the unbounded set invariant under that \
+             map, so there is no largest or smallest feature and zoom never runs out.",
+            why
+        ),
+    };
+    ZoomAction {
+        is_zoom,
+        enabled: is_zoom || built.is_ok(),
+        tooltip,
+        hint: if is_zoom {
+            "click: turn infinite zoom off"
+        } else {
+            "click: make this the scene's zoom map"
+        },
     }
-    chose
+}
+
+/// The selected transform's own operations, in the pane rather than only
+/// behind a right-click.
+///
+/// A control you can only reach by guessing that a context menu exists is one
+/// most people never find: "Zoom about this" is the entire entry point to
+/// infinite zoom, and from this window there was nothing to suggest it was
+/// there at all. Enable/Disable and Rename were in the same position.
+///
+/// These act on *this* transform, so they sit on the transform's side of the
+/// window. `+ add` and `dup` stay under the rail, because those act on the
+/// list — which one you have selected is incidental to them.
+fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
+    let enabled = app.is_transform_enabled(idx);
+    // Wrapped: "✓ Zoom about this" is a wide label, and the pane is resizable
+    // down to where three buttons no longer fit on one line.
+    ui.horizontal_wrapped(|ui| {
+        let resp = ui.add(egui::Button::new(if enabled { "Disable" } else { "Enable" }).small());
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if enabled {
+                "Stop the chaos game choosing this transform — it keeps its weight \
+                 and settings, it just stops contributing (Enter)"
+            } else {
+                "Let the chaos game choose this transform again (Enter)"
+            },
+            "click: toggle enabled",
+        );
+        if resp.clicked() {
+            app.toggle_transform_enabled(idx);
+        }
+
+        let resp = ui.add(egui::Button::new("Rename").small());
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Rename this transform. The field opens on its tab in the rail, where \
+             the name lives.",
+            "click: rename this transform",
+        );
+        if resp.clicked() {
+            let name = app
+                .scene
+                .transform_names
+                .get(idx)
+                .and_then(|n| n.clone())
+                .unwrap_or_default();
+            app.ui_state.renaming_transform = Some((idx, name));
+        }
+
+        let zoom = zoom_action(app, idx);
+        let is_zoom = zoom.is_zoom;
+        let resp = ui.add_enabled(
+            zoom.enabled,
+            egui::Button::new(ZOOM_LABEL).small().selected(is_zoom),
+        );
+        let resp = hinted(resp, &mut app.ui_state, zoom.tooltip, zoom.hint);
+        if resp.clicked() {
+            app.set_zoom_map((!is_zoom).then_some(idx));
+        }
+    });
 }
 
 /// The detail pane: everything about the selected transform.
@@ -563,6 +680,8 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
             }
         });
     });
+    ui.add_space(2.0);
+    draw_transform_actions(ui, app, idx);
     ui.add_space(2.0);
 
     // Variation rows are remembered per selected transform; moving the
@@ -812,7 +931,7 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
         );
     }
 
-    let resp = ui.button("Orthogonalize → TRS");
+    let resp = ui.button("Orthogonalize -> TRS");
     let resp = hinted(
         resp,
         &mut app.ui_state,
