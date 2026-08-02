@@ -31,7 +31,7 @@ src/
     render_panel.rs# Renderer mode, exposure, point size + count, color, haze, output
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
   render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
-    camera_panel.rs# Framing, saved views, the camera path, render/screenshot/save
+    camera_panel.rs# Framing, saved views, the camera path (incl. zoom loop), output
     browser.rs     # Scene picker (B)
     shortcuts.rs   # Keybind reference window (H)
     labels.rs      # World-anchored transform name labels
@@ -751,6 +751,14 @@ one period lower; the last key is still synthesized, never written.
   `path_closed`, and Ctrl+Y declines to touch it.
 - Like any looping path it doesn't ease (a stall at the seam is the one thing a
   zoom must not do) and the final duplicate frame is dropped.
+- **In the app**: the Camera window's path controls grow a second row —
+  `zoom loop` plus a periods count — but only when the scene has a scale
+  symmetry to close under, since without one the control is meaningless rather
+  than merely unavailable. Turning it on greys the ordinary `loop` checkbox
+  (they are different loops and only one can be the answer) with the reason on
+  hover. The similarity is re-derived on every `App::refresh_zoom`, so dragging
+  the renormalizing map updates the loop instead of leaving it closing under a
+  map that has moved.
 - Measured on `wellspiral`: the last-frame-to-first-frame step is **1.12× the
   median adjacent frame step** — the excess is the irreducible difference
   between two point samples of the same structure, not a seam.

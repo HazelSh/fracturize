@@ -1437,6 +1437,67 @@ color = [0.0, 1.0, 1.0]
     }
 
     #[test]
+    fn zoom_loop_roundtrips_and_needs_a_zoom_map() {
+        let scene_src = |zoom: &str| format!(
+            r#"
+[meta]
+name = "Looper"
+
+[camera]
+distance = 3.6
+pitch = 1.1
+path_zoom_loop = 2
+path_seconds = 12.0
+
+[[camera.path]]
+yaw = 0.0
+
+{zoom}
+
+[[transform]]
+name = "descent"
+translation = [0.0, 0.0, 0.0]
+scale = 0.6
+rotation = [0.0, 34.0, 0.0]
+color = [0.3, 0.5, 0.8]
+"#
+        );
+
+        // Without a [zoom] map there is no symmetry to close under, and
+        // pretending otherwise would give a path that claims to loop and
+        // doesn't.
+        let dir = std::env::temp_dir().join("fracturize_zoom_loop_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bare = dir.join("bare.toml");
+        std::fs::write(&bare, scene_src("")).unwrap();
+        // Scene has no Debug, so match rather than unwrap_err
+        match Scene::load(&bare) {
+            Err(e) => assert!(e.contains("[zoom]"), "{}", e),
+            Ok(_) => panic!("a zoom loop without a [zoom] map should not load"),
+        }
+
+        let path = dir.join("looper.toml");
+        std::fs::write(&path, scene_src("[zoom]
+map = \"descent\"")).unwrap();
+        let scene = Scene::load(&path).unwrap();
+        let cp = scene.camera_path.as_ref().expect("path");
+        let z = cp.zoom_loop.expect("zoom loop");
+        assert_eq!(z.periods, 2);
+        // Two periods of a 0.6 map
+        assert!((z.scale - 0.36).abs() < 1e-4, "scale {}", z.scale);
+        assert!(!cp.closed, "a zoom loop is not a key-to-key loop");
+        // One key is a path when it closes under the symmetry
+        assert!(cp.playable(), "a one-key zoom loop should fly");
+
+        // ...and it survives a save
+        let out = dir.join("saved.toml");
+        scene.save(&out).unwrap();
+        let again = Scene::load(&out).unwrap();
+        assert_eq!(again.camera_path.unwrap().zoom_loop.unwrap().periods, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn camera_path_roundtrip() {
         let src = r#"
 [meta]

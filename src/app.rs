@@ -1029,22 +1029,58 @@ impl App {
         self.after_path_edit(was_default);
     }
 
-    /// Toggle whether the path loops back to its first key (Ctrl+Y)
-    /// Ctrl+Y. A path that closes under the zoom symmetry is already a loop,
-    /// and a different one: returning to the first key would undo the descent
-    /// that makes it endless. Say so rather than silently doing the other
-    /// thing, and leave the scene's choice alone.
+    /// Toggle whether the path loops back to its first key (Ctrl+Y).
+    ///
+    /// A path that closes under the zoom symmetry is already a loop, and a
+    /// different one: returning to the first key would undo the descent that
+    /// makes it endless. Say so rather than silently doing the other thing,
+    /// and leave the scene's choice alone.
     pub fn toggle_path_closed(&mut self) {
         let path = self.author_path();
         if let Some(z) = path.zoom_loop {
             log::info!(
-                "Camera path already loops, under the zoom symmetry: {} period(s) down                  per loop. Edit [camera] path_zoom_loop to change it.",
+                "Camera path already loops under the zoom symmetry ({} period(s) per \
+                 loop). Turn that off first if you want a key-to-key loop instead.",
                 z.periods
             );
             return;
         }
         path.closed = !path.closed;
         log::info!("Camera path: {}", if path.closed { "closed loop" } else { "open" });
+    }
+
+    /// The path's zoom loop, if it has one
+    pub fn path_zoom_loop(&self) -> Option<crate::path::ZoomLoop> {
+        self.camera_path().zoom_loop
+    }
+
+    /// Turn the path's zoom loop on for `periods` periods per loop, or off.
+    ///
+    /// Closing under the scale symmetry and closing back to the first key are
+    /// two different loops, so this clears the other one rather than leaving
+    /// the path claiming both.
+    pub fn set_path_zoom_loop(&mut self, periods: Option<u32>) {
+        let was_default = self.path_is_default();
+        let Some(loop_) = periods.map(|n| n.clamp(1, 64)) else {
+            self.author_path().zoom_loop = None;
+            log::info!("Camera path: zoom loop off");
+            self.after_path_edit(was_default);
+            return;
+        };
+        // The similarity comes from the live renormalizing map, so a scene
+        // without one can't have this — and shouldn't silently get a path
+        // that claims to loop and doesn't.
+        let Some(zoom) = self.point_compute.zoom else {
+            log::warn!(
+                "A zoom loop closes under the scene's scale symmetry, and this scene                  has none. Right-click a transform → Zoom about this first."
+            );
+            return;
+        };
+        let path = self.author_path();
+        path.zoom_loop = Some(zoom.loop_similarity(loop_));
+        path.closed = false;
+        log::info!("Camera path: zoom loop, {} period(s) per loop", loop_);
+        self.after_path_edit(was_default);
     }
 
     /// Remove one path keypoint by index (Camera window row ✕). The keyboard
@@ -3240,6 +3276,14 @@ impl App {
         match crate::renorm::Renorm::build(&spec, &self.scene.transforms, self.scene.camera_distance)
         {
             Ok(r) => {
+                // A zoom loop is derived from this map, so re-derive it too —
+                // otherwise dragging the map leaves the loop closing under the
+                // similarity it used to have, and the seam quietly opens.
+                if let Some(path) = self.scene.camera_path.as_mut() {
+                    if let Some(z) = path.zoom_loop {
+                        path.zoom_loop = Some(r.loop_similarity(z.periods));
+                    }
+                }
                 self.point_compute.zoom = Some(r);
                 self.zoom_error = None;
             }

@@ -334,6 +334,10 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
     let mut closed = app.camera_path().closed;
     let seconds = app.camera_path().duration();
     let explicit_seconds = app.camera_path().seconds.is_some();
+    let zoom_loop = app.path_zoom_loop();
+    // A zoom loop closes under the scene's scale symmetry, so it only exists
+    // when there is one to close under.
+    let zoom = app.zoom().map(|z| (z.map, z.log_scale / std::f32::consts::LN_2));
 
     ui.horizontal(|ui| {
         let resp = ui.button(if moving { "Stop" } else { "Play" });
@@ -348,12 +352,21 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
             app.toggle_camera_motion();
         }
 
-        let resp = ui.checkbox(&mut closed, "loop");
+        // Disabled rather than hidden while a zoom loop is on: the two are
+        // different loops and only one can be the answer, and a control that
+        // vanishes is harder to reason about than one that says why it's grey.
+        let resp = ui.add_enabled(zoom_loop.is_none(), egui::Checkbox::new(&mut closed, "loop"));
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Close the path back to its first key, for seamless loops (Ctrl+Y). \
-             Setting this on the default orbit makes it this scene's own path.",
+            if zoom_loop.is_some() {
+                "This path already loops, under the scene's zoom symmetry. \
+                 Closing back to the first key would undo the descent that \
+                 makes it endless — turn the zoom loop off to use this instead."
+            } else {
+                "Close the path back to its first key, for seamless loops (Ctrl+Y). \
+                 Setting this on the default orbit makes it this scene's own path."
+            },
             "click: toggle a closed loop",
         );
         if resp.changed() {
@@ -379,6 +392,65 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
         );
         if resp.changed() {
             app.set_path_seconds(Some(secs));
+        }
+    });
+
+    draw_zoom_loop(ui, app, zoom, zoom_loop);
+}
+
+/// The zoom-loop row: only present when the scene has a scale symmetry to
+/// close under, because without one the control is meaningless rather than
+/// merely unavailable.
+///
+/// `S∞` is invariant under the renormalizing map, so a path whose last key is
+/// its first carried forward by that map ends on the frame it started —
+/// literally, not nearly. That makes an animation loop as an *endless* zoom.
+/// See `path::ZoomLoop` and "Infinite Zoom" in AGENTS.md.
+fn draw_zoom_loop(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    zoom: Option<(usize, f32)>,
+    current: Option<crate::path::ZoomLoop>,
+) {
+    let Some((map, octaves)) = zoom else { return };
+
+    ui.horizontal(|ui| {
+        let mut on = current.is_some();
+        let resp = ui.checkbox(&mut on, "zoom loop");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            format!(
+                "Close the loop under this scene's zoom symmetry (transform {}, {:.2}                  octaves per period) instead of by returning to the first key.
+
+                 One loop descends a whole period and ends on the frame it started —                  the same frame, not a similar one — so the animation plays as a zoom                  that never ends. One keypoint is enough, and gives a constant-rate                  descent with no seam.",
+                map, octaves
+            ),
+            "click: loop by descending one zoom period",
+        );
+        if resp.changed() {
+            app.set_path_zoom_loop(on.then_some(current.map_or(1, |z| z.periods)));
+        }
+
+        let mut periods = current.map_or(1, |z| z.periods);
+        let suffix = if periods == 1 { " period" } else { " periods" };
+        let resp = ui.add_enabled(
+            current.is_some(),
+            egui::DragValue::new(&mut periods).speed(0.05).range(1..=64).suffix(suffix),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            format!(
+                "Zoom periods descended per loop — {:.2} octaves each, so {} of them                  is a factor of {:.0}. More makes a longer fall before it repeats;                  the loop is seamless either way.",
+                octaves,
+                periods,
+                2f32.powf(octaves * periods as f32),
+            ),
+            "drag: periods descended per loop",
+        );
+        if resp.changed() {
+            app.set_path_zoom_loop(Some(periods));
         }
     });
 }
