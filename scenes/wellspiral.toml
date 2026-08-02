@@ -99,6 +99,6 @@ weight = 0.95
 
 [zoom]
 map = "descent"
-radius = 1.2
-levels = 12
-octave_falloff = 2.0
+radius = 3.0
+levels = 14
+octave_falloff = 0.0

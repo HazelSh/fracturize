@@ -661,14 +661,27 @@ octave_falloff = 2.0   # point-budget falloff per octave, as a power of `s`
   fixed point at the origin, which is where a zoom centre wants to be. Otherwise
   `p = (I − A)⁻¹b` lands somewhere arbitrary and the camera has to be aimed at
   it by hand — the CLI prints where.
-- `radius` has to clear the frustum corner (~0.85 × distance at 16:9) or the
-  outermost octave's edge cuts a hard line across the frame. 1.5 is safe; below
-  ~1.0 the cut shows.
-- `levels` is how far in the band extends. `octave_falloff` keeps that cheap:
-  octave *k* is a copy of the attractor at scale `sᵏ`, covering `sᵏ` of the
-  frame, so it gets `s^(2k)` of the points and stays at the same on-screen
-  density. Flat (`0`) spends most of the buffer on specks. Twelve octaves at
-  falloff 2 cost about the same as three at falloff 0.
+- **`radius` is not a look control.** A wrap multiplies the eye's distance from
+  the fixed point by `1/s`, so the distance at which the frustum wants material
+  multiplies by `1/s` too — while the band's outer edge stays fixed in world
+  space. Anything the old eye could see and the new one can't is simply gone,
+  and it goes *at once, mid-flight, in the middle of the frame*. That is what a
+  short band looks like: not a visible edge, but regions blinking out. The
+  bound is `radius ≥ 1 + haze::FAR_FRAC = 2.42`, because haze has finished
+  hiding material by an eye-distance of `FAR_FRAC × band`; the default is 3.0,
+  and anything below the bound is reported by the CLI, `--info` and the status
+  bar. A scene with little haze wants more.
+- **Leave `octave_falloff` at 0 for anything that will be flown.** A wrap moves
+  the octave filling the screen along by one, so if neighbouring octaves hold
+  different numbers of points, the density on screen jumps every period.
+  Measured on `wellspiral`: the discontinuity across a wrap is 1.9× an
+  equal-sized camera move at falloff 0, and 3.2× at falloff 2. It stays a knob
+  because it does even out density in a *still*, which never wraps.
+- `levels` is how far in the band extends, **in octaves** — not in zoom
+  periods, which are however big the chosen map happens to be (0.07 octaves for
+  a 0.95 spiral, 3.3 for a 0.1 collapse). The CLI prints both. Raise it
+  alongside `radius`: together they set where the band's *inner* end lands, and
+  the default 14 is about ten visible octaves plus the outward margin.
 - **Anisotropic maps are allowed but flagged.** A non-uniform scale still gives
   an exactly invariant set (self-*affine* rather than self-similar), but the
   camera wrap can't reproduce it, so the zoom shows a seam. `Renorm::defect`

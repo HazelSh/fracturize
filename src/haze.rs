@@ -32,7 +32,10 @@
 /// this way rather than by measuring the attractor keeps haze free of any
 /// sampling cost and makes it track zoom for nothing.
 const NEAR_FRAC: f32 = 1.0 - 1.0 / 2.4;
-const FAR_FRAC: f32 = 1.0 + 1.0 / 2.4;
+/// Public because `renorm::MIN_RADIUS` is derived from it: the infinite-zoom
+/// band has to reach past where haze has finished hiding things, or its edge
+/// shows.
+pub const FAR_FRAC: f32 = 1.0 + 1.0 / 2.4;
 
 /// How much of a point's contribution survives at the far plane at full
 /// strength.

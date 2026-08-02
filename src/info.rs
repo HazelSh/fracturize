@@ -190,7 +190,11 @@ pub fn report(scene: &Scene, source: &str) -> String {
                         r.fixed_point.x,
                         r.fixed_point.y,
                         r.fixed_point.z,
-                        if r.defect > 0.02 { "  [not a similarity — seam]" } else { "" },
+                        match (r.defect > 0.02, r.band_covers_the_view()) {
+                            (true, _) => "  [not a similarity — seam]",
+                            (_, false) => "  [band too short — see renorm::MIN_RADIUS]",
+                            _ => "",
+                        },
                     ));
                 }
                 Err(e) => line(format!("    [{}] {:<12} no: {}", i, name, strip_prefix(&e))),

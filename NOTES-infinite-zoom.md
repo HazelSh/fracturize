@@ -92,7 +92,7 @@ The test I care most about is `wrapping_the_camera_does_not_move_the_picture`,
 which asserts the seamlessness rather than asserting some proxy for it: after a
 wrap, every point projects to the pixel its image under `A` occupied before.
 
-## Four things I got wrong
+## Four things I got wrong before anyone looked at it
 
 **Levels meant periods.** I first wrote `levels` as "how many zoom periods of
 scale to render". A period is however big the chosen map's contraction happens
@@ -102,10 +102,15 @@ forty times it in the next, and half the scenes I tried came out as dust. It
 now means octaves, converted per map. **Any parameter whose meaning depends on
 the data is a bug wearing a number.**
 
-**Equal points per octave.** Also wrong, for a related reason: octave *k* is a
-copy at scale `sᵏ` covering `sᵏ` of the frame, so a flat deal spends most of
-the buffer on specks around the fixed point. It wants `s^(2k)`, which is one
-inverted geometric CDF and lets twelve octaves cost about what three did.
+**Equal points per octave — which I "fixed", wrongly.** Octave *k* is a copy at
+scale `sᵏ` covering `sᵏ` of the frame, so a flat deal looked like it was
+spending most of the buffer on specks around the fixed point, and I gave it an
+`s^(2k)` geometric falloff. That reasoning optimises an even-looking *still*,
+and this feature's entire purpose is the flight. A wrap moves the octave
+filling the screen along by one, so unequal octaves make the density jump every
+period. Flat is forced. Measured, and reverted, in the section below — I record
+it here in the order I believed it, because the mistake wasn't the arithmetic,
+it was optimising the wrong picture.
 
 **Iterating the matrix.** I clamped `Aᵏ` at 48 multiplies. Fine for `s = 0.5`,
 useless for `s = 0.95`, which needs hundreds — and the gentle maps are exactly
@@ -121,6 +126,65 @@ frame* and the wrap's return value is the absolute depth of that sample, not a
 step. I was adding it. This is the one bug of the four I'd call a real bug, and
 it only showed up because I ran the actual window instead of trusting the
 headless renders. Worth remembering.
+
+## The fifth thing I got wrong, found by someone looking at the output
+
+Hazel watched the first zoom animation and said sections of the fractal were
+visibly cutting out while still on screen. They were. It is worth writing down
+how I found it, because I was wrong twice on the way and the second time I was
+wrong *while holding the right answer*.
+
+The first guess was the band's outer edge. I tested it by rendering one still
+at a fixed framing with three different `radius` values and diffing them — and
+the extra radius added nothing, so I dropped the idea. **That test could not
+have detected the bug.** At a fixed framing the edge is either in the picture
+or it isn't; the failure only exists at the *moment of a wrap*, where the
+required extent jumps. Testing a dynamic fault with a static probe.
+
+Then I chased three innocents. Near-plane clipping: no, tested by rebuilding
+with `Z_NEAR` at 0.002, output identical to the byte. Point size popping across
+the wrap: a real-sounding argument that was simply void, because at these
+scales the renderer is on the 1px point-primitive path and `point_size` does
+not affect screen size at all. The AV1 encoder crushing a soft region: no, the
+fault reproduces in the raw renders.
+
+What did find it was measuring instead of arguing: render two stills 0.14%
+apart in distance straddling the wrap threshold, and the same 0.14% move
+somewhere else in the band as a control. Straddle 8.41/255, control 2.64. A
+3.2× excess, reproducible, and something to bisect against.
+
+That let me sweep parameters honestly. `levels` changed nothing at all — the
+inner end was innocent too. `octave_falloff` moved it monotonically (1.9× at 0,
+3.2× at 2, 4.8× at 3), which is a genuine second bug: a wrap moves the octave
+filling the screen along by one, so if neighbouring octaves hold different
+numbers of points the density jumps every period. Flat weighting is *forced*,
+not preferred, and I had reasoned my way into a falloff by optimising the wrong
+thing — an even-looking still, in a feature whose entire purpose is the flight.
+
+But flat weighting didn't fix the blinking. The radius did — the thing I had
+already guessed and cleared on bad evidence. A wrap multiplies the eye's
+distance from the fixed point by `1/s`, so the distance at which the frustum
+wants material multiplies by `1/s` too, while the outer edge stays where it is.
+Everything in that shell is dropped in a single frame. It doesn't read as an
+edge sweeping past, which is what I was looking for; it reads as a region
+switching off.
+
+And the bound is derivable rather than tunable, which is the part that annoys
+me most about having shipped a guess. The eye is at most `band` from the fixed
+point and haze has finished hiding things by `FAR_FRAC · band`, so
+
+```
+    radius ≥ (1 + FAR_FRAC) · band = 2.42 · band
+```
+
+I shipped 1.2 for `wellspiral` and a 1.5 default. Both under. The lesson isn't
+"test more", it's narrower and more useful: **a static test cannot falsify a
+dynamic hypothesis, and clearing a hypothesis with the wrong instrument is
+worse than never having had it** — I spent the next three experiments not
+looking at the answer because I believed I had already ruled it out.
+
+`MIN_RADIUS` is now derived from `haze::FAR_FRAC` in code, three tests pin it,
+and a band below it is reported by name everywhere a zoom is described.
 
 ## What it can't do, said plainly
 

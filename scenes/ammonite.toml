@@ -87,6 +87,6 @@ weight = 0.7
 
 [zoom]
 map = "whorl"
-radius = 1.4
-levels = 13
-octave_falloff = 2.0
+radius = 3.0
+levels = 15
+octave_falloff = 0.0

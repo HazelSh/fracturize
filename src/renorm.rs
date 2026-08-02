@@ -71,10 +71,14 @@
 //!
 //! Landing every point on one shell would leave the inside hollow, so `levels`
 //! octaves of extra contraction are dealt out uniformly at random (`m` minus a
-//! random integer in `0..levels`), filling the range `[R·s^levels, R]`. Equal
-//! points per octave rather than the natural `s^(mD)` falloff — because during
-//! a zoom every octave takes its turn at being the one on screen, and each one
-//! should be equally well drawn when its turn comes.
+//! random integer in `0..levels`), filling the range `[R·s^levels, R]`.
+//!
+//! **Equally per octave**, which is the one part of this that is forced rather
+//! than chosen. A wrap moves the octave filling the screen along by one, so an
+//! octave holding fewer points than its neighbour makes the picture change
+//! density every period. See `DEFAULT_OCTAVE_FALLOFF`. And the band has to
+//! reach far enough *out* that its edge never enters the frustum, which is a
+//! sharper condition than it looks — see `MIN_RADIUS`.
 //!
 //! # Zooming forever without leaving f32
 //!
@@ -100,19 +104,52 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 use crate::camera::OrbitCamera;
 
 /// Octaves of scale rendered below the target radius, if a scene doesn't say.
-/// Roughly the dynamic range of a 1080p frame, and generous because the
-/// octave weighting makes the deep ones nearly free.
-const DEFAULT_LEVELS: f32 = 12.0;
+/// Roughly the dynamic range of a 1080p frame plus the outward margin
+/// [`MIN_RADIUS`] adds, so the *visible* depth is unchanged by that margin.
+const DEFAULT_LEVELS: f32 = 14.0;
 
-/// Outer radius of the band, as a multiple of the reference eye distance. Has
-/// to clear the frustum corner (~0.85x the distance at 16:9) or the outermost
-/// octave's edge cuts across the frame.
-const DEFAULT_RADIUS: f32 = 1.5;
+/// Smallest outer radius, as a multiple of the reference eye distance, that
+/// doesn't put the band's edge inside the picture. **This is not a matter of
+/// taste; getting it wrong is the bug that made whole regions of a zoom
+/// animation blink out.**
+///
+/// A wrap multiplies the eye's distance from the fixed point by `1/s`, so the
+/// distance at which the frustum needs material multiplies by `1/s` too — but
+/// the band's outer edge is fixed in world space. Anything the old eye could
+/// see and the new one can't simply isn't there any more, and it goes at once,
+/// mid-flight, in the middle of the frame.
+///
+/// The bound: the eye sits at most `band` from the fixed point, and haze has
+/// taken material to nothing by an eye-distance of `haze::FAR_FRAC · band`
+/// (that is what auto-ranging the haze band off the camera distance means).
+/// So material is wanted out to `band + FAR_FRAC · band`, giving
+///
+/// ```text
+///     radius ≥ (1 + FAR_FRAC) · band  =  2.42 · band
+/// ```
+///
+/// A scene with little or no haze has nothing hiding the edge and wants more;
+/// `Renorm::summary` and `--info` say so when a scene asks for less than this.
+pub const MIN_RADIUS: f32 = 1.0 + crate::haze::FAR_FRAC;
+
+/// Outer radius of the band, as a multiple of the reference eye distance:
+/// [`MIN_RADIUS`] with a little margin.
+const DEFAULT_RADIUS: f32 = 3.0;
 
 /// How steeply the point budget falls off toward the fixed point, as a power
-/// of the contraction ratio. 2 is "equal density on screen" for a
-/// surface-like attractor; 0 deals every octave the same number of points.
-const DEFAULT_OCTAVE_FALLOFF: f32 = 2.0;
+/// of the contraction ratio.
+///
+/// **Zero, and that is a correctness requirement rather than a preference.** A
+/// wrap moves the octave that fills the screen along by one, so if octave `k`
+/// and octave `k-1` hold different numbers of points, the density on screen
+/// jumps by exactly that ratio every period. Measured on `wellspiral`: the
+/// discontinuity across a wrap runs 1.9x an equal-sized camera move at falloff
+/// 0, and 3.2x at falloff 2.
+///
+/// It survives as a knob because it is genuinely useful for a *still* — it
+/// evens out on-screen density, which is what an octave falloff is for — and
+/// because a scene that is never going to be flown doesn't care.
+const DEFAULT_OCTAVE_FALLOFF: f32 = 0.0;
 
 /// How far a map may stray from being a similarity before the camera wrap
 /// stops being seamless and we say so. A pure scale+rotation scores 0.
@@ -382,8 +419,23 @@ impl Renorm {
         levels
     }
 
+    /// Whether the band reaches far enough out that its edge stays outside the
+    /// picture across a wrap. See [`MIN_RADIUS`].
+    pub fn band_covers_the_view(&self) -> bool {
+        self.radius >= MIN_RADIUS * self.band
+    }
+
     /// A one-line report for the CLI and the status bar
     pub fn summary(&self, name: Option<&str>) -> String {
+        let short = if self.band_covers_the_view() {
+            String::new()
+        } else {
+            format!(
+                ", BAND TOO SHORT (radius {:.2}x the eye distance, needs {:.2}x) —                  material will blink out at each wrap",
+                self.radius / self.band,
+                MIN_RADIUS
+            )
+        };
         let seam = if self.defect > SIMILARITY_TOLERANCE {
             format!(", NOT a similarity (defect {:.2}) — the zoom wrap will show a seam", self.defect)
         } else {
@@ -403,7 +455,7 @@ impl Renorm {
             self.fixed_point.z,
             self.periods,
             self.periods * self.log_scale / std::f32::consts::LN_2,
-            seam
+            format!("{}{}", short, seam)
         )
     }
 }
@@ -619,6 +671,40 @@ mod tests {
         let d = (cam.eye() - r.fixed_point).length();
         assert!(d >= r.band * r.scale && d < r.band, "eye at {} outside band", d);
         assert!(levels < 0, "zooming out should count down, got {}", levels);
+    }
+
+    #[test]
+    fn the_default_band_reaches_past_the_haze() {
+        // The bug this pins: a band whose outer edge sits inside the frustum
+        // loses material at every wrap, because a wrap multiplies the distance
+        // at which the frustum wants material by 1/s while the edge stays put.
+        // Whole regions of a zoom animation blinked out. Do not lower
+        // DEFAULT_RADIUS below MIN_RADIUS to make a still look denser.
+        assert!(
+            DEFAULT_RADIUS >= MIN_RADIUS,
+            "default band radius {} is below the {} needed to keep its edge out of view",
+            DEFAULT_RADIUS,
+            MIN_RADIUS
+        );
+        let r = Renorm::from_affine(spiral_map(0.6, 34.0), 1.0, &ZoomSpec::default(), 3.6).unwrap();
+        assert!(r.band_covers_the_view());
+        assert!(!r.summary(None).contains("BAND TOO SHORT"));
+    }
+
+    #[test]
+    fn a_short_band_says_so() {
+        let spec = ZoomSpec { radius: 1.2, ..ZoomSpec::default() };
+        let r = Renorm::from_affine(spiral_map(0.6, 34.0), 1.0, &spec, 3.6).unwrap();
+        assert!(!r.band_covers_the_view());
+        assert!(r.summary(None).contains("BAND TOO SHORT"), "{}", r.summary(None));
+    }
+
+    #[test]
+    fn the_octave_deal_is_flat_by_default() {
+        // Not a preference: an octave holding fewer points than its neighbour
+        // makes the density on screen jump every time the camera wraps.
+        let r = Renorm::from_affine(spiral_map(0.6, 34.0), 1.0, &ZoomSpec::default(), 3.6).unwrap();
+        assert_eq!(r.octave_q, 1.0, "octave weighting must be flat for a seamless wrap");
     }
 
     #[test]

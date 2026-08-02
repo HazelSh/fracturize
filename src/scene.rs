@@ -379,7 +379,8 @@ pub struct ZoomDef {
     /// ("2"). It must be pure affine and contract on all three axes.
     pub map: String,
     /// Outer radius of the rendered band, as a multiple of the camera
-    /// distance. Lower values pull the structure in toward the fixed point.
+    /// distance. Not a look control: below `renorm::MIN_RADIUS` (2.42) the
+    /// band's edge enters the frustum and material blinks out at every wrap.
     #[serde(default = "default_zoom_radius")]
     pub radius: f64,
     /// Octaves of scale rendered below `radius`. Needs to cover at least the
@@ -387,8 +388,10 @@ pub struct ZoomDef {
     #[serde(default = "default_zoom_levels")]
     pub levels: f64,
     /// How steeply the point budget falls off toward the fixed point, as a
-    /// power of the contraction ratio. 2 keeps on-screen density even; 0
-    /// spends the same number of points on every octave.
+    /// power of the contraction ratio. Leave at 0 for anything that will be
+    /// flown: a falloff makes neighbouring octaves hold different numbers of
+    /// points, and a wrap then changes the density on screen. Useful for a
+    /// still, where it evens out density and nothing ever wraps.
     #[serde(default = "default_zoom_octave_falloff")]
     pub octave_falloff: f64,
 }
