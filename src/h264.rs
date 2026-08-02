@@ -79,15 +79,25 @@ impl H264Encoder {
         // setting below was accepted on its own, and that one returns native
         // error 1 (cmInitParaError) on the first encode.
         let config = EncoderConfig::new()
-            // `Quality` with min QP == max QP, NOT `RateControlMode::Off`.
-            // Off sounds like the way to ask for a fixed quantizer and is a
-            // trap: this crate carries `qp` to `iMinQp`/`iMaxQp`, which
-            // openh264 only consults *under* rate control, so with Off every
-            // quality setting produced a byte-identical file — measured at
-            // 699,001 bytes for QP 10, 25 and 40 alike. Under `Quality` the
-            // same three give 1.37 MB / 758 KB / 112 KB. The target bitrate is
-            // left at its default and does not bind: QP is what's steering.
-            .rate_control_mode(RateControlMode::Quality)
+            // A rate-control mode with min QP == max QP, NOT
+            // `RateControlMode::Off`. Off sounds like the way to ask for a
+            // fixed quantizer and is a trap: this crate carries `qp` to
+            // `iMinQp`/`iMaxQp`, which openh264 only consults *under* rate
+            // control, so with Off every quality setting produced a
+            // byte-identical file — measured at 699,001 bytes for QP 10, 25
+            // and 40 alike. Under a real mode the same three give
+            // 1.37 MB / 758 KB / 112 KB.
+            //
+            // Bufferbased specifically, out of the three modes that honour the
+            // quantizer. They produce byte-identical output here, but Quality
+            // and Timestamp both print a warning at init — that bitrate can't
+            // be held without frame skipping, which is true and precisely what
+            // we want, since QP is meant to be steering. The warning is
+            // emitted inside `initialize_ext`, before the crate gets to apply
+            // a trace level, so it cannot be silenced through the config; the
+            // only way not to print it on every single render is not to
+            // provoke it.
+            .rate_control_mode(RateControlMode::Bufferbased)
             .qp(QpRange::new(qp, qp))
             // One sample per frame is a promise the sample table makes: `stts`
             // gives every sample one tick. A dropped frame would shorten the

@@ -941,10 +941,13 @@ ISOBMFF muxer (src/video.rs), no external tools:
   it plays while it downloads. `--quality` maps onto QP and moves the bitrate
   hard: 3s of `winze` at 960x540/24fps came out 2.5 MB at q25, 5.1 at q40,
   10.3 at q60 and 16.7 at q80, so dial it down for anything with an upload
-  size cap. (openh264 must be driven in `Quality` rate-control mode for this
-  to work at all — `RateControlMode::Off` ignores the quantizer and emits a
-  byte-identical file at every setting. `quality_changes_the_bitrate` guards
-  it, because every structural test passes while the knob does nothing.) Bigger, and the one that survives an upload: the
+  size cap. (openh264 must be driven in a real rate-control mode for this to
+  work at all — `RateControlMode::Off` ignores the quantizer and emits a
+  byte-identical file at every setting. `Bufferbased` specifically: it,
+  `Quality` and `Timestamp` give identical output, but the other two warn at
+  init on every render and the warning can't be silenced through the config.
+  `quality_changes_the_bitrate` guards the knob, because every structural test
+  passes while it does nothing.) Bigger, and the one that survives an upload: the
   platforms that loop short clips want H.264, and several reject AV1. Muxing
   our AV1 into `.mp4` would have been nearly free and would have produced a
   file that looks right locally and bounces on upload — hence a real second
