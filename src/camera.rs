@@ -63,6 +63,51 @@ impl OrbitCamera {
         }
     }
 
+    /// Rebuild the orbit parameters from a camera basis. `up_reference` is the
+    /// world-up handed to `look_at` (what `up_reference()` returns), not
+    /// the camera's own up; only its component perpendicular to the view axis
+    /// matters, which is what makes this the exact inverse of the accessors.
+    ///
+    /// The one thing here that isn't obvious is roll: it is recovered as the
+    /// signed angle from world Y to `up_reference` about the view axis, since
+    /// that is precisely how `up_reference()` builds it.
+    pub fn from_eye_focus_up(eye: Vec3, focus: Vec3, up_reference: Vec3) -> Self {
+        let v = eye - focus;
+        let d = v.length().max(1e-9);
+        let forward = -v / d;
+
+        let flatten = |u: Vec3| u - forward * u.dot(forward);
+        let base = flatten(Vec3::Y);
+        let target = flatten(up_reference);
+        let roll = if base.length_squared() < 1e-12 || target.length_squared() < 1e-12 {
+            0.0
+        } else {
+            let (base, target) = (base.normalize(), target.normalize());
+            base.cross(target).dot(forward).atan2(base.dot(target))
+        };
+
+        Self {
+            yaw: v.x.atan2(v.z),
+            pitch: (v.y / d).clamp(-1.0, 1.0).asin(),
+            distance: d,
+            focus,
+            roll,
+        }
+    }
+
+    /// Move the whole camera by a similarity about `center`: scale the eye and
+    /// focus toward it by `scale`, and rotate the framing by `rot`.
+    ///
+    /// This is how [`crate::renorm::Renorm::wrap`] steps a zoom period. It
+    /// transforms the camera exactly as the world would be transformed, so a
+    /// set invariant under that similarity renders identically afterwards.
+    pub fn apply_similarity(&mut self, center: Vec3, scale: f32, rot: Quat) {
+        let eye = center + rot * ((self.eye() - center) * scale);
+        let focus = center + rot * ((self.focus - center) * scale);
+        let up = rot * self.up_reference();
+        *self = Self::from_eye_focus_up(eye, focus, up);
+    }
+
     pub fn eye(&self) -> Vec3 {
         let (sp, cp) = self.pitch.sin_cos();
         let (sy, cy) = self.yaw.sin_cos();
@@ -221,6 +266,49 @@ mod tests {
             roll: 0.0,
         };
         assert_eq!(cam.view_matrix(), Mat4::look_at_rh(cam.eye(), cam.focus, Vec3::Y));
+    }
+
+    #[test]
+    fn eye_focus_up_roundtrips() {
+        // from_eye_focus_up has to be the exact inverse of the accessors, or
+        // the zoom wrap drifts a little every period and the seam opens up.
+        for &roll in &[0.0f32, 0.9, -2.4, 3.0] {
+            let cam = OrbitCamera {
+                yaw: 1.9,
+                pitch: -0.6,
+                distance: 2.75,
+                focus: Vec3::new(-0.3, 0.15, 0.8),
+                roll,
+            };
+            let back = OrbitCamera::from_eye_focus_up(cam.eye(), cam.focus, cam.up_reference());
+            assert!((back.eye() - cam.eye()).length() < 1e-5);
+            assert!((back.distance - cam.distance).abs() < 1e-5);
+            assert!((back.roll - cam.roll).abs() < 1e-4, "roll {} -> {}", cam.roll, back.roll);
+            assert!(back.view_matrix().abs_diff_eq(cam.view_matrix(), 1e-4));
+        }
+    }
+
+    #[test]
+    fn similarity_moves_the_camera_like_the_world() {
+        let cam = OrbitCamera {
+            yaw: 0.5,
+            pitch: 0.2,
+            distance: 3.0,
+            focus: Vec3::new(0.1, 0.0, 0.0),
+            roll: 0.4,
+        };
+        let center = Vec3::new(0.2, -0.1, 0.3);
+        let (scale, rot) = (0.5, Quat::from_rotation_y(0.6));
+        let mut moved = cam;
+        moved.apply_similarity(center, scale, rot);
+
+        // A point and its image under the same similarity must land on the
+        // same pixel, seen by the moved and original cameras respectively.
+        let p = Vec3::new(0.7, -0.4, 0.25);
+        let q = center + rot * ((p - center) * scale);
+        let a = world_to_screen(q, moved.view_proj(1.6), 1280.0, 800.0).unwrap();
+        let b = world_to_screen(p, cam.view_proj(1.6), 1280.0, 800.0).unwrap();
+        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{:?} vs {:?}", a, b);
     }
 
     #[test]

@@ -265,6 +265,7 @@ mod tests {
             camera_roll: 0.0,
             background: crate::scene::DEFAULT_BACKGROUND,
             camera_path: None,
+            zoom: None,
         }
     }
 

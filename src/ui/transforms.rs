@@ -379,6 +379,40 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
         app.ui_state.panels.transforms_open = true;
         chose = true;
     }
+
+    // Infinite zoom lives here rather than in a panel because it is a property
+    // of *one map* — you are choosing which transform the scene's scale
+    // symmetry is — and this is the menu you already open to say something
+    // about one map. See `src/renorm.rs`.
+    ui.separator();
+    let is_zoom = app.zoom_map() == Some(i);
+    let label = if is_zoom { "✓ Zoom about this" } else { "Zoom about this" };
+    let can_zoom = crate::renorm::Renorm::build(
+        &crate::renorm::ZoomSpec { map: i, ..Default::default() },
+        &app.scene.transforms,
+        app.scene.camera_distance,
+    );
+    let btn = ui.add_enabled(is_zoom || can_zoom.is_ok(), egui::Button::new(label));
+    match (&can_zoom, btn.clicked()) {
+        (_, true) => {
+            app.set_zoom_map((!is_zoom).then_some(i));
+            chose = true;
+        }
+        (Err(why), false) => {
+            btn.on_hover_text(format!("{}\n\nInfinite zoom needs a pure affine map that contracts on all three axes; it renders the attractor as the unbounded set invariant under that map, so there is no largest or smallest feature and zoom never runs out.", why));
+        }
+        (Ok(r), false) => {
+            btn.on_hover_text(format!(
+                "Render this scene as the set invariant under this map: {:.2} octaves \
+                 per zoom period, no largest or smallest feature, zoom that never runs \
+                 out. The zoom centre is the map's fixed point, ({:.2}, {:.2}, {:.2}).",
+                r.log_scale / std::f32::consts::LN_2,
+                r.fixed_point.x,
+                r.fixed_point.y,
+                r.fixed_point.z,
+            ));
+        }
+    }
     chose
 }
 

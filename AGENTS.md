@@ -19,6 +19,7 @@ src/
   haze.rs        # Aerial perspective: one amount, band and falloffs derived
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
+  renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
@@ -517,6 +518,12 @@ distance = 1.6            # ...swooped in close
 focus = [0.0, -0.5, 0.0]  # looking lower
 roll = 0.4                # ...and tilted
 
+[zoom]                    # optional: infinite zoom (see "Infinite Zoom")
+map = "whorl"             # a transform name, or its index as a string
+radius = 1.5              # outer radius of the band, in camera distances
+levels = 12               # octaves rendered below it
+octave_falloff = 2.0      # point-budget falloff per octave (power of the scale)
+
 [[transform]]
 name = "whorl"                 # optional label shown in overlays
 translation = [0.0, 0.0, 0.5]
@@ -593,6 +600,138 @@ Scene-design notes learned the hard way:
   (cyclic: large stretches also rotate hues when the mean index is off-center).
   Both are keybind-tunable live (D / C) and saved into view files.
 
+## Infinite Zoom
+
+An IFS attractor has a size. Zooming out runs off the end of it in a second;
+zooming in runs out too, more insidiously, because the chaos game spends points
+in proportion to the natural measure and a window a thousand times smaller gets
+a thousandth of them. `[zoom]` removes both limits at once, exactly rather than
+approximately. The derivation is in `src/renorm.rs`'s module docs; the short
+version:
+
+Nominate one of the scene's own transforms `f` — pure affine, contracting on
+all three axes. It has a fixed point `p` and acts about it as a similarity
+`A = s·Q`. Because `S ⊇ f(S)`, applying `f⁻¹` grows the attractor, and the
+union of all such expansions
+
+```
+    S∞ = ⋃_{m ≥ 0} f⁻ᵐ(S)
+```
+
+is unbounded and *exactly* invariant under `f`. It is the same set at every
+scale — no largest feature, no smallest, no privileged size. That is the object
+`[zoom]` renders, and it exists for nearly any IFS, because nearly every IFS has
+one plain affine contraction in it.
+
+Two consequences do all the work:
+
+- **Sampling costs one `round()`.** A chaos point at radius `r` from `p` belongs
+  on the band at radius `R` after `m = round(log(R/r) / log(1/s))` applications
+  of `f⁻¹`. Every point is recycled to the scale being looked at; none is
+  discarded for having fallen too deep or too far out. `renormalize()` in
+  `points/chaos.wgsl`. For a similarity the power `Aᵏ` is taken in closed form
+  (`s⁻ᵏ`, and `k` times the rotation angle), so a gentle 0.95 spiral needing
+  sixty periods to cross the band costs the same as a 0.5 one needing two;
+  only the anisotropic fallback iterates. Measured on the reference desktop:
+  a 40M-point chaos fill takes **0.08s either way**, and the live window holds
+  120 FPS at 12M points with it on. It does not show up.
+- **Zoom is periodic, so the camera never leaves f32.** Scaling by `s` and
+  rotating by `Q` is a symmetry of `S∞`, so when the eye crosses the inner edge
+  of the band, `Renorm::wrap` applies `A⁻¹` to eye, focus and up together. The
+  camera is back at the outer edge looking at a pixel-identical picture. Nothing
+  gets small, no precision is spent, and the point buffer is never regenerated —
+  **the wrap is the level-of-detail system.** The status bar's zoom counter is
+  the only thing that moves.
+
+The honest limit: the zoom is infinite *toward `p`*. Fly off sideways and you
+leave the band and get the ordinary bounded attractor. Every self-similar zoom
+has a centre; this one's is the fixed point of the map you picked.
+
+### Using it
+
+```toml
+[zoom]
+map = "descent"        # transform name, or its index as a string ("0")
+radius = 1.5           # outer radius of the band, in camera distances
+levels = 12            # octaves rendered below `radius`
+octave_falloff = 2.0   # point-budget falloff per octave, as a power of `s`
+```
+
+- **Give the nominated map zero translation.** A map with no translation has its
+  fixed point at the origin, which is where a zoom centre wants to be. Otherwise
+  `p = (I − A)⁻¹b` lands somewhere arbitrary and the camera has to be aimed at
+  it by hand — the CLI prints where.
+- `radius` has to clear the frustum corner (~0.85 × distance at 16:9) or the
+  outermost octave's edge cuts a hard line across the frame. 1.5 is safe; below
+  ~1.0 the cut shows.
+- `levels` is how far in the band extends. `octave_falloff` keeps that cheap:
+  octave *k* is a copy of the attractor at scale `sᵏ`, covering `sᵏ` of the
+  frame, so it gets `s^(2k)` of the points and stays at the same on-screen
+  density. Flat (`0`) spends most of the buffer on specks. Twelve octaves at
+  falloff 2 cost about the same as three at falloff 0.
+- **Anisotropic maps are allowed but flagged.** A non-uniform scale still gives
+  an exactly invariant set (self-*affine* rather than self-similar), but the
+  camera wrap can't reproduce it, so the zoom shows a seam. `Renorm::defect`
+  measures this and the CLI/status bar say so rather than pretending.
+
+In the app: right-click a transform (its row or its gizmo) → **Zoom about this**,
+which toggles, tells you the period and fixed point on hover, and greys out with
+the reason when that map can't be a scale symmetry. The status bar reads
+`zoom +N`.
+
+From the CLI, on any scene, without editing it:
+
+```
+# make an existing scene scale-invariant and look at it
+fracturize --scene scenes/sierpinski.toml --zoom 0
+
+# tune the band; --zoom-levels / --zoom-radius / --zoom-falloff need --zoom
+fracturize --scene scenes/lsys_kelp.toml --zoom trunk --zoom-levels 16 \
+  --render /tmp/t.png --effort low --width 640 --height 400
+
+# a map that can't be a scale symmetry says why and exits, rather than
+# quietly rendering the ordinary bounded attractor:
+#   infinite zoom: zoom map 1 uses variations (spherical 1.00);
+#   the renormalizing map must be pure affine
+```
+
+A bad map is fatal at startup rather than silently disabling the feature: a
+scene that quietly isn't infinite looks like a bug in the maths, and that is an
+expensive thing to go looking for.
+
+### Zoom animations
+
+A camera path key whose `distance` is many periods below the first authors a
+descent of exactly that many periods — distance interpolates in log space, so
+that's a constant-rate zoom, and the per-frame wrap folds it back into one
+period however deep it goes. `scenes/wellspiral.toml` descends nine:
+
+```toml
+[[camera.path]]
+distance = 3.6
+[[camera.path]]
+distance = 0.0363   # 3.6 · 0.6^9
+```
+
+```
+fracturize --scene scenes/wellspiral.toml --render well.avif \
+  --effort medium --width 960 --height 540 --fps 24 --splat --exposure 1.4
+```
+
+### Things that interact with it
+
+- **Gizmos draw unrenormalized**, at the transforms' true positions, because
+  that is where dragging them acts. Under zoom they won't sit on the artwork.
+- **Traces are renormalized per-trace, not per-point** (`Renorm::renormalize_trace`):
+  one level for the whole walk, so it stays a connected path instead of a
+  scatter of jumps between octaves.
+- **The drawn-point budget is bypassed** (`App::drawn_points`). It's measured on
+  the plain attractor by CPU walkers, which doesn't describe what's on screen
+  under zoom — and a scale-invariant set can't collapse to a speck, which is the
+  only thing that budget exists to survive.
+- **Point size** is world-space and the band spans many scales, so a scene will
+  look grittier here than its `point_size` suggests; judge it inside the band.
+
 ## Render Jobs
 
 `P`, and the Camera window's "Render job…", open the dialog
@@ -652,6 +791,9 @@ encode+save | total`) to stdout so you can budget effort. Options:
   & Transparent Output").
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`
   (legacy on-switch; a scene's own `haze` value wins over it).
+- `--zoom <transform>` turns on infinite zoom about a named or indexed map,
+  overriding the scene's `[zoom]`; `--zoom-levels/-radius/-falloff` tune the
+  band. See "Infinite Zoom".
 - No `--scene`? `--random` rolls a flame, `--blank` opens the empty canvas
   (see "Random Flames" and "Starting From Nothing"); otherwise you get the
   built-in default. All three work windowed and with `--render`.

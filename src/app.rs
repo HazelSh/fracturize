@@ -405,6 +405,14 @@ pub struct App {
     /// Wall-clock timestamp of the previous update (for time-based motion)
     last_update: Instant,
     pub camera: OrbitCamera,
+    /// How many zoom periods the camera has travelled since the scene loaded,
+    /// under infinite zoom. Purely for the person watching: the picture is the
+    /// same at every level, so this is the only thing that says how deep in
+    /// they are. Positive = inward.
+    pub zoom_level: i32,
+    /// Why infinite zoom is off, when the scene asked for it and it couldn't
+    /// be built. Shown in the status bar rather than swallowed.
+    pub zoom_error: Option<String>,
     /// Playhead along [`App::camera_path`] in 0..1 while the camera is flying
     /// it; `None` when the camera is being positioned by hand.
     ///
@@ -741,6 +749,8 @@ impl App {
             color_falloff: scene.color_falloff,
             color_contrast: scene.color_contrast,
             fps_tracker: FpsTracker::new(),
+            zoom_level: 0,
+            zoom_error: None,
             point_compute,
             point_renderer,
             splat_renderer,
@@ -787,6 +797,7 @@ impl App {
             screenshot_buffer,
             pending_screenshot: false,
         };
+        app.refresh_zoom();
 
         // Apply a saved view, if given. Pause the orbit so the loaded
         // framing holds exactly (press O to resume).
@@ -2260,13 +2271,25 @@ impl App {
         const TRACES: usize = 24;
         const STEPS: usize = 50;
 
-        let traces = crate::trace::generate_traces(
+        let mut traces = crate::trace::generate_traces(
             &self.scene.transforms,
             &self.transform_enabled,
             TRACES,
             STEPS,
             &mut rand::thread_rng(),
         );
+        // The walkers run on the plain attractor; under infinite zoom the
+        // points on screen don't, so bring each trace along with them or the
+        // overlay draws a walk through something nobody is looking at.
+        if let Some(zoom) = self.point_compute.zoom {
+            for trace in &mut traces {
+                let mut pos: Vec<glam::Vec3> = trace.iter().map(|s| s.pos).collect();
+                zoom.renormalize_trace(&mut pos);
+                for (step, p) in trace.iter_mut().zip(pos) {
+                    step.pos = p;
+                }
+            }
+        }
 
         let mut verts = Vec::with_capacity(traces.iter().map(|t| t.len() * 2).sum());
         for trace in &traces {
@@ -2787,6 +2810,7 @@ impl App {
             &self.transform_enabled,
         );
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
+        self.refresh_zoom();
         self.frame_count = 0;
         if self.show_traces {
             self.regenerate_traces();
@@ -2808,6 +2832,8 @@ impl App {
             &self.transform_enabled,
         );
         self.gizmo_renderer.update_transforms(&self.gpu.queue, &self.scene.transforms);
+        // The renormalizing map may itself have just been dragged
+        self.refresh_zoom();
         self.reset();
         if self.show_traces {
             self.regenerate_traces();
@@ -3160,6 +3186,14 @@ impl App {
     /// are one-off and must stay reproducible from the parameters alone.
     fn drawn_points(&self, screen_height: f32) -> u32 {
         let valid = self.point_compute.valid_point_count();
+        // The budget is measured on the plain attractor by CPU walkers; under
+        // infinite zoom the points get renormalized somewhere else entirely,
+        // so the measurement doesn't describe what's on screen. There is also
+        // nothing to protect against — a scale-invariant set never collapses
+        // to a speck, which is the whole reason the budget exists.
+        if self.point_compute.zoom.is_some() {
+            return valid;
+        }
         let Some(stats) = self.attractor else { return valid };
         let depth = (stats.center - self.camera.eye()).length();
         let r_px = stats.radius * OrbitCamera::pixels_per_world_unit(depth, screen_height);
@@ -3168,6 +3202,63 @@ impl App {
         let covered = (std::f32::consts::PI * r_px * r_px).max(1.0);
         let cap = (covered * Self::POINTS_PER_PIXEL).min(u32::MAX as f32) as u32;
         valid.min(cap.max(Self::MIN_DRAWN_POINTS))
+    }
+
+    /// Rebuild the infinite-zoom renormalization from the scene, after
+    /// anything that could have changed a transform matrix. Cheap (a 3x3
+    /// inverse and a power iteration), so it just runs rather than being
+    /// tracked by a dirty flag.
+    ///
+    /// A scene that asks for zoom it can't have keeps rendering — a mid-drag
+    /// map that stopped contracting shouldn't blank the window — and says so
+    /// in the status bar instead.
+    pub fn refresh_zoom(&mut self) {
+        let Some(spec) = self.scene.zoom.clone() else {
+            self.point_compute.zoom = None;
+            self.zoom_error = None;
+            return;
+        };
+        match crate::renorm::Renorm::build(&spec, &self.scene.transforms, self.scene.camera_distance)
+        {
+            Ok(r) => {
+                self.point_compute.zoom = Some(r);
+                self.zoom_error = None;
+            }
+            Err(e) => {
+                self.point_compute.zoom = None;
+                self.zoom_error = Some(e);
+            }
+        }
+    }
+
+    /// The live renormalization, if the scene has a usable one
+    pub fn zoom(&self) -> Option<&crate::renorm::Renorm> {
+        self.point_compute.zoom.as_ref()
+    }
+
+    /// Which transform is currently the scale symmetry, if any. Read by the
+    /// Transforms context menu so its checkmark tracks the scene.
+    pub fn zoom_map(&self) -> Option<usize> {
+        self.scene.zoom.as_ref().map(|z| z.map)
+    }
+
+    /// Turn infinite zoom on for `map`, or off with `None`, and re-form the
+    /// point cloud (every point moves, so the buffer has to refill).
+    pub fn set_zoom_map(&mut self, map: Option<usize>) {
+        self.scene.zoom = map.map(|map| crate::renorm::ZoomSpec {
+            map,
+            ..self.scene.zoom.clone().unwrap_or_default()
+        });
+        self.refresh_zoom();
+        self.zoom_level = 0;
+        self.point_compute.reset(&self.gpu.queue);
+        self.frame_count = 0;
+    }
+
+    /// Keep the eye inside one zoom period; see `renorm::Renorm::wrap`
+    fn wrap_zoom(&mut self) {
+        let Some(zoom) = self.point_compute.zoom else { return };
+        self.zoom_level += zoom.wrap(&mut self.camera);
     }
 
     /// What the drawn-point budget is keyed on: any change to the maps, to
@@ -3242,12 +3333,25 @@ impl App {
                 };
                 let cam = self.camera_path().sample(t);
                 self.camera = cam;
+                // A path key's distance is unwrapped — that's the point, it's
+                // how a path descends nine zoom periods in one straight
+                // interpolation — so the sample arrives outside the band every
+                // frame and `wrap_zoom` puts it back. Its return is then the
+                // absolute depth of this sample, not a step, so the counter
+                // has to be reset rather than added to. Miss this and the
+                // reading runs away by nine per frame.
+                self.zoom_level = 0;
                 self.path_t = if ended { None } else { Some(t) };
                 if ended {
                     log::info!("Camera path: finished");
                 }
             }
         }
+
+        // Keep the eye inside one zoom period. Last, so it catches the camera
+        // however it moved this frame — dragged, scrolled, or flown along the
+        // path — and the picture it lands on is identical to the one it left.
+        self.wrap_zoom();
 
         if should_log {
             let point_count = self.point_compute.valid_point_count();

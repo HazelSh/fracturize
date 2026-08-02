@@ -1,0 +1,104 @@
+# Wellspiral — a stair that neither starts nor ends
+#
+# The first scene built for infinite zoom, and mostly an argument for it.
+#
+# "descent" is nominated as the scale symmetry ([zoom], at the bottom). It
+# contracts by 0.6 and turns 34° about the vertical, so one zoom period is a
+# factor of 1.67 and a third of a right angle. Fly toward its fixed point and
+# after every 0.74 octaves you are looking at exactly the image you started
+# from — not a similar one, the same one — and you can keep going for as long
+# as you care to. Nothing here is the biggest thing or the smallest thing.
+#
+# Its translation is zero on purpose. A map with no translation has its fixed
+# point at the origin, which is where a zoom centre wants to be; give it one
+# and the whole band moves off to wherever (I − A)⁻¹b lands and the camera has
+# to be told. That is the only constraint the scene format puts on you.
+#
+# The three fronds are the ornament the symmetry carries around: one shape at
+# 120° apart, tilted out and down so they sweep into the well rather than
+# standing off it. Three rather than two because a two-fold well reads as a
+# corridor from most angles, and rather than four because at four the fronds
+# line up into walls and you stop being able to see down.
+#
+# Fly it:
+#   fracturize --scene scenes/wellspiral.toml        # scroll in, and keep going
+#   fracturize --scene scenes/wellspiral.toml --render well.avif \
+#     --effort medium --width 960 --height 540 --fps 24 --splat --exposure 1.4
+#
+# Claude Opus 5, 2026-08-02.
+
+[meta]
+name = "Wellspiral"
+author = "Claude Opus 5"
+point_size = 0.0026
+point_count = 8_000_000
+color_speed = 0.5
+color_falloff = 0.6
+color_contrast = 2.0
+haze = 0.5
+background = [0.010, 0.009, 0.020]
+
+[camera]
+distance = 3.6
+yaw = 0.0
+pitch = 1.15
+focus = [0.0, 0.0, 0.0]
+
+# Nine periods straight down the well. The camera is folded back to the top of
+# the band every period, so the last key's distance being a hundredth of the
+# first costs nothing: no precision is spent getting there.
+path_closed = false
+path_seconds = 14.0
+
+[[camera.path]]
+yaw = 0.0
+pitch = 1.15
+distance = 3.6
+focus = [0.0, 0.0, 0.0]
+
+[[camera.path]]
+yaw = 0.9
+pitch = 0.72
+distance = 0.0363   # 3.6 · 0.6^9
+focus = [0.0, 0.0, 0.0]
+
+# The scale symmetry: pure affine, contracting on all three axes, fixed point
+# at the origin. Weighted heavily, so the chaos game spends most of its time
+# in the funnel and the fronds stay ornament.
+[[transform]]
+name = "descent"
+translation = [0.0, 0.0, 0.0]
+scale = 0.6
+rotation = [0.0, 34.0, 0.0]
+color = [0.20, 0.36, 0.68]
+weight = 3.0
+
+[[transform]]
+name = "frond-1"
+translation = [0.0, 0.30, 0.86]
+scale = 0.44
+rotation = [-26.0, 18.0, 0.0]
+color = [0.95, 0.68, 0.30]
+weight = 0.95
+
+[[transform]]
+name = "frond-2"
+translation = [0.745, 0.00, -0.43]
+scale = 0.44
+rotation = [-26.0, 138.0, 0.0]
+color = [0.85, 0.30, 0.42]
+weight = 0.95
+
+[[transform]]
+name = "frond-3"
+translation = [-0.745, -0.30, -0.43]
+scale = 0.44
+rotation = [-26.0, 258.0, 0.0]
+color = [0.35, 0.72, 0.92]
+weight = 0.95
+
+[zoom]
+map = "descent"
+radius = 1.2
+levels = 12
+octave_falloff = 2.0

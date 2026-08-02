@@ -58,6 +58,32 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         );
                     }
 
+                    // Under infinite zoom the picture is the same at every
+                    // depth, so the level counter is the only thing that says
+                    // how far in you are — and if the scene asked for zoom and
+                    // couldn't have it, this is where that gets said.
+                    if let Some(err) = app.zoom_error.clone() {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("zoom off")
+                                .color(ui.visuals().error_fg_color),
+                        )
+                        .on_hover_text(err);
+                    } else if let Some(z) = app.zoom() {
+                        ui.add_space(10.0);
+                        ui.label(format!(
+                            "zoom {}{}",
+                            if app.zoom_level >= 0 { "+" } else { "" },
+                            app.zoom_level
+                        ))
+                        .on_hover_text(format!(
+                            "Infinite zoom about transform {} — {:.2} octaves per period,                              {:.0}x total.\n\nThe attractor is rendered as the set                              invariant under that map, so it has no largest or smallest                              feature. Scrolling in past the bottom of the band folds the                              camera back to the top of it; the picture is identical, so                              this counter is the only thing that moves.",
+                            z.map,
+                            z.log_scale / std::f32::consts::LN_2,
+                            (1.0f32 / z.scale).powi(app.zoom_level.abs().min(30)),
+                        ));
+                    }
+
                     // A running job is worth seeing without the dialog open —
                     // it's using the GPU this readout is measuring.
                     if let Some(job) = app.job() {

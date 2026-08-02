@@ -243,7 +243,12 @@ pub struct Point {
     pub color_idx: u32,
 }
 
-/// Compute parameters for the simple chaos game (32 bytes)
+/// Compute parameters for the simple chaos game (176 bytes)
+///
+/// The `zoom_*` block is the infinite-zoom renormalization (see `renorm.rs`);
+/// it is all zeroes and `zoom_enabled = 0` for ordinary scenes. `mat3x3` is
+/// three padded `vec4` columns under std140 — writing `[[f32; 3]; 3]` here
+/// would silently misalign the second column.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct PointComputeParams {
@@ -252,7 +257,50 @@ pub struct PointComputeParams {
     pub iterations_per_walker: u32,
     pub write_offset: u32,
     pub buffer_capacity: u32,
-    pub _pad: [u32; 3],
+    pub zoom_enabled: u32,
+    /// Octaves of scale spread dealt out below the target radius
+    pub zoom_levels: f32,
+    /// ln(1/scale) of the renormalizing map — one zoom period in log-radius
+    pub zoom_log_scale: f32,
+    /// Per-octave point share, `scale^octave_falloff`: the ratio between the
+    /// number of points given to one octave and the next one in. 1 = flat.
+    pub zoom_octave_q: f32,
+    /// 1 when the map is a similarity, so `A^k` has a closed form
+    pub zoom_similar: u32,
+    /// Contraction ratio (the closed form needs it on its own, not as a log)
+    pub zoom_scale: f32,
+    /// std140 pads the scalar run out to the following vec4's alignment
+    pub _pad: u32,
+    /// xyz = the map's fixed point, w = target radius
+    pub zoom_fixed: [f32; 4],
+    /// xyz = the rotation axis of `A`, w = its angle
+    pub zoom_axis_angle: [f32; 4],
+    /// Linear part about the fixed point, and its inverse (padded columns)
+    pub zoom_a: [[f32; 4]; 3],
+    pub zoom_a_inv: [[f32; 4]; 3],
+}
+
+impl PointComputeParams {
+    /// Pack a resolved renormalization, or the disabled state for `None`
+    pub fn with_zoom(mut self, zoom: Option<&crate::renorm::Renorm>) -> Self {
+        let pad = |m: glam::Mat3| m.to_cols_array_2d().map(|c| [c[0], c[1], c[2], 0.0]);
+        match zoom {
+            Some(z) => {
+                self.zoom_enabled = 1;
+                self.zoom_levels = z.periods;
+                self.zoom_log_scale = z.log_scale;
+                self.zoom_octave_q = z.octave_q;
+                self.zoom_similar = z.similar as u32;
+                self.zoom_scale = z.scale;
+                self.zoom_fixed = z.fixed_point.extend(z.radius).to_array();
+                self.zoom_axis_angle = z.axis.extend(z.angle).to_array();
+                self.zoom_a = pad(z.a);
+                self.zoom_a_inv = pad(z.a_inv);
+            }
+            None => self.zoom_enabled = 0,
+        }
+        self
+    }
 }
 
 
@@ -267,6 +315,17 @@ mod tests {
     #[test]
     fn test_camera_uniforms_size() {
         assert_eq!(std::mem::size_of::<CameraUniforms>(), 128, "CameraUniforms must be 128 bytes to match WGSL struct");
+    }
+
+    #[test]
+    fn test_point_compute_params_size() {
+        // std140: 11 scalars + 1 pad (48) + two vec4 (32) + two mat3x3 as
+        // padded columns (48 each)
+        assert_eq!(
+            std::mem::size_of::<PointComputeParams>(),
+            176,
+            "PointComputeParams must be 144 bytes to match ComputeParams in chaos.wgsl"
+        );
     }
 
     #[test]

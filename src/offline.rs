@@ -210,6 +210,7 @@ fn fill_points(
         &scene.colormap,
         scene.point_count as u32,
     );
+    compute.zoom = scene_zoom(scene)?;
     let total_frames = compute.warmup_frames + accumulate.max(1);
     log::info!(
         "Filling {} point buffer: {} warmup + {} accumulation frames",
@@ -253,8 +254,35 @@ fn fill_points(
     Ok((compute, point_count))
 }
 
+/// The scene's infinite-zoom renormalization, if it asked for one.
+///
+/// Offline, an unusable zoom map is fatal rather than a status-bar note: a
+/// render is a thing you come back to later, and silently getting the ordinary
+/// bounded attractor back is the kind of surprise that costs an hour.
+fn scene_zoom(scene: &Scene) -> Result<Option<crate::renorm::Renorm>, String> {
+    scene
+        .zoom
+        .as_ref()
+        .map(|spec| {
+            crate::renorm::Renorm::build(spec, &scene.transforms, scene.camera_distance)
+                .map_err(|e| format!("infinite zoom: {}", e))
+        })
+        .transpose()
+}
+
 /// Base camera and render params from a view file, or scene defaults
 fn base_setup(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
+    let (mut camera, point_size, haze) = base_setup_unwrapped(view, scene, haze_enabled);
+    // Under infinite zoom the framing is only defined up to a zoom period, so
+    // put it in the canonical one before anything derives from it. A framing
+    // that came from a view file is already there and this is a no-op.
+    if let Ok(Some(zoom)) = scene_zoom(scene) {
+        zoom.wrap(&mut camera);
+    }
+    (camera, point_size, haze)
+}
+
+fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
     match view {
         Some(v) => (
             OrbitCamera::from_legacy(
@@ -699,6 +727,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     let t_fill = Instant::now();
 
     let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
+    let zoom = scene_zoom(&scene)?;
     // A view overrides the base framing but the scene still owns the path.
     // `path::resolve` is the same rule the app flies (see `App::camera_path`),
     // so a preview in the window and this render agree about what the camera
@@ -747,7 +776,15 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         } else {
             i as f32 / (frames - 1) as f32
         };
-        let cam = path.sample(t);
+        let mut cam = path.sample(t);
+        // The one place the wrap really earns itself: a path whose distance
+        // keys span many periods (they interpolate in log space, so that's a
+        // constant-rate zoom) is folded back into one period every frame. The
+        // camera never leaves f32's comfortable range and the zoom is seamless
+        // for as long as the path asks for.
+        if let Some(z) = &zoom {
+            z.wrap(&mut cam);
+        }
         let camera = CameraUniforms::new(
             cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
             haze.0, haze.1, haze.2, haze.3, color_contrast, scene.background.to_array(),

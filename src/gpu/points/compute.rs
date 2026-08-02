@@ -72,6 +72,9 @@ pub struct PointCompute {
     pub write_offset: u32,
     pub warmup_frames: u32,
     pub current_frame: u32,
+    /// Infinite-zoom renormalization applied to every emitted point, if the
+    /// scene asked for one (see `renorm.rs`). Rebuilt on transform edits.
+    pub zoom: Option<crate::renorm::Renorm>,
 }
 
 impl PointCompute {
@@ -262,6 +265,7 @@ impl PointCompute {
             write_offset: 0,
             warmup_frames,
             current_frame: 0,
+            zoom: None,
         }
     }
 
@@ -304,8 +308,9 @@ impl PointCompute {
             iterations_per_walker: current_iters,
             write_offset: self.write_offset,
             buffer_capacity: self.buffer_capacity,
-            _pad: [0; 3],
-        };
+            ..PointComputeParams::zeroed()
+        }
+        .with_zoom(self.zoom.as_ref());
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
         // Advance for next frame

@@ -321,6 +321,10 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
         camera_roll: 0.0,
         background: crate::scene::DEFAULT_BACKGROUND,
         camera_path: None::<CameraPath>,
+        // Not rolled at random: infinite zoom needs a map that contracts on
+        // every axis, and the generator has no reason to guarantee one.
+        // `--zoom <n>` turns it on for a roll worth keeping.
+        zoom: None,
     }
 }
 

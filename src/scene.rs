@@ -117,6 +117,30 @@ impl TransformSpec {
     }
 }
 
+/// Resolve a transform reference — a name, or an index written as a string —
+/// against the scene's transform names. Used by `[zoom].map` and `--zoom`.
+pub fn resolve_transform_ref(
+    reference: &str,
+    names: &[Option<String>],
+) -> Result<usize, String> {
+    let reference = reference.trim();
+    if let Some(i) = names.iter().position(|n| n.as_deref() == Some(reference)) {
+        return Ok(i);
+    }
+    if let Ok(i) = reference.parse::<usize>() {
+        if i < names.len() {
+            return Ok(i);
+        }
+        return Err(format!("transform index {} is out of range (0..{})", i, names.len()));
+    }
+    let known: Vec<&str> = names.iter().filter_map(|n| n.as_deref()).collect();
+    Err(format!(
+        "no transform named '{}'. Named transforms: {}",
+        reference,
+        if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
+    ))
+}
+
 /// Parse a TOML `variations` table into slot weights
 fn parse_variations(table: &BTreeMap<String, f64>) -> Result<[f32; NUM_VARIATIONS], String> {
     let mut weights = [0.0f32; NUM_VARIATIONS];
@@ -345,12 +369,50 @@ pub struct PathKeyDef {
     pub roll: Option<f64>,
 }
 
+/// Infinite-zoom settings ([zoom] in TOML). See `src/renorm.rs` for what the
+/// construction actually is; the short version is that one of the scene's own
+/// transforms is nominated as the scale symmetry, and the attractor is then
+/// rendered as the unbounded set invariant under it.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ZoomDef {
+    /// Which transform renormalizes: its name, or its index as a string
+    /// ("2"). It must be pure affine and contract on all three axes.
+    pub map: String,
+    /// Outer radius of the rendered band, as a multiple of the camera
+    /// distance. Lower values pull the structure in toward the fixed point.
+    #[serde(default = "default_zoom_radius")]
+    pub radius: f64,
+    /// Octaves of scale rendered below `radius`. Needs to cover at least the
+    /// depth the camera can see into, or zooming reaches an empty core.
+    #[serde(default = "default_zoom_levels")]
+    pub levels: f64,
+    /// How steeply the point budget falls off toward the fixed point, as a
+    /// power of the contraction ratio. 2 keeps on-screen density even; 0
+    /// spends the same number of points on every octave.
+    #[serde(default = "default_zoom_octave_falloff")]
+    pub octave_falloff: f64,
+}
+
+fn default_zoom_radius() -> f64 {
+    crate::renorm::ZoomSpec::default().radius as f64
+}
+
+fn default_zoom_levels() -> f64 {
+    crate::renorm::ZoomSpec::default().levels as f64
+}
+
+fn default_zoom_octave_falloff() -> f64 {
+    crate::renorm::ZoomSpec::default().octave_falloff as f64
+}
+
 /// Full scene file structure
 #[derive(Deserialize, Serialize)]
 pub struct SceneFile {
     pub meta: SceneMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<ZoomDef>,
     #[serde(rename = "transform")]
     pub transforms: Vec<TransformDef>,
 }
@@ -401,6 +463,8 @@ pub struct Scene {
     pub camera_roll: f32,
     /// Optional spline camera path ([[camera.path]] keypoints)
     pub camera_path: Option<CameraPath>,
+    /// Infinite-zoom renormalization ([zoom]), resolved to a transform index
+    pub zoom: Option<crate::renorm::ZoomSpec>,
 }
 
 impl Scene {
@@ -458,6 +522,7 @@ impl Scene {
             camera_roll: 0.0,
             background: DEFAULT_BACKGROUND,
             camera_path: None,
+            zoom: None,
         }
     }
 
@@ -590,6 +655,17 @@ impl Scene {
             _ => None,
         };
 
+        // Resolve [zoom].map, which may name a transform or index one
+        let zoom = match &scene_file.zoom {
+            Some(z) => Some(crate::renorm::ZoomSpec {
+                map: resolve_transform_ref(&z.map, &transform_names)?,
+                radius: z.radius as f32,
+                levels: z.levels as f32,
+                octave_falloff: z.octave_falloff as f32,
+            }),
+            None => None,
+        };
+
         Ok(Scene {
             name: scene_file.meta.name,
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
@@ -613,6 +689,7 @@ impl Scene {
             camera_pitch: folded.pitch,
             camera_roll: folded.roll,
             camera_path,
+            zoom,
         })
     }
 
@@ -720,6 +797,19 @@ impl Scene {
                             .collect()
                     }),
                 }
+            }),
+            zoom: self.zoom.as_ref().map(|z| ZoomDef {
+                // Names move around under edits and indices don't, but a name
+                // is what a human wants to read; prefer it when there is one.
+                map: self
+                    .transform_names
+                    .get(z.map)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_else(|| z.map.to_string()),
+                radius: tidy(z.radius),
+                levels: tidy(z.levels),
+                octave_falloff: tidy(z.octave_falloff),
             }),
             transforms,
         }

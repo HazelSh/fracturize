@@ -13,6 +13,7 @@ mod trace;
 mod pick;
 mod scene;
 mod randomize;
+mod renorm;
 mod render_job;
 mod ui;
 mod view;
@@ -162,6 +163,68 @@ struct Args {
     /// transforms and nothing else, for building an IFS up from nothing.
     #[arg(long, conflicts_with_all = ["scene", "random"])]
     blank: bool,
+
+    /// Turn on infinite zoom, renormalizing the attractor about the named (or
+    /// indexed) transform so it becomes scale-invariant: no biggest or
+    /// smallest feature, and zoom that never runs out. The map must be pure
+    /// affine and contract on all three axes. Overrides the scene's [zoom].
+    /// See "Infinite Zoom" in AGENTS.md.
+    #[arg(long, value_name = "TRANSFORM")]
+    zoom: Option<String>,
+
+    /// Octaves of scale rendered by --zoom (default 6). More = deeper before
+    /// the core empties out, at the cost of density in each one.
+    #[arg(long, requires = "zoom")]
+    zoom_levels: Option<f32>,
+
+    /// Outer radius of the --zoom band, as a multiple of camera distance
+    /// (default 1.5)
+    #[arg(long, requires = "zoom")]
+    zoom_radius: Option<f32>,
+
+    /// How steeply --zoom's point budget falls off toward the fixed point, as
+    /// a power of the contraction ratio (default 2; 0 = flat)
+    #[arg(long, requires = "zoom")]
+    zoom_falloff: Option<f32>,
+}
+
+/// Apply `--zoom` / `--zoom-levels` / `--zoom-radius` over whatever the scene
+/// authored. Fails loudly rather than silently rendering without the feature
+/// that was asked for: a scene that quietly isn't infinite looks like a bug in
+/// the maths, and that is an expensive thing to go looking for.
+fn apply_zoom_args(scene: &mut Scene, args: &Args) {
+    if let Some(reference) = &args.zoom {
+        let map = match scene::resolve_transform_ref(reference, &scene.transform_names) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("--zoom: {}", e);
+                std::process::exit(1);
+            }
+        };
+        scene.zoom = Some(renorm::ZoomSpec { map, ..scene.zoom.clone().unwrap_or_default() });
+    }
+    let Some(spec) = scene.zoom.as_mut() else { return };
+    if let Some(l) = args.zoom_levels {
+        spec.levels = l;
+    }
+    if let Some(r) = args.zoom_radius {
+        spec.radius = r;
+    }
+    if let Some(f) = args.zoom_falloff {
+        spec.octave_falloff = f;
+    }
+    // Resolve once here so a bad map is a startup error with a clear message,
+    // not a silently-disabled feature discovered in the output.
+    match renorm::Renorm::build(spec, &scene.transforms, scene.camera_distance) {
+        Ok(r) => {
+            let name = scene.transform_names.get(r.map).cloned().flatten();
+            println!("{}", r.summary(name.as_deref()));
+        }
+        Err(e) => {
+            eprintln!("infinite zoom: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Roll a random flame for `--random`, honouring `--seed` and logging the
@@ -274,6 +337,7 @@ impl ApplicationHandler for AppWrapper {
         } else if let Some(n) = crate::prefs::Prefs::load().point_count {
             scene.point_count = n;
         }
+        apply_zoom_args(&mut scene, &self.args);
 
         let view = self.args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
@@ -693,6 +757,7 @@ fn default_scene() -> Scene {
         camera_roll: default_cam.roll,
         background: scene::DEFAULT_BACKGROUND,
         camera_path: None,
+        zoom: None,
     }
 }
 
@@ -713,6 +778,7 @@ fn main() {
             None if args.random => random_scene(args.seed),
             None => default_scene(),
         };
+        apply_zoom_args(&mut scene, &args);
 
         // Effort presets set points + accumulation; explicit flags win
         let (effort_points, effort_accumulate) = match args.effort {

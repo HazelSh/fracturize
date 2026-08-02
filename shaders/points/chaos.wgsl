@@ -32,15 +32,26 @@ struct WalkerState {
     rng_state: vec4<u32>,
 }
 
+// Must match PointComputeParams in buffers.rs (176 bytes)
 struct ComputeParams {
     num_transforms: u32,
     num_walkers: u32,
     iterations_per_walker: u32,
     write_offset: u32,
     buffer_capacity: u32,
+    // Infinite-zoom renormalization; see renorm.rs. zoom_enabled = 0 for
+    // ordinary scenes, and then none of the rest is read.
+    zoom_enabled: u32,
+    zoom_levels: f32,
+    zoom_log_scale: f32,
+    zoom_octave_q: f32,
+    zoom_similar: u32,
+    zoom_scale: f32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
+    zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
+    zoom_a: mat3x3<f32>,
+    zoom_a_inv: mat3x3<f32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> points: array<Point>;
@@ -225,6 +236,87 @@ fn apply_variations(t_idx: u32, p: vec3<f32>, rng: ptr<function, vec4<u32>>) -> 
     return out;
 }
 
+// Infinite zoom: move a chaos point onto the scale being looked at.
+//
+// The renormalizing map f is a contraction with fixed point p and ratio s, and
+// the set we actually want to draw is the union of f^-m(S) over all integers m
+// — unbounded, exactly invariant under f, self-similar at every scale (see the
+// derivation in renorm.rs). Sampling it costs one round(): a chaos point at
+// radius r from p belongs on the target shell R after
+//
+//     m = round(log(R/r) / log(1/s))
+//
+// applications of f^-1. So no point is ever wasted for being too deep in the
+// attractor or too far out of it — each one is recycled to where the camera is.
+// A random 0..levels extra contractions spread the octaves below R so the band
+// is filled rather than hollow.
+//
+// The walker's own state is NOT renormalized: the chaos game runs on the plain
+// attractor, and only what gets written to the buffer is moved.
+// Which octave below the outer radius this point is dealt into.
+//
+// Octave k is a copy of the attractor scaled by s^k, so it covers s^k of the
+// frame's width and wants correspondingly fewer points to reach the same
+// density on screen. Dealing them out flat would spend most of the buffer on
+// specks around the fixed point; instead k is geometric with ratio
+// `zoom_octave_q = s^octave_falloff`, inverted from a uniform sample in closed
+// form. `q = 1` is the flat deal, and is worth having: it is what you want if
+// you are about to leave the band and fly *into* the core.
+fn octave_offset(rng: ptr<function, vec4<u32>>) -> f32 {
+    let levels = params.zoom_levels;
+    if levels <= 1.0 {
+        return 0.0;
+    }
+    let u = rand_float(rng);
+    let q = params.zoom_octave_q;
+    if q > 0.9999 {
+        return floor(u * levels);
+    }
+    // Inverse CDF of a geometric distribution truncated to 0..levels-1
+    let tail = pow(q, levels);
+    return min(floor(log(1.0 - u * (1.0 - tail)) / log(q)), levels - 1.0);
+}
+
+// Rodrigues: rotate v about a unit axis by `ang`
+fn rotate_axis(v: vec3<f32>, axis: vec3<f32>, ang: f32) -> vec3<f32> {
+    let c = cos(ang);
+    return v * c + cross(axis, v) * sin(ang) + axis * dot(axis, v) * (1.0 - c);
+}
+
+fn renormalize(pos: vec3<f32>, rng: ptr<function, vec4<u32>>) -> vec3<f32> {
+    var u = pos - params.zoom_fixed.xyz;
+    let r = length(u);
+    // NaN-safe: an escaped walker falls through unchanged and is re-seeded
+    if !(r > 1e-20) {
+        return pos;
+    }
+
+    var m = round(log(params.zoom_fixed.w / r) / params.zoom_log_scale);
+    m -= octave_offset(rng);
+    // A similarity has a closed-form power — s^-k with the rotation angle
+    // multiplied by k — so gentle maps, which need hundreds of periods to
+    // cross the band and are the ones that look best, cost the same as steep
+    // ones. Only the anisotropic fallback iterates, and there the count is
+    // capped because each step is a matrix multiply.
+    if params.zoom_similar != 0u {
+        // Bound k so s^-k alone can't overflow before it multiplies a tiny u
+        let k_max = 69.0 / params.zoom_log_scale;
+        let k = clamp(m, -k_max, k_max);
+        let aa = params.zoom_axis_angle;
+        return params.zoom_fixed.xyz
+            + pow(params.zoom_scale, -k) * rotate_axis(u, aa.xyz, -k * aa.w);
+    }
+
+    let k = i32(clamp(m, -48.0, 48.0));
+    for (var i = 0; i < k; i++) {
+        u = params.zoom_a_inv * u;
+    }
+    for (var i = 0; i > k; i--) {
+        u = params.zoom_a * u;
+    }
+    return params.zoom_fixed.xyz + u;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let walker_id = global_id.x;
@@ -264,9 +356,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let local_idx = walker_id * params.iterations_per_walker + i;
         let output_idx = (params.write_offset + local_idx) % params.buffer_capacity;
 
-        // Write point to buffer
+        // Write point to buffer, renormalized onto the visible scale band when
+        // infinite zoom is on (this is the only thing zoom changes)
+        var out_pos = pos;
+        if params.zoom_enabled != 0u {
+            out_pos = renormalize(pos, &rng);
+        }
+
         let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
-        points[output_idx] = Point(pos, color_idx);
+        points[output_idx] = Point(out_pos, color_idx);
     }
 
     // Save walker state for next frame
