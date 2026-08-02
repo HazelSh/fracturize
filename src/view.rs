@@ -13,7 +13,13 @@ use std::path::Path;
 pub struct View {
     /// Scene file this view was captured from (provenance only)
     pub scene: Option<String>,
-    /// Orbit angle in radians
+    /// Orbit angle in radians.
+    ///
+    /// Called `rotation` here and `yaw` everywhere else — the scene format,
+    /// the CLI flags, `OrbitCamera`. That is a trap worth only one person
+    /// falling into, so `yaw` is accepted as an alias. Saving still writes
+    /// `rotation`, so every view already on disk round-trips unchanged.
+    #[serde(alias = "yaw")]
     pub rotation: f32,
     /// Orbit elevation angle in radians (0 = level with the focus)
     #[serde(default)]
@@ -26,8 +32,12 @@ pub struct View {
     pub distance: f32,
     /// Orbit center / look-at point
     pub focus: [f32; 3],
-    /// Added to orbital camera position
+    /// Added to orbital camera position. Legacy: folded into yaw/pitch/
+    /// distance at load (`OrbitCamera::from_legacy`) and zero in anything
+    /// saved since. Defaulted so a hand-written view needn't carry it.
+    #[serde(default)]
     pub offset: [f32; 3],
+    #[serde(default = "default_view_point_size")]
     pub point_size: f32,
     /// The four values the shader wants, always written. They are derived
     /// from `haze` below when a view is saved; they remain the wire format
@@ -39,13 +49,13 @@ pub struct View {
     /// old view files still load. `haze_transmittance` in particular *means*
     /// something different from the `fog_brightness` it reads, but it ran over
     /// the same range from the same control, so the framing is recovered.
-    #[serde(alias = "fog_near")]
+    #[serde(alias = "fog_near", default = "default_haze_near")]
     pub haze_near: f32,
-    #[serde(alias = "fog_far")]
+    #[serde(alias = "fog_far", default = "default_haze_far")]
     pub haze_far: f32,
-    #[serde(alias = "fog_brightness")]
+    #[serde(alias = "fog_brightness", default = "default_haze_transmittance")]
     pub haze_transmittance: f32,
-    #[serde(alias = "fog_saturation")]
+    #[serde(alias = "fog_saturation", default = "default_haze_saturation")]
     pub haze_saturation: f32,
     /// Haze amount 0–1 (see `crate::haze`). `None` on views saved before the
     /// single-control rework — `App::apply_view` recovers an equivalent
@@ -68,6 +78,26 @@ pub struct View {
     /// Splat-renderer exposure (only meaningful with renderer = "splat")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<f32>,
+}
+
+fn default_view_point_size() -> f32 {
+    0.002
+}
+
+// A saved view always writes the haze block; these defaults exist only so a
+// view written by *hand* — which is now a reasonable thing to do, see the note
+// on `rotation` — can be four lines of camera and nothing else.
+fn default_haze_near() -> f32 {
+    3.0
+}
+fn default_haze_far() -> f32 {
+    4.5
+}
+fn default_haze_transmittance() -> f32 {
+    1.0
+}
+fn default_haze_saturation() -> f32 {
+    1.0
 }
 
 impl View {
@@ -132,6 +162,28 @@ mod tests {
         assert_eq!(loaded.roll, view.roll);
         assert_eq!(loaded.focus, view.focus);
         assert_eq!(loaded.scene, view.scene);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The minimum a person can reasonably type: four lines of camera, with
+    /// the scene-format spelling of yaw. Everything else defaults.
+    #[test]
+    fn a_hand_written_view_is_four_lines() {
+        let dir = std::env::temp_dir().join("fracturize_view_minimal_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("minimal.toml");
+        std::fs::write(
+            &path,
+            "yaw = 1.2\npitch = 0.3\ndistance = 2.5\nfocus = [0.0, 0.5, 0.0]\n",
+        )
+        .unwrap();
+        let v = View::load(&path).unwrap();
+        assert_eq!(v.rotation, 1.2);
+        assert_eq!(v.focus, [0.0, 0.5, 0.0]);
+        assert_eq!(v.offset, [0.0; 3]);
+        // No haze asked for, so none applied
+        assert_eq!(v.haze_transmittance, 1.0);
+        assert_eq!(v.haze_saturation, 1.0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

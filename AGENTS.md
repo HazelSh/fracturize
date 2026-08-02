@@ -777,6 +777,48 @@ View color params override the scene's when present. Load one with `--view <path
 in windowed mode the camera starts stopped so the framing holds (press O to fly the
 path).
 
+### Reading a scene without rendering it
+
+`--info` prints what a scene *is*: every transform with its share of the chaos
+walk (weights are unnormalized in the file, so this is the number you actually
+wanted), its contraction and variation blend; what the attractor **measures**
+— centre, 95th-percentile radius, per-axis spread, occupancy, from the same CPU
+walkers `randomize.rs` gates on — with the camera distance and maximum
+`point_size` that measurement implies; the render and colour properties; the
+camera and path; and which maps are eligible to carry infinite zoom, with the
+reason for each that isn't.
+
+```
+fracturize --scene scenes/koru.toml --info
+fracturize --random --seed 42 --info      # inspect a roll before rendering it
+```
+
+The measurement block is the part worth reading first: `point_size` and
+`camera distance` are the two things most often wrong in a hand-authored scene,
+and neither can be checked by looking at the file. Rotations are re-derived
+from the matrix, so an authored `(-26, 138, 0)` can print as `(154, 42, -180)`
+— same rotation, other euler branch.
+
+### Framing from the command line
+
+`--yaw --pitch --distance --roll --focus x,y,z` override the camera, winning
+over both the scene and any `--view`. They exist so that trying a framing
+doesn't require authoring a view file for it. When any of them is given,
+`--render` prints the `[camera]` block it settled on, ready to paste into a
+scene:
+
+```
+fracturize --scene scenes/octahedron.toml --distance 4 --pitch 0.4   --render /tmp/o.png --effort low --width 400 --height 300
+```
+
+Under infinite zoom the printed distance may not be the one you asked for: the
+framing is only defined up to a zoom period, so it is wrapped into the canonical
+one first. That's the same framing, said in the band's terms.
+
+View files are also hand-writable now: everything but `yaw`/`distance`/`focus`
+defaults, and `yaw` is accepted as an alias for the field the format calls
+`rotation`. Four lines is a valid view.
+
 `--render <out.png>` renders **headlessly** — no window, no event loop, no focus
 stealing — and exits, printing a timing breakdown (`setup | chaos fill | render |
 encode+save | total`) to stdout so you can budget effort. Options:

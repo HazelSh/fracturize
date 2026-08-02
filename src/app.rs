@@ -2155,6 +2155,9 @@ impl App {
                 exposure,
                 transparent,
                 control: Some(control.clone()),
+                // The dialog's framing is the view above; there are no flags
+                // in here to override it with.
+                camera: Default::default(),
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

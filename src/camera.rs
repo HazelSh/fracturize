@@ -181,6 +181,61 @@ impl OrbitCamera {
     }
 }
 
+/// Command-line camera overrides: whatever the scene or view says, but with
+/// these fields replaced.
+///
+/// This exists because the alternative was writing a view file for every
+/// framing you want to look at once, and a view file is nine required fields
+/// (two of them legacy) to change one number. Applied after the scene and any
+/// `--view`, so it wins over both.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraOverride {
+    pub yaw: Option<f32>,
+    pub pitch: Option<f32>,
+    pub distance: Option<f32>,
+    pub roll: Option<f32>,
+    pub focus: Option<Vec3>,
+}
+
+impl CameraOverride {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn apply(&self, cam: &mut OrbitCamera) {
+        if let Some(v) = self.yaw {
+            cam.yaw = v;
+        }
+        if let Some(v) = self.pitch {
+            cam.pitch = v;
+        }
+        if let Some(v) = self.distance {
+            cam.distance = v.max(1e-4);
+        }
+        if let Some(v) = self.roll {
+            cam.roll = v;
+        }
+        if let Some(v) = self.focus {
+            cam.focus = v;
+        }
+    }
+
+    /// How this framing would be written in a scene's `[camera]` block, so a
+    /// framing found by flags can be kept without transcribing it by hand.
+    pub fn describe(cam: &OrbitCamera) -> String {
+        format!(
+            "[camera]\nyaw = {:.4}\npitch = {:.4}\ndistance = {:.4}\nfocus = [{:.4}, {:.4}, {:.4}]{}",
+            cam.yaw,
+            cam.pitch,
+            cam.distance,
+            cam.focus.x,
+            cam.focus.y,
+            cam.focus.z,
+            if cam.roll == 0.0 { String::new() } else { format!("\nroll = {:.4}", cam.roll) },
+        )
+    }
+}
+
 /// Project a world-space position to screen pixel coordinates
 pub fn world_to_screen(pos: Vec3, view_proj: Mat4, w: f32, h: f32) -> Option<(f32, f32)> {
     let clip = view_proj * pos.extend(1.0);

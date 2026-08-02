@@ -17,7 +17,7 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 use rand::SeedableRng;
 
-use crate::camera::OrbitCamera;
+use crate::camera::{CameraOverride, OrbitCamera};
 use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
@@ -79,6 +79,8 @@ pub struct OfflineParams<'a> {
     /// the app's render-job dialog. `None` for the CLI paths, which are
     /// blocking by design and have a terminal to print to.
     pub control: Option<JobControl>,
+    /// Camera flags (`--yaw` etc.), applied over the scene and any view
+    pub camera: CameraOverride,
 }
 
 /// Evenly spaced values in [-1, 1] (a single sample sits at 0)
@@ -271,13 +273,24 @@ fn scene_zoom(scene: &Scene) -> Result<Option<crate::renorm::Renorm>, String> {
 }
 
 /// Base camera and render params from a view file, or scene defaults
-fn base_setup(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
+fn base_setup(
+    view: &Option<View>,
+    scene: &Scene,
+    haze_enabled: bool,
+    over: CameraOverride,
+) -> (OrbitCamera, f32, (f32, f32, f32, f32)) {
     let (mut camera, point_size, haze) = base_setup_unwrapped(view, scene, haze_enabled);
+    // Flags last: they are the most specific thing anyone said.
+    over.apply(&mut camera);
     // Under infinite zoom the framing is only defined up to a zoom period, so
     // put it in the canonical one before anything derives from it. A framing
     // that came from a view file is already there and this is a no-op.
     if let Ok(Some(zoom)) = scene_zoom(scene) {
         zoom.wrap(&mut camera);
+    }
+    if !over.is_empty() {
+        // So a framing found by flags can be kept without transcription
+        println!("{}", CameraOverride::describe(&camera));
     }
     (camera, point_size, haze)
 }
@@ -556,6 +569,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         exposure,
         transparent,
         control,
+        camera: camera_over,
     } = params;
     let t_start = Instant::now();
 
@@ -582,7 +596,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     );
     let t_fill = Instant::now();
 
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
 
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
@@ -700,6 +714,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         exposure,
         transparent,
         control,
+        camera: camera_over,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -726,7 +741,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     );
     let t_fill = Instant::now();
 
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
     let zoom = scene_zoom(&scene)?;
     // A view overrides the base framing but the scene still owns the path.
     // `path::resolve` is the same rule the app flies (see `App::camera_path`),
@@ -848,6 +863,7 @@ pub fn render_mutations(
         exposure,
         transparent,
         control,
+        camera: camera_over,
     } = params;
     let t_start = Instant::now();
 
@@ -887,7 +903,7 @@ pub fn render_mutations(
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled);
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;

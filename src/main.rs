@@ -2,6 +2,7 @@ mod app;
 mod avif;
 mod camera;
 mod haze;
+mod info;
 mod gpu;
 mod history;
 mod indicators;
@@ -186,13 +187,67 @@ struct Args {
     /// a power of the contraction ratio (default 2; 0 = flat)
     #[arg(long, requires = "zoom")]
     zoom_falloff: Option<f32>,
+
+    /// Print what this scene is — transforms with their share of the walk and
+    /// contraction, where the attractor actually lands, render properties, and
+    /// which maps could carry infinite zoom — then exit. Reads a scene without
+    /// rendering one.
+    #[arg(long)]
+    info: bool,
+
+    /// Override the camera's orbit angle, in radians. These five win over both
+    /// the scene and any --view, so a framing can be tried without authoring a
+    /// view file for it; --render prints the [camera] block it lands on.
+    #[arg(long, value_name = "RADIANS")]
+    yaw: Option<f32>,
+
+    /// Override the camera's elevation, in radians (positive = above)
+    #[arg(long, value_name = "RADIANS")]
+    pitch: Option<f32>,
+
+    /// Override the camera's orbit radius
+    #[arg(long, value_name = "D")]
+    distance: Option<f32>,
+
+    /// Override the camera's roll about the view axis, in radians
+    #[arg(long, value_name = "RADIANS")]
+    roll: Option<f32>,
+
+    /// Override the camera's look-at point, as "x,y,z"
+    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3)]
+    focus: Option<Vec3>,
+}
+
+/// Parse `--focus x,y,z`
+fn parse_vec3(s: &str) -> Result<Vec3, String> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() != 3 {
+        return Err(format!("expected three comma-separated numbers, got '{}'", s));
+    }
+    let mut v = [0.0f32; 3];
+    for (i, p) in parts.iter().enumerate() {
+        v[i] = p.parse().map_err(|_| format!("'{}' is not a number", p))?;
+    }
+    Ok(Vec3::from(v))
+}
+
+impl Args {
+    fn camera_override(&self) -> camera::CameraOverride {
+        camera::CameraOverride {
+            yaw: self.yaw,
+            pitch: self.pitch,
+            distance: self.distance,
+            roll: self.roll,
+            focus: self.focus,
+        }
+    }
 }
 
 /// Apply `--zoom` / `--zoom-levels` / `--zoom-radius` over whatever the scene
 /// authored. Fails loudly rather than silently rendering without the feature
 /// that was asked for: a scene that quietly isn't infinite looks like a bug in
 /// the maths, and that is an expensive thing to go looking for.
-fn apply_zoom_args(scene: &mut Scene, args: &Args) {
+fn apply_zoom_args(scene: &mut Scene, args: &Args, announce: bool) {
     if let Some(reference) = &args.zoom {
         let map = match scene::resolve_transform_ref(reference, &scene.transform_names) {
             Ok(map) => map,
@@ -216,14 +271,30 @@ fn apply_zoom_args(scene: &mut Scene, args: &Args) {
     // Resolve once here so a bad map is a startup error with a clear message,
     // not a silently-disabled feature discovered in the output.
     match renorm::Renorm::build(spec, &scene.transforms, scene.camera_distance) {
-        Ok(r) => {
+        Ok(r) if announce => {
             let name = scene.transform_names.get(r.map).cloned().flatten();
             println!("{}", r.summary(name.as_deref()));
         }
+        Ok(_) => {}
         Err(e) => {
             eprintln!("infinite zoom: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+/// The scene a run starts from: `--scene`, else `--blank`, `--random`, or the
+/// built-in default. One place, so `--info` reports on exactly what `--render`
+/// would draw.
+fn load_scene(args: &Args) -> Scene {
+    match &args.scene {
+        Some(path) => Scene::load(path).unwrap_or_else(|e| {
+            eprintln!("Failed to load scene '{}': {}", path, e);
+            std::process::exit(1);
+        }),
+        None if args.blank => Scene::blank(),
+        None if args.random => random_scene(args.seed),
+        None => default_scene(),
     }
 }
 
@@ -337,7 +408,7 @@ impl ApplicationHandler for AppWrapper {
         } else if let Some(n) = crate::prefs::Prefs::load().point_count {
             scene.point_count = n;
         }
-        apply_zoom_args(&mut scene, &self.args);
+        apply_zoom_args(&mut scene, &self.args, true);
 
         let view = self.args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
@@ -768,17 +839,27 @@ fn main() {
     // Parse CLI args
     let args = Args::parse();
 
+    // --info: read a scene and say what it is, without opening a device
+    if args.info {
+        let source = args
+            .scene
+            .clone()
+            .unwrap_or_else(|| match (args.blank, args.random) {
+                (true, _) => "--blank".to_string(),
+                (_, true) => "--random".to_string(),
+                _ => "built-in default".to_string(),
+            });
+        let mut scene = load_scene(&args);
+        // --info reports the zoom in its own section; don't say it twice
+        apply_zoom_args(&mut scene, &args, false);
+        print!("{}", info::report(&scene, &source));
+        return;
+    }
+
     // Headless render mode: no window, no event loop
     if let Some(out) = &args.render {
-        let mut scene = match &args.scene {
-            Some(path) => Scene::load(path).unwrap_or_else(|e| {
-                panic!("Failed to load scene '{}': {}", path, e);
-            }),
-            None if args.blank => Scene::blank(),
-            None if args.random => random_scene(args.seed),
-            None => default_scene(),
-        };
-        apply_zoom_args(&mut scene, &args);
+        let mut scene = load_scene(&args);
+        apply_zoom_args(&mut scene, &args, true);
 
         // Effort presets set points + accumulation; explicit flags win
         let (effort_points, effort_accumulate) = match args.effort {
@@ -843,6 +924,7 @@ fn main() {
             exposure,
             transparent: args.transparent,
             control: None,
+            camera: args.camera_override(),
         };
         let animated = std::path::Path::new(out)
             .extension()
