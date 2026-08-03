@@ -10,7 +10,7 @@
 //! syncs to the GPU, and commits through the unified history — this module
 //! itself never touches `app.scene` mutably, only reads it for display.
 
-use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 
 use crate::app::App;
 use crate::scene::{NUM_VARIATIONS, VARIATION_NAMES};
@@ -573,27 +573,15 @@ pub struct TrsFields {
 /// own (mutate.rs's rotate-after-scale composition is the main source of
 /// sheared, non-faithful matrices in practice).
 pub fn decompose_trs(matrix: Mat4) -> TrsFields {
-    let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
-    let (rx, ry, rz) = rotation.to_euler(EulerRot::XYZ);
-
-    let recomposed = Mat4::from_scale_rotation_translation(scale, rotation, translation);
-    let diff = (matrix - recomposed).to_cols_array();
-    let max_diff = diff.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
-    let norm = matrix
-        .to_cols_array()
-        .iter()
-        .map(|v| v * v)
-        .sum::<f32>()
-        .sqrt()
-        .max(1e-6);
-
-    let faithful = max_diff < 1e-4 * norm && matrix.determinant() >= 0.0;
-
+    let trs = crate::rot::Trs::of(matrix);
     TrsFields {
-        position: translation,
-        rotation_deg: Vec3::new(rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
-        scale,
-        faithful,
+        position: trs.translation,
+        // The transform chart: extrinsic XYZ degrees, the same convention the
+        // scene loader reads. Both go through `rot` so there is one definition
+        // of it, not two that could drift.
+        rotation_deg: Vec3::from(trs.rotation.to_xyz_degrees()),
+        scale: trs.scale,
+        faithful: trs.is_faithful(matrix),
     }
 }
 
@@ -852,17 +840,12 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
 }
 
 fn commit_trs(app: &mut App, idx: usize, cache: &TrsCache, field: &str) {
-    let rotation = Quat::from_euler(
-        EulerRot::XYZ,
-        cache.rotation_deg[0].to_radians(),
-        cache.rotation_deg[1].to_radians(),
-        cache.rotation_deg[2].to_radians(),
-    );
-    let matrix = Mat4::from_scale_rotation_translation(
-        Vec3::from(cache.scale),
-        rotation,
-        Vec3::from(cache.position),
-    );
+    let matrix = crate::rot::Trs {
+        scale: Vec3::from(cache.scale),
+        rotation: crate::rot::Orientation::from_xyz_degrees(cache.rotation_deg),
+        translation: Vec3::from(cache.position),
+    }
+    .matrix();
     let label_field = match field {
         "position" => "Position",
         "rotation" => "Rotation",

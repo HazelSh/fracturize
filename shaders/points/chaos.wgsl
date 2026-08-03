@@ -66,7 +66,11 @@ struct ComputeParams {
     zoom_octave_q: f32,
     zoom_similar: u32,
     zoom_scale: f32,
+    zoom_octave_fade: f32,      // periods of tapered outer edge; 0 = hard cut
+    zoom_fade_g: f32,           // per-period attenuation across that taper
     _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
     zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
     zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
     zoom_a: mat3x3<f32>,
@@ -272,15 +276,39 @@ fn apply_variations(t_idx: u32, p: vec3<f32>, rng: ptr<function, vec4<u32>>) -> 
 //
 // The walker's own state is NOT renormalized: the chaos game runs on the plain
 // attractor, and only what gets written to the buffer is moved.
-// Which octave below the outer radius this point is dealt into.
+// Which octave below the outer radius this point is dealt into. k = 0 is the
+// outermost shell (radius R), k = levels-1 the innermost.
 //
-// Octave k is a copy of the attractor scaled by s^k, so it covers s^k of the
-// frame's width and wants correspondingly fewer points to reach the same
-// density on screen. Dealing them out flat would spend most of the buffer on
-// specks around the fixed point; instead k is geometric with ratio
-// `zoom_octave_q = s^octave_falloff`, inverted from a uniform sample in closed
-// form. `q = 1` is the flat deal, and is worth having: it is what you want if
-// you are about to leave the band and fly *into* the core.
+// Mirrored on the CPU by `Renorm::octave_offset` in renorm.rs, which is where
+// this is tested; keep the two arithmetically identical.
+//
+// Three deals, in the order branched on:
+//
+//   q < 1     the stills-only geometric falloff. Octave k covers s^k of the
+//             frame's width and so wants fewer points for the same on-screen
+//             density; `zoom_octave_q = s^octave_falloff` is that ratio, and
+//             its inverse CDF is closed form. It makes every octave differ
+//             from its neighbour, which a wrap turns into a density step, so
+//             it is for things that never move. The taper does not compose
+//             with it and is switched off on the CPU when it is in use.
+//
+//   flat      every octave the same share. Correct for a scene that is flown,
+//             because a wrap moves the octave filling any screen region along
+//             by one and equal shares are what make that invisible.
+//
+//   tapered   flat, except that the outermost `zoom_octave_fade` periods ramp
+//             down to a sixteenth of a share at the edge. Without it the band
+//             simply stops, and a wrap walks the picture off that cliff: the
+//             outermost octave is replaced by one that isn't there, and a
+//             whole slab of structure goes between two frames. Fading trades
+//             that for a factor-of-g density step per wrap in the faded
+//             region only — which is a real cost, but g is nearer 1 than
+//             infinity is, and by the time material falls off the end there
+//             is a sixteenth of it left.
+//
+// The share of octave k is g^(F-k) for k < F and 1 for k >= F. Both pieces are
+// geometric, so this stays one sample per point with no rejection — the
+// property that makes renormalization cost nothing in the first place.
 fn octave_offset(rng: ptr<function, vec4<u32>>) -> f32 {
     let levels = params.zoom_levels;
     if levels <= 1.0 {
@@ -288,12 +316,34 @@ fn octave_offset(rng: ptr<function, vec4<u32>>) -> f32 {
     }
     let u = rand_float(rng);
     let q = params.zoom_octave_q;
-    if q > 0.9999 {
+    if q < 0.9999 {
+        // Inverse CDF of a geometric distribution truncated to 0..levels-1
+        let tail = pow(q, levels);
+        return min(floor(log(1.0 - u * (1.0 - tail)) / log(q)), levels - 1.0);
+    }
+
+    let f = params.zoom_octave_fade;
+    let g = params.zoom_fade_g;
+    if f < 1.0 || g > 0.9999 {
         return floor(u * levels);
     }
-    // Inverse CDF of a geometric distribution truncated to 0..levels-1
-    let tail = pow(q, levels);
-    return min(floor(log(1.0 - u * (1.0 - tail)) / log(q)), levels - 1.0);
+
+    let tail = pow(g, f);              // the depth of the fade, ~1/16
+    let m1 = g * (1.0 - tail) / (1.0 - g);  // mass of the ramp: shares g^1..g^F
+    let m2 = levels - f;                    // mass of the flat remainder
+    let x = u * (m1 + m2);
+    if x < m1 {
+        // Geometric in j, counting inward from the outermost faded shell:
+        // reindexing a rising ramp from its far end makes it a falling one, so
+        // this is the same inversion as the falloff branch above. j is capped
+        // because a u at the very top of the piece sends the log to exactly F.
+        let v = x / m1;
+        let j = min(floor(log(1.0 - v * (1.0 - tail)) / log(g)), f - 1.0);
+        return max(f - 1.0 - j, 0.0);
+    }
+    // Flat remainder. x < m1 + m2 = levels, so this floors no higher than the
+    // flat deal above does — partial top octave included.
+    return floor(f + (x - m1));
 }
 
 // Rodrigues: rotate v about a unit axis by `ang`
@@ -318,8 +368,15 @@ fn renormalize(pos: vec3<f32>, rng: ptr<function, vec4<u32>>) -> vec3<f32> {
     // ones. Only the anisotropic fallback iterates, and there the count is
     // capped because each step is a matrix multiply.
     if params.zoom_similar != 0u {
-        // Bound k so s^-k alone can't overflow before it multiplies a tiny u
-        let k_max = 69.0 / params.zoom_log_scale;
+        // Bound k so s^-k alone can't overflow before it multiplies a tiny u.
+        //
+        // Floored, because `m` is a whole number of periods and the clamp has
+        // to leave it one. A fractional bound makes `k` fractional exactly at
+        // the extremes, and `A^k` for non-integer k is branch-dependent — the
+        // axis/angle pair stops being the same rotation as any of the map's
+        // honest powers. Integer powers can't see the branch; fractional ones
+        // are nothing but branch. Same class of bug as the zoom loop's twist.
+        let k_max = floor(69.0 / params.zoom_log_scale);
         let k = clamp(m, -k_max, k_max);
         let aa = params.zoom_axis_angle;
         return params.zoom_fixed.xyz

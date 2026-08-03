@@ -1,0 +1,62 @@
+[meta]
+name = "Sierpinski Zoom"
+author = "Claude Opus 4.5 (Claude Code 2.0.76)"
+point_size = 0.002
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.5
+color_falloff = 0.0
+color_contrast = 1.0
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+
+[camera]
+focus = [0.0, 0.0, 0.5531]
+distance = 1.4226
+yaw = -3.1525
+pitch = 0.0035
+path_zoom_loop = 1
+
+[[camera.path]]
+yaw = -3.1525
+pitch = 0.0035
+distance = 2.2242
+focus = [0.0, 0.0, 0.3005]
+
+[zoom]
+map = "0"
+radius = 3.0
+levels = 14.0
+octave_falloff = 0.0
+
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [1.0, 0.2, 0.2]
+weight = 1.0
+color_value = 0.0
+
+[[transform]]
+translation = [0.0, 0.47, -0.17]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.2, 1.0, 0.2]
+weight = 1.0
+color_value = 0.333
+
+[[transform]]
+translation = [-0.41, -0.24, -0.17]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.2, 0.2, 1.0]
+weight = 1.0
+color_value = 0.667
+
+[[transform]]
+translation = [0.41, -0.24, -0.17]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [1.0, 1.0, 0.2]
+weight = 1.0
+color_value = 1.0

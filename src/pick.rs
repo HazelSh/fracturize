@@ -13,6 +13,7 @@
 use glam::{Mat4, Vec3};
 
 use crate::camera::world_to_screen;
+use crate::rot::Angle;
 
 /// Pick radius around the origin dot, in pixels
 pub const ORIGIN_RADIUS_PX: f32 = 12.0;
@@ -144,21 +145,14 @@ pub fn line_param_closest_to_ray(line_pt: Vec3, line_dir: Vec3, ray_o: Vec3, ray
 }
 
 /// Screen-space angle of the cursor around a center point, CCW-positive in
-/// conventional (y-up) orientation
-pub fn screen_angle(center: (f32, f32), cursor: (f32, f32)) -> f32 {
-    (-(cursor.1 - center.1)).atan2(cursor.0 - center.0)
-}
-
-/// Smallest signed angle difference a - b, wrapped to (-pi, pi]
-pub fn wrap_angle(delta: f32) -> f32 {
-    use std::f32::consts::{PI, TAU};
-    let mut d = delta % TAU;
-    if d > PI {
-        d -= TAU;
-    } else if d <= -PI {
-        d += TAU;
-    }
-    d
+/// conventional (y-up) orientation.
+///
+/// An [`Angle`] rather than an `f32` on purpose: two of these have no
+/// difference until a caller says which way round the pointer went. Use
+/// `start.shortest_to(now)`, which is right for a drag — nobody swings the
+/// mouse more than half a turn between two frames.
+pub fn screen_angle(center: (f32, f32), cursor: (f32, f32)) -> Angle {
+    Angle::from_radians((-(cursor.1 - center.1)).atan2(cursor.0 - center.0))
 }
 
 #[cfg(test)]
@@ -167,13 +161,7 @@ mod tests {
     use crate::camera::{cursor_ray, OrbitCamera};
 
     fn test_cam() -> OrbitCamera {
-        OrbitCamera {
-            yaw: 0.4,
-            pitch: 0.25,
-            distance: 3.0,
-            focus: Vec3::ZERO,
-            roll: 0.0,
-        }
+        OrbitCamera::from_chart(0.4, 0.25, 0.0, 3.0, Vec3::ZERO)
     }
 
     #[test]
@@ -284,9 +272,18 @@ mod tests {
     }
 
     #[test]
-    fn wrap_angle_wraps() {
-        assert!((wrap_angle(3.0 * std::f32::consts::PI) - std::f32::consts::PI).abs() < 1e-5);
-        assert!((wrap_angle(0.3) - 0.3).abs() < 1e-6);
-        assert!((wrap_angle(-3.5) - (-3.5 + std::f32::consts::TAU)).abs() < 1e-5);
+    fn a_drag_across_the_seam_is_a_short_move() {
+        // The pointer crossing the -x axis takes the angle from just under +pi
+        // to just over -pi. That is a small move, and the gizmo must rotate by
+        // a small amount — not by very nearly a full turn the other way.
+        let center = (100.0, 100.0);
+        let just_above = screen_angle(center, (0.0, 99.9));
+        let just_below = screen_angle(center, (0.0, 100.1));
+        let delta = just_above.shortest_to(just_below);
+        assert!(delta.abs() < 0.01, "seam crossing swung {} rad", delta.radians());
+        // The literal difference of the two representatives is the trap: it is
+        // very nearly a whole turn, and using it directly is the bug.
+        let naive = just_below.radians() - just_above.radians();
+        assert!(naive.abs() > 6.2, "fixture must actually straddle the seam ({})", naive);
     }
 }

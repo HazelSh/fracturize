@@ -73,6 +73,41 @@ class Map:
             c = 0.0
         return [math.degrees(v) for v in (a, b, c)]
 
+    def is_chartable(self):
+        """Whether XYZ euler can name this rotation without going degenerate.
+
+        Looking along the branch axis, `b` approaches +/-90 deg and the other
+        two angles collapse into one control: the numbers stay finite and stop
+        meaning anything individually. An L-system that turns hard enough hits
+        this routinely, which is why `rotvec` exists.
+        """
+        return abs(math.cos(math.asin(max(-1.0, min(1.0, self.orient[0, 2]))))) > 0.01
+
+    def rotvec(self):
+        """Decompose orient to a rotation vector (axis * angle, radians).
+
+        The exact form fracturize reads from `rotvec = [x, y, z]`: no chart, no
+        poles, and it round-trips whatever the rotation is.
+        """
+        m = self.orient
+        cos_t = max(-1.0, min(1.0, (m.trace() - 1.0) / 2.0))
+        theta = math.acos(cos_t)
+        if theta < 1e-8:
+            return [0.0, 0.0, 0.0]
+        if abs(math.pi - theta) < 1e-6:
+            # Half a turn: the skew part vanishes, so read the axis off
+            # (R + I)/2, whose columns are all parallel to it.
+            k = max(range(3), key=lambda i: m[i, i])
+            axis = [(m[i, k] + (1.0 if i == k else 0.0)) for i in range(3)]
+            n = math.sqrt(sum(v * v for v in axis)) or 1.0
+            return [v / n * theta for v in axis]
+        s = 2.0 * math.sin(theta)
+        return [
+            (m[2, 1] - m[1, 2]) / s * theta,
+            (m[0, 2] - m[2, 0]) / s * theta,
+            (m[1, 0] - m[0, 1]) / s * theta,
+        ]
+
 
 def turtle_maps(production, angle, step, branch_scale, trunk_width, colors):
     pos = np.zeros(3)
@@ -155,7 +190,13 @@ def emit(maps, name, args):
             f'name = "{m.kind}"',
             f"translation = [{', '.join(f'{v:.4f}' for v in m.pos)}]",
             f"scale = {scale}",
-            f"rotation = [{', '.join(f'{v:.2f}' for v in e)}]",
+            # Degrees while they mean something; the exact rotation vector
+            # where the euler chart has gone degenerate.
+            (
+                f"rotation = [{', '.join(f'{v:.2f}' for v in e)}]"
+                if m.is_chartable()
+                else f"rotvec = [{', '.join(f'{v:.6f}' for v in m.rotvec())}]"
+            ),
             f"color = [{', '.join(f'{v:.3f}' for v in m.color)}]",
             f"weight = {w / total_w:.5f}",
             "",

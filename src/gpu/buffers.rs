@@ -295,8 +295,16 @@ pub struct PointComputeParams {
     pub zoom_similar: u32,
     /// Contraction ratio (the closed form needs it on its own, not as a log)
     pub zoom_scale: f32,
-    /// std140 pads the scalar run out to the following vec4's alignment
-    pub _pad: u32,
+    /// Periods at the outer end of the band whose point share is tapered, so
+    /// the edge fades instead of cutting. 0 = hard edge (see `renorm.rs`)
+    pub zoom_octave_fade: f32,
+    /// Per-period attenuation across that taper
+    pub zoom_fade_g: f32,
+    /// std140 pads the scalar run out to the following vec4's alignment.
+    /// **Thirteen scalars, so this is three words, not one** — get it wrong
+    /// and the `vec4`s below land somewhere else and the zoom silently
+    /// renders from garbage rather than failing to compile.
+    pub _pad: [u32; 3],
     /// xyz = the map's fixed point, w = target radius
     pub zoom_fixed: [f32; 4],
     /// xyz = the rotation axis of `A`, w = its angle
@@ -316,10 +324,17 @@ impl PointComputeParams {
                 self.zoom_levels = z.periods;
                 self.zoom_log_scale = z.log_scale;
                 self.zoom_octave_q = z.octave_q;
+                self.zoom_octave_fade = z.fade_periods;
+                self.zoom_fade_g = z.fade_g;
                 self.zoom_similar = z.similar as u32;
                 self.zoom_scale = z.scale;
                 self.zoom_fixed = z.fixed_point.extend(z.radius).to_array();
-                self.zoom_axis_angle = z.axis.extend(z.angle).to_array();
+                self.zoom_axis_angle = z
+                    .twist
+                    .axis()
+                    .unwrap_or(glam::Vec3::Y)
+                    .extend(z.twist.magnitude())
+                    .to_array();
                 self.zoom_a = pad(z.a);
                 self.zoom_a_inv = pad(z.a_inv);
             }
@@ -349,12 +364,20 @@ mod tests {
 
     #[test]
     fn test_point_compute_params_size() {
-        // std140: 11 scalars + 1 pad (48) + two vec4 (32) + two mat3x3 as
+        // std140: 13 scalars + 3 pad (64) + two vec4 (32) + two mat3x3 as
         // padded columns (48 each)
         assert_eq!(
             std::mem::size_of::<PointComputeParams>(),
-            176,
-            "PointComputeParams must be 144 bytes to match ComputeParams in chaos.wgsl"
+            192,
+            "PointComputeParams must be 192 bytes to match ComputeParams in chaos.wgsl"
+        );
+        // The vec4s have to start where std140 puts them. A wrong pad is not a
+        // compile error in either language — it is a zoom rendered from
+        // whatever happened to be at the offset instead.
+        assert_eq!(
+            std::mem::offset_of!(PointComputeParams, zoom_fixed),
+            64,
+            "the scalar run must pad out to a 16-byte boundary"
         );
     }
 

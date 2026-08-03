@@ -236,16 +236,15 @@ pub fn report(scene: &Scene, source: &str) -> String {
     }
     line(format!(
         "camera: yaw {:.4} pitch {:.4} distance {:.3} focus ({:.3}, {:.3}, {:.3}){}",
-        scene.camera_yaw,
-        scene.camera_pitch,
+        scene.camera_orientation.yaw_pitch_roll().yaw.radians(),
+        scene.camera_orientation.yaw_pitch_roll().pitch.radians(),
         scene.camera_distance,
         scene.camera_focus.x,
         scene.camera_focus.y,
         scene.camera_focus.z,
-        if scene.camera_roll == 0.0 {
-            String::new()
-        } else {
-            format!(" roll {:.4}", scene.camera_roll)
+        match scene.camera_orientation.yaw_pitch_roll().roll.radians() {
+            r if r == 0.0 => String::new(),
+            r => format!(" roll {:.4}", r),
         }
     ));
     match &scene.camera_path {
@@ -300,7 +299,7 @@ pub fn report(scene: &Scene, source: &str) -> String {
                          ({:.3}, {:.3}, {:.3}){}",
                         name,
                         r.log_scale / std::f32::consts::LN_2,
-                        r.angle.to_degrees(),
+                        r.twist_degrees(),
                         r.fixed_point.x,
                         r.fixed_point.y,
                         r.fixed_point.z,

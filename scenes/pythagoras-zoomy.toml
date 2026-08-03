@@ -1,0 +1,59 @@
+[meta]
+name = "Pythagorazooom"
+author = "Claude Opus 5"
+point_size = 0.0018
+points_per_frame = 0
+decay = 0.8
+color_speed = 0.45
+color_falloff = 0.8
+color_contrast = 1.9
+background = [0.02, 0.024, 0.03]
+haze = 0.0
+
+[camera]
+focus = [1.7577, 1.2422, 1.156]
+distance = 5.1892
+yaw = -0.1542
+pitch = 0.325
+roll = 0.3498
+path_zoom_loop = 1
+
+[[camera.path]]
+yaw = 0.0002
+pitch = 0.3894
+distance = 4.3525
+focus = [1.7577, 1.2422, 1.156]
+roll = 0.7726
+
+[zoom]
+map = "right"
+radius = 3.0
+levels = 14.0
+octave_falloff = 0.0
+
+[[transform]]
+name = "left"
+translation = [0.0, 1.0, 0.0]
+scale = 0.7071
+rotation = [0.0, 14.0, 45.0]
+color = [0.42, 0.74, 0.46]
+weight = 0.3405
+color_value = 0.0
+
+[[transform]]
+name = "right"
+translation = [0.5, 1.5, 0.0]
+scale = 0.7071
+rotation = [0.0, -14.0, -45.0]
+color = [0.86, 0.72, 0.34]
+weight = 1.0
+color_value = 0.5
+
+[[transform]]
+name = "bough"
+translation = [0.0912, 0.4112, -0.663]
+scale = [0.25, 0.5, 0.43]
+rotation = [0.0, 0.0, 0.0]
+color = [0.52, 0.34, 0.28]
+weight = 0.28
+color_value = 1.0

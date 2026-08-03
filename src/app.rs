@@ -139,8 +139,14 @@ fn path_fingerprint(path: &CameraPath) -> u64 {
     mix(path.zoom_loop.map_or(0, |z| z.scale.to_bits()));
     mix(path.ease.map_or(2, |e| e as u32));
     mix(path.seconds.unwrap_or(f32::NAN).to_bits());
+    // Routes are part of the shape: two paths through the same keys but
+    // different windings draw different polylines.
+    for w in &path.windings {
+        mix(*w as u32);
+    }
     for k in &path.keys {
-        for v in [k.yaw, k.pitch, k.distance, k.roll, k.focus.x, k.focus.y, k.focus.z] {
+        let q = k.orientation.as_quat();
+        for v in [q.x, q.y, q.z, q.w, k.distance, k.focus.x, k.focus.y, k.focus.z] {
             mix(v.to_bits());
         }
     }
@@ -318,7 +324,7 @@ enum GizmoDragMode {
     TranslateAxis { axis: Vec3, s0: f32 },
     /// Dragging an outer edge: rotate around the transform's local axis
     /// (world direction `axis`, through the transform origin)
-    Rotate { axis: Vec3, center: (f32, f32), start_angle: f32 },
+    Rotate { axis: Vec3, center: (f32, f32), start_angle: crate::rot::Angle },
     /// Ctrl-drag anywhere on the gizmo: uniform scale, drag up = grow
     Scale { start_y: f32 },
 }
@@ -717,13 +723,7 @@ impl App {
         let prefs = crate::prefs::Prefs::load();
         let ui_state = UiState::from_prefs(&prefs);
 
-        let camera = OrbitCamera {
-            yaw: scene.camera_yaw,
-            pitch: scene.camera_pitch,
-            distance: scene.camera_distance,
-            focus: scene.camera_focus,
-            roll: scene.camera_roll,
-        };
+        let camera = scene.camera();
 
         let mut app = Self {
             gpu,
@@ -939,8 +939,22 @@ impl App {
 
     /// Set the camera's view-axis roll (the Camera window's field and its
     /// "level" button; right-drag goes through `OrbitCamera::roll_by`).
+    /// Put the horizon back level (the Camera window's "level" button).
+    ///
+    /// A no-op looking straight up or down, where every roll is level and the
+    /// request has no answer — which is a framing you can now reach.
+    pub fn level_camera(&mut self) {
+        self.camera.level();
+        self.invalidate_default_path();
+    }
+
     pub fn set_camera_roll(&mut self, roll: f32) {
-        self.camera.roll = roll;
+        let c = self.camera.chart();
+        self.camera.orientation = crate::rot::Orientation::from_yaw_pitch_roll(
+            c.yaw,
+            c.pitch,
+            crate::rot::Angle::from_radians(roll),
+        );
         self.invalidate_default_path();
     }
 
@@ -1004,14 +1018,14 @@ impl App {
     pub fn add_path_key(&mut self) {
         let was_default = self.path_is_default();
         let key = crate::path::PathKey::from_camera(&self.camera);
-        let path = self.scene.camera_path.get_or_insert_with(|| crate::path::CameraPath {
-            keys: Vec::new(),
-            closed: false,
-            zoom_loop: None,
-            ease: None,
-            seconds: None,
-        });
+        let path = self
+            .scene
+            .camera_path
+            .get_or_insert_with(|| crate::path::CameraPath::new(Vec::new(), false));
         path.keys.push(key);
+        // A new key means a new segment; give it the short way round until
+        // someone says otherwise.
+        path.fit_windings();
         log::info!(
             "Camera path keypoint {} added ({}; Ctrl+S saves it with the scene)",
             path.keys.len(),
@@ -1205,9 +1219,9 @@ impl App {
     fn current_view(&self) -> View {
         View {
             scene: self.scene_path.clone(),
-            rotation: self.camera.yaw,
-            pitch: self.camera.pitch,
-            roll: self.camera.roll,
+            rotation: self.camera.chart().yaw.radians(),
+            pitch: self.camera.chart().pitch.radians(),
+            roll: self.camera.chart().roll.radians(),
             distance: self.camera.distance,
             focus: self.camera.focus.to_array(),
             offset: [0.0; 3],
@@ -1252,11 +1266,7 @@ impl App {
     /// Fold the live values that live on `App` rather than on `Scene` back
     /// into the scene, so what gets written is what's on screen.
     fn sync_scene_for_save(&mut self) {
-        self.scene.camera_focus = self.camera.focus;
-        self.scene.camera_distance = self.camera.distance;
-        self.scene.camera_yaw = self.camera.yaw;
-        self.scene.camera_pitch = self.camera.pitch;
-        self.scene.camera_roll = self.camera.roll;
+        self.scene.set_camera(&self.camera);
         self.scene.point_size = self.point_size;
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
@@ -1966,8 +1976,12 @@ impl App {
             }
             GizmoDragMode::Rotate { axis, center, start_angle } => {
                 let angle = crate::pick::screen_angle(center, self.cursor);
-                let delta = crate::pick::wrap_angle(angle - start_angle);
-                let rot = Mat4::from_quat(glam::Quat::from_axis_angle(axis, delta));
+                // Shortest way round is right for a drag: nobody swings the
+                // pointer more than half a turn between two frames.
+                let delta = start_angle.shortest_to(angle);
+                let rot = Mat4::from_quat(
+                    crate::rot::Turn::about(axis, delta.radians()).exp().as_quat(),
+                );
                 // Rotate the linear part around the transform's own origin
                 let mut m = rot * Mat4::from_cols(
                     start.x_axis,
@@ -2087,13 +2101,7 @@ impl App {
         };
         log::info!("Loading scene: {} ({})", scene.name, path.display());
 
-        self.camera = OrbitCamera {
-            yaw: scene.camera_yaw,
-            pitch: scene.camera_pitch,
-            distance: scene.camera_distance,
-            focus: scene.camera_focus,
-            roll: scene.camera_roll,
-        };
+        self.camera = scene.camera();
         self.invalidate_default_path();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
@@ -2466,13 +2474,7 @@ impl App {
         if scene.author.trim().is_empty() {
             scene.author = self.default_author();
         }
-        self.camera = OrbitCamera {
-            yaw: scene.camera_yaw,
-            pitch: scene.camera_pitch,
-            distance: scene.camera_distance,
-            focus: scene.camera_focus,
-            roll: scene.camera_roll,
-        };
+        self.camera = scene.camera();
         self.invalidate_default_path();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
@@ -3479,6 +3481,26 @@ impl App {
         self.zoom_level = 0;
         self.point_compute.reset(&self.gpu.queue);
         self.frame_count = 0;
+    }
+
+    /// The scene's authored band settings, for the Render window's sliders.
+    pub fn zoom_spec(&self) -> Option<&crate::renorm::ZoomSpec> {
+        self.scene.zoom.as_ref()
+    }
+
+    /// Edit the band (radius / levels / octave_fade / octave_falloff).
+    ///
+    /// Every point's octave is drawn from these, so the whole cloud has to
+    /// re-form — the same refill `set_zoom_map` does. Undoable, because these
+    /// are written back into the scene's `[zoom]` by Ctrl+S, which is the line
+    /// this panel draws between an edit and a view knob.
+    pub fn set_zoom_spec(&mut self, spec: crate::renorm::ZoomSpec) {
+        let before = self.edit_snapshot();
+        self.scene.zoom = Some(spec);
+        self.refresh_zoom();
+        self.point_compute.reset(&self.gpu.queue);
+        self.frame_count = 0;
+        self.commit_edit("Zoom band", Some("zoom_band"), before);
     }
 
     /// Keep the eye inside one zoom period; see `renorm::Renorm::wrap`

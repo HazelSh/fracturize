@@ -1,46 +1,81 @@
 //! Orbit camera shared by the interactive app and the offline renderer
 //!
-//! The camera orbits `focus` at `distance`, parameterized by yaw (around Y)
-//! and pitch (elevation). The eye always sits exactly on the orbit sphere —
-//! the legacy scene/view `offset` (an eye displacement outside the sphere,
-//! which made pitching drift the view distance) is folded into equivalent
-//! yaw/pitch/distance at load time via [`OrbitCamera::from_legacy`].
+//! The camera orbits `focus` at `distance`, and its framing is a quaternion.
+//! The eye always sits exactly on the orbit sphere — the legacy scene/view
+//! `offset` (an eye displacement outside the sphere, which made pitching drift
+//! the view distance) is folded into equivalent orientation/distance at load
+//! time via [`OrbitCamera::from_legacy`].
+//!
+//! # Why not yaw/pitch/roll
+//!
+//! It used to be three angles plus a `look_at_rh`, and that gimbal-locked
+//! three separate ways:
+//!
+//! 1. Pitch was clamped to ±87.7°, because past that the Y-up basis handed to
+//!    `look_at` degenerated. Whole families of framings were simply
+//!    unreachable, and so were the camera paths through them.
+//! 2. Roll was applied by rotating world Y about the view axis. Looking
+//!    straight down, the view axis *is* world Y, so roll did nothing at all —
+//!    and the basis it fed `look_at` collapsed.
+//! 3. Splined pitch was unclamped, so Catmull-Rom overshoot past ±π/2 silently
+//!    produced a broken basis mid-flight.
+//!
+//! An [`Orientation`] has no poles, so none of those exist. Yaw/pitch/roll
+//! survive as a *chart* — a human-readable naming of an orientation, used by
+//! scene files, the CLI and the panel readout, and degenerate only where it
+//! has always been degenerate. See [`crate::rot`].
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
+
+use crate::rot::{Angle, Orientation, Turn, YawPitchRoll};
 
 pub const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_4; // 45°
 pub const Z_NEAR: f32 = 0.1;
 pub const Z_FAR: f32 = 100.0;
 
-/// Keep pitch away from the poles so look_at's Y-up basis stays valid
-const PITCH_LIMIT: f32 = 1.53; // ~87.7°
+/// Radians of orbit or roll per pixel of drag
+const DRAG_RATE: f32 = 0.006;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrbitCamera {
-    /// Orbit angle around Y (radians)
-    pub yaw: f32,
-    /// Elevation angle (radians, positive = above the focus)
-    pub pitch: f32,
+    /// The framing. Its `Z` axis points from the focus out toward the eye, its
+    /// `X` is camera right and its `Y` is camera up, so the camera looks along
+    /// its own `-Z` — the usual right-handed convention.
+    pub orientation: Orientation,
     /// Orbit radius
     pub distance: f32,
     /// Orbit center / look-at point
     pub focus: Vec3,
-    /// Rotation of the camera about its own view axis (radians). Not part of
-    /// the orbit — it doesn't move the eye — but it is part of the framing,
-    /// so it travels with the other three everywhere they go.
-    ///
-    /// Deliberately not `#[derive(Default)]`-able: a missing `roll` in a
-    /// struct literal has to be a compile error, because a silently-zeroed
-    /// one would reset the framing on the next save/load round trip and
-    /// nothing would report it.
-    pub roll: f32,
 }
 
 impl OrbitCamera {
+    /// Build from the yaw/pitch/roll chart — the form scene files, view files
+    /// and `--yaw`/`--pitch`/`--roll` are written in.
+    pub fn from_chart(yaw: f32, pitch: f32, roll: f32, distance: f32, focus: Vec3) -> Self {
+        Self {
+            orientation: Orientation::from_yaw_pitch_roll(
+                Angle::from_radians(yaw),
+                Angle::from_radians(pitch),
+                Angle::from_radians(roll),
+            ),
+            distance,
+            focus,
+        }
+    }
+
+    /// Read the framing back as yaw/pitch/roll.
+    ///
+    /// Ill-conditioned looking straight up or down, where yaw and roll become
+    /// the same control; [`Orientation::chart_is_faithful`] says when. The
+    /// orientation is always fine — it is only this naming of it that isn't.
+    pub fn chart(&self) -> YawPitchRoll {
+        self.orientation.yaw_pitch_roll()
+    }
+
     /// Build from legacy parameters where `offset` displaced the eye off the
-    /// orbit sphere: fold it into an equivalent on-sphere yaw/pitch/distance
-    /// (the eye position is preserved exactly; orbiting then keeps the view
-    /// distance constant instead of drifting with pitch)
+    /// orbit sphere: fold it into an equivalent on-sphere orientation and
+    /// distance (the eye position is preserved exactly; orbiting then keeps
+    /// the view distance constant instead of drifting with pitch)
     pub fn from_legacy(
         focus: Vec3,
         offset: Vec3,
@@ -54,45 +89,13 @@ impl OrbitCamera {
         let eye = focus + offset + distance * Vec3::new(cp * sy, sp, cp * cy);
         let v = eye - focus;
         let d = v.length().max(1e-4);
-        Self {
-            yaw: v.x.atan2(v.z),
-            pitch: (v.y / d).clamp(-1.0, 1.0).asin(),
-            distance: d,
-            focus,
+        Self::from_chart(
+            v.x.atan2(v.z),
+            (v.y / d).clamp(-1.0, 1.0).asin(),
             roll,
-        }
-    }
-
-    /// Rebuild the orbit parameters from a camera basis. `up_reference` is the
-    /// world-up handed to `look_at` (what `up_reference()` returns), not
-    /// the camera's own up; only its component perpendicular to the view axis
-    /// matters, which is what makes this the exact inverse of the accessors.
-    ///
-    /// The one thing here that isn't obvious is roll: it is recovered as the
-    /// signed angle from world Y to `up_reference` about the view axis, since
-    /// that is precisely how `up_reference()` builds it.
-    pub fn from_eye_focus_up(eye: Vec3, focus: Vec3, up_reference: Vec3) -> Self {
-        let v = eye - focus;
-        let d = v.length().max(1e-9);
-        let forward = -v / d;
-
-        let flatten = |u: Vec3| u - forward * u.dot(forward);
-        let base = flatten(Vec3::Y);
-        let target = flatten(up_reference);
-        let roll = if base.length_squared() < 1e-12 || target.length_squared() < 1e-12 {
-            0.0
-        } else {
-            let (base, target) = (base.normalize(), target.normalize());
-            base.cross(target).dot(forward).atan2(base.dot(target))
-        };
-
-        Self {
-            yaw: v.x.atan2(v.z),
-            pitch: (v.y / d).clamp(-1.0, 1.0).asin(),
-            distance: d,
+            d,
             focus,
-            roll,
-        }
+        )
     }
 
     /// Move the whole camera by a similarity about `center`: scale the eye and
@@ -101,32 +104,26 @@ impl OrbitCamera {
     /// This is how [`crate::renorm::Renorm::wrap`] steps a zoom period. It
     /// transforms the camera exactly as the world would be transformed, so a
     /// set invariant under that similarity renders identically afterwards.
-    pub fn apply_similarity(&mut self, center: Vec3, scale: f32, rot: Quat) {
-        let eye = center + rot * ((self.eye() - center) * scale);
-        let focus = center + rot * ((self.focus - center) * scale);
-        let up = rot * self.up_reference();
-        *self = Self::from_eye_focus_up(eye, focus, up);
+    ///
+    /// Exact, and that matters: this used to rebuild the camera from a
+    /// transformed eye/focus/up, which re-derived yaw through `atan2` and so
+    /// wrapped it into (-π, π] on every wrap. A multi-turn path then had to
+    /// put the lost turns back by hand, and getting that wrong was the whole
+    /// wrong-way-round bug. There is nothing to put back now.
+    pub fn apply_similarity(&mut self, center: Vec3, scale: f32, rot: Orientation) {
+        self.focus = center + rot.rotate((self.focus - center) * scale);
+        self.distance *= scale;
+        self.orientation = self.orientation.then(rot);
     }
 
     pub fn eye(&self) -> Vec3 {
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        self.focus + self.distance * Vec3::new(cp * sy, sp, cp * cy)
-    }
-
-    /// The "world up" handed to `look_at`, rolled about the view axis.
-    /// Everything else that needs a camera basis goes through this, so pans
-    /// and gizmo drags stay aligned with what's on screen when rolled.
-    fn up_reference(&self) -> Vec3 {
-        if self.roll == 0.0 {
-            Vec3::Y
-        } else {
-            Quat::from_axis_angle(self.forward(), self.roll) * Vec3::Y
-        }
+        self.focus + self.distance * self.orientation.rotate(Vec3::Z)
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.eye(), self.focus, self.up_reference())
+        // World → camera: undo the framing, then bring the eye to the origin.
+        Mat4::from_quat(self.orientation.as_quat().conjugate())
+            * Mat4::from_translation(-self.eye())
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
@@ -134,24 +131,35 @@ impl OrbitCamera {
     }
 
     pub fn forward(&self) -> Vec3 {
-        (self.focus - self.eye()).normalize_or(Vec3::NEG_Z)
+        self.orientation.rotate(Vec3::NEG_Z)
     }
 
     /// Camera-space right in world coordinates
     pub fn right(&self) -> Vec3 {
-        self.forward().cross(self.up_reference()).normalize_or(Vec3::X)
+        self.orientation.rotate(Vec3::X)
     }
 
     /// Camera-space up in world coordinates
     pub fn up(&self) -> Vec3 {
-        self.right().cross(self.forward())
+        self.orientation.rotate(Vec3::Y)
     }
 
     /// Mouse drag orbit: dx/dy in pixels. Grab-the-scene convention: drag
     /// right spins the scene rightward, drag up tilts its top toward you.
+    ///
+    /// Yaw turns about **world** up, so the horizon stays put however the
+    /// camera is rolled. Pitch turns about the camera's **own** right, so it
+    /// keeps meaning "tilt what I'm looking at" at every framing — including
+    /// straight up, where a world-space pitch axis doesn't exist.
+    ///
+    /// Nothing is clamped. Drag far enough and you go over the pole and come
+    /// out inverted, which is the point: those framings were unreachable
+    /// before, and some shots need them.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
-        self.yaw -= dx * 0.006;
-        self.pitch = (self.pitch - dy * 0.006).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.orientation = self
+            .orientation
+            .then_world(Turn::about(Vec3::Y, -dx * DRAG_RATE))
+            .then_body(Turn::about(Vec3::X, dy * DRAG_RATE));
     }
 
     /// How many pixels one world unit spans at depth `distance` from the eye.
@@ -173,11 +181,31 @@ impl OrbitCamera {
         self.distance = (self.distance * 0.9f32.powf(steps)).clamp(0.05, 80.0);
     }
 
-    /// Right-drag roll: horizontal drag spins the horizon. Kept unwrapped so
-    /// a path key at 2π reads as a full turn rather than as zero — same
-    /// convention as `PathKey::yaw`.
+    /// Right-drag roll: horizontal drag spins the horizon.
+    ///
+    /// About the camera's own view axis, so it works at every framing. The old
+    /// camera rolled by rotating world Y about the view axis, which meant that
+    /// looking straight down — where those are the same axis — roll silently
+    /// did nothing.
     pub fn roll_by(&mut self, dx: f32) {
-        self.roll += dx * 0.006;
+        self.orientation = self.orientation.then_body(Turn::about(Vec3::Z, -dx * DRAG_RATE));
+    }
+
+    /// Put the horizon back level, without moving the eye.
+    ///
+    /// A no-op looking straight up or down, where every roll is level and the
+    /// request has no answer.
+    pub fn level(&mut self) {
+        if !self.orientation.chart_is_faithful() {
+            return;
+        }
+        let c = self.chart();
+        self.orientation = Orientation::from_yaw_pitch_roll(c.yaw, c.pitch, Angle::ZERO);
+    }
+
+    /// Whether the horizon is level — nothing to do for [`Self::level`].
+    pub fn is_level(&self) -> bool {
+        !self.orientation.chart_is_faithful() || self.chart().roll.radians().abs() < 1e-6
     }
 }
 
@@ -192,8 +220,12 @@ impl OrbitCamera {
 pub struct CameraOverride {
     pub yaw: Option<f32>,
     pub pitch: Option<f32>,
-    pub distance: Option<f32>,
     pub roll: Option<f32>,
+    /// The exact form: a rotation vector in radians. Wins over the chart
+    /// fields, and is the only way to name a framing at the poles — which is
+    /// now reachable by dragging, so it needs to be nameable.
+    pub rotvec: Option<Vec3>,
+    pub distance: Option<f32>,
     pub focus: Option<Vec3>,
 }
 
@@ -202,37 +234,73 @@ impl CameraOverride {
         *self == Self::default()
     }
 
-    pub fn apply(&self, cam: &mut OrbitCamera) {
-        if let Some(v) = self.yaw {
-            cam.yaw = v;
+    /// Apply the overrides, reporting anything it could only do badly.
+    ///
+    /// The chart fields are resolved in **one** round trip, not three: near the
+    /// poles yaw and roll are the same control, and replacing them one at a
+    /// time would mean the answer depended on the order. Where the chart is
+    /// that ill-conditioned there is no good answer at all, so say so rather
+    /// than quietly producing a framing nobody asked for.
+    pub fn apply(&self, cam: &mut OrbitCamera) -> Option<String> {
+        let mut warning = None;
+
+        if let Some(v) = self.rotvec {
+            cam.orientation = Turn::from_rotation_vector(v).exp();
+        } else if self.yaw.is_some() || self.pitch.is_some() || self.roll.is_some() {
+            if !cam.orientation.chart_is_faithful() {
+                warning = Some(
+                    "--yaw/--pitch/--roll are ill-conditioned at this framing (looking very \
+                     nearly straight up or down, where yaw and roll are the same control); \
+                     use --rotvec x,y,z for an exact one"
+                        .to_string(),
+                );
+            }
+            let c = cam.chart();
+            cam.orientation = Orientation::from_yaw_pitch_roll(
+                self.yaw.map_or(c.yaw, Angle::from_radians),
+                self.pitch.map_or(c.pitch, Angle::from_radians),
+                self.roll.map_or(c.roll, Angle::from_radians),
+            );
         }
-        if let Some(v) = self.pitch {
-            cam.pitch = v;
-        }
+
         if let Some(v) = self.distance {
             cam.distance = v.max(1e-4);
-        }
-        if let Some(v) = self.roll {
-            cam.roll = v;
         }
         if let Some(v) = self.focus {
             cam.focus = v;
         }
+        warning
     }
 
     /// How this framing would be written in a scene's `[camera]` block, so a
     /// framing found by flags can be kept without transcribing it by hand.
+    ///
+    /// Falls back to `rotvec` where the chart can't say it — which is exactly
+    /// what the save path does, for the same reason.
     pub fn describe(cam: &OrbitCamera) -> String {
-        format!(
-            "[camera]\nyaw = {:.4}\npitch = {:.4}\ndistance = {:.4}\nfocus = [{:.4}, {:.4}, {:.4}]{}",
-            cam.yaw,
-            cam.pitch,
-            cam.distance,
-            cam.focus.x,
-            cam.focus.y,
-            cam.focus.z,
-            if cam.roll == 0.0 { String::new() } else { format!("\nroll = {:.4}", cam.roll) },
-        )
+        let head = format!(
+            "[camera]\ndistance = {:.4}\nfocus = [{:.4}, {:.4}, {:.4}]",
+            cam.distance, cam.focus.x, cam.focus.y, cam.focus.z
+        );
+        if cam.orientation.chart_is_faithful() {
+            let c = cam.chart();
+            format!(
+                "{}\nyaw = {:.4}\npitch = {:.4}{}",
+                head,
+                c.yaw.radians(),
+                c.pitch.radians(),
+                if c.roll.radians() == 0.0 {
+                    String::new()
+                } else {
+                    format!("\nroll = {:.4}", c.roll.radians())
+                },
+            )
+        } else {
+            let v = Orientation::IDENTITY
+                .shortest_turn_to(cam.orientation)
+                .as_rotation_vector();
+            format!("{}\nrotvec = [{:.6}, {:.6}, {:.6}]", head, v.x, v.y, v.z)
+        }
     }
 }
 
@@ -260,144 +328,259 @@ pub fn cursor_ray(inv_view_proj: Mat4, x: f32, y: f32, w: f32, h: f32) -> (Vec3,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Quat;
+
+    fn cam(yaw: f32, pitch: f32, roll: f32, distance: f32, focus: Vec3) -> OrbitCamera {
+        OrbitCamera::from_chart(yaw, pitch, roll, distance, focus)
+    }
+
+    /// The old camera's eye/up/view, written out longhand. Every "is this
+    /// still what it was" test compares against this rather than against the
+    /// implementation, so it keeps meaning something now the original is gone.
+    fn legacy_view(yaw: f32, pitch: f32, roll: f32, distance: f32, focus: Vec3) -> Mat4 {
+        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = yaw.sin_cos();
+        let eye = focus + distance * Vec3::new(cp * sy, sp, cp * cy);
+        let forward = (focus - eye).normalize();
+        let up_reference = if roll == 0.0 {
+            Vec3::Y
+        } else {
+            Quat::from_axis_angle(forward, roll) * Vec3::Y
+        };
+        Mat4::look_at_rh(eye, focus, up_reference)
+    }
+
+    #[test]
+    fn the_framing_is_exactly_what_look_at_used_to_build() {
+        // THE compatibility pin. Away from the poles — where the old camera
+        // could not go anyway — the new view matrix must be the old one.
+        for &yaw in &[-2.9f32, -0.7, 0.0, 1.3, 3.05] {
+            for &pitch in &[-1.5f32, -0.4, 0.0, 0.9, 1.5] {
+                for &roll in &[-2.2f32, 0.0, 1.1] {
+                    let focus = Vec3::new(0.2, -0.1, 0.4);
+                    let c = cam(yaw, pitch, roll, 2.5, focus);
+                    let want = legacy_view(yaw, pitch, roll, 2.5, focus);
+                    assert!(
+                        c.view_matrix().abs_diff_eq(want, 1e-4),
+                        "y{} p{} r{}:\n{:?}\nvs\n{:?}",
+                        yaw,
+                        pitch,
+                        roll,
+                        c.view_matrix(),
+                        want
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orbiting_at_zero_roll_is_the_old_angle_arithmetic() {
+        // The old orbit() was `yaw -= dx*rate; pitch -= dy*rate`. At roll 0
+        // that has to survive exactly, or every existing scene's turntable
+        // moves.
+        let mut c = cam(0.4, 0.2, 0.0, 3.0, Vec3::ZERO);
+        c.orbit(30.0, -20.0);
+        let got = c.chart();
+        assert!((got.yaw.radians() - (0.4 - 30.0 * DRAG_RATE)).abs() < 1e-5, "{:?}", got);
+        assert!((got.pitch.radians() - (0.2 + 20.0 * DRAG_RATE)).abs() < 1e-5, "{:?}", got);
+        assert!(got.roll.radians().abs() < 1e-5, "orbiting must not introduce roll: {:?}", got);
+    }
+
+    #[test]
+    fn you_can_orbit_over_the_pole() {
+        // Gimbal lock #1: pitch used to clamp at ±87.7°, so this framing was
+        // unreachable and so was any path through it. Drag a long way up and
+        // the camera must keep going, smoothly, and come out the other side.
+        let mut c = cam(0.0, 0.0, 0.0, 3.0, Vec3::ZERO);
+        let step = -20.0; // drag up
+        let mut prev = c.forward();
+        let mut crossed = false;
+        for _ in 0..60 {
+            c.orbit(0.0, step);
+            let f = c.forward();
+            // No snap, ever: 20px of drag is a small, bounded rotation.
+            assert!(
+                f.dot(prev) > 0.95,
+                "the view jumped: dot {} — that is a gimbal snap",
+                f.dot(prev)
+            );
+            assert!(f.is_finite() && c.up().is_finite(), "basis went non-finite");
+            assert!((c.up().length() - 1.0).abs() < 1e-4, "basis stopped being unit");
+            if c.eye().y < -1.0 {
+                crossed = true;
+            }
+            prev = f;
+        }
+        assert!(crossed, "60 steps of 20px should have gone over the top and down the far side");
+    }
+
+    #[test]
+    fn roll_works_looking_straight_down() {
+        // Gimbal lock #2, at the camera level. Roll used to be applied by
+        // rotating world Y about the view axis; looking down, those coincide,
+        // so it did nothing whatsoever.
+        let mut c = cam(0.0, std::f32::consts::FRAC_PI_2, 0.0, 3.0, Vec3::ZERO);
+        let before = c.up();
+        let eye_before = c.eye();
+        c.roll_by(100.0);
+
+        assert!(
+            c.up().dot(before) < 0.99,
+            "roll at the pole did nothing: up {:?} -> {:?}",
+            before,
+            c.up()
+        );
+        assert!((c.eye() - eye_before).length() < 1e-5, "roll must not move the eye");
+        assert!(c.view_matrix().is_finite(), "view matrix went non-finite at the pole");
+    }
+
+    #[test]
+    fn roll_spins_the_horizon_without_moving_the_eye() {
+        let level = cam(0.4, 0.2, 0.0, 3.0, Vec3::ZERO);
+        let rolled = cam(0.4, 0.2, std::f32::consts::FRAC_PI_2, 3.0, Vec3::ZERO);
+
+        assert!((rolled.eye() - level.eye()).length() < 1e-5);
+        assert!((rolled.forward() - level.forward()).length() < 1e-5);
+        assert!(
+            rolled.up().dot(level.up()).abs() < 1e-3,
+            "90 degrees of roll should leave up perpendicular to where it was"
+        );
+        assert!(rolled.right().dot(rolled.up()).abs() < 1e-5);
+        assert!((rolled.right().length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn levelling_removes_roll_and_leaves_the_eye_alone() {
+        let mut c = cam(0.9, -0.4, 1.2, 2.0, Vec3::new(0.1, 0.2, 0.0));
+        let eye = c.eye();
+        assert!(!c.is_level());
+        c.level();
+        assert!(c.is_level());
+        assert!((c.eye() - eye).length() < 1e-5, "levelling must not move the eye");
+        assert!(c.up().dot(Vec3::Y) > 0.0, "levelling should put up back near world up");
+
+        // At the pole there is no such thing as level, and asking must be a
+        // no-op rather than a scramble.
+        let mut pole = cam(0.3, std::f32::consts::FRAC_PI_2, 0.7, 2.0, Vec3::ZERO);
+        let before = pole;
+        pole.level();
+        assert_eq!(pole, before, "levelling at the pole must do nothing");
+    }
+
+    #[test]
+    fn similarity_is_exact_and_moves_the_camera_like_the_world() {
+        let c = cam(0.5, 0.2, 0.4, 3.0, Vec3::new(0.1, 0.0, 0.0));
+        let center = Vec3::new(0.2, -0.1, 0.3);
+        let (scale, rot) = (0.5, Orientation::from_axis_angle(Vec3::Y, 0.6));
+        let mut moved = c;
+        moved.apply_similarity(center, scale, rot);
+
+        // Exact, not merely close: the framing is composed, never re-derived.
+        assert_eq!(moved.orientation, c.orientation.then(rot));
+
+        // A point and its image under the same similarity land on the same
+        // pixel, seen by the moved and original cameras respectively.
+        let p = Vec3::new(0.7, -0.4, 0.25);
+        let q = center + rot.rotate((p - center) * scale);
+        let a = world_to_screen(q, moved.view_proj(1.6), 1280.0, 800.0).unwrap();
+        let b = world_to_screen(p, c.view_proj(1.6), 1280.0, 800.0).unwrap();
+        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{:?} vs {:?}", a, b);
+    }
+
+    #[test]
+    fn a_similarity_no_longer_wraps_the_yaw_it_reports() {
+        // The old apply_similarity rebuilt the camera through atan2, folding
+        // yaw into (-π, π] every time. Anything tracking a multi-turn route
+        // then had to add the lost turns back by hand — which is precisely the
+        // bug class this rework exists to delete.
+        let c = cam(0.2, 0.1, 0.0, 3.0, Vec3::ZERO);
+        let spin = Orientation::from_axis_angle(Vec3::Y, 2.0);
+        let mut walked = c;
+        for _ in 0..4 {
+            walked.apply_similarity(Vec3::ZERO, 1.0, spin);
+        }
+        // Four 2-radian turns is 8 radians: more than a full turn, and the
+        // composed orientation is simply right, with nothing to put back.
+        let mut expect = c.orientation;
+        for _ in 0..4 {
+            expect = expect.then(spin);
+        }
+        assert_eq!(walked.orientation, expect);
+    }
 
     #[test]
     fn legacy_offset_folding_preserves_eye() {
-        // The old camera model: eye = focus + offset + yaw-orbit at distance.
-        // from_legacy must produce the identical eye on the orbit sphere.
         let focus = Vec3::new(0.1, 0.2, 0.3);
         let offset = Vec3::new(0.0, 1.5, -0.2);
         let (yaw, distance) = (1.25f32, 3.0f32);
         let legacy_eye =
             focus + offset + Vec3::new(yaw.sin() * distance, 0.0, yaw.cos() * distance);
 
-        let cam = OrbitCamera::from_legacy(focus, offset, distance, yaw, 0.0, 0.0);
-        assert!((cam.eye() - legacy_eye).length() < 1e-4);
-        // And the distance is now the true eye-focus distance (constant under pitch)
-        assert!((cam.distance - (legacy_eye - focus).length()).abs() < 1e-4);
-        // Folding is idempotent once offset is zero
-        let cam2 =
-            OrbitCamera::from_legacy(cam.focus, Vec3::ZERO, cam.distance, cam.yaw, cam.pitch, 0.0);
-        assert!((cam2.eye() - cam.eye()).length() < 1e-4);
-    }
+        let c = OrbitCamera::from_legacy(focus, offset, distance, yaw, 0.0, 0.0);
+        assert!((c.eye() - legacy_eye).length() < 1e-4);
+        assert!((c.distance - (legacy_eye - focus).length()).abs() < 1e-4);
 
-    #[test]
-    fn roll_spins_the_horizon_without_moving_the_eye() {
-        let level = OrbitCamera {
-            yaw: 0.4,
-            pitch: 0.2,
-            distance: 3.0,
-            focus: Vec3::ZERO,
-            roll: 0.0,
-        };
-        let rolled = OrbitCamera { roll: std::f32::consts::FRAC_PI_2, ..level };
-
-        // The eye is an orbit property; roll must not touch it.
-        assert!((rolled.eye() - level.eye()).length() < 1e-5);
-        assert!((rolled.forward() - level.forward()).length() < 1e-5);
-
-        // A quarter turn takes the old up to the old right (or its negation,
-        // depending on handedness) — either way it stops being the old up.
-        assert!(
-            rolled.up().dot(level.up()).abs() < 1e-3,
-            "90 degrees of roll should leave up perpendicular to where it was"
+        let chart = c.chart();
+        let c2 = OrbitCamera::from_legacy(
+            c.focus,
+            Vec3::ZERO,
+            c.distance,
+            chart.yaw.radians(),
+            chart.pitch.radians(),
+            0.0,
         );
-        // And the basis stays orthonormal, so pans in a rolled view still
-        // move the scene with the pointer.
-        assert!(rolled.right().dot(rolled.up()).abs() < 1e-5);
-        assert!((rolled.right().length() - 1.0).abs() < 1e-5);
-        assert!((rolled.up().length() - 1.0).abs() < 1e-5);
+        assert!((c2.eye() - c.eye()).length() < 1e-4);
     }
 
     #[test]
-    fn zero_roll_is_exactly_the_old_behaviour() {
-        // Every existing scene and view loads with roll 0; their framing must
-        // be bit-for-bit what it was before roll existed.
-        let cam = OrbitCamera {
-            yaw: 1.1,
-            pitch: -0.3,
-            distance: 2.5,
-            focus: Vec3::new(0.2, 0.0, -0.1),
-            roll: 0.0,
-        };
-        assert_eq!(cam.view_matrix(), Mat4::look_at_rh(cam.eye(), cam.focus, Vec3::Y));
+    fn overrides_resolve_the_chart_in_one_round_trip() {
+        let mut c = cam(0.5, 0.3, 0.2, 3.0, Vec3::ZERO);
+        let over = CameraOverride { yaw: Some(1.0), ..Default::default() };
+        assert!(over.apply(&mut c).is_none(), "an ordinary framing should not warn");
+        let got = c.chart();
+        assert!((got.yaw.radians() - 1.0).abs() < 1e-5);
+        assert!((got.pitch.radians() - 0.3).abs() < 1e-5, "pitch must survive");
+        assert!((got.roll.radians() - 0.2).abs() < 1e-5, "roll must survive");
     }
 
     #[test]
-    fn eye_focus_up_roundtrips() {
-        // from_eye_focus_up has to be the exact inverse of the accessors, or
-        // the zoom wrap drifts a little every period and the seam opens up.
-        for &roll in &[0.0f32, 0.9, -2.4, 3.0] {
-            let cam = OrbitCamera {
-                yaw: 1.9,
-                pitch: -0.6,
-                distance: 2.75,
-                focus: Vec3::new(-0.3, 0.15, 0.8),
-                roll,
-            };
-            let back = OrbitCamera::from_eye_focus_up(cam.eye(), cam.focus, cam.up_reference());
-            assert!((back.eye() - cam.eye()).length() < 1e-5);
-            assert!((back.distance - cam.distance).abs() < 1e-5);
-            assert!((back.roll - cam.roll).abs() < 1e-4, "roll {} -> {}", cam.roll, back.roll);
-            assert!(back.view_matrix().abs_diff_eq(cam.view_matrix(), 1e-4));
-        }
-    }
+    fn overrides_say_so_at_the_poles_and_offer_a_way_through() {
+        let mut c = cam(0.0, std::f32::consts::FRAC_PI_2, 0.0, 3.0, Vec3::ZERO);
+        let warned = CameraOverride { yaw: Some(1.0), ..Default::default() }.apply(&mut c);
+        assert!(warned.is_some(), "--yaw at the pole must warn, not silently guess");
 
-    #[test]
-    fn similarity_moves_the_camera_like_the_world() {
-        let cam = OrbitCamera {
-            yaw: 0.5,
-            pitch: 0.2,
-            distance: 3.0,
-            focus: Vec3::new(0.1, 0.0, 0.0),
-            roll: 0.4,
-        };
-        let center = Vec3::new(0.2, -0.1, 0.3);
-        let (scale, rot) = (0.5, Quat::from_rotation_y(0.6));
-        let mut moved = cam;
-        moved.apply_similarity(center, scale, rot);
-
-        // A point and its image under the same similarity must land on the
-        // same pixel, seen by the moved and original cameras respectively.
-        let p = Vec3::new(0.7, -0.4, 0.25);
-        let q = center + rot * ((p - center) * scale);
-        let a = world_to_screen(q, moved.view_proj(1.6), 1280.0, 800.0).unwrap();
-        let b = world_to_screen(p, cam.view_proj(1.6), 1280.0, 800.0).unwrap();
-        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{:?} vs {:?}", a, b);
+        // rotvec always works, and describe() offers it back.
+        let mut d = cam(0.0, std::f32::consts::FRAC_PI_2, 0.0, 3.0, Vec3::ZERO);
+        let target = Vec3::new(0.3, -1.2, 0.4);
+        assert!(
+            CameraOverride { rotvec: Some(target), ..Default::default() }.apply(&mut d).is_none()
+        );
+        assert!(d.orientation.angle_to(Turn::from_rotation_vector(target).exp()) < 1e-5);
+        assert!(
+            CameraOverride::describe(&c).contains("rotvec"),
+            "a pole framing must be describable: {}",
+            CameraOverride::describe(&c)
+        );
     }
 
     #[test]
     fn cursor_ray_center_points_at_focus() {
-        let cam = OrbitCamera {
-            yaw: 0.7,
-            pitch: 0.3,
-            distance: 3.0,
-            focus: Vec3::ZERO,
-            roll: 0.0,
-        };
-        let vp = cam.view_proj(16.0 / 9.0);
+        let c = cam(0.7, 0.3, 0.0, 3.0, Vec3::ZERO);
+        let vp = c.view_proj(16.0 / 9.0);
         let (origin, dir) = cursor_ray(vp.inverse(), 640.0, 360.0, 1280.0, 720.0);
-        // The ray through the screen center passes through the focus
-        let to_focus = (cam.focus - origin).normalize();
+        let to_focus = (c.focus - origin).normalize();
         assert!(dir.dot(to_focus) > 0.999, "dir {:?} vs {:?}", dir, to_focus);
     }
 
     #[test]
     fn screen_roundtrip() {
-        let cam = OrbitCamera {
-            yaw: 0.2,
-            pitch: -0.4,
-            distance: 4.0,
-            focus: Vec3::new(0.5, 0.0, -0.2),
-            roll: 0.0,
-        };
-        let vp = cam.view_proj(16.0 / 9.0);
+        let c = cam(0.2, -0.4, 0.0, 4.0, Vec3::new(0.5, 0.0, -0.2));
+        let vp = c.view_proj(16.0 / 9.0);
         let p = Vec3::new(0.3, 0.1, 0.2);
         let (sx, sy) = world_to_screen(p, vp, 1280.0, 720.0).unwrap();
         let (origin, dir) = cursor_ray(vp.inverse(), sx, sy, 1280.0, 720.0);
-        // p lies on the reconstructed ray
         let t = (p - origin).dot(dir);
-        let closest = origin + dir * t;
-        assert!((closest - p).length() < 1e-3);
+        assert!(((origin + dir * t) - p).length() < 1e-3);
     }
 }

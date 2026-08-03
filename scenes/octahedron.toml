@@ -4,6 +4,7 @@ author = "Claude Opus 4.5 (Claude Code 2.0.76)"
 point_size = 0.004
 points_per_frame = 2000
 decay = 0.8
+haze = 0.78
 
 # Octahedron: 6 vertices along the axes
 # Like Sierpinski but with 6 points instead of 4
@@ -13,6 +14,7 @@ decay = 0.8
 translation = [0.5, 0.0, 0.0]
 scale = 0.4
 color = [1.0, 0.2, 0.2]
+weight = 0.735
 
 # -X vertex (cyan)
 [[transform]]
@@ -20,11 +22,25 @@ translation = [-0.5, 0.0, 0.0]
 scale = 0.4
 color = [0.2, 1.0, 1.0]
 
+[[camera.path]]
+yaw = -1.5702
+pitch = 0.0011
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
 # +Y vertex (green)
 [[transform]]
 translation = [0.0, 0.5, 0.0]
 scale = 0.4
 color = [0.2, 1.0, 0.2]
+
+[[camera.path]]
+yaw = -1.5702
+pitch = 0.0011
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
 
 # -Y vertex (magenta)
 [[transform]]
@@ -32,14 +48,78 @@ translation = [0.0, -0.5, 0.0]
 scale = 0.4
 color = [1.0, 0.2, 1.0]
 
+[[camera.path]]
+yaw = -0.803
+pitch = 0.0069
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
 # +Z vertex (blue)
 [[transform]]
 translation = [0.0, 0.0, 0.5]
 scale = 0.4
 color = [0.2, 0.2, 1.0]
 
+[[camera.path]]
+yaw = -0.803
+pitch = 0.0069
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
 # -Z vertex (yellow)
 [[transform]]
 translation = [0.0, 0.0, -0.5]
 scale = 0.4
 color = [1.0, 1.0, 0.2]
+
+[camera]
+distance = 2.5614
+yaw = -0.8038
+pitch = 0.0172
+roll = 0.0168
+path_closed = true
+path_seconds = 19.8
+
+[[camera.path]]
+yaw = -0.8419
+pitch = 0.5628
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0195
+
+[[camera.path]]
+yaw = -0.8419
+pitch = 0.5628
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0195
+
+[[camera.path]]
+yaw = -2.3251
+pitch = 1.0506
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0333
+
+[[camera.path]]
+yaw = -2.3251
+pitch = 1.0506
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0333
+
+[[camera.path]]
+yaw = -1.9386
+pitch = 1.5532
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 1.2158
+
+[[camera.path]]
+yaw = -1.9386
+pitch = 1.5532
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 1.2158

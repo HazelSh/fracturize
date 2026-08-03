@@ -5,3 +5,4 @@ Cargo.lock
 /views
 __pycache__/
 *.pdf
+/.claude

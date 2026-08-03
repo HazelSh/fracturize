@@ -1,0 +1,112 @@
+# Octave edge test — the hard case for the infinite zoom's outer boundary
+#
+# A diagnostic scene, not a pretty one. It is built to make the band's outer
+# edge as visible as it can possibly be, so that a fix for it can be seen
+# rather than argued about:
+#
+#   * The zoom map "halve" is scale 0.5, no rotation, no translation. Its fixed
+#     point is the origin and one zoom period is exactly one octave, so a wrap
+#     is nothing but "double the camera distance" — which means a still at
+#     distance d and a still at distance 2d are the *same picture* if the
+#     renormalized set is really scale-invariant, and differ by exactly the
+#     material the finite band is missing if it isn't. No rotation to line up,
+#     no interpolation, no animation noise: two stills and a subtraction.
+#
+#   * The other maps throw arms a long way out from the origin, so the outer
+#     octaves are full of large, legible structure sitting forward of the
+#     camera — the case Hazel reported, where zooming in drops a recognisable
+#     chunk all at once instead of letting it go.
+#
+#   * haze is low on purpose. Haze is what normally hides the edge, and
+#     `renorm::MIN_RADIUS` is derived on the assumption that it takes material
+#     all the way to nothing — which is only true at amount 1.0. Scenes that
+#     want little or no haze (both of Hazel's zoom drafts run haze = 0.0) have
+#     nothing covering the edge, and this is what they look like.
+#
+# Usage:
+#   fracturize --scene scenes/octave-edge-test.toml --splat --info
+#   fracturize --scene scenes/octave-edge-test.toml --splat --render a.png --distance 2.0
+#   fracturize --scene scenes/octave-edge-test.toml --splat --render b.png --distance 4.0
+#   # a and b should be the same image. What differs is the cut.
+#
+# Claude Opus 5, 2026-08-03.
+
+[meta]
+name = "Octave edge test"
+author = "Claude Opus 5"
+point_size = 0.0022
+point_count = 8_000_000
+color_speed = 0.5
+color_falloff = 0.75
+color_contrast = 2.2
+haze = 0.12
+background = [0.015, 0.016, 0.022]
+
+[camera]
+distance = 2.0
+yaw = 0.55
+pitch = 0.22
+focus = [0.0, 0.0, 0.0]
+path_seconds = 3.0
+# One period straight down the zoom, closing on itself: the last frame and the
+# first are the same picture if the band is really scale-invariant, so the seam
+# between them is the wrap discontinuity with nothing else mixed in.
+path_zoom_loop = 1
+
+[[camera.path]]
+yaw = 0.55
+pitch = 0.22
+distance = 2.0
+focus = [0.0, 0.0, 0.0]
+
+# The scale symmetry: the plainest one there is. Zero translation puts the
+# fixed point on the origin; a half scale with no rotation makes one period
+# exactly one octave and exactly a dolly.
+[[transform]]
+name = "halve"
+translation = [0.0, 0.0, 0.0]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.34, 0.55, 0.86]
+weight = 1.4
+
+# Three arms flung well clear of the origin. These are what fills the outer
+# octaves: at the top of the band each of them is a slab most of the frame
+# wide, which is the material that currently disappears in one frame at a wrap.
+[[transform]]
+name = "arm_a"
+translation = [1.05, 0.28, -0.12]
+scale = 0.46
+rotation = [0.0, 27.0, 15.0]
+color = [0.94, 0.66, 0.28]
+weight = 1.2
+
+[[transform]]
+name = "arm_b"
+translation = [-0.52, 0.94, 0.34]
+scale = 0.46
+rotation = [18.0, -40.0, -22.0]
+color = [0.88, 0.36, 0.42]
+weight = 1.2
+
+[[transform]]
+name = "arm_c"
+translation = [-0.36, -0.78, -0.86]
+scale = 0.44
+rotation = [-30.0, 12.0, 48.0]
+color = [0.46, 0.88, 0.68]
+weight = 1.1
+
+[zoom]
+map = "halve"
+radius = 3.0
+levels = 14.0
+octave_falloff = 0.0
+# This scene is the reason octave_fade exists, and one of the few that should
+# set it. With it at 0 the outermost octave carries 3.4% of the frame and goes
+# as one solid slab at every wrap (worst pixel 0.40). At 3.0 the same total
+# change is spread across the outer third of the band: worst pixel 0.30, and
+# the difference image is faint texture instead of a chunk of tree. It does not
+# make the wrap's *total* brightness step smaller — nothing can, the shares
+# telescope — it makes it stop looking like a cut.
+octave_fade = 3.0

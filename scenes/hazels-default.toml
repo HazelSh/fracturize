@@ -1,0 +1,100 @@
+[meta]
+name = "Hazels Default"
+author = ""
+point_size = 0.002
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.5
+color_falloff = 3.0
+color_contrast = 6.0
+background = [0.0045, 0.0045, 0.0082]
+haze = 0.78
+color_mode = "mix"
+
+[camera]
+focus = [0.2813, -0.0552, 0.2892]
+distance = 0.6703
+yaw = 0.7798
+pitch = 0.3621
+path_closed = true
+roll = -0.0945
+
+[[camera.path]]
+yaw = -1.7298
+pitch = 0.9062
+distance = 3.7037
+focus = [0.4216, -0.0004, 0.3566]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -2.3958
+pitch = 1.2093
+distance = 2.7
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -3.3679
+pitch = 0.5677
+distance = 1.7715
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -4.139
+pitch = 0.3669
+distance = 1.046
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -5.0081
+pitch = 0.5073
+distance = 0.6863
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -6.5531
+pitch = -0.0897
+distance = 0.7626
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -7.3631
+pitch = -0.0987
+distance = 1.4349
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -7.828
+pitch = 0.1563
+distance = 2.7
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[camera.path]]
+yaw = -8.4309
+pitch = 0.7169
+distance = 3.7037
+focus = [0.2813, -0.0552, 0.2892]
+roll = 0.0045
+
+[[transform]]
+translation = [0.4446, 0.2411, 0.2901]
+scale = 0.8248
+rotation = [179.2142, 87.6349, -179.2613]
+color = [1.0, 0.2863, 0.0]
+weight = 1.0
+color_value = 0.0
+
+[[transform]]
+translation = [-0.2246, -0.2132, 0.2685]
+scale = 0.5853
+rotation = [0.0, 0.0, -90.6284]
+color = [0.8941, 0.8941, 0.2588]
+weight = 1.0
+color_value = 0.5
+color_speed = 1.0

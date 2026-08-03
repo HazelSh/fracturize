@@ -1,4 +1,4 @@
-use glam::{EulerRot, Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::palette::spec::PaletteDef;
@@ -334,7 +334,16 @@ pub struct TransformDef {
     #[serde(default = "default_scale")]
     pub scale: ScaleDef,
     #[serde(default)]
-    pub rotation: [f64; 3], // Euler angles in degrees (pitch, yaw, roll)
+    pub rotation: [f64; 3], // Euler angles in degrees, extrinsic XYZ
+    /// The exact rotation: a rotation vector in radians. Wins over `rotation`.
+    ///
+    /// XYZ euler is a chart, and it has poles: a rotation near a quarter turn
+    /// about Y comes back as something like `[179.2, 87.6, -179.3]`, which is
+    /// correct, unreadable, and one rounding error away from being wrong. Only
+    /// written where the degrees can't reproduce the matrix, so ordinary
+    /// scenes — and `tools/lsystem_to_ifs.py` — carry on unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotvec: Option<[f64; 3]>,
     pub color: [f64; 3],
     #[serde(default = "default_weight")]
     pub weight: f64,
@@ -401,6 +410,16 @@ pub struct CameraDef {
     /// Roll about the view axis in radians (0 = horizon level)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roll: Option<f64>,
+    /// The exact framing: a rotation vector in radians. Wins over
+    /// yaw/pitch/roll when present.
+    ///
+    /// yaw/pitch/roll are a chart, and a chart has poles: looking straight up
+    /// or down they collapse into one control and stop naming a framing
+    /// individually. Those framings are reachable now, so they need a way to
+    /// be written down. Only used where the chart can't do the job, so
+    /// ordinary scenes stay readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotvec: Option<[f64; 3]>,
     /// Camera path: loop back to the first keypoint (seamless loops)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_closed: Option<bool>,
@@ -427,6 +446,15 @@ pub struct CameraDef {
 /// back to the base [camera] framing, so a key only states what changes.
 #[derive(Deserialize, Serialize, Clone, Copy, Default)]
 pub struct PathKeyDef {
+    /// The exact framing: a rotation vector in radians. Wins over
+    /// yaw/pitch/roll. See [`CameraDef::rotvec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotvec: Option<[f64; 3]>,
+    /// Extra whole turns taken on the segment *leaving* this key, beyond the
+    /// short way round. Only written where the yaw column can't carry the
+    /// route on its own — so a hand-edited `yaw` can never contradict it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<i32>,
     /// Orbit angle in radians. Unbounded: successive keys spanning more than
     /// a full turn author spirals; nothing is wrapped.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -466,6 +494,18 @@ pub struct ZoomDef {
     /// still, where it evens out density and nothing ever wraps.
     #[serde(default = "default_zoom_octave_falloff")]
     pub octave_falloff: f64,
+    /// Octaves over which the band's *outer* edge fades out instead of
+    /// stopping dead. The edge is a cliff otherwise, and a wrap walks the
+    /// picture off it — a whole octave of structure disappears between two
+    /// frames. Set 0 for the old hard edge. Ignored when `octave_falloff` is
+    /// non-zero, which already varies density per octave.
+    ///
+    /// **Omit it and it is derived from `haze`** (`renorm::auto_octave_fade`),
+    /// because haze is what decides whether the edge is visible at all and so
+    /// whether fading it is worth anything. Written back out resolved, so a
+    /// saved scene says what it is actually doing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub octave_fade: Option<f64>,
 }
 
 fn default_zoom_radius() -> f64 {
@@ -547,12 +587,13 @@ pub struct Scene {
     pub camera_focus: Vec3,
     /// Camera orbit radius
     pub camera_distance: f32,
-    /// Camera orbit angle around Y (radians)
-    pub camera_yaw: f32,
-    /// Camera orbit elevation (radians)
-    pub camera_pitch: f32,
-    /// Camera roll about the view axis (radians)
-    pub camera_roll: f32,
+    /// Camera framing.
+    ///
+    /// A quaternion rather than the yaw/pitch/roll the file is written in:
+    /// those are a chart, they degenerate at the poles, and holding them here
+    /// meant every framing in the app had to be one the chart could name. The
+    /// conversion happens once, at the file boundary.
+    pub camera_orientation: crate::rot::Orientation,
     /// Optional spline camera path ([[camera.path]] keypoints)
     pub camera_path: Option<CameraPath>,
     /// Infinite-zoom renormalization ([zoom]), resolved to a transform index
@@ -560,6 +601,22 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// The scene's base framing, as a camera.
+    pub fn camera(&self) -> crate::camera::OrbitCamera {
+        crate::camera::OrbitCamera {
+            orientation: self.camera_orientation,
+            distance: self.camera_distance,
+            focus: self.camera_focus,
+        }
+    }
+
+    /// Adopt a camera as the scene's base framing.
+    pub fn set_camera(&mut self, cam: &crate::camera::OrbitCamera) {
+        self.camera_orientation = cam.orientation;
+        self.camera_distance = cam.distance;
+        self.camera_focus = cam.focus;
+    }
+
     /// An empty canvas: the smallest scene that still renders something, for
     /// building an IFS up from nothing rather than mutating one that exists.
     ///
@@ -611,9 +668,11 @@ impl Scene {
             colormap,
             camera_focus: Vec3::ZERO,
             camera_distance: 3.0,
-            camera_yaw: 0.0,
-            camera_pitch: 0.3,
-            camera_roll: 0.0,
+            camera_orientation: crate::rot::Orientation::from_yaw_pitch_roll(
+                crate::rot::Angle::ZERO,
+                crate::rot::Angle::from_radians(0.3),
+                crate::rot::Angle::ZERO,
+            ),
             background: DEFAULT_BACKGROUND,
             camera_path: None,
             zoom: None,
@@ -650,19 +709,26 @@ impl Scene {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                // Convert euler angles (degrees) to quaternion
-                let rotation = Quat::from_euler(
-                    glam::EulerRot::XYZ,
-                    (t.rotation[0] as f32).to_radians(),
-                    (t.rotation[1] as f32).to_radians(),
-                    (t.rotation[2] as f32).to_radians(),
-                );
+                // The transform chart is extrinsic XYZ degrees, and stays
+                // that way: redefining it would silently reinterpret every
+                // `rotation = [...]` on disk and in tools/lsystem_to_ifs.py.
+                // An exact `rotvec` wins where a matrix won't survive it.
+                let rotation = match t.rotvec {
+                    Some(v) => crate::rot::Turn::from_rotation_vector(Vec3::from(
+                        v.map(|x| x as f32),
+                    ))
+                    .exp(),
+                    None => crate::rot::Orientation::from_xyz_degrees(
+                        t.rotation.map(|v| v as f32),
+                    ),
+                };
 
-                let matrix = Mat4::from_scale_rotation_translation(
-                    t.scale.to_vec3(),
+                let matrix = crate::rot::Trs {
+                    scale: t.scale.to_vec3(),
                     rotation,
-                    Vec3::from(t.translation.map(|v| v as f32)),
-                );
+                    translation: Vec3::from(t.translation.map(|v| v as f32)),
+                }
+                .matrix();
 
                 // Color value: use explicit if provided, otherwise distribute evenly
                 let color_value = t.color_value.map(|v| v as f32).unwrap_or_else(|| {
@@ -741,8 +807,8 @@ impl Scene {
         };
         let camera_offset = cam.offset.map(|f| Vec3::from(f.map(|v| v as f32))).unwrap_or(default_offset);
         let camera_distance = cam.distance.unwrap_or(3.0) as f32;
-        // Fold the legacy eye offset into on-sphere yaw/pitch/distance
-        let folded = crate::camera::OrbitCamera::from_legacy(
+        // Fold the legacy eye offset into an on-sphere framing and distance
+        let mut folded = crate::camera::OrbitCamera::from_legacy(
             camera_focus,
             camera_offset,
             camera_distance,
@@ -750,6 +816,13 @@ impl Scene {
             cam.pitch.unwrap_or(0.0) as f32,
             cam.roll.unwrap_or(0.0) as f32,
         );
+        // An exact framing wins over the chart: it is what gets written for
+        // anything the chart can't name, so it has to be what gets read.
+        if let Some(v) = cam.rotvec {
+            folded.orientation =
+                crate::rot::Turn::from_rotation_vector(Vec3::from(v.map(|x| x as f32))).exp();
+        }
+        let base_chart = folded.chart();
 
         // Resolve [[camera.path]] keypoints; omitted fields inherit the base
         // (folded) camera framing
@@ -763,21 +836,80 @@ impl Scene {
                                 (or one, with path_zoom_loop)"
                         .to_string());
                 }
+                // Each key's chart, with omitted fields inherited from the
+                // base framing. Kept alongside the resolved orientations
+                // because the *route* lives here and nowhere else: a key at
+                // yaw 6.28 is the same framing as one at 0, and only the
+                // number the author wrote says a whole turn happened.
+                let charts: Vec<crate::rot::YawPitchRoll> = defs
+                    .iter()
+                    .map(|k| crate::rot::YawPitchRoll {
+                        yaw: k
+                            .yaw
+                            .map_or(base_chart.yaw, |v| crate::rot::Angle::from_radians(v as f32)),
+                        pitch: k
+                            .pitch
+                            .map_or(base_chart.pitch, |v| crate::rot::Angle::from_radians(v as f32)),
+                        roll: k
+                            .roll
+                            .map_or(base_chart.roll, |v| crate::rot::Angle::from_radians(v as f32)),
+                    })
+                    .collect();
+
+                let keys: Vec<PathKey> = defs
+                    .iter()
+                    .zip(&charts)
+                    .map(|(k, c)| PathKey {
+                        orientation: match k.rotvec {
+                            Some(v) => crate::rot::Turn::from_rotation_vector(Vec3::from(
+                                v.map(|x| x as f32),
+                            ))
+                            .exp(),
+                            None => crate::rot::Orientation::from_yaw_pitch_roll(
+                                c.yaw, c.pitch, c.roll,
+                            ),
+                        },
+                        distance: k.distance.map(|v| v as f32).unwrap_or(folded.distance),
+                        focus: k
+                            .focus
+                            .map(|f| Vec3::from(f.map(|v| v as f32)))
+                            .unwrap_or(camera_focus),
+                    })
+                    .collect();
+
+                let closed = cam.path_closed.unwrap_or(false);
+                let n = keys.len();
+                let segments = match (n, closed) {
+                    (0, _) => 0,
+                    (1, _) => 0,
+                    (n, true) => n,
+                    (n, false) => n - 1,
+                };
+                // An explicit `turns` wins; otherwise read the route off the
+                // chart the author drew. A key written as an exact rotvec has
+                // no chart to read, so it takes the short way unless told.
+                let windings = (0..segments)
+                    .map(|i| {
+                        let j = (i + 1) % n;
+                        match defs[i].turns {
+                            Some(t) => t,
+                            // A closed path's last segment is the one nobody
+                            // wrote: it runs back to key 0, and the documented
+                            // convention is that it takes the shortest way
+                            // there. Reading the literal jump from the last
+                            // key's yaw to the first would send a corkscrew
+                            // all the way back round the way it came.
+                            None if j < i => 0,
+                            None if defs[i].rotvec.is_some() || defs[j].rotvec.is_some() => 0,
+                            None => crate::rot::winding_from_chart(charts[i], charts[j]),
+                        }
+                    })
+                    .collect();
+
                 Some(CameraPath {
-                    keys: defs
-                        .iter()
-                        .map(|k| PathKey {
-                            yaw: k.yaw.map(|v| v as f32).unwrap_or(folded.yaw),
-                            pitch: k.pitch.map(|v| v as f32).unwrap_or(folded.pitch),
-                            distance: k.distance.map(|v| v as f32).unwrap_or(folded.distance),
-                            focus: k
-                                .focus
-                                .map(|f| Vec3::from(f.map(|v| v as f32)))
-                                .unwrap_or(camera_focus),
-                            roll: k.roll.map(|v| v as f32).unwrap_or(folded.roll),
-                        })
-                        .collect(),
-                    closed: cam.path_closed.unwrap_or(false),
+                    keys,
+                    windings,
+                    closed,
                     zoom_loop: None, // resolved below, once [zoom] is known
                     ease: cam.path_ease,
                     seconds: cam.path_seconds.map(|v| v as f32),
@@ -795,6 +927,7 @@ impl Scene {
                 radius: z.radius as f32,
                 levels: z.levels as f32,
                 octave_falloff: z.octave_falloff as f32,
+                octave_fade: z.octave_fade.unwrap_or(0.0) as f32,
             }),
             None => None,
         };
@@ -839,9 +972,7 @@ impl Scene {
             colormap,
             camera_focus,
             camera_distance: folded.distance,
-            camera_yaw: folded.yaw,
-            camera_pitch: folded.pitch,
-            camera_roll: folded.roll,
+            camera_orientation: folded.orientation,
             camera_path,
             zoom,
         })
@@ -901,8 +1032,16 @@ impl Scene {
             .iter()
             .enumerate()
             .map(|(i, spec)| {
-                let (scale, rot, trans) = spec.matrix.to_scale_rotation_translation();
-                let (rx, ry, rz) = rot.to_euler(EulerRot::XYZ);
+                let trs = crate::rot::Trs::of(spec.matrix);
+                let (scale, trans) = (trs.scale, trs.translation);
+                // Degrees while they reproduce the matrix, which is nearly
+                // always; the exact rotation vector for the rest, rather than
+                // writing a chart reading that doesn't reload to what it says.
+                let chartable = trs.is_faithful(spec.matrix)
+                    && crate::rot::Orientation::from_xyz_degrees(trs.rotation.to_xyz_degrees())
+                        .angle_to(trs.rotation)
+                        < 1e-4;
+                let degrees = trs.rotation.to_xyz_degrees();
 
                 let variations: BTreeMap<String, f64> = spec
                     .variations
@@ -927,7 +1066,14 @@ impl Scene {
                     name: self.transform_names.get(i).cloned().flatten(),
                     translation: trans.to_array().map(tidy),
                     scale,
-                    rotation: [rx, ry, rz].map(|r| tidy(r.to_degrees())),
+                    rotation: if chartable { degrees.map(tidy) } else { [0.0; 3] },
+                    rotvec: (!chartable).then(|| {
+                        tidy_rotvec(
+                            crate::rot::Orientation::IDENTITY
+                                .shortest_turn_to(trs.rotation)
+                                .as_rotation_vector(),
+                        )
+                    }),
                     color: color.to_array().map(tidy),
                     weight: tidy(spec.weight),
                     color_value: Some(tidy(spec.color_value)),
@@ -974,29 +1120,33 @@ impl Scene {
                     .camera_path
                     .as_ref()
                     .filter(|p| p.playable());
+                let base_chart = self.camera_orientation.yaw_pitch_roll();
+                let chartable = self.camera_orientation.chart_is_faithful();
                 CameraDef {
                     focus: Some(self.camera_focus.to_array().map(tidy)),
                     offset: None,
                     distance: Some(tidy(self.camera_distance)),
-                    yaw: Some(tidy(self.camera_yaw)),
-                    pitch: Some(tidy(self.camera_pitch)),
-                    roll: (self.camera_roll != 0.0).then(|| tidy(self.camera_roll)),
+                    // The readable chart where it can name the framing, the
+                    // exact rotation vector where it can't — which is only at
+                    // the poles, and only reachable at all since the camera
+                    // stopped being three angles.
+                    yaw: chartable.then(|| tidy(base_chart.yaw.radians())),
+                    pitch: chartable.then(|| tidy(base_chart.pitch.radians())),
+                    roll: chartable
+                        .then(|| tidy(base_chart.roll.radians()))
+                        .filter(|r| *r != 0.0),
+                    rotvec: (!chartable).then(|| {
+                        tidy_rotvec(
+                            crate::rot::Orientation::IDENTITY
+                                .shortest_turn_to(self.camera_orientation)
+                                .as_rotation_vector(),
+                        )
+                    }),
                     path_closed: path.and_then(|p| p.closed.then_some(true)),
                     path_zoom_loop: path.and_then(|p| p.zoom_loop.map(|z| z.periods)),
                     path_seconds: path.and_then(|p| p.seconds.map(tidy)),
                     path_ease: path.and_then(|p| p.ease),
-                    path: path.map(|p| {
-                        p.keys
-                            .iter()
-                            .map(|k| PathKeyDef {
-                                yaw: Some(tidy(k.yaw)),
-                                pitch: Some(tidy(k.pitch)),
-                                distance: Some(tidy(k.distance)),
-                                focus: Some(k.focus.to_array().map(tidy)),
-                                roll: (k.roll != 0.0).then(|| tidy(k.roll)),
-                            })
-                            .collect()
-                    }),
+                    path: path.map(path_keys_to_defs),
                 }
             }),
             // Written whenever the scene has one, even in `transforms` mode —
@@ -1019,6 +1169,10 @@ impl Scene {
                 radius: tidy(z.radius),
                 levels: tidy(z.levels),
                 octave_falloff: tidy(z.octave_falloff),
+                // Always written out resolved: a scene file should say what
+                // it is doing, not leave it to be re-derived from a haze
+                // value that may since have moved.
+                octave_fade: Some(tidy(z.octave_fade)),
             }),
             transforms,
         }
@@ -1067,6 +1221,93 @@ impl Scene {
 /// 0.0020000000949949026. `+ 0.0` normalizes -0.0.
 fn tidy(v: f32) -> f64 {
     (v as f64 * 10_000.0).round() / 10_000.0 + 0.0
+}
+
+/// A rotation vector, rounded for the file. Finer than [`tidy`]: this is the
+/// exact form, used precisely where the readable one won't do, so rounding it
+/// to four places would defeat the purpose.
+fn tidy_rotvec(v: Vec3) -> [f64; 3] {
+    v.to_array().map(|x| (x as f64 * 1e6).round() / 1e6 + 0.0)
+}
+
+/// Write a path's keys in the most readable form that still round-trips.
+///
+/// Two tiers. Ordinary paths get yaw/pitch/roll, as they always have, with the
+/// yaw column **chained rather than wrapped** so the documented convention
+/// survives: successive keys spanning a full turn still visibly span a full
+/// turn in the file. Wrapping them into (-π, π] would keep playing correctly —
+/// the routes are stored separately — while quietly killing the one thing a
+/// human reads the column for.
+///
+/// Anything the chart can't name (a framing at the poles) gets `rotvec`. Both
+/// tiers add `turns` only on the segments whose route the yaw column doesn't
+/// already imply, so a hand-edited `yaw` can never end up contradicting a
+/// `turns` sitting next to it.
+fn path_keys_to_defs(p: &CameraPath) -> Vec<PathKeyDef> {
+    use crate::rot::{winding_from_chart, Angle, Orientation, YawPitchRoll};
+    const TAU: f32 = std::f32::consts::TAU;
+
+    let n = p.keys.len();
+    let segments = p.segments();
+    let charts: Vec<YawPitchRoll> = p.keys.iter().map(|k| k.orientation.yaw_pitch_roll()).collect();
+    let chartable = p.keys.iter().all(|k| k.orientation.chart_is_faithful());
+
+    // Chain the yaw column through the routes, so the file shows the journey.
+    let mut written = charts.clone();
+    if chartable {
+        for i in 1..n {
+            let step = charts[i - 1].yaw.shortest_to(charts[i].yaw).radians()
+                + TAU * p.winding(i - 1) as f32;
+            written[i].yaw = Angle::from_radians(written[i - 1].yaw.radians() + step);
+        }
+    }
+
+    // Whatever the chart doesn't already say has to be said out loud. For a
+    // closed path this is usually the closing segment, whose route the chained
+    // column has no room left to express.
+    let route_stated = |i: usize| -> Option<i32> {
+        let w = p.winding(i);
+        let j = (i + 1) % n;
+        // Mirror exactly what the loader will infer, or `turns` gets written
+        // where it says nothing. The closing segment of a loop is the case:
+        // the loader takes it the short way by rule, so a `turns = 0` there is
+        // noise, and stating anything else is the only way to override it.
+        let implied = if j < i || !chartable {
+            0
+        } else {
+            winding_from_chart(written[i], written[j])
+        };
+        (w != implied).then_some(w)
+    };
+
+    (0..n)
+        .map(|i| {
+            let turns = (i < segments).then(|| route_stated(i)).flatten();
+            let common = PathKeyDef {
+                turns,
+                distance: Some(tidy(p.keys[i].distance)),
+                focus: Some(p.keys[i].focus.to_array().map(tidy)),
+                ..Default::default()
+            };
+            if chartable {
+                PathKeyDef {
+                    yaw: Some(tidy(written[i].yaw.radians())),
+                    pitch: Some(tidy(written[i].pitch.radians())),
+                    roll: Some(tidy(written[i].roll.radians())).filter(|r| *r != 0.0),
+                    ..common
+                }
+            } else {
+                PathKeyDef {
+                    rotvec: Some(tidy_rotvec(
+                        Orientation::IDENTITY
+                            .shortest_turn_to(p.keys[i].orientation)
+                            .as_rotation_vector(),
+                    )),
+                    ..common
+                }
+            }
+        })
+        .collect()
 }
 
 // === Comment-preserving merge helpers ===
@@ -1421,6 +1662,83 @@ fn inline_variation_tables(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
 
+    // === rotation round-trips =============================================
+
+    /// Every transform in every shipped scene must survive a save.
+    ///
+    /// `rotation` is XYZ degrees, which is a chart with poles: a rotation near
+    /// a quarter turn about Y reads back as something like
+    /// `[179.2, 87.6, -179.3]` — correct, but a place where small errors turn
+    /// into large ones. Where the degrees can't reproduce the matrix, an exact
+    /// `rotvec` is written instead; either way the matrix has to come back.
+    #[test]
+    fn every_scenes_transforms_survive_a_save() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/scenes");
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+            .collect();
+        files.sort();
+
+        let tmp = std::env::temp_dir().join("fracturize-roundtrip-transforms.toml");
+        for file in &files {
+            let name = file.file_stem().unwrap().to_string_lossy().into_owned();
+            let before = super::Scene::load(file).unwrap();
+            let _ = std::fs::remove_file(&tmp);
+            before.save(&tmp).unwrap();
+            let after = super::Scene::load(&tmp).unwrap();
+
+            assert_eq!(before.transforms.len(), after.transforms.len(), "{}", name);
+            for (i, (a, b)) in
+                before.transforms.iter().zip(after.transforms.iter()).enumerate()
+            {
+                let diff = a
+                    .matrix
+                    .to_cols_array()
+                    .iter()
+                    .zip(b.matrix.to_cols_array().iter())
+                    .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+                assert!(diff < 1e-3, "{} transform {}: matrix moved {:.6}", name, i, diff);
+            }
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A matrix the degrees chart can't say cleanly still round-trips, by
+    /// falling back to the exact form rather than writing a lie.
+    #[test]
+    fn a_pole_rotation_falls_back_to_rotvec() {
+        // A quarter turn about Y is exactly where XYZ euler gives up.
+        let rotation = crate::rot::Orientation::from_axis_angle(
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_2,
+        );
+        let m = crate::rot::Trs {
+            scale: glam::Vec3::splat(0.5),
+            rotation,
+            translation: glam::Vec3::new(0.1, 0.2, 0.3),
+        }
+        .matrix();
+
+        let trs = crate::rot::Trs::of(m);
+        assert!(trs.is_faithful(m), "a clean TRS must decompose");
+        assert!(
+            trs.rotation.angle_to(rotation) < 1e-4,
+            "and recover the rotation itself, whatever the chart says about it"
+        );
+
+        // Whichever form gets written, reloading has to land on the same
+        // matrix — that is the whole contract.
+        let back = crate::rot::Orientation::from_xyz_degrees(trs.rotation.to_xyz_degrees());
+        assert!(
+            back.angle_to(rotation) < 1e-3,
+            "degrees round trip: {:?} -> {:?}",
+            trs.rotation.to_xyz_degrees(),
+            back
+        );
+    }
+
     // === [palette] ========================================================
 
     /// The minimum scene a palette test needs, as text.
@@ -1760,7 +2078,7 @@ color = [0.25, 0.6, 0.9]
     #[test]
     fn euler_xyz_is_rx_ry_rz() {
         let (a, b, c) = (0.3f32, -0.7, 1.1);
-        let q = Quat::from_euler(glam::EulerRot::XYZ, a, b, c);
+        let q = glam::Quat::from_euler(glam::EulerRot::XYZ, a, b, c);
         let m = glam::Mat3::from_rotation_x(a)
             * glam::Mat3::from_rotation_y(b)
             * glam::Mat3::from_rotation_z(c);
@@ -1928,11 +2246,8 @@ color = [0.0, 1.0, 1.0]
         assert_eq!(reloaded.name, scene.name);
         assert_eq!(reloaded.color_falloff, scene.color_falloff);
         assert!((reloaded.haze - 0.35).abs() < 1e-4, "haze {}", reloaded.haze);
-        assert!(
-            (reloaded.camera_roll - 0.35).abs() < 1e-4,
-            "roll {}",
-            reloaded.camera_roll
-        );
+        let roll = reloaded.camera_orientation.yaw_pitch_roll().roll.radians();
+        assert!((roll - 0.35).abs() < 1e-4, "roll {}", roll);
         // point_count is deliberately *not* round-tripped: it's a render
         // property owned by the Render window and prefs, so saving to a fresh
         // file omits it and the reload falls back to the default. Loading a
@@ -2026,6 +2341,76 @@ map = \"descent\"")).unwrap();
     }
 
     #[test]
+    fn zoom_band_settings_roundtrip_and_default_sensibly() {
+        let src = |zoom: &str| format!(
+            r#"
+[meta]
+name = "Banded"
+
+[camera]
+distance = 3.0
+focus = [0.0, 0.0, 0.0]
+
+[[transform]]
+name = "descent"
+translation = [0.0, 0.0, 0.0]
+scale = 0.6
+rotation = [0.0, 34.0, 0.0]
+color = [0.4, 0.6, 0.9]
+
+[[transform]]
+name = "spur"
+translation = [0.4, 0.5, 0.1]
+scale = 0.45
+color = [0.9, 0.5, 0.3]
+
+{zoom}
+"#
+        );
+
+        let dir = std::env::temp_dir().join("fracturize_zoom_band_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A [zoom] with only a map takes every band setting from ZoomSpec's
+        // defaults — including the fade, which is on unless a scene says not.
+        let bare = dir.join("bare.toml");
+        std::fs::write(&bare, src("[zoom]\nmap = \"descent\"")).unwrap();
+        let scene = Scene::load(&bare).unwrap();
+        let spec = scene.zoom.as_ref().expect("zoom");
+        assert_eq!(*spec, crate::renorm::ZoomSpec { map: 0, ..Default::default() });
+        assert_eq!(spec.octave_fade, 0.0, "the fade is opt-in; see DEFAULT_OCTAVE_FADE");
+
+        // An authored fade reaches the spec.
+        let faded = dir.join("faded.toml");
+        std::fs::write(&faded, src("[zoom]\nmap = \"descent\"\noctave_fade = 3.0")).unwrap();
+        let faded_spec = Scene::load(&faded).unwrap().zoom.take().expect("zoom");
+        assert_eq!(faded_spec.octave_fade, 3.0);
+
+        // Authored values survive a load/save/load round trip. The fade is
+        // written back out even though it matches the default, so a saved
+        // scene states what its band is doing rather than leaving it implied.
+        let authored = dir.join("authored.toml");
+        std::fs::write(
+            &authored,
+            src("[zoom]\nmap = \"descent\"\nradius = 6.5\nlevels = 12.0\noctave_fade = 2.5"),
+        )
+        .unwrap();
+        let scene = Scene::load(&authored).unwrap();
+        let spec = scene.zoom.as_ref().expect("zoom");
+        assert_eq!(spec.octave_fade, 2.5);
+        assert_eq!(spec.radius, 6.5);
+
+        let out = dir.join("saved.toml");
+        scene.save(&out).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("octave_fade"), "{text}");
+        let again = Scene::load(&out).unwrap();
+        assert_eq!(again.zoom.as_ref().unwrap(), spec);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn camera_path_roundtrip() {
         let src = r#"
 [meta]
@@ -2069,7 +2454,10 @@ color = [1.0, 0.2, 0.2]
         assert!(p.closed);
         assert_eq!(p.seconds, Some(8.0));
         // Omitted fields inherit the base camera
-        assert!((p.keys[0].pitch - 0.3).abs() < 1e-6, "pitch inherits base");
+        assert!(
+            (p.keys[0].orientation.yaw_pitch_roll().pitch.radians() - 0.3).abs() < 1e-5,
+            "pitch inherits base"
+        );
         assert!((p.keys[0].focus - Vec3::new(0.0, 0.2, 0.0)).length() < 1e-6);
         assert!((p.keys[1].distance - 3.0).abs() < 1e-6, "distance inherits base");
         assert!((p.keys[1].focus - Vec3::new(0.0, 0.5, 0.0)).length() < 1e-6);
@@ -2084,11 +2472,12 @@ color = [1.0, 0.2, 0.2]
         assert_eq!(q.keys.len(), 3);
         assert!(q.closed);
         for (a, b) in p.keys.iter().zip(&q.keys) {
-            assert!((a.yaw - b.yaw).abs() < 1e-3);
-            assert!((a.pitch - b.pitch).abs() < 1e-3);
+            assert!(a.orientation.angle_to(b.orientation) < 1e-3);
             assert!((a.distance - b.distance).abs() < 1e-3);
             assert!((a.focus - b.focus).length() < 1e-3);
         }
+        // Routes survive too, or a corkscrew quietly unwinds on save.
+        assert_eq!(p.windings, q.windings, "windings must round-trip");
 
         // Fresh save (new file) round-trips too
         let fresh_path = dir.join("fresh.toml");
@@ -2161,4 +2550,3 @@ color = [0.9, 0.5, 0.2]
 pub fn generate_colormap(colors: &[Vec3]) -> Colormap {
     Palette::from_transform_colors(colors).to_colormap()
 }
-

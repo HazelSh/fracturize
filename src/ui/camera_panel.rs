@@ -89,7 +89,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         // Roll's home. Right-drag sets it, but a gesture with no readout
         // can't be undone precisely, and "level" is a thing you want back
         // exactly rather than approximately.
-        let mut roll_deg = app.camera.roll.to_degrees();
+        let mut roll_deg = app.camera.chart().roll.degrees();
         let resp = ui.add(
             egui::DragValue::new(&mut roll_deg)
                 .speed(0.5)
@@ -106,7 +106,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             app.set_camera_roll(roll_deg.to_radians());
         }
 
-        let resp = ui.add_enabled(app.camera.roll != 0.0, egui::Button::new("level"));
+        let resp = ui.add_enabled(!app.camera.is_level(), egui::Button::new("level"));
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -114,15 +114,15 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             "click: level the camera",
         );
         if resp.clicked() {
-            app.set_camera_roll(0.0);
+            app.level_camera();
         }
     });
 
     ui.label(
         egui::RichText::new(format!(
             "yaw {:.2} · pitch {:.2} · focus ({:.2}, {:.2}, {:.2})",
-            app.camera.yaw,
-            app.camera.pitch,
+            app.camera.chart().yaw.radians(),
+            app.camera.chart().pitch.radians(),
             app.camera.focus.x,
             app.camera.focus.y,
             app.camera.focus.z,
@@ -189,7 +189,13 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
     // it's derived from the framing, and it re-derives itself as you move. Your
     // first "+ Add key" starts a list of your own, which the ✕s can edit.
     let own: Option<Vec<(f32, f32, f32)>> = app.scene.camera_path.as_ref().map(|p| {
-        p.keys.iter().map(|k| (k.distance, k.yaw, k.pitch)).collect()
+        p.keys
+            .iter()
+            .map(|k| {
+                let c = k.orientation.yaw_pitch_roll();
+                (k.distance, c.yaw.radians(), c.pitch.radians())
+            })
+            .collect()
     });
     let authored = own.is_some();
     let flying_default = app.path_is_default();
@@ -198,7 +204,10 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         app.camera_path()
             .keys
             .iter()
-            .map(|k| (k.distance, k.yaw, k.pitch))
+            .map(|k| {
+                let c = k.orientation.yaw_pitch_roll();
+                (k.distance, c.yaw.radians(), c.pitch.radians())
+            })
             .collect()
     });
     // Pinned below the list, so the list gets the slack from a taller window.

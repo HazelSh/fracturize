@@ -28,6 +28,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.separator();
             draw_haze(ui, app);
             ui.separator();
+            draw_zoom_band(ui, app);
+            ui.separator();
             draw_output(ui, app);
         });
 
@@ -306,5 +308,155 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
             });
         });
 
+    });
+}
+
+/// The infinite-zoom band: how much of the attractor is rendered, over how
+/// many octaves, and what happens at the outer edge.
+///
+/// Lives here rather than in the Camera window because it is a statement about
+/// what gets drawn, not about where the eye is — and because it wants to sit
+/// next to haze, which is the other half of whether the band's edge is
+/// visible. *Which* map carries the zoom is still chosen in the Transforms
+/// window, since that is a property of one map.
+///
+/// Greyed rather than hidden when the scene has no zoom map, for the reason
+/// spelled out on the camera panel's zoom-loop row: a control that vanishes
+/// can't tell you the feature exists.
+fn draw_zoom_band(ui: &mut egui::Ui, app: &mut App) {
+    ui.collapsing("infinite zoom", |ui| {
+        if let Some(err) = app.zoom_error.clone() {
+            ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
+            return;
+        }
+        let (Some(spec), Some(z)) = (app.zoom_spec().cloned(), app.zoom().copied()) else {
+            ui.add_enabled_ui(false, |ui| {
+                ui.label("no zoom map");
+            });
+            ui.label(
+                egui::RichText::new("Transforms window → right-click a map → Zoom about this")
+                    .small()
+                    .weak(),
+            );
+            return;
+        };
+        let mut next = spec.clone();
+
+        ui.label(egui::RichText::new(format!(
+            "transform {} · {:.2} octaves per period · {:.0}° twist",
+            z.map,
+            z.log_scale / std::f32::consts::LN_2,
+            z.twist_degrees()
+        )).small().weak());
+
+        // The headline control, and the reason this section exists. See
+        // `renorm::DEFAULT_OCTAVE_FADE` for the measurements behind the
+        // wording — in particular that it does not make the wrap's total
+        // brightness step smaller, it spreads it out so there is no
+        // discontinuity in any one place.
+        let resp = ui.add(
+            egui::Slider::new(&mut next.octave_fade, 0.0..=6.0)
+                .fixed_decimals(1)
+                .text("edge fade"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Octaves over which the band's outer edge thins out instead of \
+             stopping dead. At 0 the outermost octave vanishes in one frame at \
+             every wrap, taking a recognisable slab of structure with it. \
+             Winding it up spreads that same change across the outer octaves, \
+             so nothing cuts — the picture dims a little instead.",
+            "drag: widen or narrow the outer fade",
+        );
+        if resp.changed() {
+            app.set_zoom_spec(next.clone());
+        }
+        ui.label(egui::RichText::new(if z.fade_periods >= 1.0 {
+            format!(
+                "outer {:.1} octaves faded, x{:.2} per period",
+                z.fade_periods * z.log_scale / std::f32::consts::LN_2,
+                z.fade_g
+            )
+        } else if spec.octave_falloff > 0.0 {
+            "hard edge — the octave falloff below overrides the fade".to_string()
+        } else {
+            "hard edge".to_string()
+        }).small().weak());
+
+        ui.collapsing("band size", |ui| {
+            let mut next = spec.clone();
+            let resp = ui.add(
+                egui::Slider::new(&mut next.radius, 1.0..=12.0)
+                    .fixed_decimals(2)
+                    .text("radius"),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Outer radius of the band, in camera distances. Not a look \
+                 control: below 2.42 its edge enters the frustum and material \
+                 blinks out at every wrap. Raising it past that only helps a \
+                 scene with haze — the rendered set is scale-invariant, so the \
+                 outermost octave looks the same however far out you put it.",
+                "drag: resize the band's outer edge",
+            );
+            if resp.changed() {
+                app.set_zoom_spec(next.clone());
+            }
+            if !z.band_covers_the_view() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "below {:.2} — the edge is inside the picture",
+                        crate::renorm::MIN_RADIUS
+                    ))
+                    .color(ui.visuals().error_fg_color)
+                    .small(),
+                );
+            }
+
+            let mut next = spec.clone();
+            let resp = ui.add(
+                egui::Slider::new(&mut next.levels, 4.0..=24.0)
+                    .fixed_decimals(1)
+                    .text("levels"),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Octaves of scale rendered below the outer radius. Deeper means \
+                 you can zoom further before the core empties out, and every \
+                 octave thinner for the same point budget.",
+                "drag: change how deep the band goes",
+            );
+            if resp.changed() {
+                app.set_zoom_spec(next.clone());
+            }
+            ui.label(
+                egui::RichText::new(format!("{:.0} zoom periods of this map", z.periods))
+                    .small()
+                    .weak(),
+            );
+
+            let mut next = spec.clone();
+            let resp = ui.add(
+                egui::Slider::new(&mut next.octave_falloff, 0.0..=3.0)
+                    .fixed_decimals(1)
+                    .text("octave falloff"),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Point budget falling off toward the fixed point. Leave at 0 for \
+                 anything that will be flown: it makes neighbouring octaves hold \
+                 different numbers of points, so the density jumps every time the \
+                 camera wraps. Useful for a still, which never wraps — and it \
+                 turns the edge fade off, since nothing wants both.",
+                "drag: bias the point budget inward",
+            );
+            if resp.changed() {
+                app.set_zoom_spec(next);
+            }
+        });
     });
 }

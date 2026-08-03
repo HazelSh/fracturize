@@ -235,6 +235,21 @@ loop is a constant-rate descent with no ease, no wobble, and no velocity kink
 at the seam, for free. A two-key path would have needed the ends clamped, which
 is precisely what puts a speed discontinuity at a loop seam.
 
+*Update, after the quaternion rework:* this got stronger, and is now exact in
+orientation rather than only in yaw. The spline is cumulative Catmull-Rom over
+displacements, and for a one-key loop every segment displacement is the same
+element `q⁻¹·rot·q`. The cumulative weights sum to `1+u` identically, so the
+whole product telescopes to `q(u) = rot^(1+u)·q`: the spline *is* the
+continuous similarity flow, not an approximation of it.
+
+That also fixed a real bug the old version hid. The yaw-space spline could only
+carry the *vertical component* of the map's twist, which is exact for a map
+that turns about the vertical and wrong for one that doesn't.
+`pythagoras-zoomy` twists 47.02° about `(0.117, -0.282, -0.952)` — an axis that
+is mostly Z — so the loop swept the camera −13.27° of yaw where 47.02° of turn
+was needed to close it. It drifted a little every pass and nothing said so. It
+now closes to 1.1e-4 on a radius of 4.35.
+
 **The seam needs no special case in the renderer.** `sample` already wraps `t`
 for looping paths, so t=1 lands on t=0 — a different *camera* from the one the
 path was heading toward, but the identical *picture*, and `Renorm::wrap` was

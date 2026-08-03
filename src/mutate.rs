@@ -6,7 +6,7 @@
 //! what changed. Used by the in-app `U` key (with undo) and the offline
 //! `--mutations` contact sheet.
 
-use glam::{Mat4, Quat, Vec3, Vec4};
+use glam::Vec3;
 use rand::Rng;
 
 use crate::scene::{Scene, NUM_VARIATIONS, VARIATION_NAMES};
@@ -66,10 +66,8 @@ fn apply_random_op(scene: &mut Scene, rng: &mut impl Rng, strength: f32, log: &m
         let axis = random_unit(rng);
         let deg = rng.gen_range(5.0..30.0) * strength;
         let m = scene.transforms[i].matrix;
-        let rot = Mat4::from_quat(Quat::from_axis_angle(axis, deg.to_radians()));
-        let mut rotated = rot * Mat4::from_cols(m.x_axis, m.y_axis, m.z_axis, Vec4::W);
-        rotated.w_axis = m.w_axis;
-        scene.transforms[i].matrix = rotated;
+        scene.transforms[i].matrix =
+            crate::rot::turn_linear_part(m, crate::rot::Turn::about(axis, deg.to_radians()));
         log.push(format!(
             "T{} rotate {:.0}° about ({:+.2},{:+.2},{:+.2})",
             i, deg, axis.x, axis.y, axis.z

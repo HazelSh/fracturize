@@ -18,6 +18,7 @@ mod scene;
 mod randomize;
 mod renorm;
 mod render_job;
+mod rot;
 mod ui;
 mod video;
 mod view;
@@ -179,20 +180,30 @@ struct Args {
     #[arg(long, value_name = "TRANSFORM")]
     zoom: Option<String>,
 
-    /// Octaves of scale rendered by --zoom (default 6). More = deeper before
+    /// Octaves of scale rendered by --zoom (default 15). More = deeper before
     /// the core empties out, at the cost of density in each one.
     #[arg(long, requires = "zoom")]
     zoom_levels: Option<f32>,
 
     /// Outer radius of the --zoom band, as a multiple of camera distance
-    /// (default 1.5)
+    /// (default 4.8; below 2.42 the band's edge enters the frustum)
     #[arg(long, requires = "zoom")]
     zoom_radius: Option<f32>,
 
     /// How steeply --zoom's point budget falls off toward the fixed point, as
-    /// a power of the contraction ratio (default 2; 0 = flat)
+    /// a power of the contraction ratio (default 0 = flat). Non-zero makes a
+    /// wrap step the density; it is for stills.
     #[arg(long, requires = "zoom")]
     zoom_falloff: Option<f32>,
+
+    /// Octaves over which the --zoom band's outer edge fades out instead of
+    /// stopping dead (default 0 = hard edge). At 0 a wrap drops the whole
+    /// outermost octave between two frames; winding it up spreads that same
+    /// change across the outer octaves so nothing cuts. Worth it on a scene
+    /// whose bulk fills those octaves, a cost on one whose doesn't — see
+    /// "Infinite Zoom" in AGENTS.md.
+    #[arg(long, requires = "zoom")]
+    zoom_fade: Option<f32>,
 
     /// Colour the fractal through an independent gradient instead of the
     /// per-transform ring: a library name (see --palettes), a palette file
@@ -260,6 +271,17 @@ struct Args {
     #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
     roll: Option<f32>,
 
+    /// Override the camera's framing exactly, as a rotation vector "x,y,z" in
+    /// radians. Wins over --yaw/--pitch/--roll.
+    ///
+    /// Those three are a chart, and a chart has poles: looking straight up or
+    /// down, yaw and roll become the same control and neither means anything
+    /// on its own. Since the camera can now be dragged over the pole, those
+    /// framings need a way to be named — this is it. `--render` prints the
+    /// form it lands on, so a framing found by hand can be pasted back.
+    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3, allow_hyphen_values = true)]
+    rotvec: Option<Vec3>,
+
     /// Override the camera's look-at point, as "x,y,z"
     // allow_hyphen_values, or a focus with a negative coordinate — which is
     // half of them — is read as a flag and the run dies on "unexpected
@@ -286,6 +308,7 @@ impl Args {
         camera::CameraOverride {
             yaw: self.yaw,
             pitch: self.pitch,
+            rotvec: self.rotvec,
             distance: self.distance,
             roll: self.roll,
             focus: self.focus,
@@ -317,6 +340,9 @@ fn apply_zoom_args(scene: &mut Scene, args: &Args, announce: bool) {
     }
     if let Some(f) = args.zoom_falloff {
         spec.octave_falloff = f;
+    }
+    if let Some(f) = args.zoom_fade {
+        spec.octave_fade = f;
     }
     // Resolve once here so a bad map is a startup error with a clear message,
     // not a silently-disabled feature discovered in the output.
@@ -1048,9 +1074,7 @@ fn default_scene() -> Scene {
         colormap,
         camera_focus: default_cam.focus,
         camera_distance: default_cam.distance,
-        camera_yaw: default_cam.yaw,
-        camera_pitch: default_cam.pitch,
-        camera_roll: default_cam.roll,
+        camera_orientation: default_cam.orientation,
         background: scene::DEFAULT_BACKGROUND,
         camera_path: None,
         zoom: None,
@@ -1099,7 +1123,6 @@ fn main() {
         let (effort_points, effort_accumulate) = match args.effort {
             Some(e) => {
                 let (p, a) = e.preset();
-
                 (Some(p), Some(a))
             }
             None => (None, None),

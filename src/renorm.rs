@@ -99,14 +99,20 @@
 //! attractor again. Every self-similar zoom has a center; this one's is the
 //! fixed point of the map you chose.
 
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 
 use crate::camera::OrbitCamera;
+use crate::rot::{Orientation, Turn};
 
 /// Octaves of scale rendered below the target radius, if a scene doesn't say.
 /// Roughly the dynamic range of a 1080p frame plus the outward margin
 /// [`MIN_RADIUS`] adds, so the *visible* depth is unchanged by that margin.
-const DEFAULT_LEVELS: f32 = 14.0;
+///
+/// One more than it was, to pay for [`DEFAULT_RADIUS`] going up: the band is
+/// `[R·2⁻ˡᵉᵛᵉˡˢ, R]`, so every doubling of `R` costs an octave of depth at the
+/// inner end. 3.0 → 4.8 is 0.68 octaves; rounding up to a whole one lands the
+/// inner edge slightly deeper than before rather than slightly shallower.
+const DEFAULT_LEVELS: f32 = 15.0;
 
 /// Smallest outer radius, as a multiple of the reference eye distance, that
 /// doesn't put the band's edge inside the picture. **This is not a matter of
@@ -134,7 +140,14 @@ pub const MIN_RADIUS: f32 = 1.0 + crate::haze::FAR_FRAC;
 
 /// Outer radius of the band, as a multiple of the reference eye distance:
 /// [`MIN_RADIUS`] with a little margin.
-const DEFAULT_RADIUS: f32 = 3.0;
+///
+/// Twice [`MIN_RADIUS`] rather than the 1.24× it used to be. The bound is
+/// derived assuming haze takes distant material all the way to nothing, which
+/// is only true at `haze = 1.0`; at the strengths scenes actually use (0.3–0.5,
+/// and 0.0 in a couple of drafts) something survives at the far plane and the
+/// edge is not hidden at all. Headroom is the only defence against that, and
+/// against a scene being framed differently from how it was authored.
+const DEFAULT_RADIUS: f32 = 4.8;
 
 /// How steeply the point budget falls off toward the fixed point, as a power
 /// of the contraction ratio.
@@ -150,6 +163,86 @@ const DEFAULT_RADIUS: f32 = 3.0;
 /// evens out on-screen density, which is what an octave falloff is for — and
 /// because a scene that is never going to be flown doesn't care.
 const DEFAULT_OCTAVE_FALLOFF: f32 = 0.0;
+
+/// Octaves over which the band's *outer* edge fades out instead of stopping.
+///
+/// The edge is a cliff otherwise, and a wrap walks the picture straight off it:
+/// a wrap moves the octave filling any given screen region along by one, so the
+/// outermost octave is replaced by an octave that doesn't exist, and everything
+/// it was drawing vanishes between one frame and the next. Measured on
+/// `scenes/octave-edge-test.toml`, that outermost octave carries 3.4% of the
+/// frame's brightness and 3.4% of its pixels change by more than 10% — and not
+/// as noise, as one recognisable slab of structure.
+///
+/// [`MIN_RADIUS`] is supposed to keep the edge out of frame, and does for a
+/// scene with full haze. But its derivation assumes haze takes material to
+/// *nothing* by the far plane, and that only holds at `haze = 1.0`; below that
+/// a constant fraction survives and no band radius is far enough. So the edge
+/// has to stop being a cliff rather than merely being pushed away.
+///
+/// Over these octaves the point budget per octave ramps from [`FADE_DEPTH`] of
+/// full at the outermost shell up to full, and what falls off the end is a
+/// sixteenth of a shell rather than a whole one.
+///
+/// **Off, and that is a measurement rather than a preference.** The plan this
+/// came from decided it should be on by default; the measurement says no, for
+/// two reasons that only showed up once there was something to measure.
+///
+/// The method: a wrap moves every shell one octave inward, so rendering a
+/// scene at `radius` and at `radius · s` gives exactly the two frames either
+/// side of a wrap — no animation, no interpolation, and the offline renderer
+/// is deterministic, so the difference is all signal. Mean brightness ratio
+/// across that pair, and the worst single pixel:
+///
+/// ```text
+///                              octave_fade:   0        1        2        3
+///   wellspiral        haze 0.50  wrap ratio   0.9999   0.9981   0.9639   0.9399
+///   pythagoras-zoomy  haze 0.00  wrap ratio   1.0000   -        -        0.9621
+///   octave-edge-test  haze 0.12  wrap ratio   0.9669   0.9654   0.9644   0.9492
+///                                worst pixel  0.399    0.413    0.327    0.298
+/// ```
+///
+/// **1. Most scenes have nothing to fix.** `wellspiral` and `pythagoras-zoomy`
+/// wrap at 0.9999 and 1.0000 with a hard edge — their outermost octave simply
+/// isn't in the picture. Every octave of fade is then pure cost, and three of
+/// them put a 4-6% brightness step at each wrap where there had been none. In
+/// a rendered loop `pythagoras-zoomy` picks up a 3.0% mid-loop pop against
+/// 0.13% with the edge hard.
+///
+/// **2. The fade cannot make the step smaller, only wider.** The share of
+/// octave `k` after a wrap is the share of `k-1` before it, so the change
+/// summed over octaves telescopes to exactly one octave's worth for *any*
+/// monotone ramp — a hard cut included. On `octave-edge-test` the wrap costs
+/// 3.40% of frame brightness with a hard edge and 3.44% with a 2.3-octave
+/// fade. What the fade buys is entirely in *where* that change lands: worst
+/// pixel 0.399 -> 0.298, and the difference image goes from one solid slab of
+/// structure to a faint texture spread over the whole frame. That is the
+/// difference between "a branch blinked out" and "the picture dimmed
+/// slightly", which is worth having — but it is a redistribution, not a cure,
+/// and it is only worth paying for on a scene that has the problem.
+///
+/// So: off unless asked for, and worth asking for on a scene whose bulk sits
+/// far enough from the fixed point to fill the band's outer octaves. The
+/// two-render check above is cheap and is the way to tell;
+/// `scenes/octave-edge-test.toml` is built to fail it.
+const DEFAULT_OCTAVE_FADE: f32 = 0.0;
+
+/// The fade width to reach for on a scene that wants one, in octaves. Not a
+/// default — see [`DEFAULT_OCTAVE_FADE`] for why there isn't one — but the
+/// value that measured best on the scene built to need it, and so the number
+/// the docs and `scenes/octave-edge-test.toml` quote. Referenced from the
+/// tests and from prose rather than from code, which is the point of it.
+#[allow(dead_code)]
+pub const SUGGESTED_OCTAVE_FADE: f32 = 3.0;
+
+/// Density at the outermost shell, as a fraction of a full octave's share.
+///
+/// Derived rather than authored, and `octave_fade` is the only knob: fixing the
+/// depth and letting the width set the steepness means one number controls
+/// something visible, instead of two numbers that trade off against each other
+/// in a way nobody can see. A sixteenth is dim enough that losing it off the
+/// end of the band is not a visible event.
+const FADE_DEPTH: f32 = 1.0 / 16.0;
 
 /// How far a map may stray from being a similarity before the camera wrap
 /// stops being seamless and we say so. A pure scale+rotation scores 0.
@@ -177,6 +270,13 @@ pub struct ZoomSpec {
     /// Point-budget falloff toward the fixed point, as a power of the
     /// contraction ratio (see [`DEFAULT_OCTAVE_FALLOFF`])
     pub octave_falloff: f32,
+    /// Octaves over which the band's outer edge fades out rather than
+    /// stopping (see [`DEFAULT_OCTAVE_FADE`]). 0 restores the hard edge.
+    ///
+    /// In octaves, like `levels` and for the same reason: a zoom period is
+    /// whatever the chosen map's contraction happens to be, so a fade authored
+    /// in periods would mean a different depth in every scene.
+    pub octave_fade: f32,
 }
 
 impl Default for ZoomSpec {
@@ -186,6 +286,7 @@ impl Default for ZoomSpec {
             radius: DEFAULT_RADIUS,
             levels: DEFAULT_LEVELS,
             octave_falloff: DEFAULT_OCTAVE_FALLOFF,
+            octave_fade: DEFAULT_OCTAVE_FADE,
         }
     }
 }
@@ -205,8 +306,14 @@ pub struct Renorm {
     pub scale: f32,
     /// `ln(1/scale)` — one zoom period in log-radius. Positive.
     pub log_scale: f32,
-    /// Rotation part of `A` (`A ≈ scale · rot`)
-    pub rot: Quat,
+    /// Rotation part of `A` (`A ≈ scale · rot`).
+    ///
+    /// Canonical, so its principal angle is in `[0, π]` and `twist` is
+    /// literally how far the map turns. Everything downstream — the camera
+    /// wrap, the GPU's closed-form power, the loop similarity — takes its
+    /// branch from here and never re-derives one, which is what stops a
+    /// fraction of a degree reading as very nearly a whole turn the other way.
+    pub rot: Orientation,
     /// How far `A` is from being a pure similarity; 0 is exact. Above
     /// [`SIMILARITY_TOLERANCE`] the camera wrap leaves a visible seam.
     pub defect: f32,
@@ -218,10 +325,22 @@ pub struct Renorm {
     pub periods: f32,
     /// Ratio of one period's point share to the next one in, `scale^falloff`
     pub octave_q: f32,
-    /// Rotation axis and angle of `rot`, for the closed-form power of a
-    /// similarity (see `renormalize()` in chaos.wgsl)
-    pub axis: Vec3,
-    pub angle: f32,
+    /// How many *periods* at the outer end of the band get less than a full
+    /// octave's point share, so the edge fades instead of cutting. The
+    /// authored octave count converted to this map's own periods and rounded
+    /// to a whole number: a period is the step a wrap takes, so a fractional
+    /// one has no meaning here and only costs the sampler its closed form.
+    /// Zero disables the taper.
+    pub fade_periods: f32,
+    /// Per-period attenuation across [`Self::fade_periods`], derived so the
+    /// outermost shell lands at [`FADE_DEPTH`] of a full share:
+    /// `g = FADE_DEPTH^(1/fade_periods)`. This is also, exactly, how much the
+    /// on-screen density of the faded region changes at each wrap.
+    pub fade_g: f32,
+    /// One period's rotation, as a displacement — the axis and angle the
+    /// closed-form power of a similarity needs (see `renormalize()` in
+    /// chaos.wgsl). Taken the short way round, once, here.
+    pub twist: Turn,
     /// Whether `A` is a similarity to within [`SIMILARITY_TOLERANCE`], and so
     /// whether `Aᵏ` can be taken in closed form instead of by iteration
     pub similar: bool,
@@ -308,8 +427,49 @@ impl Renorm {
         let q = a * (1.0 / scale);
         // Gram-Schmidt the scaled matrix into an honest rotation, and score how
         // much that had to change it: for a true similarity, QᵀQ is already I.
-        let (rot, defect) = orthonormalize(q);
-        let (axis, angle) = rot.to_axis_angle();
+        let (rot, defect) = crate::rot::orthonormalize(q);
+        // The branch, chosen once and never again. `Orientation` is canonical,
+        // so this is the principal turn: at most half a turn, in the direction
+        // the map actually goes. Powers of it are taken by scaling this vector,
+        // which stays linear and cannot wrap.
+        let twist = Orientation::IDENTITY.shortest_turn_to(rot);
+
+        // Authored in octaves; the shader deals in this map's own periods.
+        // Capped at 64 because a barely-contracting map would otherwise ask
+        // for thousands, and floored at 1 so the band is never empty.
+        let periods = (spec.levels.max(0.0) * std::f32::consts::LN_2 / log_scale).clamp(1.0, 64.0);
+        let octave_q = scale.powf(spec.octave_falloff.max(0.0));
+
+        // The taper, in periods, rounded: a period is the step a wrap takes,
+        // so a fraction of one is not a thing the distribution can express,
+        // and pretending otherwise costs the sampler its closed form for no
+        // visible gain.
+        //
+        // Never more than half the band. `periods` is clamped above, so a very
+        // gentle map's band can end up far shallower than the authored octave
+        // count asked for — and a fade authored as "3 octaves" would then eat
+        // most of what's left. Half keeps a substantial full-density core no
+        // matter how the clamp bites.
+        //
+        // Zero when `octave_falloff` is in play. That knob already makes every
+        // octave differ from its neighbour, is documented as stills-only for
+        // exactly that reason, and the taper exists for scenes that are flown;
+        // nothing wants both, and composing them would only obscure which one
+        // was responsible for a step.
+        let fade_periods = if octave_q < 0.9999 {
+            0.0
+        } else {
+            (spec.octave_fade.max(0.0) * std::f32::consts::LN_2 / log_scale)
+                .round()
+                .clamp(0.0, (periods * 0.5).floor())
+        };
+        // g such that fade_periods steps of it take a full share down to
+        // FADE_DEPTH. Also the per-wrap density ratio in the faded region.
+        let fade_g = if fade_periods >= 1.0 {
+            FADE_DEPTH.powf(1.0 / fade_periods)
+        } else {
+            1.0
+        };
 
         Ok(Self {
             map: spec.map,
@@ -321,16 +481,70 @@ impl Renorm {
             rot,
             defect,
             radius: (spec.radius * reference_distance).max(1e-6),
-            // Authored in octaves; the shader deals in this map's own periods.
-            // Capped at 64 because a barely-contracting map would otherwise
-            // ask for thousands, and floored at 1 so the band is never empty.
-            periods: (spec.levels.max(0.0) * std::f32::consts::LN_2 / log_scale).clamp(1.0, 64.0),
-            octave_q: scale.powf(spec.octave_falloff.max(0.0)),
-            axis,
-            angle,
+            periods,
+            octave_q,
+            fade_periods,
+            fade_g,
+            twist,
             similar: defect <= SIMILARITY_TOLERANCE,
             band: reference_distance.max(1e-6),
         })
+    }
+
+    /// Which octave below the outer radius a point is dealt into, from a
+    /// uniform `u` in `[0, 1)`. **The reference implementation of
+    /// `octave_offset()` in `points/chaos.wgsl`** — the shader is the copy that
+    /// runs, this is the copy that can be asserted about, and they must agree
+    /// arithmetic for arithmetic.
+    ///
+    /// Three regimes, in the order the shader branches on them:
+    ///
+    /// 1. `octave_q < 1` — the stills-only geometric deal. Untouched by the
+    ///    taper; see [`Self::fade_periods`] for why they don't compose.
+    /// 2. `fade_periods == 0` — the flat deal, `floor(u · periods)`.
+    /// 3. otherwise the taper: the share of octave `k` is `g^(F−k)` for
+    ///    `k < F` and 1 for `k ≥ F`, so it climbs from [`FADE_DEPTH`] at the
+    ///    outermost shell to full and stays there. Both pieces are geometric,
+    ///    so the inverse CDF is closed-form and it is still one sample per
+    ///    point with no rejection — which is the property that makes this
+    ///    whole construction cost nothing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn octave_offset(&self, u: f32) -> f32 {
+        let levels = self.periods;
+        if levels <= 1.0 {
+            return 0.0;
+        }
+        debug_assert!((0.0..1.0).contains(&u), "octave_offset wants a uniform in [0,1)");
+        if self.octave_q < 0.9999 {
+            let tail = self.octave_q.powf(levels);
+            let k = (1.0 - u * (1.0 - tail)).ln() / self.octave_q.ln();
+            return k.floor().min(levels - 1.0);
+        }
+        let f = self.fade_periods;
+        if !(f >= 1.0) || self.fade_g >= 0.9999 {
+            return (u * levels).floor();
+        }
+        let g = self.fade_g;
+        let tail = g.powf(f); // = FADE_DEPTH, up to rounding
+        // Mass of the ramp (shares g¹…g^F) and of the flat remainder.
+        let m1 = g * (1.0 - tail) / (1.0 - g);
+        let m2 = levels - f;
+        let x = u * (m1 + m2);
+        if x < m1 {
+            // Geometric in `j`, counting *inward* from the outermost faded
+            // shell — the same inversion as the falloff path above, because
+            // reindexing a rising ramp from its far end makes it a falling
+            // one. `j` is capped rather than trusted: `u` arbitrarily close to
+            // the top of the piece sends the log to `F` exactly.
+            let v = x / m1;
+            let j = ((1.0 - v * (1.0 - tail)).ln() / g.ln()).floor().min(f - 1.0);
+            (f - 1.0 - j).max(0.0)
+        } else {
+            // Flat remainder. No cap: `x < m1 + m2 = levels`, so this floors
+            // to at most `floor(levels)` — exactly the range the flat deal
+            // above produces, partial top octave and all.
+            (f + (x - m1)).floor()
+        }
     }
 
     /// The integer `m` in `f⁻ᵐ(x)` that lands a point at radius `r` from the
@@ -368,9 +582,11 @@ impl Renorm {
         if !(r > 1e-20) {
             return pos;
         }
-        // CPU-side spread stays flat; the shader's geometric deal is a
-        // rendering-budget concern and this is only used for reasoning about
-        // one point at a time.
+        // Deliberately flat, and deliberately *not* [`Self::octave_offset`]:
+        // this exists to reason about the geometry one point at a time, where
+        // `spread` wants to mean "how far down the band", and 0 wants to mean
+        // the outermost shell. How the point budget is actually dealt out is a
+        // rendering concern; `octave_offset` is the mirror of that.
         let m = self.level_for_radius(r).round() - (spread * self.periods).floor();
         self.apply_level(pos, m.clamp(-48.0, 48.0) as i32)
     }
@@ -427,32 +643,28 @@ impl Renorm {
 
     /// The similarity a path closes under when it loops by descending
     /// `periods` zoom periods: `Aᵖᵉʳⁱᵒᵈˢ`, in closed form.
+    ///
+    /// The rotation is carried as a [`Turn`] rather than a quaternion, and
+    /// that is load-bearing. Scaling the twist vector by `n` is linear and
+    /// unbounded, so four periods of a 47° map is a 188° sweep. Building a
+    /// quaternion instead and reading an angle back out of it — which is what
+    /// this used to do — folds 188° into 172° *the other way*, and the camera
+    /// flies the loop backwards. Integer powers don't care about the branch;
+    /// the path between them is nothing but branch.
     pub fn loop_similarity(&self, periods: u32) -> crate::path::ZoomLoop {
-        let n = periods.max(1) as i32;
-        let (axis, angle) = self.rot.to_axis_angle();
+        let n = periods.max(1);
         crate::path::ZoomLoop {
-            periods: periods.max(1),
+            periods: n,
             center: self.fixed_point,
-            scale: self.scale.powi(n),
-            rot: Quat::from_axis_angle(axis, angle * n as f32),
+            scale: self.scale.powi(n as i32),
+            turn: self.twist * n as f32,
         }
     }
 
-    /// How far `rot` actually turns, in degrees: the magnitude of the shorter
-    /// of the two ways round.
-    ///
-    /// `Quat::to_axis_angle` reports the angle in [0, 2π] and carries the
-    /// direction in the axis, so reading the angle alone called a 91° twist
-    /// "269°" whenever the quaternion came back with a negative scalar part.
-    /// Every rotation past half a turn is a shorter one the other way.
+    /// How far the map turns in one period, in degrees. Always the shorter way
+    /// round, because [`Self::twist`] is canonical.
     pub fn twist_degrees(&self) -> f32 {
-        let angle = self.rot.to_axis_angle().1;
-        let angle = if angle > std::f32::consts::PI {
-            std::f32::consts::TAU - angle
-        } else {
-            angle
-        };
-        angle.to_degrees()
+        self.twist.magnitude().to_degrees()
     }
 
     /// A one-line report for the CLI and the status bar
@@ -472,10 +684,19 @@ impl Renorm {
         } else {
             String::new()
         };
+        let fade = if self.fade_periods >= 1.0 {
+            format!(
+                ", outer {:.1} octaves faded (x{:.2}/period)",
+                self.fade_periods * self.log_scale / std::f32::consts::LN_2,
+                self.fade_g
+            )
+        } else {
+            ", hard outer edge".to_string()
+        };
         format!(
             "infinite zoom on transform {}{}: scale {:.3} ({:.2} octaves/period), \
              {:.0}° twist, fixed point ({:.3}, {:.3}, {:.3}), {:.0} periods \
-             ({:.1} octaves) rendered{}",
+             ({:.1} octaves) rendered{}{}",
             self.map,
             name.map(|n| format!(" \"{}\"", n)).unwrap_or_default(),
             self.scale,
@@ -486,6 +707,7 @@ impl Renorm {
             self.fixed_point.z,
             self.periods,
             self.periods * self.log_scale / std::f32::consts::LN_2,
+            fade,
             format!("{}{}", short, seam)
         )
     }
@@ -507,28 +729,10 @@ fn largest_singular_value(a: Mat3) -> f32 {
     (ata * v).dot(v).max(0.0).sqrt()
 }
 
-/// Gram-Schmidt a near-orthogonal matrix into a rotation, returning it and how
-/// far it had to move (the "similarity defect": 0 for a true scale+rotation).
-fn orthonormalize(q: Mat3) -> (Quat, f32) {
-    let x = q.x_axis.normalize_or(Vec3::X);
-    let y = (q.y_axis - x * x.dot(q.y_axis)).normalize_or(Vec3::Y);
-    let z = x.cross(y);
-    let ortho = Mat3::from_cols(x, y, z);
-
-    // Deviation of QᵀQ from the identity, entrywise: catches both non-uniform
-    // scale and shear, which are exactly the two ways the wrap can break.
-    let m = q.transpose() * q - Mat3::IDENTITY;
-    let defect = m
-        .to_cols_array()
-        .iter()
-        .fold(0.0f32, |acc, v| acc.max(v.abs()));
-
-    (Quat::from_mat3(&ortho).normalize(), defect)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Quat;
     use crate::camera::world_to_screen;
 
     fn spiral_map(scale: f32, twist_deg: f32) -> Mat4 {
@@ -567,8 +771,7 @@ mod tests {
         let r = renorm(0.55, 31.0);
         assert!((r.scale - 0.55).abs() < 1e-4, "scale {}", r.scale);
         assert!(r.defect < 1e-4, "a pure similarity should have no defect: {}", r.defect);
-        let (_, angle) = r.rot.to_axis_angle();
-        assert!((angle.to_degrees() - 31.0).abs() < 0.1, "twist {}", angle.to_degrees());
+        assert!((r.twist_degrees() - 31.0).abs() < 0.1, "twist {}", r.twist_degrees());
     }
 
     #[test]
@@ -626,13 +829,7 @@ mod tests {
         // it by projecting x with the wrapped camera and A(x) — its partner in
         // the invariant set — with the original.
         let r = renorm(0.6, 40.0);
-        let cam = OrbitCamera {
-            yaw: 0.7,
-            pitch: 0.35,
-            distance: 1.0,
-            focus: r.fixed_point + Vec3::new(0.05, -0.02, 0.01),
-            roll: 0.3,
-        };
+        let cam = OrbitCamera::from_chart(0.7, 0.35, 0.3, 1.0, r.fixed_point + Vec3::new(0.05, -0.02, 0.01));
         // Sit inside the inner edge so exactly one wrap fires. The margin is
         // for the off-center focus: the wrap measures eye-to-fixed-point, not
         // the orbit radius.
@@ -675,29 +872,18 @@ mod tests {
     #[test]
     fn wrapping_is_idempotent_inside_the_band() {
         let r = renorm(0.5, 15.0);
-        let mut cam = OrbitCamera {
-            yaw: 0.2,
-            pitch: 0.1,
-            distance: r.band * 0.75,
-            focus: r.fixed_point,
-            roll: 0.0,
-        };
+        let mut cam = OrbitCamera::from_chart(0.2, 0.1, 0.0, r.band * 0.75, r.fixed_point);
         let before = cam;
         assert_eq!(r.wrap(&mut cam), 0);
         assert_eq!(cam.distance, before.distance);
-        assert_eq!(cam.yaw, before.yaw);
+        // Exactly untouched, not merely close: a no-op wrap composes nothing.
+        assert_eq!(cam.orientation, before.orientation);
     }
 
     #[test]
     fn wrapping_recovers_from_far_outside() {
         let r = renorm(0.5, 15.0);
-        let mut cam = OrbitCamera {
-            yaw: 0.2,
-            pitch: 0.1,
-            distance: r.band * 5000.0,
-            focus: r.fixed_point,
-            roll: 0.0,
-        };
+        let mut cam = OrbitCamera::from_chart(0.2, 0.1, 0.0, r.band * 5000.0, r.fixed_point);
         let levels = r.wrap(&mut cam);
         let d = (cam.eye() - r.fixed_point).length();
         assert!(d >= r.band * r.scale && d < r.band, "eye at {} outside band", d);
@@ -723,11 +909,236 @@ mod tests {
     }
 
     #[test]
+    fn the_default_band_keeps_real_headroom_over_the_bound() {
+        // Clearing MIN_RADIUS is not enough on its own. The bound is derived
+        // assuming haze takes distant material all the way to nothing, which
+        // only happens at haze = 1.0; every shipped scene runs 0.3-0.5 and two
+        // drafts run 0.0, so at those strengths the edge is not hidden and the
+        // margin is all there is. Roughly double the bound, not the 1.24x it
+        // was.
+        assert!(
+            DEFAULT_RADIUS >= 1.9 * MIN_RADIUS,
+            "default radius {DEFAULT_RADIUS} leaves too little over the {MIN_RADIUS} bound"
+        );
+    }
+
+    #[test]
+    fn widening_the_band_did_not_cost_visible_depth() {
+        // The band is [R*2^-levels, R], so every doubling of R costs an octave
+        // at the inner end. levels went up alongside radius to pay for it; the
+        // inner edge must land at least as deep as the 3.0/14 it replaced.
+        let inner_now = DEFAULT_RADIUS * 2f32.powf(-DEFAULT_LEVELS);
+        let inner_before = 3.0 * 2f32.powf(-14.0);
+        assert!(
+            inner_now <= inner_before,
+            "inner edge moved out from {inner_before:e} to {inner_now:e}"
+        );
+    }
+
+    #[test]
     fn a_short_band_says_so() {
         let spec = ZoomSpec { radius: 1.2, ..ZoomSpec::default() };
         let r = Renorm::from_affine(spiral_map(0.6, 34.0), 1.0, &spec, 3.6).unwrap();
         assert!(!r.band_covers_the_view());
         assert!(r.summary(None).contains("BAND TOO SHORT"), "{}", r.summary(None));
+    }
+
+    /// Exact quadrature of `octave_offset`'s inverse CDF: `n` evenly spaced
+    /// samples of `u` put each octave's count within `1/n` of its true mass,
+    /// deterministically and with no RNG to argue with. Returns the fraction
+    /// of points landing in each octave, indexed by offset.
+    fn octave_histogram(r: &Renorm, n: usize) -> Vec<f64> {
+        let mut hist = vec![0.0f64; r.periods.floor() as usize + 2];
+        for i in 0..n {
+            let u = (i as f32 + 0.5) / n as f32;
+            let k = r.octave_offset(u);
+            assert_eq!(k, k.floor(), "octave offsets must be whole: u {u} gave {k}");
+            assert!(k >= 0.0 && (k as usize) < hist.len(), "offset {k} out of band");
+            hist[k as usize] += 1.0 / n as f64;
+        }
+        hist
+    }
+
+    /// A map whose period is exactly one octave, so `periods` and `levels`
+    /// are the same number and the arithmetic in these tests can be checked
+    /// by hand.
+    fn octave_renorm(levels: f32, fade: f32) -> Renorm {
+        Renorm::from_affine(
+            Mat4::from_scale(Vec3::splat(0.5)),
+            1.0,
+            &ZoomSpec { map: 0, radius: 4.8, levels, octave_fade: fade, octave_falloff: 0.0 },
+            1.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_taper_matches_its_target_distribution() {
+        // The taper is a claim about a distribution, and a picture can't check
+        // one. Share of octave k is g^(F-k) up to k = F, then flat.
+        let r = octave_renorm(15.0, 3.0);
+        assert_eq!(r.fade_periods, 3.0, "3 octaves of fade on a 1-octave period");
+        let g = r.fade_g;
+        let hist = octave_histogram(&r, 2_000_000);
+
+        let flat = hist[r.fade_periods as usize]; // the first un-tapered octave
+        assert!(flat > 0.0);
+        for k in 0..r.periods as usize {
+            let want = if (k as f32) < r.fade_periods {
+                (g as f64).powf(r.fade_periods as f64 - k as f64)
+            } else {
+                1.0
+            };
+            let got = hist[k] / flat;
+            assert!(
+                (got - want).abs() < 2e-3,
+                "octave {k} holds {got:.5} of a full share, wanted {want:.5}"
+            );
+        }
+        let total: f64 = hist.iter().sum();
+        assert!((total - 1.0).abs() < 1e-9, "the deal must be a distribution: {total}");
+    }
+
+    #[test]
+    fn the_taper_reaches_the_intended_depth_and_no_further() {
+        // The whole point: what falls off the end of the band is FADE_DEPTH of
+        // an octave rather than a whole one. If this drifts, the fade stops
+        // hiding the cut (too shallow) or starts eating the scene (too deep).
+        let r = octave_renorm(15.0, 3.0);
+        let hist = octave_histogram(&r, 2_000_000);
+        let depth = hist[0] / hist[r.fade_periods as usize];
+        assert!(
+            (depth - FADE_DEPTH as f64).abs() < 1e-3,
+            "outermost shell holds {depth:.5} of a share, wanted {}",
+            FADE_DEPTH
+        );
+        // And the shell just inside the fade is at full share, not still ramping
+        assert!(
+            (hist[3] / hist[4] - 1.0).abs() < 1e-3,
+            "the ramp must have finished by octave F"
+        );
+    }
+
+    #[test]
+    fn the_taper_moves_points_inward_rather_than_discarding_them() {
+        // Every point still lands somewhere: the taper is a redistribution of
+        // a fixed budget, not a cull, so the core gets slightly *denser*.
+        let hard = octave_histogram(&octave_renorm(15.0, 0.0), 200_000);
+        let faded = octave_histogram(&octave_renorm(15.0, 3.0), 200_000);
+        assert!((hard.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!((faded.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        for k in 0..3 {
+            assert!(faded[k] < hard[k], "octave {k} should be thinned");
+        }
+        for k in 3..15 {
+            assert!(faded[k] > hard[k], "octave {k} should pick up the difference");
+        }
+    }
+
+    #[test]
+    fn no_fade_is_the_flat_deal_exactly() {
+        // The old behaviour has to remain reachable, and reachable *exactly* —
+        // this is the escape hatch if the taper turns out wrong for a scene.
+        let r = octave_renorm(15.0, 0.0);
+        assert_eq!(r.fade_periods, 0.0);
+        let hist = octave_histogram(&r, 150_000);
+        for k in 0..15 {
+            assert!(
+                (hist[k] - 1.0 / 15.0).abs() < 1e-4,
+                "octave {k} holds {} of the points, wanted 1/15",
+                hist[k]
+            );
+        }
+    }
+
+    #[test]
+    fn the_falloff_path_is_left_alone() {
+        // octave_falloff is documented as stills-only because it makes every
+        // octave differ from its neighbour; the taper is for scenes that are
+        // flown. Composing them would only make it impossible to tell which
+        // one was responsible for a step, so asking for both gets falloff.
+        let spec = ZoomSpec { octave_falloff: 2.0, octave_fade: 3.0, ..ZoomSpec::default() };
+        let r = Renorm::from_affine(Mat4::from_scale(Vec3::splat(0.5)), 1.0, &spec, 1.0).unwrap();
+        assert_eq!(r.fade_periods, 0.0, "the taper must stand down for a falloff");
+        assert_eq!(r.fade_g, 1.0);
+        assert!(r.summary(None).contains("hard outer edge"));
+
+        // and the geometric deal is still geometric, ratio q per octave.
+        // Only while there is mass to measure: a geometric deal empties fast,
+        // and at q = 0.25 the sixth octave holds ninety samples out of half a
+        // million, where the "ratio" is quantisation rather than distribution.
+        let hist = octave_histogram(&r, 500_000);
+        for k in 0..(r.periods as usize - 1) {
+            if hist[k + 1] < 1e-3 {
+                break;
+            }
+            let ratio = hist[k + 1] / hist[k];
+            assert!(
+                (ratio / r.octave_q as f64 - 1.0).abs() < 0.01,
+                "octave {k}->{} ratio {ratio:.5}, wanted q = {}",
+                k + 1,
+                r.octave_q
+            );
+        }
+    }
+
+    #[test]
+    fn the_taper_never_eats_more_than_half_the_band() {
+        // `periods` is clamped at 64, so a barely-contracting map's band can
+        // come out far shallower than the authored octave count asked for. A
+        // fade authored in octaves would then swallow most of what's left;
+        // this is the floor under how much full-density band always survives.
+        let r = Renorm::from_affine(spiral_map(0.97, 5.0), 1.0, &ZoomSpec {
+            levels: 40.0,
+            octave_fade: 30.0,
+            ..ZoomSpec::default()
+        }, 1.0)
+        .unwrap();
+        assert!(
+            r.fade_periods <= r.periods * 0.5,
+            "fade {} of {} periods",
+            r.fade_periods,
+            r.periods
+        );
+        let hist = octave_histogram(&r, 500_000);
+        let full: f64 = hist[r.fade_periods as usize..].iter().sum();
+        assert!(full > 0.5, "only {full:.3} of the budget is at full share");
+    }
+
+    #[test]
+    fn a_fade_wider_than_the_band_still_deals_every_point() {
+        // Degenerate asks must not produce NaN offsets or an empty band.
+        for (levels, fade) in [(1.0, 8.0), (2.0, 30.0), (15.0, 0.5), (15.0, 1000.0)] {
+            let r = octave_renorm(levels, fade);
+            let hist = octave_histogram(&r, 20_000);
+            assert!(
+                (hist.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+                "levels {levels} fade {fade} lost points"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fade_is_off_by_default_and_says_so() {
+        // Not a preference: on three of the four scenes measured, the wrap is
+        // already seamless with a hard edge (0.9999, 1.0000) and a three-octave
+        // fade puts a 4-6% brightness step into it. See DEFAULT_OCTAVE_FADE.
+        // Changing this default means re-running that measurement.
+        assert_eq!(DEFAULT_OCTAVE_FADE, 0.0);
+        let r = Renorm::from_affine(spiral_map(0.6, 34.0), 1.0, &ZoomSpec::default(), 3.6).unwrap();
+        assert_eq!(r.fade_periods, 0.0);
+        assert_eq!(r.fade_g, 1.0);
+        assert!(r.summary(None).contains("hard outer edge"), "{}", r.summary(None));
+    }
+
+    #[test]
+    fn asking_for_the_fade_turns_it_on_and_reports_it() {
+        let spec = ZoomSpec { octave_fade: SUGGESTED_OCTAVE_FADE, ..ZoomSpec::default() };
+        let r = Renorm::from_affine(spiral_map(0.6, 34.0), 1.0, &spec, 3.6).unwrap();
+        assert!(r.fade_periods >= 1.0, "an authored fade must reach the shader");
+        assert!(r.fade_g < 1.0);
+        let s = r.summary(None);
+        assert!(s.contains("faded"), "{s}");
     }
 
     #[test]

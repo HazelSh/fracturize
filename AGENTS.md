@@ -200,14 +200,23 @@ moving, densifying when you pause — warmup refills in ~1s). Picking math
 lives in `pick.rs`, drag application in `app.rs`.
 
 The camera eye always sits on the orbit sphere: the legacy scene/view
-`offset` (which made pitch drift the view distance) is folded into
-yaw/pitch/distance at load time and no longer written to files.
+`offset` (which made pitch drift the view distance) is folded into the
+framing and distance at load time and no longer written to files.
 
-Roll is the fourth camera parameter and travels with the other three
-everywhere — scene `[camera]`, view files, path keypoints, the offline
-renderer. `OrbitCamera` deliberately has no `Default`, so a struct literal
-that forgets `roll` fails to compile rather than silently levelling someone's
-framing on the next save.
+**The framing is a quaternion, not three angles.** `OrbitCamera` holds an
+`Orientation` (see `src/rot.rs`), so there are no poles and nothing is
+clamped: drag straight up and you go over the top and come out inverted, and
+roll works looking straight down. All three of those were impossible before —
+pitch stopped at ±87.7°, and at the pole roll silently did nothing because the
+axis it rotated world-up about *was* world-up.
+
+Yaw/pitch/roll survive as a **chart**: a human-readable naming of a framing,
+used by scene files, `--yaw/--pitch/--roll`, and the Camera panel readout.
+Charts have poles. Looking straight up or down, yaw and roll become the same
+control and neither means anything on its own — so anything that writes a
+framing checks first and falls back to `rotvec` (an exact rotation vector in
+radians) where the chart can't say it. `--rotvec x,y,z` is the CLI equivalent,
+and `--render` prints whichever form the framing it landed on needs.
 
 ## Keybinds (also in-app: press H)
 
@@ -478,8 +487,15 @@ yaw = 0.0                 # orbit angle around Y, radians
 pitch = 0.32              # orbit elevation, radians (positive = above)
 roll = 0.0                # optional: rotation about the view axis, radians
                           # (omitted when level; right-drag sets it in-app)
+# rotvec = [x, y, z]      # optional: the exact framing, as a rotation vector
+                          # in radians. Wins over yaw/pitch/roll, and is what
+                          # gets written for a framing at the poles — where
+                          # yaw and roll are the same control and the three
+                          # angles stop naming it. Ordinary scenes never see
+                          # this; it exists because the camera can now be
+                          # pointed straight up.
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
-# into yaw/pitch/distance and never written back
+# into the framing/distance and never written back
 path_closed = true        # optional camera path: loop back to key 1 (seamless)
 path_seconds = 14.0       # playback/render duration (default 3s per segment)
 path_ease = false         # smoothstep time; default: open paths ease, loops don't
@@ -488,13 +504,27 @@ path_zoom_loop = 1        # optional: close the loop under the [zoom] symmetry,
                           # animation loops as an endless zoom (see below)
 
 # Camera path spline keypoints (2+ = a path; see src/path.rs). A uniform
-# Catmull-Rom spline runs through the keys in orbit-parameter space: yaw is
-# unbounded (keys spanning 2*TAU author a two-turn corkscrew — nothing wraps),
-# distance interpolates in log space (constant-relative-rate zooms), and focus
-# travels on its own spline so look directions blend smoothly while the eye
-# moves. Omitted fields inherit the base [camera] framing. Closed paths take
-# the shortest yaw route back to key 1. In-app: Y appends the current framing
-# as a keypoint, Shift+Y removes, Ctrl+Y toggles the loop, O or Z flies it.
+# Catmull-Rom spline runs through the keys, in *cumulative* form so it splines
+# framings rather than angles: yaw is unbounded (keys spanning 2*TAU author a
+# two-turn corkscrew — nothing wraps), distance interpolates in log space
+# (constant-relative-rate zooms), and focus travels on its own spline so look
+# directions blend smoothly while the eye moves. Omitted fields inherit the
+# base [camera] framing. Closed paths take the shortest yaw route back to key
+# 1. In-app: Y appends the current framing as a keypoint, Shift+Y removes,
+# Ctrl+Y toggles the loop, O or Z flies it.
+#
+# ROUTES. Which way round a segment goes is data, not something re-derived
+# from its endpoints — that is what used to make a 1° change swing 359° the
+# wrong way. Normally the yaw column says it: keys at 0, 3.14, 6.28 author a
+# full turn, and that is read once at load and kept. A key can also carry
+# `turns = N` to state it outright, which is written only where the yaw
+# column can't (the closing segment of a loop, or a key written as `rotvec`),
+# so a hand-edited yaw can never contradict a `turns` beside it. Whatever the
+# route says, the keys themselves are always hit exactly.
+#
+# A key may use `rotvec = [x, y, z]` instead of yaw/pitch/roll, on the same
+# terms as [camera] above: exact, no poles, and what gets written for a
+# keypoint framing the three angles can't name.
 #
 # EVERY SCENE HAS A PATH. Omit these keypoints (or author fewer than two) and
 # the path is a seamless full orbit around the current framing, at 0.18 rad/s
@@ -525,15 +555,23 @@ roll = 0.4                # ...and tilted
 
 [zoom]                    # optional: infinite zoom (see "Infinite Zoom")
 map = "whorl"             # a transform name, or its index as a string
-radius = 1.5              # outer radius of the band, in camera distances
-levels = 12               # octaves rendered below it
-octave_falloff = 2.0      # point-budget falloff per octave (power of the scale)
+radius = 4.8              # outer radius of the band, in camera distances
+levels = 15               # octaves rendered below it
+octave_fade = 0.0         # octaves of fade on the band's outer edge (0 = hard)
+octave_falloff = 0.0      # point-budget falloff per octave (power of the scale)
 
 [[transform]]
 name = "whorl"                 # optional label shown in overlays
 translation = [0.0, 0.0, 0.5]
 scale = 0.5                    # uniform, or per-axis: scale = [0.05, 0.6, 0.05]
 rotation = [0, 0, 0]           # Euler degrees (XYZ)
+# rotvec = [x, y, z]           # optional: the exact rotation, as a rotation
+                               # vector in radians. Wins over `rotation`, and
+                               # is written where XYZ euler can't reproduce
+                               # the matrix — a rotation near a quarter turn
+                               # about Y reads back as [179.2, 87.6, -179.3],
+                               # correct but one rounding error from wrong.
+                               # tools/lsystem_to_ifs.py emits it too.
 color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap
 weight = 1.0                   # selection probability
 color_value = 0.25             # optional explicit colormap index (0-1)
@@ -842,9 +880,10 @@ has a centre; this one's is the fixed point of the map you picked.
 ```toml
 [zoom]
 map = "descent"        # transform name, or its index as a string ("0")
-radius = 1.5           # outer radius of the band, in camera distances
-levels = 12            # octaves rendered below `radius`
-octave_falloff = 2.0   # point-budget falloff per octave, as a power of `s`
+radius = 4.8           # outer radius of the band, in camera distances
+levels = 15            # octaves rendered below `radius`
+octave_fade = 0.0      # octaves of fade on the band's outer edge (0 = hard cut)
+octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
 ```
 
 - **Give the nominated map zero translation.** A map with no translation has its
@@ -858,9 +897,47 @@ octave_falloff = 2.0   # point-budget falloff per octave, as a power of `s`
   and it goes *at once, mid-flight, in the middle of the frame*. That is what a
   short band looks like: not a visible edge, but regions blinking out. The
   bound is `radius ≥ 1 + haze::FAR_FRAC = 2.42`, because haze has finished
-  hiding material by an eye-distance of `FAR_FRAC × band`; the default is 3.0,
+  hiding material by an eye-distance of `FAR_FRAC × band`; the default is 4.8,
   and anything below the bound is reported by the CLI, `--info` and the status
-  bar. A scene with little haze wants more.
+  bar.
+
+  **Raising it past the bound only helps a scene that has haze.** The bound is
+  derived assuming haze takes material all the way to nothing, which happens
+  only at `haze = 1.0`; below that a fixed fraction survives at the far plane.
+  And more radius does not compensate, because the rendered set is
+  scale-invariant *by construction* — the outermost octave subtends the same
+  solid angle whatever `R` is, so pushing it out doesn't shrink it. Measured on
+  `scenes/octave-edge-test.toml` (haze 0.12): the wrap loses 3.41% of frame
+  brightness at `radius = 3.0` and 3.31% at `radius = 4.8`. What headroom
+  actually buys is margin for a scene framed differently from how it was
+  authored, and margin for haze to do its job. If your band's edge is visible,
+  the fixes are haze and `octave_fade`, not radius.
+- **`octave_fade` softens the outer edge, and is off unless you ask.** The
+  outermost octaves get a reduced share of the point budget — ramping from a
+  sixteenth at the edge up to full over this many octaves — so the band trails
+  off instead of stopping. Two things about it are worth knowing before
+  reaching for it, both measured rather than argued:
+
+  **It cannot make the wrap's brightness step smaller, only wider.** Octave
+  `k`'s share after a wrap is octave `k−1`'s share before it, so summed over
+  the band the change telescopes to exactly one octave's worth for *any*
+  monotone ramp, hard cut included. On `scenes/octave-edge-test.toml` the wrap
+  costs 3.40% of frame brightness with a hard edge and 3.44% with a 2.3-octave
+  fade. What it buys is where that change lands: worst pixel 0.399 → 0.298,
+  and the difference image goes from one solid slab of structure to faint
+  texture over the whole frame. That is the difference between "a branch
+  blinked out" and "the picture dimmed slightly" — worth having on a scene
+  that has the problem, and worth nothing on one that doesn't.
+
+  **Most scenes don't have the problem.** `wellspiral` and `pythagoras-zoomy`
+  wrap at 0.9999 and 1.0000 with a hard edge; their outermost octave isn't in
+  the picture. Turning on three octaves of fade costs them a 4–6% step at each
+  wrap that wasn't there before (`pythagoras-zoomy` picks up a 3.0% mid-loop
+  pop against 0.13%). Hence off by default. Reach for it — 3.0 is the value
+  that measured best — when the bulk of the attractor sits far enough from the
+  fixed point to fill the band's outer octaves, and check with the two-render
+  diagnostic below rather than guessing. Ignored when `octave_falloff` is
+  non-zero; nothing wants both.
 - **Leave `octave_falloff` at 0 for anything that will be flown.** A wrap moves
   the octave filling the screen along by one, so if neighbouring octaves hold
   different numbers of points, the density on screen jumps every period.
@@ -869,9 +946,10 @@ octave_falloff = 2.0   # point-budget falloff per octave, as a power of `s`
   because it does even out density in a *still*, which never wraps.
 - `levels` is how far in the band extends, **in octaves** — not in zoom
   periods, which are however big the chosen map happens to be (0.07 octaves for
-  a 0.95 spiral, 3.3 for a 0.1 collapse). The CLI prints both. Raise it
-  alongside `radius`: together they set where the band's *inner* end lands, and
-  the default 14 is about ten visible octaves plus the outward margin.
+  a 0.95 spiral, 3.3 for a 0.1 collapse). `octave_fade` is in octaves for the
+  same reason. The CLI prints both. Raise `levels` alongside `radius`: the band
+  is `[R·2⁻ˡᵉᵛᵉˡˢ, R]`, so every doubling of `R` costs an octave at the inner
+  end, and the default 15 is about ten visible octaves plus the outward margin.
 - **Anisotropic maps are allowed but flagged.** A non-uniform scale still gives
   an exactly invariant set (self-*affine* rather than self-similar), but the
   camera wrap can't reproduce it, so the zoom shows a seam. `Renorm::defect`
@@ -882,15 +960,33 @@ which toggles, tells you the period and fixed point on hover, and greys out with
 the reason when that map can't be a scale symmetry. The status bar reads
 `zoom +N`.
 
+The band itself is in the **Render window → infinite zoom**: `edge fade` at the
+top, with `radius`, `levels` and `octave falloff` under *band size*. All four
+are undoable and are what Ctrl+S writes into `[zoom]`. It sits next to haze
+deliberately — haze is the other half of whether the band's edge is visible —
+and it greys out with a pointer to the Transforms window when no map carries the
+zoom, rather than vanishing. Changing any of them re-forms the point cloud,
+since every point's octave is drawn from them.
+
 From the CLI, on any scene, without editing it:
 
 ```
 # make an existing scene scale-invariant and look at it
 fracturize --scene scenes/sierpinski.toml --zoom 0
 
-# tune the band; --zoom-levels / --zoom-radius / --zoom-falloff need --zoom
+# tune the band; --zoom-levels / --zoom-radius / --zoom-fade / --zoom-falloff
+# all need --zoom
 fracturize --scene scenes/lsys_kelp.toml --zoom trunk --zoom-levels 16 \
   --render /tmp/t.png --effort low --width 640 --height 400
+
+# what the outer edge is actually doing: render the band, then render it with
+# the outermost octave gone (same inner edge, one octave further in). The
+# difference is exactly what a wrap drops, and scenes/octave-edge-test.toml is
+# built to make it as visible as it gets.
+fracturize --scene scenes/octave-edge-test.toml --splat --zoom halve \
+  --zoom-radius 3.0 --zoom-levels 14 --zoom-fade 0 --render /tmp/full.png
+fracturize --scene scenes/octave-edge-test.toml --splat --zoom halve \
+  --zoom-radius 1.5 --zoom-levels 14 --zoom-fade 0 --render /tmp/cut.png
 
 # a map that can't be a scale symmetry says why and exits, rather than
 # quietly rendering the ordinary bounded attractor:

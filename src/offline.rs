@@ -97,8 +97,8 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
             view_proj: base.view_proj(aspect),
             label: format!(
                 "yaw {:.1}° pitch {:.1}° dist {:.2}",
-                base.yaw.to_degrees(),
-                base.pitch.to_degrees(),
+                base.chart().yaw.degrees(),
+                base.chart().pitch.degrees(),
                 base.distance
             ),
         }],
@@ -107,11 +107,17 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
             (0..n)
                 .map(|k| {
                     let mut cam = *base;
-                    cam.yaw = base.yaw + k as f32 * std::f32::consts::TAU / n as f32;
+                    // About world up, so the sweep is the same orbit at every
+                    // roll — and doesn't degenerate looking straight down.
+                    cam.orientation = base.orientation.then_world(crate::rot::Turn::about(
+                        glam::Vec3::Y,
+                        k as f32 * std::f32::consts::TAU / n as f32,
+                    ));
+                    let yaw = cam.chart().yaw;
                     TileView {
                         view_proj: cam.view_proj(aspect),
                         // Radians in parens: paste directly into [camera] yaw
-                        label: format!("yaw {:.1}° ({:.4})", cam.yaw.to_degrees(), cam.yaw),
+                        label: format!("yaw {:.1}° ({:.4})", yaw.degrees(), yaw.radians()),
                     }
                 })
                 .collect()
@@ -359,13 +365,7 @@ fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) 
             };
             let (fb, fs) = crate::haze::falloff(amount);
             (
-                OrbitCamera {
-                    yaw: scene.camera_yaw,
-                    pitch: scene.camera_pitch,
-                    distance: scene.camera_distance,
-                    focus: scene.camera_focus,
-                    roll: scene.camera_roll,
-                },
+                scene.camera(),
                 scene.point_size,
                 // Auto-ranged: resolved from whichever camera ends up rendering
                 // each frame, not from the scene's authored distance. A

@@ -95,14 +95,7 @@ pub fn build_path(path: &CameraPath) -> Vec<LineVertex> {
     // come back round, because sample(1.0) wraps to the start.
 
     for key in &path.keys {
-        let cam = crate::camera::OrbitCamera {
-            yaw: key.yaw,
-            pitch: key.pitch,
-            distance: key.distance,
-            focus: key.focus,
-            roll: key.roll,
-        };
-        push_cross(&mut verts, cam.eye(), tick, PATH_KEY_COLOR);
+        push_cross(&mut verts, key.to_camera().eye(), tick, PATH_KEY_COLOR);
     }
 
     verts

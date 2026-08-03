@@ -1,49 +1,91 @@
 ---- needs to go faster! I want 100m points in realtime!
-  -- "motherfucking realtime motherfucking raytracing"
+ -- "motherfucking realtime motherfucking raytracing"
+  - limits currently: points need data needs vram, very limiting esp. on laptop. 
 
 ---- lighting/shadowing?
  -- (how the actual fuck? well, fairlight were doing it realtime in 2010, so...)
- -- ... Fairlight/CNCD were not, actually, rendering IFS fractals.
+ -- ... Fairlight/CNCD were not, actually, rendering IFS fractals. pointclouds instead.
   - this matters. what the fuck is the normal?
    - no, seriously. random bit of grit away from body of fractal. what angle is it at to the light?
     - is it a tiny ball, I guess? and the balls have a size?
      - and when there's other balls in the size, sample those, figure out a gradient...?
       - tangent to that toward open-space is the normal...? seriously, this is fucked. worse than SDF by far. 
+ -- what was that paper on youtube with the modelling-as-tiny-toruses thing? looked to solve normals
 
 ---- ...particle system things? 'motion transforms'? velocity, acceleration, mass, per-point?
+ -- make the points 'flow'?
 
----- dynamic point density / infinite zoom
-
----- in-engine scene browser, super lo-res preview
-
----- little bit of atmosphere in the shading? darken/desat colors further from camera?
- -- depth is hard to spot at the moment
-  - much easier to add a touch of fog than to figure out pointcloud shadowing
- -- unfuck existing fog implementation? 
-
----- saving .gifs / animated/motion png? or modern animated .avifs
- -- DONE (fable5, 2026-07-15): `--render out.avif` = animated AVIF, rav1e +
-    hand-rolled avis muxer in src/avif.rs. --fps/--seconds/--quality.
+---- in-engine scene browser, super lo-res preview?
+ -- consider little preview windows for other things. mutation especially, do apophysis 3x3 grid of mutation-directions?
 
 ---- rework keyboard shortcuts + list → into real GUI with buttons etc
 
----- infinite zoom plan / space-filling
+---- dynamic point density / infinite zoom
+---- infinite zoom plan / 'space-filling'
+ -- fractals that are 'lines' across all scales, not rays. can zoom into mandelbrot forever, but not out. 
+  - have some demoscene analyticlly-defined fractals that take infinite zoom in/out. what about IFSs? 
+  - fixed-point 'structure' with no privledged scale? any point in/out self-similar to other points in/out
+   - for linear transforms, at least. what about nonlinear? 
 
----- better handling of point counts, bake into UI, remove from scene. not a scene param.
+---- better handling of fizz / sparkle 
+ -- tuned lower for more stable renders, higher for... no idea. add some persistance to the framebuffer, do temporal AA style shit? 
 
----- better handling of fizz / sparkle -- tuned lower for more stable renders
+---- 'chaos traces' not showing what I want to show...
+ -- showing 'large'scale warps across whole fractal
+ -- ...need to figure out what it is I want to see, and then also, how it's exposed in the chaos-game (if at all)
+  - would like a sense of 'layers' / fractal-depth, and paths down/up through it. 
+ -- also not visible with gizmos enabled
 
----- chaos traces not showing what I want to show...
+---- automatic feature detection, automatic camera positioning/pointing? at/lookat 'voids', 'clusters'?
+ -- suggest camera paths? available for mutation?
 
----- camera paths with .gif render or video render?
- -- DONE (fable5, 2026-07-15): [[camera.path]] spline keypoints in scenes
-    (src/path.rs — Catmull-Rom over yaw/pitch/log-distance/focus, closed
-    loops, multi-turn spirals). In-app: Y add key, Ctrl+Y loop, Z preview.
-    Pathless scenes animate as a seamless full orbit. scenes/winze.toml +
-    renders/winze.avif are the demo.
- -- automatic feature detection, automatic camera positioning/pointing? at/lookat 'voids', 'clusters'?
+---- [DONE] random colorschemes / palette gen / coloring broken out & swappable
+ -- see PALETTE-PLAN.md for the thinking, "Colour: two sources, one colormap" in AGENTS.md for what shipped.
+ -- stage 2 (index -> RGB) is now the swappable seam: `color_mode = transforms | palette`, src/palette/.
+ -- gradients' weak points, since I asked: 1-D can order structure but never *label* it, the index is
+    arbitrary, it hides transform identity, and it's 8-bit. that's why the per-transform mode stays.
+ -- random gen: cosine palettes + harmony schemes + library, all gated on a luminance sweep with no
+    seam at index 0. the cyclic-seam thing is the non-obvious one.
+ -- still open, deliberately: widen the colour channel (PALETTE-PLAN.md §6). carry a Vec3 through the
+    walker and pack 8/8/8 into Point's free 24 bits, so transform *combinations* get distinct colours
+    rather than just positions. free in memory, one branch in the chaos shader. this is the thing that
+    would make the second mode a genuinely different instrument instead of "the old way".
+ -- also open: colour by accumulated contraction (a depth map of the fractal — answers "what scale is
+    this feature", which matters most under infinite zoom), by nearest fixed point, by iteration age.
 
+---- splats needs another render mode that actually does something to show distance. 
+ -- possibly just scale down contribution by distance? 
+ -- no. it needs to show *structure*. I need occlusion. complicates rendering by a *lot*. 
+  - updated 'fog'/haze helps a lot, actually
 
+---- unfuck extended gizmo indicators (rotation, displacement). 
+ -- start with gizmo / UI design thinking & nail it down, *then* go to implement. 
+  - took me *way* to long to recognise 'arrows' built from lines / quad-shaped. needs billboards or something, closer to flat ui not 3d. 
 
+---- camera path point editing. 
+ -- gizmos enabled on selection?
+ -- 'adopt' a point, move camera as usual, drop adoption -- as a workflow?
 
+---- DONE: quaternions for rotations
+ -- was: getting gimbal lock on camera + camera paths
+ -- camera framing is an Orientation now; no pitch clamp, roll works at the
+    poles, paths spline framings not angles (src/rot.rs, cumulative Catmull-Rom)
+ -- yaw/pitch/roll survive as a *chart* for files + CLI + readouts, with
+    `rotvec` as the exact fallback where a chart has poles
+ -- routes ("which way round") are explicit data, so the 359-vs-1 bug class
+    can't be written: Orientation and Angle have no Sub
+ -- found + fixed a live one on the way: a multi-period zoom loop swept the
+    short way round a twist that wasn't about the vertical
+
+---- think about gizmos vs fractal render
+ -- currently, fractal occludes gizmo fully, but gizmo retains UI interaction. 
+  - zooming breaks horribly as things move to under scrollwheel without visibility
+ -- 
+
+---- call in fable5 specifically, spend down credits, to review recent opus5 work
+
+---- naming 
 🕮⊞◌⃘⁂
+
+
+

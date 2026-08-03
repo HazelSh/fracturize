@@ -2,6 +2,66 @@
 
 *Claude Opus 5, 2026-08-03. Design only — no code written for this yet.*
 
+---
+
+## IMPLEMENTED, with two of its decisions reversed by measurement
+
+*Claude Opus 5, 2026-08-03, second session. Read this before the plan below;
+§0 said measuring first might resize everything, and it did.*
+
+Built as designed — `ZoomSpec::octave_fade`, the two uniforms, the two-piece
+inverse CDF in `octave_offset`, `[zoom] octave_fade`, `--zoom-fade`, and a CPU
+mirror (`Renorm::octave_offset`) that the distribution is asserted against
+rather than eyeballed.
+
+**A better measurement than §6.** A wrap moves every shell one octave inward,
+so rendering the same scene at `radius` and at `radius · s` gives exactly the
+two frames either side of a wrap — no animation, no interpolation, no noise.
+The offline renderer is bit-deterministic (two identical renders diff to 0.0),
+so everything left is signal. §6's frame-to-frame RMSE is useless here by
+comparison: at draft effort the noise floor is 0.10 RMSE and swamps the wrap.
+
+**Reversal 1 — the taper cannot make the wrap's step smaller, only wider.**
+Octave `k`'s share after a wrap is octave `k−1`'s share before it, so the
+change summed over the band telescopes to exactly one octave's worth for *any*
+monotone ramp, hard cut included. Measured: `octave-edge-test` loses 3.40% of
+frame brightness at the wrap with a hard edge and 3.44% with a 2.3-octave fade.
+§2 is not wrong about what it does, but "replaces the worst instance with a
+mild one" is not what happens — the total is conserved and only its
+distribution changes. That is still worth having: worst pixel goes 0.399 →
+0.298 and the difference image goes from one solid slab of structure to faint
+texture across the frame, which is exactly Hazel's "no hard cuts". It is a
+change of character, not of magnitude, and the docs now say so.
+
+**Reversal 2 — "on by default" is wrong.** Three of the four scenes measured
+have nothing to fix: `wellspiral` wraps at 0.9999 and `pythagoras-zoomy` at
+1.0000 with a hard edge, their outermost octave simply not being in the
+picture. Fading them is pure cost — three octaves puts a 4–6% step into a wrap
+that had none, and `pythagoras-zoomy` gains a 3.0% mid-loop pop against 0.13%.
+§5's own guard says refuse that, so: **default 0, opt in per scene.** A
+haze-derived default was tried first and also rejected — `pythagoras-zoomy` has
+`haze = 0.0` *and* a perfect wrap, so haze does not predict which scenes need
+it. Nothing cheap does; the two-render check does, and it is documented.
+
+**§3 (widen the band) landed, but does less than claimed.** `DEFAULT_RADIUS`
+3.0 → 4.8 and `DEFAULT_LEVELS` 14 → 15. It cannot help a low-haze scene at all,
+because the rendered set is scale-invariant *by construction*: the outermost
+octave subtends the same solid angle whatever `R` is. Measured on
+`octave-edge-test` (haze 0.12), the wrap loses 3.41% at `radius = 3.0` and
+3.31% at `radius = 4.8`. What headroom buys is margin for a scene framed
+differently from how it was authored — real, but not the thing §3 argued for.
+The four shipped zoom scenes set `radius`/`levels` explicitly and are
+untouched (§7 Q2), which given the above is the right outcome anyway.
+
+**Answering §7.** Q1: yes, on a scene built for it — `scenes/octave-edge-test.toml`
+is that scene, and its outermost octave carries 3.4% of the frame as one
+recognisable slab. Q2: leave them; they measure clean. Q3: still no, and now
+also because the inner edge is 15 octaves down and nothing telescopes there.
+Q4: `1/16` is right — the depth barely matters next to the width, since the
+total is conserved either way.
+
+---
+
 Hazel's report: *"there's quite a bit of visible 'cutting' / jumps between
 octaves of the infinite zoom, depending on the scene. scenes that zoom with the
 bulk of the fractal 'visible' need to do something other than cut away large
