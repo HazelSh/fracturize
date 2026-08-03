@@ -1,13 +1,43 @@
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+use crate::palette::spec::PaletteDef;
+use crate::palette::Palette;
 use crate::path::{CameraPath, PathKey};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-/// 256-color gradient for Apophysis-style rendering
-pub type Colormap = [[f32; 4]; 256];
+/// 256-color gradient for Apophysis-style rendering. Lives in
+/// `crate::palette` now that filling it is a swappable stage; re-exported
+/// here because everything that reads a scene expects to find it here.
+pub use crate::palette::Colormap;
+
+/// Which source fills the 256-entry colormap.
+///
+/// Both modes share stage 1 (the walker's colour accumulation), so
+/// `color_speed`, `color_falloff` and `color_contrast` mean the same thing in
+/// each — the seam is only at the 1-D → RGB map itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColorMode {
+    /// The ring built from per-transform RGB. What the renderer always did,
+    /// and the lane for using colour to read IFS *structure* — each transform
+    /// keeps its own identity.
+    #[default]
+    Transforms,
+    /// An independent gradient that doesn't depend on the transform count.
+    /// The Apophysis model: structure and styling become separable jobs.
+    Palette,
+}
+
+impl ColorMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ColorMode::Transforms => "transforms",
+            ColorMode::Palette => "palette",
+        }
+    }
+}
 
 /// Number of variation slots per transform (must match chaos.wgsl)
 pub const NUM_VARIATIONS: usize = 20;
@@ -414,6 +444,7 @@ fn default_zoom_octave_falloff() -> f64 {
     crate::renorm::ZoomSpec::default().octave_falloff as f64
 }
 
+
 /// Full scene file structure
 #[derive(Deserialize, Serialize)]
 pub struct SceneFile {
@@ -422,6 +453,14 @@ pub struct SceneFile {
     pub camera: Option<CameraDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zoom: Option<ZoomDef>,
+    /// An independent gradient. **Its presence selects palette mode** — one
+    /// mechanism, rather than a `color_mode` key that can fall out of sync
+    /// with it. (`enabled = false` inside the table is the one exception, and
+    /// exists so the A/B toggle survives a save.) Per-transform `color` stays
+    /// in the file either way: it is still what `transforms` mode renders, so
+    /// a scene can carry both and be flipped between them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub palette: Option<PaletteDef>,
     #[serde(rename = "transform")]
     pub transforms: Vec<TransformDef>,
 }
@@ -456,9 +495,17 @@ pub struct Scene {
     pub transforms: Vec<TransformSpec>,
     /// Human-readable name per transform (from scene file)
     pub transform_names: Vec<Option<String>>,
-    /// Per-transform gradient color (source data for the colormap)
+    /// Per-transform gradient color (source data for `ColorMode::Transforms`)
     pub colors: Vec<Vec3>,
-    /// 256-color gradient for point coloring
+    /// The scene's own gradient, if it has one. Kept even when
+    /// `color_mode` is `Transforms`, so switching back and forth — and
+    /// saving in between — doesn't throw the palette away.
+    pub palette: Option<Palette>,
+    /// Which of the two fills `colormap`
+    pub color_mode: ColorMode,
+    /// 256-color gradient for point coloring — the resolved output of
+    /// `color_mode`, and the only thing the GPU ever sees. Rebuild it with
+    /// [`Scene::regenerate_colormap`] after touching either source.
     pub colormap: Colormap,
     /// Camera orbit center / look-at point
     pub camera_focus: Vec3,
@@ -523,6 +570,8 @@ impl Scene {
             ],
             transform_names: vec![None, None],
             colors,
+            palette: None,
+            color_mode: ColorMode::Transforms,
             colormap,
             camera_focus: Vec3::ZERO,
             camera_distance: 3.0,
@@ -611,8 +660,26 @@ impl Scene {
         let mut transforms = transforms;
         resolve_color_speeds(&mut transforms, global_speed, scene_file.meta.color_falloff as f32);
 
-        // Generate colormap from transform colors (always cyclic)
-        let colormap = generate_colormap(&transform_colors);
+        // A `[palette]` table selects palette mode by its presence alone;
+        // `enabled = false` inside it keeps the gradient on file while
+        // rendering the transform ring (the A/B toggle). A malformed palette
+        // is an error rather than a silent fall-back to the other mode — a
+        // scene that quietly rendered the wrong colours would be worse than
+        // one that refused to load.
+        let palette = scene_file
+            .palette
+            .as_ref()
+            .map(|d| d.resolve())
+            .transpose()?;
+        let color_mode = match (&palette, scene_file.palette.as_ref().and_then(|d| d.enabled)) {
+            (Some(_), Some(false)) => ColorMode::Transforms,
+            (Some(_), _) => ColorMode::Palette,
+            (None, _) => ColorMode::Transforms,
+        };
+        let colormap = match (color_mode, &palette) {
+            (ColorMode::Palette, Some(p)) => p.to_colormap(),
+            _ => generate_colormap(&transform_colors),
+        };
 
         let cam = scene_file.camera.unwrap_or_default();
         let camera_focus = cam.focus.map(|f| Vec3::from(f.map(|v| v as f32))).unwrap_or(Vec3::ZERO);
@@ -718,6 +785,8 @@ impl Scene {
             transforms,
             transform_names,
             colors: transform_colors,
+            palette,
+            color_mode,
             colormap,
             camera_focus,
             camera_distance: folded.distance,
@@ -729,10 +798,45 @@ impl Scene {
         })
     }
 
-    /// Rebuild the colormap from the per-transform colors (after color edits
-    /// or transform add/remove)
+    /// The gradient this scene actually renders through, whichever mode it is
+    /// in. In `Transforms` mode this is built on the spot from `colors`, so
+    /// the GUI can draw the colormap you are getting rather than only the one
+    /// you authored.
+    pub fn effective_palette(&self) -> Palette {
+        match (self.color_mode, &self.palette) {
+            (ColorMode::Palette, Some(p)) => p.clone(),
+            // A scene in palette mode with no palette is only reachable
+            // mid-edit; falling back keeps it rendering rather than white.
+            _ => Palette::from_transform_colors(&self.colors),
+        }
+    }
+
+    /// Rebuild the colormap from whichever source `color_mode` selects.
+    /// Call after any colour edit, and after adding or removing a transform —
+    /// the transform ring's spacing is `k/N`, so N changing recolours it.
     pub fn regenerate_colormap(&mut self) {
-        self.colormap = generate_colormap(&self.colors);
+        self.colormap = self.effective_palette().to_colormap();
+    }
+
+    /// Switch colour source. Adopting palette mode with no palette in hand
+    /// freezes the current transform ring into one, so the toggle always
+    /// lands on the gradient that was already on screen instead of on
+    /// something unrelated — you edit away from what you had.
+    pub fn set_color_mode(&mut self, mode: ColorMode) {
+        if mode == ColorMode::Palette && self.palette.is_none() {
+            let mut p = Palette::from_transform_colors(&self.colors);
+            p.name = None;
+            self.palette = Some(p);
+        }
+        self.color_mode = mode;
+        self.regenerate_colormap();
+    }
+
+    /// Install a gradient and switch to it.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = Some(palette);
+        self.color_mode = ColorMode::Palette;
+        self.regenerate_colormap();
     }
 
     /// Save the scene back to a TOML file, decomposing each transform matrix
@@ -838,6 +942,14 @@ impl Scene {
                     }),
                 }
             }),
+            // Written whenever the scene has one, even in `transforms` mode —
+            // that's what `enabled = false` is for, and dropping the gradient
+            // because it isn't currently selected would make the A/B toggle
+            // destructive.
+            palette: self
+                .palette
+                .as_ref()
+                .map(|p| PaletteDef::from_palette(p, self.color_mode == ColorMode::Palette)),
             zoom: self.zoom.as_ref().map(|z| ZoomDef {
                 // Names move around under edits and indices don't, but a name
                 // is what a human wants to read; prefer it when there is one.
@@ -874,6 +986,7 @@ impl Scene {
         let fresh = toml::to_string(&file)
             .map_err(|e| format!("Failed to serialize scene: {}", e))?;
         let fresh = inline_variation_tables(&fresh).unwrap_or(fresh);
+        let fresh = rewrite_palette_table(&fresh, file.palette.as_ref()).unwrap_or(fresh);
 
         let content = fs::read_to_string(path.as_ref())
             .ok()
@@ -1027,6 +1140,8 @@ fn merge_scene_into_document(
     file: &SceneFile,
     fresh: &str,
 ) -> Option<String> {
+    apply_palette_table(&mut doc, file.palette.as_ref());
+
     {
         let meta = doc
             .entry("meta")
@@ -1193,6 +1308,35 @@ fn merge_scene_into_document(
 
 /// Rewrite each `[transform.variations]` sub-table as an inline
 /// `variations = { ... }` on the transform itself
+/// Replace a document's `[palette]` with a freshly built one (or remove it).
+///
+/// Unlike the rest of the merge, this is a wholesale rewrite rather than a
+/// key-by-key update, and deliberately so: a palette's *shape* changes under
+/// editing — stops appear and vanish, a cosine palette becomes stops when you
+/// grab a handle — so there is no stable set of keys to update in place. It
+/// also lets serde's `[[palette.stops]]` array-of-tables come out as the
+/// inline `stops = [ { at = …, color = "#…" } ]` a person would write.
+fn rewrite_palette_table(content: &str, def: Option<&PaletteDef>) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = content.parse().ok()?;
+    apply_palette_table(&mut doc, def);
+    Some(doc.to_string())
+}
+
+fn apply_palette_table(doc: &mut toml_edit::DocumentMut, def: Option<&PaletteDef>) {
+    let Some(def) = def else {
+        doc.remove("palette");
+        return;
+    };
+    let mut table = def.to_table();
+    // Keep an existing table's position (and the comment above it) when there
+    // is one; otherwise it lands after the tables already present.
+    if let Some(toml_edit::Item::Table(old)) = doc.get("palette") {
+        *table.decor_mut() = old.decor().clone();
+        table.set_position(old.position().unwrap_or(usize::MAX));
+    }
+    doc["palette"] = toml_edit::Item::Table(table);
+}
+
 fn inline_variation_tables(content: &str) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = content.parse().ok()?;
     let transforms = doc.get_mut("transform")?.as_array_of_tables_mut()?;
@@ -1210,6 +1354,221 @@ fn inline_variation_tables(content: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    // === [palette] ========================================================
+
+    /// The minimum scene a palette test needs, as text.
+    fn scene_with(palette: &str) -> String {
+        format!(
+            r#"[meta]
+name = "PaletteTest"
+
+[camera]
+distance = 3.0
+
+{palette}
+[[transform]]
+translation = [0.5, 0.5, 0.0]
+scale = 0.5
+color = [0.9, 0.5, 0.25]
+
+[[transform]]
+translation = [-0.5, -0.5, 0.0]
+scale = 0.5
+color = [0.25, 0.6, 0.9]
+"#
+        )
+    }
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fracturize_palette_{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("scene.toml")
+    }
+
+    #[test]
+    fn no_palette_table_means_transform_mode() {
+        let path = temp("absent");
+        std::fs::write(&path, scene_with("")).unwrap();
+        let scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.color_mode, ColorMode::Transforms);
+        assert!(scene.palette.is_none());
+        // ...and renders exactly what it always did
+        assert_eq!(scene.colormap, generate_colormap(&scene.colors));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_palette_table_selects_palette_mode_by_its_presence() {
+        let path = temp("present");
+        std::fs::write(&path, scene_with("[palette]\nname = \"ember\"\n\n")).unwrap();
+        let scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.color_mode, ColorMode::Palette);
+        assert_eq!(scene.colormap, crate::palette::library::get("ember").unwrap().to_colormap());
+        // The per-transform colours are still there, still meaningful
+        assert_eq!(scene.colors.len(), 2);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn enabled_false_keeps_the_palette_but_renders_the_ring() {
+        let path = temp("disabled");
+        std::fs::write(&path, scene_with("[palette]\nname = \"ocean\"\nenabled = false\n\n")).unwrap();
+        let scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.color_mode, ColorMode::Transforms);
+        assert!(scene.palette.is_some(), "the gradient stays on file");
+        assert_eq!(scene.colormap, generate_colormap(&scene.colors));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The A/B toggle has to survive Ctrl+S, or flipping to `transforms` and
+    /// saving would silently delete the gradient (or silently flip back).
+    #[test]
+    fn the_mode_toggle_survives_a_save() {
+        let path = temp("toggle");
+        std::fs::write(&path, scene_with("[palette]\nname = \"jade\"\n\n")).unwrap();
+
+        let mut scene = Scene::load(&path).unwrap();
+        scene.set_color_mode(ColorMode::Transforms);
+        scene.save(&path).unwrap();
+
+        let back = Scene::load(&path).unwrap();
+        assert_eq!(back.color_mode, ColorMode::Transforms);
+        assert_eq!(back.palette.as_ref().and_then(|p| p.name.clone()).as_deref(), Some("jade"));
+
+        // ...and back again
+        let mut scene = back;
+        scene.set_color_mode(ColorMode::Palette);
+        scene.save(&path).unwrap();
+        let back = Scene::load(&path).unwrap();
+        assert_eq!(back.color_mode, ColorMode::Palette);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn authored_stops_round_trip_through_a_save() {
+        let path = temp("stops");
+        std::fs::write(
+            &path,
+            scene_with(
+                "[palette]\ncyclic = true\ninterpolate = \"oklab\"\nrotate = 0.25\nreverse = true\n\
+                 stops = [ { at = 0.0, color = \"#0c040a\" }, { at = 0.4, color = \"#b23818\" }, \
+                 { at = 0.75, color = \"#fcde9e\" } ]\n\n",
+            ),
+        )
+        .unwrap();
+
+        let scene = Scene::load(&path).unwrap();
+        let before = scene.colormap;
+        let p = scene.palette.clone().unwrap();
+        assert_eq!(p.stops().unwrap().len(), 3);
+        assert_eq!(p.interpolate, crate::palette::Interpolate::Oklab);
+        assert!(p.reverse);
+        assert!((p.rotate - 0.25).abs() < 1e-6);
+
+        scene.save(&path).unwrap();
+        let back = Scene::load(&path).unwrap();
+        assert_eq!(back.color_mode, ColorMode::Palette);
+        assert_eq!(back.palette.unwrap(), p);
+        assert_eq!(back.colormap, before, "the rendered gradient must not drift");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_cosine_palette_round_trips() {
+        let path = temp("cosine");
+        std::fs::write(
+            &path,
+            scene_with(
+                "[palette]\ncosine = { a = [0.5, 0.5, 0.5], b = [0.5, 0.5, 0.5], \
+                 c = [1.0, 1.0, 1.0], d = [0.0, 0.33, 0.67] }\n\n",
+            ),
+        )
+        .unwrap();
+        let scene = Scene::load(&path).unwrap();
+        let before = scene.colormap;
+        scene.save(&path).unwrap();
+        let back = Scene::load(&path).unwrap();
+        assert_eq!(back.colormap, before);
+        assert!(matches!(back.palette.unwrap().body, crate::palette::Body::Cosine(_)));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// Adding a palette to a hand-authored scene must not cost it its
+    /// comments — the whole point of the merge path.
+    #[test]
+    fn adding_a_palette_preserves_comments() {
+        let path = temp("comments");
+        let src = "# A scene with a story.\n[meta]\nname = \"Told\"  # inline\n\n                   [camera]\ndistance = 3.0\n\n                   # The first map.\n[[transform]]\ntranslation = [0.5, 0.5, 0.0]\n                   scale = 0.5\ncolor = [0.9, 0.5, 0.25]\n";
+        std::fs::write(&path, src).unwrap();
+
+        let mut scene = Scene::load(&path).unwrap();
+        scene.set_palette(crate::palette::library::get("abyss").unwrap());
+        scene.save(&path).unwrap();
+
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("# A scene with a story."), "{out}");
+        assert!(out.contains("# The first map."), "{out}");
+        assert!(out.contains("# inline"), "{out}");
+        assert!(out.contains("[palette]") && out.contains("abyss"), "{out}");
+        assert_eq!(Scene::load(&path).unwrap().color_mode, ColorMode::Palette);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// Dropping a palette has to actually remove the table, or the next load
+    /// would put it straight back.
+    #[test]
+    fn clearing_a_palette_removes_the_table() {
+        let path = temp("cleared");
+        std::fs::write(&path, scene_with("[palette]\nname = \"neon\"\n\n")).unwrap();
+        let mut scene = Scene::load(&path).unwrap();
+        scene.palette = None;
+        scene.color_mode = ColorMode::Transforms;
+        scene.save(&path).unwrap();
+
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(!out.contains("[palette]"), "{out}");
+        assert!(Scene::load(&path).unwrap().palette.is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_broken_palette_is_a_load_error_not_a_silent_fallback() {
+        let path = temp("broken");
+        std::fs::write(&path, scene_with("[palette]\nname = \"no-such-gradient\"\n\n")).unwrap();
+        let err = match Scene::load(&path) {
+            Err(e) => e,
+            Ok(_) => panic!("a palette naming a gradient that doesn't exist must not load"),
+        };
+        assert!(err.contains("unknown palette"), "{err}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn switching_to_palette_mode_adopts_the_ring_that_was_showing() {
+        let mut scene = Scene::blank();
+        let ring = scene.colormap;
+        scene.set_color_mode(ColorMode::Palette);
+        assert!(scene.palette.is_some());
+        assert_eq!(scene.colormap, ring, "the toggle must not change what is on screen");
+    }
+
+    /// The transform ring depends on the transform count; a palette does not.
+    /// This is the defect palette mode exists to escape, so pin both halves.
+    #[test]
+    fn a_palette_is_independent_of_the_transform_count() {
+        let mut scene = Scene::blank();
+        let ring_before = scene.colormap;
+        scene.colors.push(Vec3::new(0.2, 0.9, 0.4));
+        scene.regenerate_colormap();
+        assert_ne!(scene.colormap, ring_before, "adding a colour moves the whole ring");
+
+        scene.set_palette(crate::palette::library::get("fern").unwrap());
+        let with_palette = scene.colormap;
+        scene.colors.push(Vec3::new(0.9, 0.2, 0.4));
+        scene.regenerate_colormap();
+        assert_eq!(scene.colormap, with_palette, "a palette does not care how many maps there are");
+    }
     use super::*;
 
     #[test]
@@ -1629,48 +1988,13 @@ color = [0.9, 0.5, 0.2]
     }
 }
 
-/// Generate a 256-color gradient from transform colors
-/// Creates smooth interpolation between colors spaced evenly across the gradient
-/// Always cyclic (last color blends to first)
+/// The `transforms` colour source: N per-transform colours spread evenly
+/// around a cyclic gradient.
+///
+/// Thin wrapper over [`Palette::from_transform_colors`], which is where the
+/// logic (and the test pinning it byte-for-byte to the version this replaced)
+/// now lives.
 pub fn generate_colormap(colors: &[Vec3]) -> Colormap {
-    let mut colormap = [[0.0f32; 4]; 256];
-
-    if colors.is_empty() {
-        // Default: white
-        for entry in &mut colormap {
-            *entry = [1.0, 1.0, 1.0, 1.0];
-        }
-        return colormap;
-    }
-
-    if colors.len() == 1 {
-        // Single color: fill entire map
-        let c = colors[0];
-        for entry in &mut colormap {
-            *entry = [c.x, c.y, c.z, 1.0];
-        }
-        return colormap;
-    }
-
-    // Multiple colors: interpolate between them
-    // Cyclic: treat the sequence as wrapping around (last connects to first)
-    let n = colors.len();
-    
-    for i in 0..256 {
-        let t = i as f32 / 256.0; // 0.0 to <1.0 for cyclic
-        
-        let scaled = t * n as f32;
-        let idx0 = scaled.floor() as usize;
-        let idx1 = (idx0 + 1) % colors.len();
-        let local_t = scaled - idx0 as f32;
-
-        // Linear interpolation
-        let c0 = colors[idx0];
-        let c1 = colors[idx1];
-        let c = c0 * (1.0 - local_t) + c1 * local_t;
-
-        colormap[i] = [c.x, c.y, c.z, 1.0];
-    }
-
-    colormap
+    Palette::from_transform_colors(colors).to_colormap()
 }
+

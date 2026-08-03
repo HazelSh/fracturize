@@ -2531,7 +2531,7 @@ impl App {
     // === Transform editing (see also gizmo drags above) ===
 
     /// The transform editing keys act on: the explicit selection, or T0
-    fn selection(&self) -> Option<usize> {
+    pub fn selection(&self) -> Option<usize> {
         let n = self.scene.transforms.len();
         if n == 0 {
             return None;
@@ -3019,6 +3019,143 @@ impl App {
         self.color_falloff = falloff.clamp(0.0, 4.0);
         self.refresh_color_speeds();
         self.commit_edit("Color falloff", Some("color_falloff"), before);
+    }
+
+    // === Palette =========================================================
+    //
+    // Every one of these is a scene edit, so they take a snapshot and commit,
+    // and every one has to push the rebuilt colormap to the GPU: existing
+    // points keep their 8-bit index, so re-uploading the 256 entries recolours
+    // the whole buffer on the next frame without re-running the chaos game.
+    // That is what makes dragging a gradient handle feel live.
+
+    /// Rebuild the colormap and hand it to the GPU. The one path — anything
+    /// that changes colour goes through here rather than doing it by hand.
+    fn push_colormap(&mut self) {
+        self.scene.regenerate_colormap();
+        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+    }
+
+    /// Switch colour source (the `transforms | palette` toggle).
+    pub fn set_color_mode(&mut self, mode: crate::scene::ColorMode) {
+        if self.scene.color_mode == mode {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.set_color_mode(mode);
+        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.commit_edit(format!("Color mode: {}", mode.name()), None, before);
+    }
+
+    /// Install a gradient (library pick, random roll, or import).
+    pub fn set_palette(&mut self, palette: crate::palette::Palette, label: &str) {
+        let before = self.edit_snapshot();
+        self.scene.set_palette(palette);
+        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.commit_edit(label.to_string(), None, before);
+    }
+
+    /// Edit the current palette in place. The closure gets `&mut Palette`;
+    /// `key` coalesces a whole drag into one undo step, as elsewhere.
+    pub fn edit_palette(
+        &mut self,
+        label: impl Into<String>,
+        key: Option<&str>,
+        f: impl FnOnce(&mut crate::palette::Palette),
+    ) {
+        let before = self.edit_snapshot();
+        let Some(p) = self.scene.palette.as_mut() else { return };
+        f(p);
+        self.push_colormap();
+        self.commit_edit(label.into(), key, before);
+    }
+
+    /// Move a control point along the gradient.
+    ///
+    /// Stops are kept sorted, so dragging one past its neighbour reorders the
+    /// list and the index the caller was holding no longer refers to the same
+    /// stop. Returns where it ended up so the GUI can keep hold of it through
+    /// the drag instead of grabbing whichever stop inherited the old index.
+    pub fn set_palette_stop_at(&mut self, idx: usize, at: f32) -> usize {
+        let mut moved = idx;
+        // One coalescing key for every stop, not one per index: a drag that
+        // crosses a neighbour changes the index mid-gesture, and a key
+        // carrying the index would split that one drag into two undo steps.
+        // Only one stop can be dragged at a time, so a shared key is safe.
+        self.edit_palette("Move palette stop", Some("pal:stop"), |p| {
+            moved = p.move_stop(idx, at);
+        });
+        moved
+    }
+
+    pub fn set_palette_stop_color(&mut self, idx: usize, color: Vec3) {
+        self.edit_palette("Recolor palette stop", Some(&format!("pal:col:{idx}")), |p| {
+            if let Some(s) = p.stops_mut().and_then(|s| s.get_mut(idx)) {
+                s.color = color;
+            }
+        });
+    }
+
+    /// Add a control point at `at`, taking the colour the gradient already
+    /// has there — so adding a handle never changes the picture, it only
+    /// gives you somewhere to grab.
+    pub fn add_palette_stop(&mut self, at: f32) -> Option<usize> {
+        let color = self.scene.palette.as_ref()?.sample(at);
+        let mut added = None;
+        self.edit_palette("Add palette stop", None, |p| {
+            let Some(stops) = p.stops_mut() else { return };
+            stops.push(crate::palette::Stop { at: at.clamp(0.0, 0.999), color });
+            stops.sort_by(|a, b| a.at.partial_cmp(&b.at).unwrap_or(std::cmp::Ordering::Equal));
+            added = stops.iter().position(|s| s.at == at.clamp(0.0, 0.999));
+        });
+        added
+    }
+
+    /// Remove a control point. Two is the floor: one stop is a flat colour
+    /// and zero is white, and neither is a state a delete button should be
+    /// able to strand someone in.
+    pub fn remove_palette_stop(&mut self, idx: usize) {
+        if self.scene.palette.as_ref().and_then(|p| p.stops()).is_none_or(|s| s.len() <= 2) {
+            return;
+        }
+        self.edit_palette("Delete palette stop", None, |p| {
+            if let Some(stops) = p.stops_mut() {
+                if idx < stops.len() {
+                    stops.remove(idx);
+                }
+            }
+        });
+    }
+
+    /// Freeze a procedural or imported gradient into editable control points.
+    /// A cosine palette has no handles to grab; this is the "I want to edit
+    /// this one" button, and it keeps the colours you were already looking at.
+    pub fn convert_palette_to_stops(&mut self, n: usize) {
+        let Some(p) = self.scene.palette.as_ref() else { return };
+        if p.stops().is_some() {
+            return;
+        }
+        let frozen = p.to_stops(n);
+        let before = self.edit_snapshot();
+        self.scene.palette = Some(frozen);
+        self.push_colormap();
+        self.commit_edit("Convert palette to stops", None, before);
+    }
+
+    /// Roll a new gradient, honouring the same generators as
+    /// `--random-palette`. Returns what it landed on, for the status line.
+    pub fn randomize_palette(
+        &mut self,
+        generator: Option<crate::palette::random::Generator>,
+    ) -> String {
+        let mut rng = rand::thread_rng();
+        let p = match generator {
+            Some(g) => crate::palette::random::from(g, &mut rng),
+            None => crate::palette::random::palette(&mut rng),
+        };
+        let described = p.describe();
+        self.set_palette(p, "Random palette");
+        described
     }
 
     /// Haze band in world units: the pinned one, or auto-ranged off the

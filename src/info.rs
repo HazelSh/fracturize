@@ -15,8 +15,39 @@
 
 use glam::Vec3;
 
+use crate::palette::{to_srgb8, Palette};
 use crate::renorm::{Renorm, ZoomSpec};
-use crate::scene::Scene;
+use crate::scene::{ColorMode, Scene};
+
+/// A gradient as `width` 24-bit ANSI colour blocks.
+///
+/// Unconditionally colourised, including when stdout is a pipe. `--info` is a
+/// diagnostic read by people and by agents, not a data format — and an agent
+/// that can see the gradient makes better decisions about a scene than one
+/// parsing floats and imagining it. Colours are encoded to sRGB on the way
+/// out, because a terminal expects display values, not the linear ones the
+/// GPU is handed.
+pub fn swatch(palette: &Palette, width: usize) -> String {
+    let mut out = String::new();
+    for i in 0..width {
+        let [r, g, b] = to_srgb8(palette.sample(i as f32 / width as f32));
+        out.push_str(&format!("\x1b[48;2;{r};{g};{b}m "));
+    }
+    out.push_str("\x1b[0m");
+    out
+}
+
+/// The same gradient as `n` hex stops — the fallback for anywhere the escape
+/// codes above don't render, and the form you can paste into a scene file.
+fn hex_ramp(palette: &Palette, n: usize) -> String {
+    (0..n)
+        .map(|i| {
+            let [r, g, b] = to_srgb8(palette.sample(i as f32 / n as f32));
+            format!("#{r:02x}{g:02x}{b:02x}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Everything `--info` prints, as one string
 pub fn report(scene: &Scene, source: &str) -> String {
@@ -129,6 +160,44 @@ pub fn report(scene: &Scene, source: &str) -> String {
         "color: speed {:.2}, falloff {:.2}, contrast {:.2}",
         scene.color_speed, scene.color_falloff, scene.color_contrast
     ));
+
+    // ---- colour source ----------------------------------------------------
+    // The gradient is the one render property a file genuinely cannot convey:
+    // `[palette] name = "ember"` says nothing about what ember looks like, and
+    // twenty-four floats say less. So draw it.
+    let resolved = scene.effective_palette();
+    line(format!(
+        "colormap [{}]: {}",
+        scene.color_mode.name(),
+        match scene.color_mode {
+            ColorMode::Palette => resolved.describe(),
+            ColorMode::Transforms => format!(
+                "{} transform colours, evenly spread (adding a transform moves them all)",
+                scene.colors.len()
+            ),
+        }
+    ));
+    line(format!("  {}", swatch(&resolved, 48)));
+    line(format!("  {}", hex_ramp(&resolved, 8)));
+    let (mean, swing) = resolved.luminance_profile();
+    line(format!(
+        "  luminance: mean {:.2}, swing {:.2}{}",
+        mean,
+        swing,
+        // The palette is the only shading this renderer has, so a flat one is
+        // worth saying out loud rather than leaving to be discovered.
+        if swing < 0.15 { "  (flat — renders without shading)" } else { "" }
+    ));
+    if scene.color_mode == ColorMode::Transforms && scene.palette.is_some() {
+        line("  (this scene also carries a [palette]; --color-mode palette renders it)".to_string());
+    }
+    if scene.color_contrast > 1.5 {
+        line(format!(
+            "  note: color_contrast {:.2} stretches the index, so only part of \
+             this gradient is reached",
+            scene.color_contrast
+        ));
+    }
     line(format!(
         "camera: yaw {:.4} pitch {:.4} distance {:.3} focus ({:.3}, {:.3}, {:.3}){}",
         scene.camera_yaw,

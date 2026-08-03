@@ -204,6 +204,12 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
+/// Colour: the source (stage 2) and the two accumulation knobs around it.
+///
+/// `color_contrast` is drawn by `gradient::draw` rather than here, directly
+/// under the strip showing what it does to the gradient. It used to sit with
+/// the other sliders, where a palette compressed into an arc of itself looked
+/// like a broken palette rather than a contrast setting.
 fn draw_color(ui: &mut egui::Ui, app: &mut App) {
     let mut falloff = app.color_falloff;
     let resp = ui.add(egui::Slider::new(&mut falloff, 0.0..=4.0).text("color falloff"));
@@ -217,21 +223,7 @@ fn draw_color(ui: &mut egui::Ui, app: &mut App) {
         app.set_color_falloff(falloff);
     }
 
-    let mut contrast = app.color_contrast;
-    let resp = ui.add(
-        egui::Slider::new(&mut contrast, 0.25..=16.0)
-            .logarithmic(true)
-            .text("color contrast"),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "Cyclic colormap contrast stretch (C / Shift+C)",
-        "drag: adjust color contrast",
-    );
-    if resp.changed() {
-        app.set_color_contrast(contrast);
-    }
+    super::gradient::draw(ui, app);
 }
 
 /// One slider, and a disclosure for the band it normally works out itself.

@@ -310,6 +310,11 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
         transforms: c.transforms,
         transform_names: c.names,
         colors: c.colors,
+        // A random flame stays in `transforms` mode: `--random` has
+        // always produced per-transform colours, and a palette is opted
+        // into with --random-palette rather than arriving unasked.
+        palette: None,
+        color_mode: crate::scene::ColorMode::Transforms,
         colormap,
         camera_focus: center,
         // ~2.4x the 95th-percentile radius fills the frame without clipping

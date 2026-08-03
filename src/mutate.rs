@@ -118,11 +118,22 @@ fn apply_random_op(scene: &mut Scene, rng: &mut impl Rng, strength: f32, log: &m
             }
         }
     } else if roll < 0.87 {
-        // Hue shift of the transform's gradient color
-        let deg = rng.gen_range(-90.0..90.0) * strength;
-        let c = scene.colors[i];
-        scene.colors[i] = rotate_hue(c, deg);
-        log.push(format!("T{} hue {:+.0}°", i, deg));
+        // The colour operator, which is a different thing in each mode.
+        // Hue-shifting one transform's RGB is meaningless once a palette owns
+        // the colours — nothing downstream reads it — so in palette mode the
+        // same slice of the roll perturbs the gradient instead. Without this,
+        // `U` in palette mode would spend a mutation doing nothing visible.
+        match (scene.color_mode, scene.palette.as_mut()) {
+            (crate::scene::ColorMode::Palette, Some(p)) => {
+                log.push(crate::palette::random::perturb(p, rng, strength));
+            }
+            _ => {
+                let deg = rng.gen_range(-90.0..90.0) * strength;
+                let c = scene.colors[i];
+                scene.colors[i] = rotate_hue(c, deg);
+                log.push(format!("T{} hue {:+.0}°", i, deg));
+            }
+        }
     } else if roll < 0.92 {
         // Colormap index shift
         let d = rng.gen_range(-0.2..0.2) * strength;
@@ -220,6 +231,53 @@ color = [0.2, 0.2, 1.0]
         )
         .unwrap();
         Scene::load(&path).unwrap()
+    }
+
+    /// In palette mode the gradient is what colour *is*, so `U` has to reach
+    /// it. Before this, every colour mutation edited per-transform RGB that
+    /// nothing downstream read, and mutating a palette scene never changed
+    /// its colours at all.
+    #[test]
+    fn mutation_reaches_the_palette_in_palette_mode() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(11);
+        let mut scene = test_scene("fracturize_mutate_palette");
+        scene.set_palette(crate::palette::library::get("ember").unwrap());
+
+        let mut palette_changed = false;
+        for _ in 0..60 {
+            let before = scene.palette.clone().unwrap();
+            let log = mutate(&mut scene, &mut rng, 1.0);
+            if scene.palette.as_ref() != Some(&before) {
+                palette_changed = true;
+                assert!(
+                    log.iter().any(|l| l.starts_with("palette")),
+                    "a palette change must be reported: {log:?}"
+                );
+            }
+            // Whatever happened, the rendered gradient must still agree with
+            // the palette — a stale colormap would show the old colours.
+            assert_eq!(scene.colormap, scene.effective_palette().to_colormap());
+            assert_eq!(scene.color_mode, crate::scene::ColorMode::Palette);
+        }
+        assert!(palette_changed, "60 mutations never touched the palette");
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_palette")).ok();
+    }
+
+    /// ...and in transforms mode it must still do the old thing.
+    #[test]
+    fn mutation_still_shifts_transform_hues_without_a_palette() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(11);
+        let mut scene = test_scene("fracturize_mutate_hue");
+        let before = scene.colors.clone();
+        let mut saw_hue = false;
+        for _ in 0..60 {
+            let log = mutate(&mut scene, &mut rng, 1.0);
+            saw_hue |= log.iter().any(|l| l.contains("hue"));
+            assert!(scene.palette.is_none(), "transforms mode must not invent a palette");
+        }
+        assert!(saw_hue, "60 mutations never shifted a transform hue");
+        assert_ne!(scene.colors, before);
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_hue")).ok();
     }
 
     #[test]

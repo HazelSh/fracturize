@@ -9,6 +9,7 @@ mod history;
 mod indicators;
 mod mutate;
 mod offline;
+mod palette;
 mod path;
 mod prefs;
 mod trace;
@@ -193,6 +194,44 @@ struct Args {
     #[arg(long, requires = "zoom")]
     zoom_falloff: Option<f32>,
 
+    /// Colour the fractal through an independent gradient instead of the
+    /// per-transform ring: a library name (see --palettes), a palette file
+    /// (.toml, or Apophysis .ugr / .gradient / .flame), or `file.ugr#name` to
+    /// pick one gradient out of a collection. Overrides the scene's own
+    /// [palette] — restyling a scene shouldn't require editing it, same
+    /// reasoning as --zoom.
+    #[arg(long, value_name = "NAME|PATH")]
+    palette: Option<String>,
+
+    /// Which colour source fills the 256-entry colormap. Scenes with a
+    /// [palette] use it by default; `transforms` renders the per-transform
+    /// ring instead without discarding the palette, so the two are A/B-able.
+    #[arg(long, value_enum)]
+    color_mode: Option<ColorModeArg>,
+
+    /// Roll a random gradient. Honours --seed and prints the [palette] table
+    /// so a good roll can be pasted into a scene (same convention as
+    /// --random). Optionally name a generator: cosine, harmony or library.
+    #[arg(long, value_name = "GENERATOR", num_args = 0..=1, default_missing_value = "any")]
+    random_palette: Option<String>,
+
+    /// Shift the palette along the colour index, 0-1 (wraps)
+    #[arg(long, value_name = "T", allow_hyphen_values = true)]
+    palette_rotate: Option<f32>,
+
+    /// Reverse the palette's direction
+    #[arg(long)]
+    palette_reverse: bool,
+
+    /// Interpolate the palette's control points in `rgb` (flam3-compatible)
+    /// or `oklab` (perceptually even, no grey midpoints)
+    #[arg(long, value_name = "SPACE")]
+    palette_interpolate: Option<String>,
+
+    /// List the built-in palette library, with a colour swatch each, and exit
+    #[arg(long)]
+    palettes: bool,
+
     /// Print what this scene is — transforms with their share of the walk and
     /// contraction, where the attractor actually lands, render properties, and
     /// which maps could carry infinite zoom — then exit. Reads a scene without
@@ -289,6 +328,176 @@ fn apply_zoom_args(scene: &mut Scene, args: &Args, announce: bool) {
             std::process::exit(1);
         }
     }
+}
+
+/// `--color-mode`, as clap sees it.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum ColorModeArg {
+    Transforms,
+    Palette,
+}
+
+impl From<ColorModeArg> for scene::ColorMode {
+    fn from(a: ColorModeArg) -> Self {
+        match a {
+            ColorModeArg::Transforms => scene::ColorMode::Transforms,
+            ColorModeArg::Palette => scene::ColorMode::Palette,
+        }
+    }
+}
+
+/// Apply the `--palette*` flags over whatever the scene authored.
+///
+/// Order matters and is the same one the scene format uses: pick a gradient,
+/// then adjust it. So `--palette ember --palette-reverse` reverses ember, and
+/// a scene's own `reverse = true` is *replaced* rather than compounded when a
+/// new palette is named — otherwise "give me ember" would silently hand back
+/// ember-backwards depending on what the file happened to say.
+///
+/// Like `--zoom`, failures exit rather than falling back: a run that quietly
+/// rendered the scene's original colours would look like the flag did nothing.
+fn apply_palette_args(scene: &mut Scene, args: &Args, announce: bool) {
+    let rolled = args.random_palette.as_ref().map(|which| {
+        let generator = match which.as_str() {
+            "any" => None,
+            name => Some(palette::random::Generator::parse(name).unwrap_or_else(|| {
+                eprintln!(
+                    "--random-palette: unknown generator '{}'. Available: any, {}",
+                    name,
+                    palette::random::Generator::ALL
+                        .iter()
+                        .map(|g| g.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                std::process::exit(1);
+            })),
+        };
+        let (p, seed) = roll_palette(generator, args.seed);
+        if announce {
+            println!("Random palette seed: {} ({})", seed, p.describe());
+            println!("{}", palette::spec::PaletteDef::from_palette(&p, true).to_toml_fragment());
+        }
+        p
+    });
+
+    let named = args.palette.as_ref().map(|spec| {
+        resolve_palette_arg(spec).unwrap_or_else(|e| {
+            eprintln!("--palette: {}", e);
+            std::process::exit(1);
+        })
+    });
+
+    // A rolled palette and a named one is a contradiction; clap can't express
+    // "either but not both" across an Option pair as cleanly as just saying so.
+    if rolled.is_some() && named.is_some() {
+        eprintln!("--palette and --random-palette both set a gradient; pick one");
+        std::process::exit(1);
+    }
+
+    if let Some(p) = named.or(rolled) {
+        scene.set_palette(p);
+    }
+
+    if let Some(p) = scene.palette.as_mut() {
+        if let Some(r) = args.palette_rotate {
+            p.rotate = r.rem_euclid(1.0);
+        }
+        if args.palette_reverse {
+            p.reverse = !p.reverse;
+        }
+        if let Some(space) = &args.palette_interpolate {
+            p.interpolate = palette::Interpolate::parse(space).unwrap_or_else(|| {
+                eprintln!(
+                    "--palette-interpolate: expected {}",
+                    palette::Interpolate::ALL
+                        .iter()
+                        .map(|i| i.name())
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                );
+                std::process::exit(1);
+            });
+        }
+    } else if args.palette_rotate.is_some() || args.palette_reverse
+        || args.palette_interpolate.is_some()
+    {
+        eprintln!("--palette-rotate / --palette-reverse / --palette-interpolate need a palette: \
+                   pass --palette or --random-palette, or use a scene with a [palette] table");
+        std::process::exit(1);
+    }
+
+    // Last, so it can override the mode a --palette implied — `--palette ember
+    // --color-mode transforms` loads ember and renders without it, which is
+    // exactly the A/B the mode flag exists for.
+    if let Some(mode) = args.color_mode {
+        scene.set_color_mode(mode.into());
+    }
+
+    scene.regenerate_colormap();
+}
+
+/// A `--palette` value: a library name, a file, or `file#gradient-name`.
+fn resolve_palette_arg(spec: &str) -> Result<palette::Palette, String> {
+    // A bare library name wins over a same-named file, because the library is
+    // the thing people will type by far the most often.
+    let bare = spec.split('#').next().unwrap_or(spec);
+    if !bare.contains(['/', '\\', '.']) {
+        if let Some(p) = palette::library::get(bare) {
+            return Ok(p);
+        }
+    }
+    if std::path::Path::new(bare).exists() {
+        return palette::import::load_one(spec);
+    }
+    Err(format!(
+        "'{}' is neither a library palette nor a file. Library: {}",
+        spec,
+        palette::library::names().join(", ")
+    ))
+}
+
+/// Roll a palette, honouring `--seed` and returning the seed used so it can
+/// be printed and reproduced.
+fn roll_palette(
+    generator: Option<palette::random::Generator>,
+    seed: Option<u64>,
+) -> (palette::Palette, u64) {
+    use rand::SeedableRng;
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    });
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let p = match generator {
+        Some(g) => palette::random::from(g, &mut rng),
+        None => palette::random::palette(&mut rng),
+    };
+    (p, seed)
+}
+
+/// `--palettes`: the library, one per line, each with a swatch you can
+/// actually see. Printing twenty-four floats and asking someone to imagine
+/// the gradient is not a listing.
+fn print_palette_library() {
+    println!("{} built-in palettes:\n", palette::library::len());
+    let width = palette::library::names().iter().map(|n| n.len()).max().unwrap_or(8);
+    for p in palette::library::all() {
+        let name = p.name.clone().unwrap_or_default();
+        println!(
+            "  {:<width$}  {}  {}",
+            name,
+            info::swatch(&p, 32),
+            palette::library::blurb(&name).unwrap_or(""),
+            width = width
+        );
+    }
+    println!(
+        "\nUse with --palette <name>. Apophysis .ugr / .gradient / .flame files\n\
+         work too: --palette mygradients.ugr#twilight"
+    );
 }
 
 /// The scene a run starts from: `--scene`, else `--blank`, `--random`, or the
@@ -417,6 +626,7 @@ impl ApplicationHandler for AppWrapper {
             scene.point_count = n;
         }
         apply_zoom_args(&mut scene, &self.args, true);
+        apply_palette_args(&mut scene, &self.args, true);
 
         let view = self.args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
@@ -828,6 +1038,8 @@ fn default_scene() -> Scene {
             variations: TransformSpec::linear_variations(),
         })
         .collect(),
+        palette: None,
+        color_mode: scene::ColorMode::Transforms,
         colormap,
         camera_focus: default_cam.focus,
         camera_distance: default_cam.distance,
@@ -847,6 +1059,12 @@ fn main() {
     // Parse CLI args
     let args = Args::parse();
 
+    // --palettes: show the library and stop. No scene, no device.
+    if args.palettes {
+        print_palette_library();
+        return;
+    }
+
     // --info: read a scene and say what it is, without opening a device
     if args.info {
         let source = args
@@ -860,6 +1078,8 @@ fn main() {
         let mut scene = load_scene(&args);
         // --info reports the zoom in its own section; don't say it twice
         apply_zoom_args(&mut scene, &args, false);
+        // --info prints the palette in its own section; don't say it twice
+        apply_palette_args(&mut scene, &args, false);
         print!("{}", info::report(&scene, &source));
         return;
     }
@@ -868,11 +1088,13 @@ fn main() {
     if let Some(out) = &args.render {
         let mut scene = load_scene(&args);
         apply_zoom_args(&mut scene, &args, true);
+        apply_palette_args(&mut scene, &args, true);
 
         // Effort presets set points + accumulation; explicit flags win
         let (effort_points, effort_accumulate) = match args.effort {
             Some(e) => {
                 let (p, a) = e.preset();
+
                 (Some(p), Some(a))
             }
             None => (None, None),

@@ -968,6 +968,16 @@ fn draw_weight_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         }
     });
 
+    // In palette mode the per-transform RGB is not rendered at all — the
+    // gradient owns the colours — so showing a swatch there would be a
+    // control that does nothing. What matters instead is *where in the
+    // gradient* this transform sits, drawn on the gradient itself.
+    if app.scene.color_mode == crate::scene::ColorMode::Palette {
+        ui.label("Color value");
+        super::gradient::transform_color_value(ui, app, idx);
+        return;
+    }
+
     let color = app.scene.colors[idx];
     let mut srgb = [
         (color.x.clamp(0.0, 1.0) * 255.0).round() as u8,

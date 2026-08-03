@@ -257,6 +257,8 @@ mod tests {
             }],
             transform_names: vec![None],
             colors: vec![Vec3::ONE],
+            palette: None,
+            color_mode: crate::scene::ColorMode::Transforms,
             colormap: [[0.0; 4]; 256],
             camera_focus: Vec3::ZERO,
             camera_distance: 3.0,

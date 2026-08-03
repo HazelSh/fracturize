@@ -21,6 +21,7 @@ use crate::prefs::PanelPrefs;
 pub mod browser;
 pub mod camera_panel;
 pub mod explore;
+pub mod gradient;
 pub mod hints;
 pub mod icons;
 pub mod labels;
@@ -78,6 +79,20 @@ pub struct UiState {
     /// rebuilt from `JobParams`) so switching output modes doesn't discard
     /// the settings of the mode you switched away from.
     pub render_job: render_job::RenderJobForm,
+    /// Which palette control point the gradient editor has selected, if any.
+    /// Held across frames so the colour picker and position field have
+    /// something to act on, and updated by `App::set_palette_stop_at` when a
+    /// drag reorders the stops out from under the index.
+    pub palette_stop: Option<usize>,
+    /// The control point currently being dragged, followed through reorders.
+    ///
+    /// Stops are kept sorted, so dragging one past its neighbour swaps their
+    /// indices — but egui keys a drag by *widget id*, which is built from the
+    /// index. Without this the drag silently transfers to whichever stop
+    /// inherited the index and starts hauling that one along too, and two
+    /// control points end up stacked on the cursor. So the id says only "a
+    /// drag is in progress"; this says what it is dragging.
+    pub palette_drag: Option<usize>,
 }
 
 impl UiState {
@@ -92,6 +107,8 @@ impl UiState {
             browser_scrolled_to: None,
             save_as: save_as::SaveAsState::default(),
             render_job: render_job::RenderJobForm::default(),
+            palette_stop: None,
+            palette_drag: None,
         }
     }
 }

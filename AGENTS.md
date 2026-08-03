@@ -605,6 +605,148 @@ Scene-design notes learned the hard way:
   (cyclic: large stretches also rotate hues when the mean index is off-center).
   Both are keybind-tunable live (D / C) and saved into view files.
 
+## Colour: two sources, one colormap
+
+**The renderer has always been a palette renderer.** `chaos.wgsl` writes an
+8-bit *index*, never a colour, and both point shaders resolve it against a
+256-entry storage buffer. Colouring is three stages:
+
+1. **Accumulate** — walker history → a scalar `c ∈ [0,1]`, an EMA over the
+   transforms' `color_value`s at a rate set by `color_speed` / `color_falloff`.
+2. **Map** — `c` → RGB, via the 256-entry colormap. **This is the swappable
+   stage** (`src/palette/`).
+3. **Grade** — the render-time cyclic contrast stretch, and haze desaturation.
+
+Stage 1 is shared, so `color_speed`, `color_falloff` and `color_contrast` mean
+the same thing whichever source fills the colormap.
+
+| `color_mode` | Source | What it's for |
+|---|---|---|
+| `transforms` (default) | The per-transform RGBs, spread evenly around a cyclic ring | Reading IFS **structure** — each transform keeps its identity |
+| `palette` | An independent gradient | Styling. Apophysis's model: structure and colour become separable jobs |
+
+Both are kept deliberately. A gradient can express *an ordering* of structure
+but can never *label* it — a 1-D index means only "the EMA landed here" — so
+the transform ring stays as the lane for using colour to understand a flame.
+
+**A defect the transform ring has, and palette mode doesn't:** its stops sit at
+`k/N`, so *adding a transform moves every other transform's colour*. Author a
+scene you like with four maps, add a fifth, and all five have shifted. A
+palette doesn't depend on the transform count at all.
+
+`Scene::color_mode` selects the source; `Scene::regenerate_colormap` resolves
+it. Call it after **any** colour edit and after adding or removing a transform.
+`App::push_colormap` does that and re-uploads to the GPU — points keep their
+8-bit index, so re-uploading 256 entries recolours the whole buffer on the next
+frame without re-running the chaos game. That is what makes dragging a gradient
+handle feel live.
+
+**Palette mode needed zero GPU changes.** Not few — zero. Everything downstream
+of stage 2 already worked the way Apophysis works.
+
+### `[palette]` in a scene
+
+Its **presence selects palette mode** — one mechanism, rather than a
+`color_mode` key that can drift out of sync with it. Per-transform `color`
+stays in the file regardless: it's still what `transforms` mode renders, so a
+scene can carry both and be flipped between them with `--color-mode`. The one
+exception is `enabled = false`, which keeps the gradient on file while
+rendering the ring — without it the in-app A/B toggle would be destroyed by
+every save.
+
+```toml
+[palette]
+name = "ember"                # a library palette (--palettes lists them)...
+
+# ...or authored here. `stops`, `cosine` or `entries`; the first present wins
+# and all three override `name` (which then survives as provenance).
+cyclic = true                 # index 255 wraps to 0. The default: the shader's
+                              # lookup wraps and the contrast stretch assumes it
+interpolate = "rgb"           # or "oklab" — perceptually even, no grey midpoint
+                              # between complementary stops
+stops = [
+  { at = 0.00, color = "#0c040a" },
+  { at = 0.38, color = "#b23818" },
+  { at = 0.70, color = "#fcde9e" },
+]
+# cosine = { a = [...], b = [...], c = [...], d = [...] }   # Iñigo Quílez form
+# entries = ["#…", …]         # 256 verbatim, for an import
+
+rotate = 0.0                  # shift along the index; reverse applies first
+reverse = false               # both sit on top, so a library palette can be
+                              # tuned per-scene without forking it
+```
+
+**A stop's `color` is sRGB hex or linear floats.** `"#b23818"` is what a colour
+picker shows; `[0.44, 0.04, 0.01]` is the linear triple the GPU gets, matching
+per-transform `color` and `background`. Both parse; saving writes hex, because
+a palette is a thing you look at. Everything that *displays* a palette (the
+`--info` swatch, the GUI strip) encodes to sRGB first — which is why the strip
+reads brighter than the per-transform swatches beside it. The strip is right:
+it's what renders.
+
+A malformed or unknown palette is a **load error**, not a fall-back to the
+other mode — a scene that quietly rendered the wrong colours would be worse
+than one that refused to load.
+
+### CLI
+
+```
+--palette <name|path>          # library name, a file, or file.ugr#gradient-name
+--color-mode transforms|palette
+--random-palette [cosine|harmony|library]   # honours --seed; prints the
+                                            # [palette] table so a roll can be kept
+--palette-rotate <t>  --palette-reverse  --palette-interpolate rgb|oklab
+--palettes                     # list the library with swatches, and exit
+```
+
+`--palette` restyles a scene without editing it, same spirit as `--zoom`.
+`--info` gains a colour section: mode, source, a **24-bit ANSI swatch**, a hex
+ramp, and the luminance profile. The swatch is emitted even when stdout is a
+pipe — `--info` is a diagnostic read by people *and agents*, and an agent that
+can see the gradient makes better decisions than one imagining it from floats.
+
+### The library, and importing
+
+`src/palette/library.rs` holds ~20 hand-authored gradients. flam3's ~700 are
+**not vendored**: `flam3-palettes.xml` is GPL'd and this project's licence
+isn't stated. Instead `src/palette/import.rs` reads what a flame user already
+has — Apophysis/UltraFractal `.ugr` / `.gradient` (many gradients per file;
+`color=` is **BGR**-packed and indices run 0..399, not 0..255), and a `.flame`'s
+`<palette>` hex blob. Imported colours are display sRGB and are decoded to
+linear on the way in.
+
+Two rules every library entry follows, both enforced by tests:
+
+- **Luminance has to go somewhere.** The renderer has no lights, so the palette
+  *is* the shading. A gradient at one brightness renders flat however pretty
+  its hues are.
+- **Luminance rises and falls once.** The colormap is cyclic, so a monotone
+  dark→bright ramp puts a hard seam at index 0. This is obvious in hindsight
+  and invisible until you've rendered a hundred bad rolls.
+
+`palette::random` enforces both on generated palettes via `score()`: each
+generator rolls a dozen candidates and keeps the best. `U` mutates the palette
+in palette mode instead of per-transform hue, which nothing downstream reads
+there.
+
+### GUI
+
+The gradient strip lives in the Render window (`src/ui/gradient.rs`) and is
+drawn in **both** modes — in `transforms` mode it's read-only, and being able
+to see the colormap you're getting is worth having on its own. Ticks along it
+mark each transform's `color_value`.
+
+`color_contrast` was moved out of the slider stack to sit directly under the
+strip, with a second thinner strip above it showing the colormap *after* the
+stretch whenever it isn't 1. A designed palette compressed into an arc of
+itself otherwise looks like a broken palette rather than a contrast setting.
+
+In the Transforms window, palette mode replaces the per-transform RGB swatch
+(which renders nothing in that mode) with the strip and a draggable marker for
+that transform's `color_value`. That's the Apophysis idiom and the one piece of
+UI that makes the model click.
+
 ## Infinite Zoom
 
 An IFS attractor has a size. Zooming out runs off the end of it in a second;
