@@ -92,6 +92,15 @@ fn bar(ui: &mut egui::Ui, height: f32, map: &Colormap, transform: impl Fn(f32) -
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     draw_mode_row(ui, app);
 
+    // Mix mode has no colormap to draw: colour is a 3-vector carried through
+    // the walk and written straight into the point, so there is no 1-D strip
+    // it could be indexing into. Its "palette" is the set of transform
+    // colours, so show those.
+    if app.scene.color_mode == ColorMode::Mix {
+        draw_mix(ui, app);
+        return;
+    }
+
     let map = app.scene.colormap;
     let resp = bar(ui, STRIP_H, &map, |t| t);
     let strip_rect = resp.rect;
@@ -104,16 +113,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        match app.scene.color_mode {
-            ColorMode::Palette => "The gradient this scene renders through. \
-                                   Double-click to add a control point.",
-            ColorMode::Transforms => "The colormap built from the per-transform colours. \
-                                      Read-only here — edit the colours in the Transforms window, \
-                                      or switch to palette mode.",
+        if app.scene.color_mode == ColorMode::Palette {
+            "The gradient this scene renders through. Double-click to add a control point."
+        } else {
+            "The colormap built from the per-transform colours. Read-only here — edit the \
+             colours in the Transforms window, or switch to palette mode."
         },
-        match app.scene.color_mode {
-            ColorMode::Palette => "double-click: add a control point",
-            ColorMode::Transforms => "the colormap the transform colours produce",
+        if app.scene.color_mode == ColorMode::Palette {
+            "double-click: add a control point"
+        } else {
+            "the colormap the transform colours produce"
         },
     );
 
@@ -172,6 +181,21 @@ fn draw_mode_row(ui: &mut egui::Ui, app: &mut App) {
             app.set_color_mode(ColorMode::Palette);
         }
 
+        let resp = ui.selectable_label(mode == ColorMode::Mix, "mix");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Carry the per-transform colours through the walk as a 3-vector instead of a \
+             gradient position, so they genuinely blend: a walker that came via a red map and \
+             then a blue one is purple, and tells apart from one that came via two magenta \
+             maps. Distinct transform *combinations* get distinct colours — the thing a 1-D \
+             index cannot do. No colormap, so color contrast doesn't apply.",
+            "click: mix the transform colours through the walk",
+        );
+        if resp.clicked() {
+            app.set_color_mode(ColorMode::Mix);
+        }
+
         if mode == ColorMode::Palette {
             let current = app
                 .scene
@@ -213,6 +237,52 @@ fn draw_mode_row(ui: &mut egui::Ui, app: &mut App) {
             }
         }
     });
+}
+
+/// Mix mode's stand-in for the strip: the transform colours themselves, which
+/// is what the walk is actually blending. Clicking one selects that transform,
+/// so the swatch row doubles as a way into the colour picker that edits it.
+fn draw_mix(ui: &mut egui::Ui, app: &mut App) {
+    let colors: Vec<Vec3> = app.scene.colors.clone();
+    let selected = app.selection();
+    let mut clicked = None;
+
+    ui.horizontal_wrapped(|ui| {
+        for (i, &c) in colors.iter().enumerate() {
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(STRIP_H, STRIP_H), egui::Sense::click());
+            if ui.is_rect_visible(rect) {
+                let stroke = if selected == Some(i) {
+                    egui::Stroke::new(2.0, ui.visuals().widgets.active.fg_stroke.color)
+                } else {
+                    egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)
+                };
+                ui.painter().rect(rect, 2.0, color32(c), stroke, egui::StrokeKind::Inside);
+            }
+            let name = app
+                .scene
+                .transform_names
+                .get(i)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| format!("T{i}"));
+            if resp.on_hover_text(name).clicked() {
+                clicked = Some(i);
+            }
+        }
+    });
+    if let Some(i) = clicked {
+        app.select_transform(Some(i));
+    }
+
+    ui.label(
+        egui::RichText::new(
+            "Colour is mixed through the walk, not looked up: no colormap, and \
+             color contrast does not apply. Edit the colours in the Transforms window.",
+        )
+        .weak()
+        .small(),
+    );
 }
 
 /// Small ticks along the strip showing each transform's `color_value`.

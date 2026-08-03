@@ -11,7 +11,7 @@ struct Point {
     color_idx: u32,
 }
 
-// Must match GpuTransform in buffers.rs (160 bytes)
+// Must match GpuTransform in buffers.rs (176 bytes)
 struct Transform {
     matrix: mat4x4<f32>,
     color_value: f32,
@@ -20,19 +20,38 @@ struct Transform {
     color_speed: f32,
     // Variation weights; slot order matches scene::VARIATION_NAMES
     var_weights: array<vec4<f32>, 5>,
+    // This transform's own colour, linear RGB (ColorMode::Mix only). vec3 is
+    // 16-aligned, so it lands at offset 160 and the struct is 176.
+    color_rgb: vec3<f32>,
 }
 
+// The walker carries colour two ways at once, and they cost the same because
+// both fit in space that was already padding:
+//
+//   current_color   a scalar position in the colormap (transforms / palette)
+//   current_rgb     a 3-vector that genuinely mixes (mix mode)
+//
+// The scalar can order structure but never label it: two walkers that arrived
+// by completely different routes collide on the same index whenever their
+// EMAs happen to land together. Mixing three channels instead of one makes a
+// walker that came via a red map and then a blue one *purple*, and
+// distinguishable from one that came via two magenta maps — distinct
+// transform *combinations* get distinct colours, which is the thing 1-D
+// indexing structurally cannot do.
+//
+// `current_rgb` occupies what were `_pad1..3`, so this costs no memory at all
+// on a renderer whose entire constraint is VRAM.
 struct WalkerState {
     current_pos: vec3<f32>,
     _pad0: f32,
     current_color: f32,
-    _pad1: f32,
-    _pad2: f32,
-    _pad3: f32,
+    current_rgb_r: f32,
+    current_rgb_g: f32,
+    current_rgb_b: f32,
     rng_state: vec4<u32>,
 }
 
-// Must match PointComputeParams in buffers.rs (176 bytes)
+// Must match PointComputeParams in buffers.rs (192 bytes)
 struct ComputeParams {
     num_transforms: u32,
     num_walkers: u32,
@@ -317,6 +336,19 @@ fn renormalize(pos: vec3<f32>, rng: ptr<function, vec4<u32>>) -> vec3<f32> {
     return params.zoom_fixed.xyz + u;
 }
 
+// Pack a linear RGB triple into 24 bits, 8 per channel.
+//
+// Stored as sqrt(linear), not linear. Eight bits spread evenly over a linear
+// ramp put almost all of their resolution in the highlights, and a fractal is
+// mostly dark material — a straight linear quantisation bands visibly in the
+// shadows, which is exactly where this renderer lives. One `sqrt` on write and
+// one multiply on read buys that back. Must stay in step with `unpack_rgb` in
+// render.wgsl and splat.wgsl.
+fn pack_rgb(c: vec3<f32>) -> u32 {
+    let q = vec3<u32>(round(sqrt(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0))) * 255.0));
+    return q.r | (q.g << 8u) | (q.b << 16u);
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let walker_id = global_id.x;
@@ -328,6 +360,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var rng = walker_states[walker_id].rng_state;
     var pos = walker_states[walker_id].current_pos;
     var color_val = walker_states[walker_id].current_color;
+    var color_rgb = vec3<f32>(
+        walker_states[walker_id].current_rgb_r,
+        walker_states[walker_id].current_rgb_g,
+        walker_states[walker_id].current_rgb_b,
+    );
 
     for (var i = 0u; i < params.iterations_per_walker; i++) {
         // Select random transform based on weights
@@ -348,9 +385,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             );
         }
 
-        // Blend color toward transform's color
+        // Blend color toward transform's color. Both channels advance at the
+        // same rate, so `color_speed` / `color_falloff` mean exactly what they
+        // meant before in every mode — the accumulation stage is shared, and
+        // only what it accumulates differs.
         let speed = transforms[transform_idx].color_speed;
         color_val = color_val * (1.0 - speed) + transforms[transform_idx].color_value * speed;
+        color_rgb = mix(color_rgb, transforms[transform_idx].color_rgb, speed);
 
         // Calculate output index with circular wrapping
         let local_idx = walker_id * params.iterations_per_walker + i;
@@ -363,12 +404,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             out_pos = renormalize(pos, &rng);
         }
 
+        // Both encodings ride in the one word: the colormap index in the low
+        // 8 bits (every consumer already masks with 0xFF), the mixed RGB in
+        // the 24 that were free. So switching colour mode is a uniform flip
+        // that recolours the existing buffer — no refill, no stall.
         let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
-        points[output_idx] = Point(out_pos, color_idx);
+        points[output_idx] = Point(out_pos, color_idx | (pack_rgb(color_rgb) << 8u));
     }
 
     // Save walker state for next frame
     walker_states[walker_id].current_pos = pos;
     walker_states[walker_id].current_color = color_val;
+    walker_states[walker_id].current_rgb_r = color_rgb.r;
+    walker_states[walker_id].current_rgb_g = color_rgb.g;
+    walker_states[walker_id].current_rgb_b = color_rgb.b;
     walker_states[walker_id].rng_state = rng;
 }

@@ -209,6 +209,7 @@ fn fill_points(
     let mut compute = PointCompute::new(
         device,
         &scene.transforms,
+        &scene.colors,
         &scene.colormap,
         scene.point_count as u32,
     );
@@ -667,7 +668,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
             tile.view_proj, height as f32, point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent,
+            transparent, scene.color_mode.packs_rgb(),
         );
         renderer.upload_camera(&queue, &camera);
 
@@ -860,7 +861,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
             cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent,
+            transparent, scene.color_mode.packs_rgb(),
         );
         renderer.upload_camera(&queue, &camera);
         let use_point_primitives = point_size * height as f32 / cam.distance <= 1.5;
@@ -973,7 +974,7 @@ pub fn render_mutations(
         view_proj, height as f32, point_size, aspect, 1.0,
         haze_near, haze_far, haze.transmittance, haze.saturation,
         color_contrast, scene.background.to_array(),
-        transparent,
+        transparent, scene.color_mode.packs_rgb(),
     );
 
     let target = TileTarget::new(&device, width, height, clear);

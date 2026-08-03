@@ -37,6 +37,18 @@ pub fn swatch(palette: &Palette, width: usize) -> String {
     out
 }
 
+/// A list of colours as ANSI blocks, four columns each so a handful of
+/// transform colours are still legible side by side.
+fn color_blocks(colors: &[Vec3]) -> String {
+    let mut out = String::new();
+    for &c in colors {
+        let [r, g, b] = to_srgb8(c);
+        out.push_str(&format!("\x1b[48;2;{r};{g};{b}m    "));
+    }
+    out.push_str("\x1b[0m");
+    out
+}
+
 /// The same gradient as `n` hex stops — the fallback for anywhere the escape
 /// codes above don't render, and the form you can paste into a scene file.
 fn hex_ramp(palette: &Palette, n: usize) -> String {
@@ -175,10 +187,34 @@ pub fn report(scene: &Scene, source: &str) -> String {
                 "{} transform colours, evenly spread (adding a transform moves them all)",
                 scene.colors.len()
             ),
+            ColorMode::Mix => format!(
+                "{} transform colours mixed through the walk as RGB — no colormap, \
+                 so transform *combinations* are distinguishable and color_contrast \
+                 does not apply",
+                scene.colors.len()
+            ),
         }
     ));
-    line(format!("  {}", swatch(&resolved, 48)));
-    line(format!("  {}", hex_ramp(&resolved, 8)));
+    if scene.color_mode == ColorMode::Mix {
+        // The ring would be a lie here: mix mode never indexes it. Show the
+        // colours that actually get blended, one block each.
+        line(format!("  {}", color_blocks(&scene.colors)));
+        line(format!(
+            "  {}",
+            scene
+                .colors
+                .iter()
+                .map(|&c| {
+                    let [r, g, b] = to_srgb8(c);
+                    format!("#{r:02x}{g:02x}{b:02x}")
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    } else {
+        line(format!("  {}", swatch(&resolved, 48)));
+        line(format!("  {}", hex_ramp(&resolved, 8)));
+    }
     let (mean, swing) = resolved.luminance_profile();
     line(format!(
         "  luminance: mean {:.2}, swing {:.2}{}",
@@ -191,7 +227,7 @@ pub fn report(scene: &Scene, source: &str) -> String {
     if scene.color_mode == ColorMode::Transforms && scene.palette.is_some() {
         line("  (this scene also carries a [palette]; --color-mode palette renders it)".to_string());
     }
-    if scene.color_contrast > 1.5 {
+    if scene.color_contrast > 1.5 && scene.color_mode != ColorMode::Mix {
         line(format!(
             "  note: color_contrast {:.2} stretches the index, so only part of \
              this gradient is reached",

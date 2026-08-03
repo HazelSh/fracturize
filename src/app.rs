@@ -614,6 +614,7 @@ impl App {
         let point_compute = PointCompute::new(
             &gpu.device,
             &scene.transforms,
+            &scene.colors,
             &scene.colormap,
             buffer_capacity,
         );
@@ -2636,8 +2637,7 @@ impl App {
         self.scene.colors[idx] = hsv_to_rgb(h, s, v);
         let c = self.scene.colors[idx];
         log::info!("T{} color: h={:.0} s={:.2} v={:.2} rgb=({:.2},{:.2},{:.2})", idx, h, s, v, c.x, c.y, c.z);
-        self.scene.regenerate_colormap();
-        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.push_colormap();
         const CHANNEL_NAMES: [&str; 3] = ["Hue", "Saturation", "Value"];
         self.commit_edit(
             format!("{} T{}", CHANNEL_NAMES[channel], idx),
@@ -2782,8 +2782,7 @@ impl App {
         }
         let before = self.edit_snapshot();
         self.scene.colors[idx] = color;
-        self.scene.regenerate_colormap();
-        self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.push_colormap();
         self.commit_edit(
             format!("Recolor T{}", idx),
             Some(&format!("insp:t{}:color", idx)),
@@ -2851,6 +2850,7 @@ impl App {
         self.point_compute = PointCompute::new(
             &self.gpu.device,
             &self.scene.transforms,
+            &self.scene.colors,
             &self.scene.colormap,
             self.buffer_capacity,
         );
@@ -2875,6 +2875,7 @@ impl App {
         self.point_compute.update_weights(
             &self.gpu.queue,
             &self.scene.transforms,
+            &self.scene.colors,
             &self.transform_enabled,
         );
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
@@ -2897,6 +2898,7 @@ impl App {
         self.point_compute.update_weights(
             &self.gpu.queue,
             &self.scene.transforms,
+            &self.scene.colors,
             &self.transform_enabled,
         );
         self.gizmo_renderer.update_transforms(&self.gpu.queue, &self.scene.transforms);
@@ -2957,6 +2959,7 @@ impl App {
         self.point_compute.update_weights(
             &self.gpu.queue,
             &self.scene.transforms,
+            &self.scene.colors,
             &self.transform_enabled,
         );
         self.reset();
@@ -3031,12 +3034,20 @@ impl App {
 
     /// Rebuild the colormap and hand it to the GPU. The one path — anything
     /// that changes colour goes through here rather than doing it by hand.
+    ///
+    /// Both colour buffers, not just the colormap: `ColorMode::Mix` reads each
+    /// transform's RGB out of the *transform* buffer, so a colour edit that
+    /// only re-uploaded the 256 entries would leave mix mode showing the old
+    /// colours until something else happened to touch a weight.
     fn push_colormap(&mut self) {
         self.scene.regenerate_colormap();
         self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.sync_transforms_to_gpu();
     }
 
-    /// Switch colour source (the `transforms | palette` toggle).
+    /// Switch colour source (the `transforms | palette | mix` toggle). The
+    /// transform re-upload isn't redundant with the colormap one: `mix` reads
+    /// the per-transform RGBs off the GPU struct, not the colormap.
     pub fn set_color_mode(&mut self, mode: crate::scene::ColorMode) {
         if self.scene.color_mode == mode {
             return;
@@ -3044,6 +3055,7 @@ impl App {
         let before = self.edit_snapshot();
         self.scene.set_color_mode(mode);
         self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+        self.sync_transforms_to_gpu();
         self.commit_edit(format!("Color mode: {}", mode.name()), None, before);
     }
 
@@ -3335,6 +3347,7 @@ impl App {
         self.point_compute.update_weights(
             &self.gpu.queue,
             &self.scene.transforms,
+            &self.scene.colors,
             &self.transform_enabled,
         );
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
@@ -3617,6 +3630,7 @@ impl App {
             self.scene.background.to_array(),
             // A screenshot is a file with an alpha channel worth filling in.
             self.transparent_render,
+            self.scene.color_mode.packs_rgb(),
         );
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3886,6 +3900,7 @@ impl App {
             // The window's swapchain has nothing behind it to composite
             // through, so the live pass is always opaque.
             false,
+            self.scene.color_mode.packs_rgb(),
         );
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
         if self.show_traces {

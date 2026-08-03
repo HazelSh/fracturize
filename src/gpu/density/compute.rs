@@ -100,7 +100,10 @@ impl ChaosCompute {
             .iter()
             .map(|t| {
                 cumulative += t.weight / total_weight;
-                GpuTransform::new(t, cumulative, t.weight)
+                // The density renderer is the inactive experimental path and
+                // has no mixed-RGB mode; white keeps its shader's arithmetic
+                // unchanged.
+                GpuTransform::new(t, cumulative, t.weight, glam::Vec3::ONE)
             })
             .collect();
 

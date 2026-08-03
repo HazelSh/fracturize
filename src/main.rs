@@ -203,9 +203,12 @@ struct Args {
     #[arg(long, value_name = "NAME|PATH")]
     palette: Option<String>,
 
-    /// Which colour source fills the 256-entry colormap. Scenes with a
-    /// [palette] use it by default; `transforms` renders the per-transform
-    /// ring instead without discarding the palette, so the two are A/B-able.
+    /// Where point colour comes from. `transforms` spreads the per-transform
+    /// RGBs around a cyclic colormap; `palette` indexes an independent
+    /// gradient (the default for scenes with a [palette], and switching to
+    /// `transforms` keeps the palette so the two are A/B-able); `mix` carries
+    /// the transform colours through the walk as RGB so they genuinely blend
+    /// and transform *combinations* become distinguishable.
     #[arg(long, value_enum)]
     color_mode: Option<ColorModeArg>,
 
@@ -335,6 +338,7 @@ fn apply_zoom_args(scene: &mut Scene, args: &Args, announce: bool) {
 enum ColorModeArg {
     Transforms,
     Palette,
+    Mix,
 }
 
 impl From<ColorModeArg> for scene::ColorMode {
@@ -342,6 +346,7 @@ impl From<ColorModeArg> for scene::ColorMode {
         match a {
             ColorModeArg::Transforms => scene::ColorMode::Transforms,
             ColorModeArg::Palette => scene::ColorMode::Palette,
+            ColorModeArg::Mix => scene::ColorMode::Mix,
         }
     }
 }

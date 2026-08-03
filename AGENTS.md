@@ -624,10 +624,12 @@ the same thing whichever source fills the colormap.
 |---|---|---|
 | `transforms` (default) | The per-transform RGBs, spread evenly around a cyclic ring | Reading IFS **structure** — each transform keeps its identity |
 | `palette` | An independent gradient | Styling. Apophysis's model: structure and colour become separable jobs |
+| `mix` | The per-transform RGBs, mixed as a **3-vector** along the walk | Telling transform *combinations* apart — see below. Skips stages 2 and 3 |
 
-Both are kept deliberately. A gradient can express *an ordering* of structure
-but can never *label* it — a 1-D index means only "the EMA landed here" — so
-the transform ring stays as the lane for using colour to understand a flame.
+All three are kept deliberately. A gradient can express *an ordering* of
+structure but can never *label* it — a 1-D index means only "the EMA landed
+here" — so the transform ring stays as the lane for using colour to understand
+a flame.
 
 **A defect the transform ring has, and palette mode doesn't:** its stops sit at
 `k/N`, so *adding a transform moves every other transform's colour*. Author a
@@ -693,7 +695,7 @@ than one that refused to load.
 
 ```
 --palette <name|path>          # library name, a file, or file.ugr#gradient-name
---color-mode transforms|palette
+--color-mode transforms|palette|mix
 --random-palette [cosine|harmony|library]   # honours --seed; prints the
                                             # [palette] table so a roll can be kept
 --palette-rotate <t>  --palette-reverse  --palette-interpolate rgb|oklab
@@ -746,6 +748,47 @@ In the Transforms window, palette mode replaces the per-transform RGB swatch
 (which renders nothing in that mode) with the strip and a draggable marker for
 that transform's `color_value`. That's the Apophysis idiom and the one piece of
 UI that makes the model click.
+
+### `mix`: three channels instead of one
+
+Both other modes reduce the walker's history to **one scalar** and look it up.
+That reduction, not the gradient, is where the information goes. A walker's
+history is a word over N symbols, and a scalar can't distinguish most words:
+arrive at the same EMA by two different routes and you get the same colour.
+Three channels can. A walker that went through a red map and then a blue one is
+purple, and *distinguishable* from one that went through two magenta maps —
+so distinct transform **combinations** get distinct colours.
+
+The plumbing costs nothing, because both ends already had room:
+
+- `WalkerState` had three spare f32 pads; they're now `current_rgb_r/g/b`.
+- `Point.color_idx` had 24 free bits above the 8-bit index; they now hold 8
+  bits per channel. The index is still written underneath, so nothing else in
+  the point path changed.
+- `GpuTransform` gained `color_rgb: vec3<f32>` (which is what takes it from 160
+  to **176** bytes — WGSL aligns the vec3 to 16, and Rust needs the explicit
+  `_pad` to agree).
+
+The mix is the *same EMA* as stage 1, run on a vector: `color_rgb = mix(...,
+transforms[i].color_rgb, speed)`, so `color_speed` and `color_falloff` still
+mean what they meant. Packing companies through a sqrt (`pack_rgb` in
+chaos.wgsl, `unpack_rgb` in **both** render.wgsl and splat.wgsl, which must
+stay in step) — 8 bits is coarse in the darks, and one multiply on read buys
+that back.
+
+Stages 2 and 3 are skipped: `camera.color_rgb_mode` makes `lookup_color` return
+the unpacked RGB before it ever touches the colormap. **`color_contrast` does
+nothing in mix mode** — it stretches a 1-D index and there isn't one. `--info`
+and the GUI both suppress it there rather than showing a dead control.
+
+Because the transform RGBs now reach the GPU as *data* and not just as a
+colormap, `App::push_colormap` also calls `sync_transforms_to_gpu()`. Editing a
+transform's colour in mix mode otherwise changes nothing on screen.
+
+Mix has no `[palette]` table to be inferred from, so `[meta] color_mode = "mix"`
+is the only thing carrying it across a save — the one place an explicit key
+exists, and it outranks the palette-presence rule in both directions. An
+unrecognised mode is a load error, not a silent fall-back.
 
 ## Infinite Zoom
 

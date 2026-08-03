@@ -77,10 +77,21 @@ pub struct PointCompute {
     pub zoom: Option<crate::renorm::Renorm>,
 }
 
+/// A transform's colour, or white if the parallel `colors` array is short.
+/// It can be, briefly: adding a transform pushes onto `transforms` and
+/// `colors` separately, and a redraw can land between the two.
+fn transform_color(colors: &[glam::Vec3], i: usize) -> glam::Vec3 {
+    colors.get(i).copied().unwrap_or(glam::Vec3::ONE)
+}
+
 impl PointCompute {
     pub fn new(
         device: &wgpu::Device,
         transforms: &[TransformSpec],
+        // Per-transform linear RGB, parallel to `transforms`. Only read in
+        // `ColorMode::Mix`, but uploaded always: the mode is a uniform flip
+        // at draw time, so the buffer has to be ready for either.
+        colors: &[glam::Vec3],
         colormap: &[[f32; 4]; 256],
         buffer_capacity: u32,
     ) -> Self {
@@ -111,9 +122,10 @@ impl PointCompute {
         let mut cumulative = 0.0;
         let gpu_transforms: Vec<GpuTransform> = transforms
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(i, t)| {
                 cumulative += t.weight / total_weight;
-                GpuTransform::new(t, cumulative, t.weight)
+                GpuTransform::new(t, cumulative, t.weight, transform_color(colors, i))
             })
             .collect();
 
@@ -337,6 +349,7 @@ impl PointCompute {
         &self,
         queue: &wgpu::Queue,
         transforms: &[TransformSpec],
+        colors: &[glam::Vec3],
         enabled: &[bool],
     ) {
         let total_weight: f32 = transforms
@@ -349,12 +362,13 @@ impl PointCompute {
         let gpu_transforms: Vec<GpuTransform> = transforms
             .iter()
             .zip(enabled.iter())
-            .map(|(t, &on)| {
+            .enumerate()
+            .map(|(i, (t, &on))| {
                 let effective_weight = if on { t.weight } else { 0.0 };
                 if total_weight > 0.0 {
                     cumulative += effective_weight / total_weight;
                 }
-                GpuTransform::new(t, cumulative, effective_weight)
+                GpuTransform::new(t, cumulative, effective_weight, transform_color(colors, i))
             })
             .collect();
 

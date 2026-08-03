@@ -23,9 +23,10 @@ struct CameraUniforms {
     bg_b: f32,
     // 1 when this pass writes an image with an alpha channel to keep.
     transparent: f32,
+    // 1 when point colour is packed RGB rather than a colormap index
+    color_rgb_mode: f32,
     _pad0: f32,
     _pad1: f32,
-    _pad2: f32,
 }
 
 struct VertexOutput {
@@ -42,7 +43,22 @@ struct VertexOutput {
 // palette center are amplified and wrap around (the colormap is cyclic),
 // restoring color amplitude when scale-aware accumulation compresses the
 // index range toward the mean. contrast = 1 is an exact passthrough.
+// The mixed-RGB path: 8/8/8 out of the top 24 bits, sqrt-companded (see
+// `pack_rgb` in chaos.wgsl). No colormap, and no contrast stretch — that is a
+// cyclic rescale of a 1-D *index*, and there is no index here to rescale.
+fn unpack_rgb(packed: u32) -> vec3<f32> {
+    let v = vec3<f32>(
+        f32((packed >> 8u) & 0xFFu),
+        f32((packed >> 16u) & 0xFFu),
+        f32((packed >> 24u) & 0xFFu),
+    ) / 255.0;
+    return v * v;
+}
+
 fn lookup_color(color_idx: u32) -> vec3<f32> {
+    if camera.color_rgb_mode > 0.5 {
+        return unpack_rgb(color_idx);
+    }
     let f = (f32(color_idx & 0xFFu) + 0.5) / 256.0;
     let stretched = fract(0.5 + (f - 0.5) * camera.color_contrast);
     return colormap[u32(stretched * 256.0) & 0xFFu].rgb;

@@ -28,14 +28,41 @@ pub enum ColorMode {
     /// An independent gradient that doesn't depend on the transform count.
     /// The Apophysis model: structure and styling become separable jobs.
     Palette,
+    /// Per-transform RGB carried through the walk as a **3-vector**, mixed
+    /// rather than indexed, and written straight into the point.
+    ///
+    /// The other two modes both reduce the walker's history to one scalar and
+    /// look it up. That reduction, not the gradient, is where the information
+    /// goes: a walker's history is a word over N symbols and a scalar cannot
+    /// distinguish most words. Mixing three channels can — a walker that came
+    /// via a red map and then a blue one is purple, and distinguishable from
+    /// one that came via two magenta maps. Distinct transform *combinations*
+    /// get distinct colours.
+    ///
+    /// Costs nothing: the walker's spare padding holds the vector and the
+    /// point's spare 24 bits hold the result. `color_contrast` does not apply
+    /// (it stretches a 1-D index, and there isn't one).
+    Mix,
 }
 
 impl ColorMode {
+    pub const ALL: [ColorMode; 3] = [ColorMode::Transforms, ColorMode::Palette, ColorMode::Mix];
+
     pub fn name(&self) -> &'static str {
         match self {
             ColorMode::Transforms => "transforms",
             ColorMode::Palette => "palette",
+            ColorMode::Mix => "mix",
         }
+    }
+
+    pub fn parse(s: &str) -> Option<ColorMode> {
+        ColorMode::ALL.into_iter().find(|m| m.name().eq_ignore_ascii_case(s))
+    }
+
+    /// Whether point colour is packed RGB rather than a colormap index.
+    pub fn packs_rgb(&self) -> bool {
+        matches!(self, ColorMode::Mix)
     }
 }
 
@@ -217,6 +244,15 @@ pub struct SceneMeta {
     /// wrapping cyclically. Compensates the wash-out from low color_falloff.
     #[serde(default = "default_color_contrast")]
     pub color_contrast: f64,
+    /// Colour source, when the `[palette]` presence rule can't express it.
+    ///
+    /// That rule — palette table present means palette mode — covers two of
+    /// the three modes and stays the mechanism for them, so existing files are
+    /// untouched and there is no redundant key to fall out of sync. `mix` is
+    /// the case it can't say, so this exists; it wins over the rule whenever
+    /// it is present, and is only *written* when the rule would get it wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_mode: Option<String>,
     /// Background colour behind the fractal, in **linear** 0-1 RGB — the
     /// value handed straight to `LoadOp::Clear`, which for an sRGB target is
     /// linear. Defaults to the dark blue-black every scene rendered on before
@@ -671,10 +707,23 @@ impl Scene {
             .as_ref()
             .map(|d| d.resolve())
             .transpose()?;
-        let color_mode = match (&palette, scene_file.palette.as_ref().and_then(|d| d.enabled)) {
-            (Some(_), Some(false)) => ColorMode::Transforms,
-            (Some(_), _) => ColorMode::Palette,
-            (None, _) => ColorMode::Transforms,
+        // An explicit `meta.color_mode` wins; otherwise the palette-presence
+        // rule decides. Naming a mode that doesn't exist is an error rather
+        // than a silent fall-back to the default — a typo that quietly
+        // rendered the wrong colours would be worse than one that refused.
+        let color_mode = match &scene_file.meta.color_mode {
+            Some(name) => ColorMode::parse(name).ok_or_else(|| {
+                format!(
+                    "Unknown color_mode '{}'. Available: {}",
+                    name,
+                    ColorMode::ALL.iter().map(|m| m.name()).collect::<Vec<_>>().join(", ")
+                )
+            })?,
+            None => match (&palette, scene_file.palette.as_ref().and_then(|d| d.enabled)) {
+                (Some(_), Some(false)) => ColorMode::Transforms,
+                (Some(_), _) => ColorMode::Palette,
+                (None, _) => ColorMode::Transforms,
+            },
         };
         let colormap = match (color_mode, &palette) {
             (ColorMode::Palette, Some(p)) => p.to_colormap(),
@@ -824,6 +873,8 @@ impl Scene {
     /// something unrelated — you edit away from what you had.
     pub fn set_color_mode(&mut self, mode: ColorMode) {
         if mode == ColorMode::Palette && self.palette.is_none() {
+            // (Mix needs nothing adopted: it reads the per-transform RGBs
+            // directly, which every scene already has.)
             let mut p = Palette::from_transform_colors(&self.colors);
             p.name = None;
             self.palette = Some(p);
@@ -902,6 +953,12 @@ impl Scene {
                 color_contrast: tidy(self.color_contrast),
                 haze: tidy(self.haze),
                 background: self.background.to_array().map(tidy),
+                // Written only when the `[palette]` presence rule wouldn't
+                // reproduce the mode on the next load — in practice, only for
+                // `mix`. Everything else keeps expressing itself the way it
+                // already does, so no existing file grows a key.
+                color_mode: (self.color_mode == ColorMode::Mix)
+                    .then(|| self.color_mode.name().to_string()),
                 // Point count is a render property chosen in the Render
                 // window and persisted to prefs, not part of the artwork, so
                 // saving no longer writes it. `None` also means the merge
@@ -1157,6 +1214,15 @@ fn merge_scene_into_document(
         set_f64(meta, "color_speed", file.meta.color_speed, Some(0.5));
         set_f64(meta, "color_falloff", file.meta.color_falloff, Some(0.0));
         set_f64(meta, "color_contrast", file.meta.color_contrast, Some(1.0));
+        match &file.meta.color_mode {
+            Some(m) => set_str(meta, "color_mode", m),
+            // Dropped when the palette-presence rule can say it again, so a
+            // scene that leaves `mix` doesn't keep a stale key that would
+            // override the rule on the next load.
+            None => {
+                meta.remove("color_mode");
+            }
+        }
         // `haze` was called `fog` when it darkened distant material rather
         // than thinning it. The loader still reads either, so a file left
         // holding both would be ambiguous — write the new key and drop the
@@ -1443,6 +1509,104 @@ color = [0.25, 0.6, 0.9]
         let back = Scene::load(&path).unwrap();
         assert_eq!(back.color_mode, ColorMode::Palette);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// `scene_with` drops its fragment between `[camera]` and the transforms,
+    /// which is the wrong side of the file for a `[meta]` key.
+    fn scene_with_mode(mode: &str) -> String {
+        scene_with("").replace("name = \"PaletteTest\"", &format!("name = \"PaletteTest\"\ncolor_mode = \"{mode}\""))
+    }
+
+    /// Mix has no `[palette]` table to be inferred from and no per-transform
+    /// state that distinguishes it, so `meta.color_mode` is the only thing
+    /// carrying it across a save. If that key goes missing the scene silently
+    /// reverts to `transforms`, which renders — just not what was authored.
+    #[test]
+    fn mix_mode_survives_a_save() {
+        let path = temp("mix_save");
+        std::fs::write(&path, scene_with("")).unwrap();
+
+        let mut scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.color_mode, ColorMode::Transforms);
+        scene.set_color_mode(ColorMode::Mix);
+        assert!(scene.palette.is_none(), "mix adopts nothing: it reads the transform colours directly");
+        scene.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("color_mode = \"mix\""), "the mode has to be written:\n{text}");
+
+        let back = Scene::load(&path).unwrap();
+        assert_eq!(back.color_mode, ColorMode::Mix);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// ...and leaving mix has to remove the key again, or the scene would
+    /// reload into a mode it was explicitly switched out of.
+    #[test]
+    fn leaving_mix_drops_the_key() {
+        let path = temp("mix_leave");
+        std::fs::write(&path, scene_with_mode("mix")).unwrap();
+
+        let mut scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.color_mode, ColorMode::Mix);
+        scene.set_color_mode(ColorMode::Transforms);
+        scene.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("color_mode"), "the key should be gone:\n{text}");
+        assert_eq!(Scene::load(&path).unwrap().color_mode, ColorMode::Transforms);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// An explicit key beats the palette-presence rule in both directions —
+    /// otherwise a scene couldn't keep a gradient on file while rendering mix.
+    #[test]
+    fn an_explicit_mode_outranks_the_palette_table() {
+        let path = temp("mix_over_palette");
+        std::fs::write(
+            &path,
+            scene_with("[palette]\nname = \"ember\"\n\n")
+                .replace("name = \"PaletteTest\"", "name = \"PaletteTest\"\ncolor_mode = \"mix\""),
+        )
+        .unwrap();
+
+        let scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.color_mode, ColorMode::Mix);
+        assert!(scene.palette.is_some(), "the gradient stays on file");
+        // Mix ignores the colormap entirely, so it must not be the palette's:
+        // switching back to `palette` is what should install that.
+        assert_eq!(scene.colormap, generate_colormap(&scene.colors));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// A typo'd mode refuses to load rather than quietly rendering the default
+    /// — wrong colours are harder to notice than a failed load.
+    #[test]
+    fn an_unknown_mode_is_an_error() {
+        let path = temp("mix_typo");
+        std::fs::write(&path, scene_with_mode("mixx")).unwrap();
+        match Scene::load(&path) {
+            Ok(_) => panic!("'mixx' should not load"),
+            Err(e) => {
+                assert!(e.contains("mixx"), "the message should name the bad mode: {e}");
+                assert!(e.contains("mix"), "and list the real ones: {e}");
+            }
+        }
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The GPU branches on this: only mix writes RGB into the point's spare
+    /// bits, and the shader reads those bits instead of the colormap.
+    #[test]
+    fn only_mix_packs_rgb() {
+        assert!(ColorMode::Mix.packs_rgb());
+        assert!(!ColorMode::Transforms.packs_rgb());
+        assert!(!ColorMode::Palette.packs_rgb());
+        for m in ColorMode::ALL {
+            assert_eq!(ColorMode::parse(m.name()), Some(m), "{} must parse back", m.name());
+        }
+        assert_eq!(ColorMode::parse("MIX"), Some(ColorMode::Mix), "names are case-insensitive");
+        assert_eq!(ColorMode::parse("rainbow"), None);
     }
 
     #[test]

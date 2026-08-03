@@ -131,8 +131,13 @@ pub struct VoxelCounter {
     pub _pad: [u32; 3],
 }
 
-/// GPU transform representation (160 bytes)
-/// Uses color_value (0-1) instead of full RGBA
+/// GPU transform representation (176 bytes)
+///
+/// Carries colour twice, because the two colour models want different things
+/// from it: `color_value` is a *position* in the 256-entry colormap (the
+/// scalar the walker's EMA converges toward), and `color_rgb` is the
+/// transform's actual colour, for `ColorMode::Mix` where the walker carries a
+/// 3-vector and colours genuinely blend. Only one is read per run.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuTransform {
@@ -143,10 +148,21 @@ pub struct GpuTransform {
     pub color_speed: f32,      // 4 bytes - per-transform blending speed
     /// Variation blend weights (slot order matches chaos.wgsl / scene::VARIATION_NAMES)
     pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 80 bytes
+    /// This transform's own colour, linear RGB (`ColorMode::Mix` only)
+    pub color_rgb: [f32; 3],   // 12 bytes
+    /// WGSL gives the preceding `vec3<f32>` an alignment of 16, so the struct
+    /// rounds up to 176 there. Rust's `repr(C)` would stop at 172 and every
+    /// transform after the first would read the wrong memory.
+    pub _pad: f32,             // 4 bytes
 }
 
 impl GpuTransform {
-    pub fn new(spec: &crate::scene::TransformSpec, cumulative_weight: f32, effective_weight: f32) -> Self {
+    pub fn new(
+        spec: &crate::scene::TransformSpec,
+        cumulative_weight: f32,
+        effective_weight: f32,
+        color_rgb: glam::Vec3,
+    ) -> Self {
         Self {
             matrix: spec.matrix.to_cols_array_2d(),
             color_value: spec.color_value,
@@ -154,6 +170,8 @@ impl GpuTransform {
             cumulative_weight,
             color_speed: spec.color_speed,
             var_weights: spec.variations,
+            color_rgb: color_rgb.to_array(),
+            _pad: 0.0,
         }
     }
 }
@@ -182,7 +200,13 @@ pub struct CameraUniforms {
     /// renderer is opaque and depth-tested, so it has no other way to know
     /// that the alpha it writes will be kept — see `render.wgsl`.
     pub transparent: f32,   // 4 bytes
-    pub _pad: [f32; 3],     // 12 bytes - struct size must be a multiple of 16
+    /// 1 in `ColorMode::Mix`, where a point's colour is packed into the top
+    /// 24 bits of `Point.color_idx` as 8/8/8 rather than being a colormap
+    /// index. A uniform branch rather than a second pipeline: it is perfectly
+    /// coherent across every invocation, so it costs nothing measurable, and
+    /// the alternative is duplicating four pipelines to change two lines.
+    pub color_rgb_mode: f32, // 4 bytes
+    pub _pad: [f32; 2],     // 8 bytes - struct size must be a multiple of 16
 }
 
 impl CameraUniforms {
@@ -199,6 +223,7 @@ impl CameraUniforms {
         color_contrast: f32,
         background: [f32; 3],
         transparent: bool,
+        color_rgb_mode: bool,
     ) -> Self {
         Self {
             mvp: mvp.to_cols_array_2d(),
@@ -213,7 +238,8 @@ impl CameraUniforms {
             color_contrast,
             background,
             transparent: if transparent { 1.0 } else { 0.0 },
-            _pad: [0.0; 3],
+            color_rgb_mode: if color_rgb_mode { 1.0 } else { 0.0 },
+            _pad: [0.0; 2],
         }
     }
 }
@@ -309,7 +335,11 @@ mod tests {
     use super::*;
     #[test]
     fn test_gpu_transform_size() {
-        assert_eq!(std::mem::size_of::<GpuTransform>(), 160, "GpuTransform must be 160 bytes to match WGSL struct");
+        // 64 (matrix) + 16 (four scalars) + 80 (var_weights) = 160, then
+        // `color_rgb: vec3<f32>` takes 16 in WGSL (12 + alignment tail), so
+        // both sides land on 176. The explicit `_pad` is what keeps Rust's
+        // repr(C) from stopping at 172.
+        assert_eq!(std::mem::size_of::<GpuTransform>(), 176, "GpuTransform must be 176 bytes to match WGSL struct");
     }
 
     #[test]
