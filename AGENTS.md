@@ -1249,6 +1249,29 @@ and neither can be checked by looking at the file. Rotations are re-derived
 from the matrix, so an authored `(-26, 138, 0)` can print as `(154, 42, -180)`
 — same rotation, other euler branch.
 
+`--info` reports on a `--view` too, and on the camera flags: the `view:` block
+says what the file sets, what each value replaced (`scene: 0.0024`), and — in
+the closing line — what a view never carries. The `camera:` line below it is
+then the framing that would actually **render**, resolved through the same
+`offline::effective_camera` a `--render` frames with, with the scene's own
+framing kept on the line under it so nothing is lost by asking about a view.
+
+Two conventions hold that block together, and any block added to `--info`
+should follow them (`src/info.rs`):
+
+- **Fixed schema.** Every row prints every time, including ones the file left
+  out — those read `unset` rather than vanishing. A row that disappears when
+  empty is a row nobody can learn to look for, and two reports of different
+  views diff row for row only if both have the same rows.
+- **One writer per quantity.** `point()`, `angle()`, `length()`, `amount()`,
+  `size()`, `word()` — a position is always `(x, y, z)` to 3dp, an angle always
+  carries radians *and* degrees, and a word standing in for a number is right
+  aligned with the numbers. Reach for the helper rather than a fresh
+  `format!`, so the shape is learned once by whoever (or whatever) reads it.
+
+Alignment is two narrow columns, not a table: a few spaces buy scannability,
+padding out to a grid just burns another agent's context.
+
 ### Framing from the command line
 
 `--yaw --pitch --distance --roll --focus x,y,z` override the camera, winning

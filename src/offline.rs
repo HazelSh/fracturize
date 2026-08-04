@@ -309,14 +309,24 @@ impl Haze {
     }
 }
 
-/// Base camera and render params from a view file, or scene defaults
-fn base_setup(
-    view: &Option<View>,
-    scene: &Scene,
-    haze_enabled: bool,
-    over: CameraOverride,
-) -> (OrbitCamera, f32, Haze) {
-    let (mut camera, point_size, haze) = base_setup_unwrapped(view, scene, haze_enabled);
+/// The camera a render would actually use: a `--view`'s framing if there is
+/// one, else the scene's, with the camera flags over the top.
+///
+/// One function so that anything reporting a framing reports the one that
+/// would be drawn — `--info` prints through this, which is the only reason it
+/// can be trusted about a scene it was handed a view for.
+pub fn effective_camera(view: Option<&View>, scene: &Scene, over: CameraOverride) -> OrbitCamera {
+    let mut camera = match view {
+        Some(v) => OrbitCamera::from_legacy(
+            Vec3::from(v.focus),
+            Vec3::from(v.offset),
+            v.distance,
+            v.rotation,
+            v.pitch,
+            v.roll,
+        ),
+        None => scene.camera(),
+    };
     // Flags last: they are the most specific thing anyone said.
     over.apply(&mut camera);
     // Under infinite zoom the framing is only defined up to a zoom period, so
@@ -325,6 +335,18 @@ fn base_setup(
     if let Ok(Some(zoom)) = scene_zoom(scene) {
         zoom.wrap(&mut camera);
     }
+    camera
+}
+
+/// Base camera and render params from a view file, or scene defaults
+fn base_setup(
+    view: &Option<View>,
+    scene: &Scene,
+    haze_enabled: bool,
+    over: CameraOverride,
+) -> (OrbitCamera, f32, Haze) {
+    let (point_size, haze) = base_render_params(view, scene, haze_enabled);
+    let camera = effective_camera(view.as_ref(), scene, over);
     if !over.is_empty() {
         // So a framing found by flags can be kept without transcription
         println!("{}", CameraOverride::describe(&camera));
@@ -332,17 +354,11 @@ fn base_setup(
     (camera, point_size, haze)
 }
 
-fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (OrbitCamera, f32, Haze) {
+/// Point size and haze from a view file, or the scene's own. The framing that
+/// goes with them is `effective_camera`.
+fn base_render_params(view: &Option<View>, scene: &Scene, haze_enabled: bool) -> (f32, Haze) {
     match view {
         Some(v) => (
-            OrbitCamera::from_legacy(
-                Vec3::from(v.focus),
-                Vec3::from(v.offset),
-                v.distance,
-                v.rotation,
-                v.pitch,
-                v.roll,
-            ),
             v.point_size,
             // A view's band follows the same rule as `App::apply_view`: only
             // a hand-pinned one overrides the auto range. A legacy view (no
@@ -369,7 +385,6 @@ fn base_setup_unwrapped(view: &Option<View>, scene: &Scene, haze_enabled: bool) 
             };
             let (fb, fs) = crate::haze::falloff(amount);
             (
-                scene.camera(),
                 scene.point_size,
                 // Auto-ranged: resolved from whichever camera ends up rendering
                 // each frame, not from the scene's authored distance. A

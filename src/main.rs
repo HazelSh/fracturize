@@ -434,6 +434,9 @@ struct Args {
     /// Transforms with their share of the walk and contraction, where the
     /// attractor actually lands, render properties, and which maps could carry
     /// infinite zoom. Reads a scene without rendering one.
+    ///
+    /// Add --view to have it report the view file too — what that file sets,
+    /// what each value replaced, and the framing the two of them land on.
     #[arg(short, long, help_heading = "Inspecting")]
     info: bool,
 
@@ -1331,7 +1334,19 @@ fn main() {
         apply_zoom_args(&mut scene, &args, false);
         // --info prints the palette in its own section; don't say it twice
         apply_palette_args(&mut scene, &args, false);
-        print!("{}", info::report(&scene, &source));
+        // A --view is part of "what would render", so --info reports through
+        // it rather than describing a framing the next --render wouldn't use.
+        let view = args.view.as_ref().map(|path| {
+            View::load(path).unwrap_or_else(|e| {
+                eprintln!("Failed to load view '{}': {}", path, e);
+                std::process::exit(1);
+            })
+        });
+        let mut subject = info::Subject::new(&scene, &source).with_camera(args.camera_override());
+        if let (Some(path), Some(v)) = (args.view.as_deref(), view.as_ref()) {
+            subject = subject.with_view(path, v);
+        }
+        print!("{}", info::report(&subject));
         return;
     }
 
