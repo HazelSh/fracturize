@@ -8,6 +8,11 @@
 //! bounded attractor with real extent on more than one axis. Up to
 //! `MAX_ATTEMPTS` tries; the last candidate is kept if none pass, so the
 //! button always produces something rather than hanging.
+//!
+//! Colour is rolled as well as form — the colour source (all three modes),
+//! the gradient a palette-mode roll needs, and the background it all sits on.
+//! Every draw comes off the caller's rng, so `--random --seed N` reproduces a
+//! roll exactly, colours included.
 
 use glam::{Mat4, Quat, Vec3};
 use rand::Rng;
@@ -67,7 +72,7 @@ pub fn random_flame(rng: &mut impl Rng) -> Scene {
                 if stats.acceptable() { "accept" } else { "reject" },
             );
             if stats.acceptable() {
-                return finish(last, stats.center, stats.radius);
+                return finish(last, stats.center, stats.radius, rng);
             }
         }
         last = build_candidate(rng);
@@ -75,7 +80,7 @@ pub fn random_flame(rng: &mut impl Rng) -> Scene {
     // Nothing passed — hand back the last roll anyway with a neutral framing
     // rather than looping forever or returning an error the UI can't act on.
     log::warn!("Random flame: no candidate passed the quality gate in {} tries", MAX_ATTEMPTS);
-    finish(last, Vec3::ZERO, 1.0)
+    finish(last, Vec3::ZERO, 1.0, rng)
 }
 
 /// A candidate before quality checking: just the parts the chaos game needs.
@@ -280,17 +285,18 @@ impl AttractorStats {
 
 
 /// Wrap an accepted candidate up as a full `Scene`, framed for its size.
-fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
+fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Scene {
     let color_speed = 0.5;
-    let color_falloff = if rand::thread_rng().r#gen::<f32>() < 0.4 {
-        rand::thread_rng().gen_range(0.6..1.2)
-    } else {
-        0.0
-    };
+    let color_falloff = if rng.r#gen::<f32>() < 0.4 { rng.gen_range(0.6..1.2) } else { 0.0 };
     resolve_color_speeds(&mut c.transforms, color_speed, color_falloff);
     let colormap = generate_colormap(&c.colors);
 
-    Scene {
+    // Which colour source this flame renders through, and — for palette mode —
+    // the gradient itself. Rolled before the scene is built so the background
+    // can be tinted from whatever will actually be on screen.
+    let (color_mode, palette) = random_color_mode(rng);
+
+    let mut scene = Scene {
         name: format!("random-{}", crate::app::unix_timestamp()),
         author: "fracturize random flame".to_string(),
         // Scale the dot size with the attractor: the same point size that
@@ -310,9 +316,8 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
         transforms: c.transforms,
         transform_names: c.names,
         colors: c.colors,
-        // A random flame stays in `transforms` mode: `--random` has
-        // always produced per-transform colours, and a palette is opted
-        // into with --random-palette rather than arriving unasked.
+        // Filled in below: `set_palette` / `set_color_mode` install the rolled
+        // mode and rebuild the colormap from whichever source it selects.
         palette: None,
         color_mode: crate::scene::ColorMode::Transforms,
         colormap,
@@ -326,13 +331,111 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32) -> Scene {
                 crate::rot::Angle::from_radians(0.3),
                 crate::rot::Angle::ZERO,
             ),
+        // Replaced below, once the colours it has to sit behind are settled.
         background: crate::scene::DEFAULT_BACKGROUND,
         camera_path: None::<CameraPath>,
         // Not rolled at random: infinite zoom needs a map that contracts on
         // every axis, and the generator has no reason to guarantee one.
         // `--zoom <n>` turns it on for a roll worth keeping.
         zoom: None,
+    };
+
+    match palette {
+        Some(p) => scene.set_palette(p),
+        None => scene.set_color_mode(color_mode),
     }
+    let tint = tint(&scene, rng);
+    scene.background = random_background(rng, tint);
+    scene
+}
+
+/// Odds of each colour source. `transforms` keeps the majority because it is
+/// the mode the per-transform colours were rolled *for* — the ring spreads
+/// them around the gradient by `color_value` — but the other two are just as
+/// much a part of what this renderer does, and a dice button that can only
+/// produce one third of the palette space is under-selling the instrument.
+const P_MIX: f32 = 0.25;
+const P_PALETTE: f32 = 0.25;
+
+/// Roll a colour source, plus the gradient if the roll wants one.
+///
+/// Palette mode is the only one that needs anything built: `mix` reads the
+/// per-transform RGBs the candidate already has, and `transforms` is what
+/// those RGBs were made for.
+fn random_color_mode(rng: &mut impl Rng) -> (crate::scene::ColorMode, Option<crate::palette::Palette>) {
+    use crate::scene::ColorMode;
+    let roll: f32 = rng.r#gen();
+    if roll < P_PALETTE {
+        (ColorMode::Palette, Some(crate::palette::random::palette(rng)))
+    } else if roll < P_PALETTE + P_MIX {
+        (ColorMode::Mix, None)
+    } else {
+        (ColorMode::Transforms, None)
+    }
+}
+
+/// A colour the flame actually renders in, to hang the background off.
+///
+/// Sampled rather than averaged: the mean of a complementary or triadic
+/// scheme is mud, and a background tinted from mud is just grey. One real
+/// colour out of the set keeps the background in the flame's family.
+fn tint(scene: &Scene, rng: &mut impl Rng) -> Vec3 {
+    match scene.color_mode {
+        crate::scene::ColorMode::Palette => scene
+            .palette
+            .as_ref()
+            .map(|p| p.sample(rng.r#gen()))
+            .unwrap_or(Vec3::ONE),
+        _ if scene.colors.is_empty() => Vec3::ONE,
+        _ => scene.colors[rng.gen_range(0..scene.colors.len())],
+    }
+}
+
+/// How often the background comes out dark.
+const P_DARK_BACKGROUND: f32 = 2.0 / 3.0;
+/// Brightest channel a dark background may reach, linear. The old fixed
+/// default sat at 0.05 on its blue channel, so this is the band that has
+/// always read as "the fractal is in the dark".
+const DARK_BACKGROUND_LEVEL: f32 = 0.06;
+/// And the band for the other third. Stops well short of white on purpose:
+/// the render composites the flame *over* the background by coverage, so
+/// contrast is the gap between the two, and rolled flame colours are bright
+/// (value 0.7–1.0). A paper-white ground would swallow them.
+const LIGHT_BACKGROUND_LEVEL: std::ops::Range<f32> = 0.06..0.35;
+
+/// Roll a background that belongs behind `tint`.
+///
+/// Hue comes from the flame rather than from nowhere, so the two agree; the
+/// level and the chroma are what make it a *ground* rather than another
+/// element — dark and saturated, or mid and nearly neutral.
+fn random_background(rng: &mut impl Rng, tint: Vec3) -> Vec3 {
+    // Mostly the flame's own hue family, which reads as one scene; sometimes
+    // its opposite, which makes the form pop off the ground. Rotating in
+    // Oklab keeps the shift a hue shift rather than a lightness one.
+    let shift = if rng.r#gen::<f32>() < 0.3 {
+        rng.gen_range(150.0..210.0)
+    } else {
+        rng.gen_range(-40.0f32..40.0)
+    };
+    let hue = crate::palette::random::rotate_hue(tint, shift).max(Vec3::ZERO);
+
+    // Normalise to the brightest channel so `level` means what it says
+    // whatever colour came in. A colour with no chroma to keep (or one the
+    // rotation pushed out of gamut) falls back to neutral.
+    let peak = hue.max_element();
+    let hue = if peak > 1e-4 { hue / peak } else { Vec3::ONE };
+
+    let (level, chroma) = if rng.r#gen::<f32>() < P_DARK_BACKGROUND {
+        // Deep and tinted: at this level chroma costs nothing legibility-wise,
+        // and a near-black that is *some* colour beats one that is grey.
+        (rng.gen_range(0.004..DARK_BACKGROUND_LEVEL), rng.gen_range(0.35..1.0))
+    } else {
+        // Mid and mostly neutral: a saturated light ground competes with the
+        // flame for the eye, and loses interestingly to nothing.
+        (rng.gen_range(LIGHT_BACKGROUND_LEVEL), rng.gen_range(0.08..0.4))
+    };
+
+    (Vec3::ONE.lerp(hue, chroma) * level).clamp(Vec3::ZERO, Vec3::ONE)
 }
 
 /// HSV (h in degrees, s/v in 0-1) to linear RGB (0-1). Mirrors the private
@@ -395,6 +498,92 @@ mod tests {
                 stats.radius,
                 stats.spread
             );
+        }
+    }
+
+    /// The background is a scene parameter the renderer clears to and the
+    /// haze fades toward, so a non-finite or out-of-range roll is a bad
+    /// frame, not a bad colour.
+    #[test]
+    fn backgrounds_are_in_range_and_mostly_dark() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut dark = 0;
+        const ROLLS: usize = 600;
+        for _ in 0..ROLLS {
+            let tint = hsv_to_rgb(rng.gen_range(0.0..360.0), 0.8, 0.9);
+            let bg = random_background(&mut rng, tint);
+            assert!(
+                bg.to_array().iter().all(|c| c.is_finite() && (0.0..=1.0).contains(c)),
+                "background {:?} out of range",
+                bg
+            );
+            if bg.max_element() <= DARK_BACKGROUND_LEVEL {
+                dark += 1;
+            }
+        }
+        // 2/3, with room for the binomial spread at this sample count.
+        let ratio = dark as f32 / ROLLS as f32;
+        assert!((0.60..0.73).contains(&ratio), "dark background ratio {:.3}", ratio);
+    }
+
+    /// All three colour sources should show up on the dice, and a palette-mode
+    /// flame must actually carry a palette — the mode without one renders
+    /// through a fallback, which is a bug the generator shouldn't ship.
+    #[test]
+    fn all_color_modes_are_rolled_and_consistent() {
+        use crate::scene::ColorMode;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let mut seen = [0usize; 3];
+        for _ in 0..300 {
+            let (mode, palette) = random_color_mode(&mut rng);
+            match mode {
+                ColorMode::Transforms => seen[0] += 1,
+                ColorMode::Palette => seen[1] += 1,
+                ColorMode::Mix => seen[2] += 1,
+            }
+            assert_eq!(
+                palette.is_some(),
+                mode == ColorMode::Palette,
+                "{:?} rolled the wrong palette state",
+                mode
+            );
+        }
+        assert!(seen.iter().all(|&n| n > 0), "not every colour mode was rolled: {:?}", seen);
+    }
+
+    /// Whatever mode a rolled flame lands in, it has to be renderable in it.
+    #[test]
+    fn rolled_flames_carry_their_color_mode() {
+        for seed in 0..8u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let scene = random_flame(&mut rng);
+            if scene.color_mode == crate::scene::ColorMode::Palette {
+                assert!(scene.palette.is_some(), "seed {}: palette mode with no palette", seed);
+            }
+            assert!(
+                scene.colormap.iter().flatten().all(|c| c.is_finite()),
+                "seed {}: non-finite colormap",
+                seed
+            );
+            assert!(
+                scene.background.to_array().iter().all(|c| (0.0..=1.0).contains(c)),
+                "seed {}: background {:?} out of range",
+                seed,
+                scene.background
+            );
+        }
+    }
+
+    /// `--random --seed n` promises the same flame twice. The colour rolls
+    /// have to come off the seeded rng like everything else for that to hold.
+    #[test]
+    fn the_same_seed_gives_the_same_colours() {
+        for seed in 0..4u64 {
+            let a = random_flame(&mut rand::rngs::StdRng::seed_from_u64(seed));
+            let b = random_flame(&mut rand::rngs::StdRng::seed_from_u64(seed));
+            assert_eq!(a.color_mode, b.color_mode, "seed {}: mode not reproducible", seed);
+            assert_eq!(a.background, b.background, "seed {}: background not reproducible", seed);
+            assert_eq!(a.color_falloff, b.color_falloff, "seed {}: falloff not reproducible", seed);
         }
     }
 

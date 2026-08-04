@@ -391,6 +391,19 @@ way, so an interesting roll can always be recovered. `spherical` is never
 rolled (its 1/r^2 inversion blows scenes out — fine by hand, bad by dice).
 A rolled flame is a normal history entry: one Ctrl+Z restores what was there.
 
+Colour is rolled too, not just form. The colour *source* is one of all three
+modes — `transforms` half the time (the per-transform RGBs are generated for
+that ring), `palette` and `mix` a quarter each; a palette-mode roll rolls its
+gradient from `palette::random`. The **background** is rolled from a colour
+the flame actually renders in (one of the transform colours, or a sample of
+the gradient), hue-rotated in Oklab — usually within the flame's own family,
+sometimes to its complement. Two thirds of rolls are dark and saturated; the
+rest are mid and near-neutral, and deliberately stop short of white, because
+the point pass composites the flame over the background by coverage and a
+paper-white ground would swallow colours rolled at value 0.7–1.0. Override any
+of it with `--palette` / `--random-palette` / `--color-mode`, which apply after
+the roll.
+
 ## Starting From Nothing
 
 `--blank`, and the Explore window's "Blank scene", give you `Scene::blank()`:
