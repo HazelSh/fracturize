@@ -811,7 +811,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         seconds,
         anim.fps,
         path.keys.len(),
-        if path.wraps() { "loop" } else { "open path" },
+        path.loops.kind().label(),
         if is_default { " (auto full orbit)" } else { "" },
     );
     println!("Encoding {} ({})", anim.format.codec_label(), anim.format.extension());

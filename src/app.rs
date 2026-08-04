@@ -10,7 +10,7 @@ use crate::camera::OrbitCamera;
 use crate::gpu::lines::LineVertex;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, OverlayTargets, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::history::{EditSnapshot, History};
-use crate::path::CameraPath;
+use crate::path::{CameraPath, LoopKind};
 use crate::scene::{Scene, TransformSpec};
 use crate::ui::{hints, UiState};
 use crate::view::View;
@@ -132,11 +132,11 @@ fn path_fingerprint(path: &CameraPath) -> u64 {
         h = h.wrapping_mul(0x1000_0000_01b3);
     };
     mix(path.keys.len() as u32);
-    mix(path.closed as u32);
+    mix(path.loops.kind() as u32);
     // The zoom loop changes where the closing segment goes, so the drawn
     // polyline has to be rebuilt when it changes or when its map is dragged
-    mix(path.zoom_loop.map_or(0, |z| z.periods.wrapping_add(1)));
-    mix(path.zoom_loop.map_or(0, |z| z.scale.to_bits()));
+    mix(path.loops.zoom().map_or(0, |z| z.periods.wrapping_add(1)));
+    mix(path.loops.zoom().map_or(0, |z| z.scale.to_bits()));
     mix(path.ease.map_or(2, |e| e as u32));
     mix(path.seconds.unwrap_or(f32::NAN).to_bits());
     // Routes are part of the shape: two paths through the same keys but
@@ -1021,7 +1021,9 @@ impl App {
         let path = self
             .scene
             .camera_path
-            .get_or_insert_with(|| crate::path::CameraPath::new(Vec::new(), false));
+            .get_or_insert_with(|| {
+                crate::path::CameraPath::new(Vec::new(), crate::path::Loop::Once)
+            });
         path.keys.push(key);
         // A new key means a new segment; give it the short way round until
         // someone says otherwise.
@@ -1054,10 +1056,10 @@ impl App {
     /// A path that closes under the zoom symmetry is already a loop, and a
     /// different one: returning to the first key would undo the descent that
     /// makes it endless. Say so rather than silently doing the other thing,
-    /// and leave the scene's choice alone.
+    /// and leave the scene's choice alone. The Camera window's radio *can*
+    /// make that swap, because there you can see what you're picking between.
     pub fn toggle_path_closed(&mut self) {
-        let path = self.author_path();
-        if let Some(z) = path.zoom_loop {
+        if let Some(z) = self.camera_path().loops.zoom() {
             log::info!(
                 "Camera path already loops under the zoom symmetry ({} period(s) per \
                  loop). Turn that off first if you want a key-to-key loop instead.",
@@ -1065,43 +1067,83 @@ impl App {
             );
             return;
         }
-        path.closed = !path.closed;
-        log::info!("Camera path: {}", if path.closed { "closed loop" } else { "open" });
+        let next = match self.camera_path().loops.kind() {
+            LoopKind::Closed => LoopKind::Once,
+            _ => LoopKind::Closed,
+        };
+        self.set_path_loop(next);
     }
 
-    /// The path's zoom loop, if it has one
+    /// How the path loops, as the Camera window's radio names it.
+    pub fn path_loop(&self) -> crate::path::Loop {
+        self.camera_path().loops
+    }
+
+    /// The path's zoom loop, if it's on one
     pub fn path_zoom_loop(&self) -> Option<crate::path::ZoomLoop> {
-        self.camera_path().zoom_loop
+        self.camera_path().loops.zoom()
     }
 
-    /// Turn the path's zoom loop on for `periods` periods per loop, or off.
+    /// Put the path on one of the four loops.
     ///
-    /// Closing under the scale symmetry and closing back to the first key are
-    /// two different loops, so this clears the other one rather than leaving
-    /// the path claiming both.
-    pub fn set_path_zoom_loop(&mut self, periods: Option<u32>) {
+    /// One setter for all four, because they are one choice: it is no longer
+    /// possible to ask for two loops at once, or to turn one off and leave the
+    /// path on nothing. Choosing `Zoom` keeps whatever period count the path
+    /// already had, so flipping away and back doesn't silently reset it.
+    pub fn set_path_loop(&mut self, kind: LoopKind) {
+        let periods = self.path_zoom_loop().map_or(1, |z| z.periods);
+        let loops = match kind {
+            LoopKind::Once => crate::path::Loop::Once,
+            LoopKind::PingPong => crate::path::Loop::PingPong,
+            LoopKind::Closed => crate::path::Loop::Closed,
+            LoopKind::Zoom => {
+                // The similarity comes from the live renormalizing map, so a
+                // scene without one can't have this — and shouldn't silently
+                // get a path that claims to loop and doesn't.
+                let Some(zoom) = self.point_compute.zoom else {
+                    log::warn!(
+                        "A zoom loop closes under the scene's scale symmetry, and this scene \
+                         has none. Select a transform in the Transforms window and press \
+                         \"Zoom about this\" first."
+                    );
+                    return;
+                };
+                crate::path::Loop::Zoom(zoom.loop_similarity(periods))
+            }
+        };
+        if self.camera_path().loops == loops {
+            return;
+        }
+        // An `ease` that only says what the loop it's leaving wanted anyway is
+        // not a choice, and carrying it across is wrong in both directions.
+        // The default orbit pins `ease = false` because a closed loop must not
+        // stall at its seam; switch that to a ping-pong and the same `false`
+        // takes away the deceleration its turnarounds need, which is the
+        // judder `Loop::eases_by_default` exists to prevent. A deliberate ease
+        // — one that already differs from the old loop's default — is kept.
+        let old = self.camera_path().loops;
+        let inherited = self.camera_path().ease == Some(old.eases_by_default());
         let was_default = self.path_is_default();
-        let Some(loop_) = periods.map(|n| n.clamp(1, 64)) else {
-            self.author_path().zoom_loop = None;
-            log::info!("Camera path: zoom loop off");
-            self.after_path_edit(was_default);
-            return;
-        };
-        // The similarity comes from the live renormalizing map, so a scene
-        // without one can't have this — and shouldn't silently get a path
-        // that claims to loop and doesn't.
-        let Some(zoom) = self.point_compute.zoom else {
-            log::warn!(
-                "A zoom loop closes under the scene's scale symmetry, and this scene \
-                 has none. Select a transform in the Transforms window and press \
-                 \"Zoom about this\" first."
-            );
-            return;
-        };
         let path = self.author_path();
-        path.zoom_loop = Some(zoom.loop_similarity(loop_));
-        path.closed = false;
-        log::info!("Camera path: zoom loop, {} period(s) per loop", loop_);
+        path.loops = loops;
+        if inherited {
+            path.ease = None;
+        }
+        log::info!("Camera path: {}", kind.label());
+        self.after_path_edit(was_default);
+    }
+
+    /// Zoom periods descended per loop. Only meaningful on a zoom loop, and
+    /// silently ignored off one — the panel greys the control there.
+    pub fn set_path_zoom_periods(&mut self, periods: u32) {
+        let periods = periods.clamp(1, 64);
+        let Some(zoom) = self.point_compute.zoom else { return };
+        if self.camera_path().loops.zoom().is_none() {
+            return;
+        }
+        let was_default = self.path_is_default();
+        self.author_path().loops = crate::path::Loop::Zoom(zoom.loop_similarity(periods));
+        log::info!("Camera path: zoom loop, {} period(s) per loop", periods);
         self.after_path_edit(was_default);
     }
 
@@ -3445,8 +3487,8 @@ impl App {
                 // otherwise dragging the map leaves the loop closing under the
                 // similarity it used to have, and the seam quietly opens.
                 if let Some(path) = self.scene.camera_path.as_mut() {
-                    if let Some(z) = path.zoom_loop {
-                        path.zoom_loop = Some(r.loop_similarity(z.periods));
+                    if let Some(z) = path.loops.zoom() {
+                        path.loops = crate::path::Loop::Zoom(r.loop_similarity(z.periods));
                     }
                 }
                 self.point_compute.zoom = Some(r);

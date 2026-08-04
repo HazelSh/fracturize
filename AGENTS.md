@@ -31,7 +31,8 @@ src/
     render_panel.rs# Renderer mode, exposure, point size + count, color, haze, output
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
   render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
-    camera_panel.rs# Framing, saved views, the camera path (incl. zoom loop), output
+    camera_panel.rs# Framing, saved views, the camera path (incl. how it loops), output
+    radio.rs       # Segmented one-of-n radio, used by all three such settings
     browser.rs     # Scene picker (B)
     shortcuts.rs   # Keybind reference window (H)
     labels.rs      # World-anchored transform name labels
@@ -230,7 +231,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | G | toggle transform gizmos and their name labels |
 | O or Z | play / stop the camera flying its path (two keys, one action) |
 | Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
-| Ctrl+Y | toggle camera path closed (seamless loop) |
+| Ctrl+Y | toggle camera path closed (seamless loop; the Camera window has all four loops) |
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
@@ -291,12 +292,33 @@ aspect and picking math are unaffected by which panels are open.
 | Transforms | Vertical tab rail (colour swatch, name, eye toggle, relative-weight bar) plus a detail pane for the selected transform: position/rotation/scale, weight, colour, variations |
 | Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
 | Render | Renderer mode, exposure, point size, point count, color falloff/contrast, haze |
-| Camera | Framing, saved views, the camera path (keypoints + playback), render job / screenshot / save scene |
+| Camera | Framing, saved views, the camera path (keypoints, how it loops, playback), render job / screenshot / save scene |
 | Scenes (B) | Scene picker; the same selection the arrow keys walk |
 | Keybinds (H) | The table above, scrollable, rows clickable |
 
 Conventions worth keeping:
 
+- **A choose-1-of-n setting is a segmented radio** (`src/ui/radio.rs`), not a
+  row of toggle buttons. Three settings are genuinely one-of-n with no off
+  state — the renderer (points/splat), the colour source
+  (transforms/palette/mix) and how the camera path loops
+  (once/ping-pong/loop/zoom) — and all three used to be drawn as loose
+  `selectable_label`s, or in the camera's case as two checkboxes for a
+  four-way choice. That draws a picture that isn't true: n independent toggles
+  that could all be off, or all on. One connected pill with the chosen segment
+  lit says the thing that's actually so. Each segment keeps its own `hinted()`
+  tooltip and status-bar hint, and a segment can be greyed *in place* when it
+  isn't available (the zoom loop without a zoom map), because a mode that
+  isn't drawn can't tell you it exists.
+
+  Each segment carries the ring-and-dot mark, filled on the one chosen — the
+  same two `CircleShape`s egui's own `RadioButton` paints. **Drawn, not
+  typed**: the obvious characters (U+2B58 `⭘`, U+25C9 `◉`) are in *none* of
+  this app's fonts — Ubuntu-Light, NotoEmoji, emoji-icon-font, Phosphor, or
+  Envy Code R — so they would render as tofu. `◉` exists only in Hack, which
+  is the *monospace* family, and buttons are proportional. egui draws its own
+  for the same reason; check `fc-list`/fontTools before putting a symbol in a
+  label here.
 - **Every interactive widget goes through `hints::hinted()`**, which attaches
   a tooltip *and* sets the status bar's left-hand hint while hovered. The one
   documented exception is a bare camera drag on empty viewport space, which
@@ -330,6 +352,16 @@ Conventions worth keeping:
   reallocation per 250ms: it's the dial that decides whether the machine stays
   responsive, so you must be able to feel it load up under your hand and drag
   back, not commit blind to a number and find out afterwards.
+- **A panel window has a minimum size, and the height one is load-bearing**
+  (`ui::WindowKey::min_size`). A window too short for its fixed furniture
+  hands its flexible middle a *negative* height; the middle draws anyway, over
+  the rows pinned below it by `egui::Panel::bottom` — and it takes their
+  clicks, because egui gives the pointer to whichever widget was registered
+  later and a bottom panel's contents are registered before the body that
+  follows. The buried controls still paint, still highlight on hover and still
+  show tooltips, so this reads as "that control is broken" rather than "that
+  window is too short". The Camera window is the one that hits it. Widths are
+  only a legibility floor — a narrow row clips, which is graceful.
 - **Panel geometry persists** to `prefs.window_geometry` (see `ui::WindowKey` /
   `ui::remember`); `ui::default_layout` is only what you get before you've
   moved anything. Writes are deferred by `App::flush_dirty_prefs` so dragging a
@@ -496,12 +528,22 @@ roll = 0.0                # optional: rotation about the view axis, radians
                           # pointed straight up.
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
 # into the framing/distance and never written back
-path_closed = true        # optional camera path: loop back to key 1 (seamless)
-path_seconds = 14.0       # playback/render duration (default 3s per segment)
-path_ease = false         # smoothstep time; default: open paths ease, loops don't
-path_zoom_loop = 1        # optional: close the loop under the [zoom] symmetry,
-                          # descending this many zoom periods per loop, so the
-                          # animation loops as an endless zoom (see below)
+path_loop = "closed"      # how playback gets from the last frame back to the
+                          # first. One of:
+                          #   "once"     play through and stop (the default)
+                          #   "pingpong" out to the last key, then back again
+                          #   "closed"   loop back to key 1 (seamless)
+                          #   "zoom"     close under the [zoom] symmetry, so the
+                          #              animation loops as an endless zoom
+                          # See `path::Loop`. Legacy `path_closed = true` and
+                          # `path_zoom_loop = N` still load and are migrated on
+                          # save; neither is written back.
+path_zoom_periods = 1     # zoom periods descended per loop, with path_loop =
+                          # "zoom" (default 1; see "Infinite Zoom")
+path_seconds = 14.0       # playback/render duration (default 3s per segment
+                          # *travelled* — which a ping-pong does twice over)
+path_ease = false         # smoothstep time; default: once and pingpong ease,
+                          # the two closing loops don't
 
 # Camera path spline keypoints (2+ = a path; see src/path.rs). A uniform
 # Catmull-Rom spline runs through the keys, in *cumulative* form so it splines
@@ -511,7 +553,8 @@ path_zoom_loop = 1        # optional: close the loop under the [zoom] symmetry,
 # directions blend smoothly while the eye moves. Omitted fields inherit the
 # base [camera] framing. Closed paths take the shortest yaw route back to key
 # 1. In-app: Y appends the current framing as a keypoint, Shift+Y removes,
-# Ctrl+Y toggles the loop, O or Z flies it.
+# Ctrl+Y toggles the loop, O or Z flies it; the Camera window's Loop radio
+# picks any of the four.
 #
 # ROUTES. Which way round a segment goes is data, not something re-derived
 # from its endpoints — that is what used to make a 1° change swing 359° the
@@ -1038,16 +1081,16 @@ expensive thing to go looking for.
 ### Looping zoom animations
 
 An animation can loop as an *endless* zoom, and exactly rather than
-approximately, because the scene has a symmetry. `path_zoom_loop = N` closes
+approximately, because the scene has a symmetry. `path_loop = "zoom"` closes
 the path under that symmetry instead of by returning to the first key: one loop
-descends N zoom periods and ends on a frame **identical** to the one it
+descends `path_zoom_periods` zoom periods and ends on a frame **identical** to the one it
 started, since scaling by `sᴺ` about the fixed point and turning by the map's
 rotation leaves the rendered set unchanged. Played on a loop, a fourteen-second
 file falls forever.
 
 ```toml
 [camera]
-path_zoom_loop = 1
+path_loop = "zoom"
 path_seconds = 14.0
 
 [[camera.path]]      # one keypoint is enough — and is better than two
@@ -1063,20 +1106,20 @@ exactly linear — a constant-rate descent with no ease, no wobble and no
 velocity kink at the seam. Author more keys and you get a flight that closes
 one period lower; the last key is still synthesized, never written.
 
-- `path_zoom_loop` needs a `[zoom]` map, and says so if there isn't one. It is
-  resolved against the live renormalizing map, so dragging that map updates the
-  loop rather than staling it.
-- It is a *different* loop from `path_closed`, not a variant: closing back to
-  the first key would undo the descent. Setting `path_zoom_loop` clears
-  `path_closed`, and Ctrl+Y declines to touch it.
+- `path_loop = "zoom"` needs a `[zoom]` map, and says so if there isn't one.
+  It is resolved against the live renormalizing map, so dragging that map
+  updates the loop rather than staling it.
+- It is a *different* loop from `"closed"`, not a variant: closing back to the
+  first key would undo the descent. The two were once separate keys that could
+  both be set at once, which is a contradiction — now they're two values of
+  one, and Ctrl+Y declines to touch a zoom loop.
 - Like any looping path it doesn't ease (a stall at the seam is the one thing a
   zoom must not do) and the final duplicate frame is dropped.
-- **In the app**: the Camera window's path controls grow a second row —
-  `zoom loop` plus a periods count — but only when the scene has a scale
-  symmetry to close under, since without one the control is meaningless rather
-  than merely unavailable. Turning it on greys the ordinary `loop` checkbox
-  (they are different loops and only one can be the answer) with the reason on
-  hover. The similarity is re-derived on every `App::refresh_zoom`, so dragging
+- **In the app**: `zoom` is the fourth segment of the Camera window's Loop
+  radio, greyed when the scene has no scale symmetry to close under (with the
+  reason, and where to get one, on hover) rather than hidden — a mode that
+  isn't drawn can't tell you it exists. Choosing it reveals a periods count
+  beside it. The similarity is re-derived on every `App::refresh_zoom`, so dragging
   the renormalizing map updates the loop instead of leaving it closing under a
   map that has moved.
 - Measured on `wellspiral`: the last-frame-to-first-frame step is **1.12× the

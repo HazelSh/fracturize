@@ -420,19 +420,29 @@ pub struct CameraDef {
     /// ordinary scenes stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotvec: Option<[f64; 3]>,
-    /// Camera path: loop back to the first keypoint (seamless loops)
+    /// Camera path: how playback gets from the last frame back to the first —
+    /// `"once"`, `"pingpong"`, `"closed"` or `"zoom"`. Omitted means `once`.
+    /// See `path::Loop`; this is the single key that names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_closed: Option<bool>,
-    /// Camera path: playback/render duration in seconds (default 3s/segment)
+    pub path_loop: Option<String>,
+    /// Camera path: zoom periods descended per loop, with `path_loop =
+    /// "zoom"`. Omitted means one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_zoom_periods: Option<u32>,
+    /// Camera path: playback/render duration in seconds (default 3s per
+    /// segment traversed — which a ping-pong does twice over)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_seconds: Option<f64>,
-    /// Camera path: ease in/out (default: open paths ease, looping don't)
+    /// Camera path: ease in/out (default: the loop's own — see `path::Loop`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_ease: Option<bool>,
-    /// Camera path: close the loop under the scene's zoom symmetry instead of
-    /// by returning to the first key. One loop descends this many zoom
-    /// periods and lands on an identical frame, so the animation loops as an
-    /// endless zoom. Needs a `[zoom]` map. See `path::ZoomLoop`.
+    /// Legacy: the loop used to be two independent keys, `path_closed = true`
+    /// and `path_zoom_loop = <periods>`, which between them could say
+    /// "returns to the first key *and* descends a zoom period" — two
+    /// different loops at once. Both still load, below `path_loop`; neither is
+    /// ever written back, the same treatment camera `offset` gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_closed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_zoom_loop: Option<u32>,
     /// Camera path spline keypoints ([[camera.path]]). Omitted fields
@@ -824,6 +834,28 @@ impl Scene {
         }
         let base_chart = folded.chart();
 
+        // Which of the four loops this path is on. `path_loop` names it
+        // outright; without it, fall back to reading the pair of legacy keys
+        // that used to. A zoom loop wins over a closed one there, matching
+        // what the old loader did when a file claimed both.
+        let loop_kind = match &cam.path_loop {
+            Some(s) => crate::path::LoopKind::parse(s).ok_or_else(|| {
+                format!(
+                    "camera.path_loop: unknown loop {:?} — expected \
+                     \"once\", \"pingpong\", \"closed\" or \"zoom\"",
+                    s
+                )
+            })?,
+            None if cam.path_zoom_loop.is_some() => crate::path::LoopKind::Zoom,
+            None if cam.path_closed == Some(true) => crate::path::LoopKind::Closed,
+            None => crate::path::LoopKind::Once,
+        };
+        let zoom_periods = cam
+            .path_zoom_periods
+            .or(cam.path_zoom_loop)
+            .unwrap_or(1)
+            .clamp(1, 64);
+
         // Resolve [[camera.path]] keypoints; omitted fields inherit the base
         // (folded) camera framing
         let camera_path = match &cam.path {
@@ -831,9 +863,9 @@ impl Scene {
                 // A zoom loop is the one path that works with a single key:
                 // its closing segment runs to that key's own image under the
                 // symmetry, which is a real segment through real geometry.
-                if defs.len() < 2 && cam.path_zoom_loop.is_none() {
+                if defs.len() < 2 && loop_kind != crate::path::LoopKind::Zoom {
                     return Err("camera.path needs at least 2 keypoints \
-                                (or one, with path_zoom_loop)"
+                                (or one, with path_loop = \"zoom\")"
                         .to_string());
                 }
                 // Each key's chart, with omitted fields inherited from the
@@ -877,7 +909,10 @@ impl Scene {
                     })
                     .collect();
 
-                let closed = cam.path_closed.unwrap_or(false);
+                let closed = matches!(
+                    loop_kind,
+                    crate::path::LoopKind::Closed | crate::path::LoopKind::Zoom
+                );
                 let n = keys.len();
                 let segments = match (n, closed) {
                     (0, _) => 0,
@@ -909,8 +944,16 @@ impl Scene {
                 Some(CameraPath {
                     keys,
                     windings,
-                    closed,
-                    zoom_loop: None, // resolved below, once [zoom] is known
+                    loops: match loop_kind {
+                        crate::path::LoopKind::Once => crate::path::Loop::Once,
+                        crate::path::LoopKind::PingPong => crate::path::Loop::PingPong,
+                        crate::path::LoopKind::Closed => crate::path::Loop::Closed,
+                        // A zoom loop's similarity comes from [zoom], which
+                        // hasn't been resolved yet. Fixed up below, and the
+                        // block that does it errors rather than leaving this
+                        // standing if the scene has no map to close under.
+                        crate::path::LoopKind::Zoom => crate::path::Loop::Once,
+                    },
                     ease: cam.path_ease,
                     seconds: cam.path_seconds.map(|v| v as f32),
                 })
@@ -934,20 +977,17 @@ impl Scene {
 
         // A zoom-looping path closes under the renormalizing map, so it can
         // only be resolved once that map is known.
-        if let Some(periods) = cam.path_zoom_loop {
+        if loop_kind == crate::path::LoopKind::Zoom {
             let spec = zoom.as_ref().ok_or_else(|| {
-                "camera.path_zoom_loop needs a [zoom] map: the loop closes under \
+                "camera.path_loop = \"zoom\" needs a [zoom] map: the loop closes under \
                  the scene's scale symmetry, and without one there is no symmetry \
                  to close under"
                     .to_string()
             })?;
             let renorm = crate::renorm::Renorm::build(spec, &transforms, folded.distance)
-                .map_err(|e| format!("camera.path_zoom_loop: {}", e))?;
+                .map_err(|e| format!("camera.path_loop: {}", e))?;
             if let Some(path) = camera_path.as_mut() {
-                path.zoom_loop = Some(renorm.loop_similarity(periods));
-                // Closing under the symmetry and returning to key 1 are two
-                // different loops; asking for both is a contradiction.
-                path.closed = false;
+                path.loops = crate::path::Loop::Zoom(renorm.loop_similarity(zoom_periods));
             }
         }
 
@@ -1142,8 +1182,20 @@ impl Scene {
                                 .as_rotation_vector(),
                         )
                     }),
-                    path_closed: path.and_then(|p| p.closed.then_some(true)),
-                    path_zoom_loop: path.and_then(|p| p.zoom_loop.map(|z| z.periods)),
+                    // One key names the loop, and `once` is the default, so
+                    // an ordinary path never mentions it at all.
+                    path_loop: path
+                        .map(|p| p.loops.kind())
+                        .filter(|k| *k != crate::path::LoopKind::Once)
+                        .map(|k| k.as_str().to_string()),
+                    path_zoom_periods: path
+                        .and_then(|p| p.loops.zoom().map(|z| z.periods))
+                        .filter(|n| *n != 1),
+                    // The two keys `path_loop` replaced. Read on load, never
+                    // written — like camera `offset`, leaving them would let a
+                    // stale one contradict the key that now decides.
+                    path_closed: None,
+                    path_zoom_loop: None,
                     path_seconds: path.and_then(|p| p.seconds.map(tidy)),
                     path_ease: path.and_then(|p| p.ease),
                     path: path.map(path_keys_to_defs),
@@ -1497,10 +1549,25 @@ fn merge_scene_into_document(
         // double-apply on the next load
         camera.remove("offset");
 
-        match cam.path_closed {
-            Some(b) => set_bool(camera, "path_closed", b),
+        // The loop, in the one key that names it. The two legacy keys go the
+        // way `offset` does: removed, so a stale `path_closed = true` can't
+        // sit next to a `path_loop` that says otherwise.
+        //
+        // (`path_zoom_loop` was never written here at all, which meant turning
+        // a zoom loop on and pressing Ctrl+S over an existing file silently
+        // dropped it — the merge path only wrote keys it had a case for.)
+        camera.remove("path_closed");
+        camera.remove("path_zoom_loop");
+        match &cam.path_loop {
+            Some(s) => set_str(camera, "path_loop", s),
             None => {
-                camera.remove("path_closed");
+                camera.remove("path_loop");
+            }
+        }
+        match cam.path_zoom_periods {
+            Some(n) => set_i64(camera, "path_zoom_periods", n as i64, None),
+            None => {
+                camera.remove("path_zoom_periods");
             }
         }
         match cam.path_seconds {
@@ -2324,11 +2391,15 @@ color = [0.3, 0.5, 0.8]
 map = \"descent\"")).unwrap();
         let scene = Scene::load(&path).unwrap();
         let cp = scene.camera_path.as_ref().expect("path");
-        let z = cp.zoom_loop.expect("zoom loop");
+        let z = cp.loops.zoom().expect("zoom loop");
         assert_eq!(z.periods, 2);
         // Two periods of a 0.6 map
         assert!((z.scale - 0.36).abs() < 1e-4, "scale {}", z.scale);
-        assert!(!cp.closed, "a zoom loop is not a key-to-key loop");
+        assert_eq!(
+            cp.loops.kind(),
+            crate::path::LoopKind::Zoom,
+            "a zoom loop is not a key-to-key loop"
+        );
         // One key is a path when it closes under the symmetry
         assert!(cp.playable(), "a one-key zoom loop should fly");
 
@@ -2336,7 +2407,7 @@ map = \"descent\"")).unwrap();
         let out = dir.join("saved.toml");
         scene.save(&out).unwrap();
         let again = Scene::load(&out).unwrap();
-        assert_eq!(again.camera_path.unwrap().zoom_loop.unwrap().periods, 2);
+        assert_eq!(again.camera_path.unwrap().loops.zoom().unwrap().periods, 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2410,6 +2481,89 @@ color = [0.9, 0.5, 0.3]
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The loop is one key now (`path_loop`), and it has to survive the merge
+    /// save that writes over an existing file — which is where the pair of
+    /// keys it replaced went wrong. `path_zoom_loop` was never written by the
+    /// merge path at all, so turning a zoom loop on and pressing Ctrl+S on a
+    /// scene loaded from disk silently dropped it.
+    #[test]
+    fn the_loop_survives_a_merge_save() {
+        let src = r#"
+[meta]
+name = "Looper"
+
+[camera]
+distance = 3.6
+pitch = 1.1
+path_zoom_loop = 2      # legacy spelling
+
+[[camera.path]]
+yaw = 0.0
+
+[zoom]
+map = "descent"
+
+[[transform]]
+name = "descent"
+translation = [0.0, 0.0, 0.0]
+scale = 0.6
+rotation = [0.0, 34.0, 0.0]
+color = [0.3, 0.5, 0.8]
+"#;
+        let dir = std::env::temp_dir().join("fracturize_loop_merge_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("looper.toml");
+        std::fs::write(&path, src).unwrap();
+
+        // Legacy key loads...
+        let scene = Scene::load(&path).unwrap();
+        assert_eq!(
+            scene.camera_path.as_ref().unwrap().loops.zoom().unwrap().periods,
+            2
+        );
+
+        // ...and saving over the file migrates it rather than dropping it.
+        scene.save(&path).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains(r#"path_loop = "zoom""#), "{}", out);
+        assert!(out.contains("path_zoom_periods = 2"), "{}", out);
+        assert!(!out.contains("path_zoom_loop"), "{}", out);
+        assert_eq!(
+            Scene::load(&path).unwrap().camera_path.unwrap().loops.zoom().unwrap().periods,
+            2
+        );
+
+        // A ping-pong is the same round trip, through a mode the pair of flags
+        // could not have expressed at all.
+        let pong = dir.join("pong.toml");
+        std::fs::write(
+            &pong,
+            src.replace("path_zoom_loop = 2      # legacy spelling", "path_loop = \"pingpong\"")
+                .replace("[[camera.path]]\nyaw = 0.0", "[[camera.path]]\nyaw = 0.0\n\n[[camera.path]]\nyaw = 1.0"),
+        )
+        .unwrap();
+        let scene = Scene::load(&pong).unwrap();
+        assert_eq!(scene.camera_path.as_ref().unwrap().loops, crate::path::Loop::PingPong);
+        scene.save(&pong).unwrap();
+        assert!(std::fs::read_to_string(&pong).unwrap().contains(r#"path_loop = "pingpong""#));
+        assert_eq!(
+            Scene::load(&pong).unwrap().camera_path.unwrap().loops,
+            crate::path::Loop::PingPong
+        );
+
+        // An unknown loop is a load error, not a silent fall-back to `once`:
+        // a scene that quietly played the wrong way would be worse than one
+        // that refused to load.
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, src.replace("path_zoom_loop = 2", "path_loop = \"bounce\"")).unwrap();
+        match Scene::load(&bad) {
+            Err(e) => assert!(e.contains("path_loop"), "{}", e),
+            Ok(_) => panic!("an unknown path_loop should not load"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn camera_path_roundtrip() {
         let src = r#"
@@ -2451,7 +2605,7 @@ color = [1.0, 0.2, 0.2]
         let scene = Scene::load(&path).unwrap();
         let p = scene.camera_path.as_ref().expect("path parsed");
         assert_eq!(p.keys.len(), 3);
-        assert!(p.closed);
+        assert_eq!(p.loops, crate::path::Loop::Closed);
         assert_eq!(p.seconds, Some(8.0));
         // Omitted fields inherit the base camera
         assert!(
@@ -2467,10 +2621,15 @@ color = [1.0, 0.2, 0.2]
         let out = std::fs::read_to_string(&path).unwrap();
         assert!(out.contains("# approach from afar"), "{}", out);
         assert!(out.contains("[[camera.path]]"), "{}", out);
+        // The legacy `path_closed` is migrated to the one key that names the
+        // loop, and removed — leaving it would let a stale flag contradict the
+        // key that now decides. Same treatment camera `offset` gets.
+        assert!(out.contains(r#"path_loop = "closed""#), "{}", out);
+        assert!(!out.contains("path_closed"), "{}", out);
         let reloaded = Scene::load(&path).unwrap();
         let q = reloaded.camera_path.as_ref().unwrap();
         assert_eq!(q.keys.len(), 3);
-        assert!(q.closed);
+        assert_eq!(q.loops, crate::path::Loop::Closed);
         for (a, b) in p.keys.iter().zip(&q.keys) {
             assert!(a.orientation.angle_to(b.orientation) < 1e-3);
             assert!((a.distance - b.distance).abs() < 1e-3);

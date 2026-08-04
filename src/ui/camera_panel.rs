@@ -218,11 +218,21 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Camera path").strong());
-        ui.label(
+        let resp = ui.label(
             egui::RichText::new(if authored { "(this scene's)" } else { "(default orbit)" })
                 .small()
                 .weak(),
         );
+        // What the default orbit is, on hover rather than as two permanent
+        // lines of prose. It only ever appeared on the default orbit, which is
+        // also the case that shows four keypoints — so it cost the list its
+        // room in exactly the situation where the list was longest.
+        if !authored {
+            resp.on_hover_text(
+                "A full turn around the current framing — every scene has this \
+                 until it authors keypoints of its own.",
+            );
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let resp = ui.add_enabled(authored, egui::Button::new("Reset"));
@@ -257,17 +267,6 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
             }
         });
     });
-
-    if !authored {
-        ui.label(
-            egui::RichText::new(
-                "A full turn around the current framing — every scene has this \
-                 until it authors keypoints of its own.",
-            )
-            .small()
-            .weak(),
-        );
-    }
 
     // Every remaining point of the window goes to the list — see `draw`'s
     // panel layout. `auto_shrink` off on the vertical axis is what makes the
@@ -340,7 +339,6 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
     }
 
     let moving = app.camera_moving();
-    let mut closed = app.camera_path().closed;
     let seconds = app.camera_path().duration();
     let explicit_seconds = app.camera_path().seconds.is_some();
     let zoom_loop = app.path_zoom_loop();
@@ -361,27 +359,6 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
             app.toggle_camera_motion();
         }
 
-        // Disabled rather than hidden while a zoom loop is on: the two are
-        // different loops and only one can be the answer, and a control that
-        // vanishes is harder to reason about than one that says why it's grey.
-        let resp = ui.add_enabled(zoom_loop.is_none(), egui::Checkbox::new(&mut closed, "loop"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            if zoom_loop.is_some() {
-                "This path already loops, under the scene's zoom symmetry. \
-                 Closing back to the first key would undo the descent that \
-                 makes it endless — turn the zoom loop off to use this instead."
-            } else {
-                "Close the path back to its first key, for seamless loops (Ctrl+Y). \
-                 Setting this on the default orbit makes it this scene's own path."
-            },
-            "click: toggle a closed loop",
-        );
-        if resp.changed() {
-            app.toggle_path_closed();
-        }
-
         let mut secs = seconds;
         let resp = ui.add(
             egui::DragValue::new(&mut secs)
@@ -395,7 +372,8 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
             if explicit_seconds {
                 "How long the whole path takes"
             } else {
-                "How long the whole path takes — currently the default of 3s per segment; setting it here pins it"
+                "How long the whole path takes — currently the default of 3s per \
+                 segment travelled; setting it here pins it"
             },
             "drag: set the path duration",
         );
@@ -404,72 +382,103 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
         }
     });
 
-    draw_zoom_loop(ui, app, zoom, zoom_loop);
+    draw_loop(ui, app, zoom, zoom_loop);
 }
 
-/// The zoom-loop row: greyed, not hidden, when the scene has no scale
-/// symmetry to close under.
+/// How the path gets back to its start: a four-way radio, because it is one
+/// choice and a path is always on one of them.
 ///
-/// It used to vanish, on the grounds that without a zoom map the control is
-/// meaningless rather than merely unavailable. That was the wrong call, and
-/// for the same reason the `loop` checkbox above is greyed instead of hidden:
-/// a control that isn't there can't tell you it exists. Hiding it meant the
-/// only way to discover infinite zoom from the Camera window was to already
-/// know about it — so the greyed row names the feature and says where to turn
-/// it on.
+/// It used to be two checkboxes — `loop`, and a `zoom loop` row that greyed
+/// itself out while the other was on. Two boxes for a four-way choice draws a
+/// picture that isn't true: it says the two can be combined (they can't — see
+/// `path::Loop`), and it leaves the ordinary case, "play once and stop", with
+/// nothing on screen naming it at all. You could only tell you were on it by
+/// noticing that neither box was ticked.
 ///
-/// `S∞` is invariant under the renormalizing map, so a path whose last key is
-/// its first carried forward by that map ends on the frame it started —
-/// literally, not nearly. That makes an animation loop as an *endless* zoom.
-/// See `path::ZoomLoop` and "Infinite Zoom" in AGENTS.md.
-fn draw_zoom_loop(
+/// `zoom` is greyed rather than dropped when the scene has no scale symmetry
+/// to close under, on the same reasoning the old row was: a mode that isn't
+/// drawn can't tell you it exists, and the tooltip is where it says how to get
+/// one. The period count beside it follows the same rule.
+fn draw_loop(
     ui: &mut egui::Ui,
     app: &mut App,
     zoom: Option<(usize, f32)>,
     current: Option<crate::path::ZoomLoop>,
 ) {
-    let Some((map, octaves)) = zoom else {
-        ui.horizontal(|ui| {
-            let mut off = false;
-            let resp = ui.add_enabled(false, egui::Checkbox::new(&mut off, "zoom loop"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Loop by descending one zoom period instead of returning to the first \
-                 key, so the animation plays as a zoom that never ends.\n\n\
-                 Needs a scale symmetry to close under, and this scene has none yet. \
-                 Select a transform in the Transforms window and press \"Zoom about \
-                 this\" to nominate one.",
-                // No arrow: the UI font has no U+2192, and a missing glyph in
-                // the one line that tells you where to go is worse than a comma.
-                "needs a zoom map — Transforms window, Zoom about this",
-            );
-        });
-        return;
+    use crate::path::LoopKind;
+
+    let zoom_note = match zoom {
+        Some((map, octaves)) => format!(
+            "Close the loop under this scene's zoom symmetry (transform {}, {:.2} \
+             octaves per period) instead of by returning to the first key.\n\n\
+             One loop descends a whole period and ends on the frame it started — \
+             the same frame, not a similar one — so the animation plays as a zoom \
+             that never ends. One keypoint is enough, and gives a constant-rate \
+             descent with no seam.",
+            map, octaves
+        ),
+        None => "Loop by descending one zoom period instead of returning to the \
+                 first key, so the animation plays as a zoom that never ends.\n\n\
+                 Needs a scale symmetry to close under, and this scene has none \
+                 yet. Select a transform in the Transforms window and press \
+                 \"Zoom about this\" to nominate one."
+            .to_string(),
     };
 
+    let kind = app.path_loop().kind();
     ui.horizontal(|ui| {
-        let mut on = current.is_some();
-        let resp = ui.checkbox(&mut on, "zoom loop");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            format!(
-                "Close the loop under this scene's zoom symmetry (transform {}, \
-                 {:.2} octaves per period) instead of by returning to the first \
-                 key.\n\n\
-                 One loop descends a whole period and ends on the frame it \
-                 started — the same frame, not a similar one — so the animation \
-                 plays as a zoom that never ends. One keypoint is enough, and \
-                 gives a constant-rate descent with no seam.",
-                map, octaves
-            ),
-            "click: loop by descending one zoom period",
-        );
-        if resp.changed() {
-            app.set_path_zoom_loop(on.then_some(current.map_or(1, |z| z.periods)));
+        ui.label("Loop");
+        let chosen = super::radio::radio(&mut app.ui_state, "path_loop", kind)
+            .option(
+                LoopKind::Once,
+                "once",
+                "Fly from the first keypoint to the last and stop. Eases in and \
+                 out, so it starts and finishes at rest.",
+                "click: play the path once and stop",
+            )
+            .option(
+                LoopKind::PingPong,
+                "ping-pong",
+                "Fly out to the last keypoint, then back along the same route to \
+                 the first, forever. The way to loop a path whose ends are \
+                 nowhere near each other — there's nothing to close, because the \
+                 return journey is the outward one reversed. It slows to a stop \
+                 at each end and accelerates back out, so neither turn jolts.",
+                "click: loop out and back along the path",
+            )
+            .option(
+                LoopKind::Closed,
+                "loop",
+                "Close the path back to its first key, for seamless loops \
+                 (Ctrl+Y). Constant speed, so the seam is invisible. Setting \
+                 this on the default orbit makes it this scene's own path.",
+                "click: loop back round to the first key",
+            )
+            .option_enabled(
+                zoom.is_some(),
+                LoopKind::Zoom,
+                "zoom",
+                zoom_note,
+                if zoom.is_some() {
+                    "click: loop by descending one zoom period"
+                } else {
+                    // No arrow: the UI font has no U+2192, and a missing glyph
+                    // in the one line that tells you where to go is worse than
+                    // a comma.
+                    "needs a zoom map — Transforms window, Zoom about this"
+                },
+            )
+            .show(ui);
+        if let Some(kind) = chosen {
+            app.set_path_loop(kind);
         }
 
+        // The zoom loop's one parameter, on the same row as the option it
+        // belongs to and greyed off it — a modifier of that segment, not a
+        // fifth thing to pick. It also has to be *this* row: the Camera window
+        // is already at its vertical budget, and a row of its own pushed the
+        // keypoint list into the transport controls below it.
+        let Some((_, octaves)) = zoom else { return };
         let mut periods = current.map_or(1, |z| z.periods);
         let suffix = if periods == 1 { " period" } else { " periods" };
         let resp = ui.add_enabled(
@@ -490,10 +499,11 @@ fn draw_zoom_loop(
             "drag: periods descended per loop",
         );
         if resp.changed() {
-            app.set_path_zoom_loop(Some(periods));
+            app.set_path_zoom_periods(periods);
         }
     });
 }
+
 
 fn draw_output(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {

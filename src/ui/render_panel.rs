@@ -37,29 +37,28 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.render_open = open;
 }
 
-/// The points/splat segmented toggle, shared by this panel and the toolbar.
+/// The points/splat segmented radio, shared by this panel and the toolbar.
+///
+/// A radio rather than two toggles: there are exactly two renderers and the
+/// point buffer is always going through one of them, so "neither" isn't a
+/// state this control can be in. See `ui::radio`.
 pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
-    let mode = app.render_mode;
-    let resp = ui.selectable_label(mode == RenderMode::Points, "points");
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "One additive splat per point — crisp, dusty edges (R)",
-        "click: switch to the points renderer",
-    );
-    if resp.clicked() {
-        app.set_render_mode(RenderMode::Points);
-    }
-
-    let resp = ui.selectable_label(mode == RenderMode::Splat, "splat");
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "Log-density accumulation — smoother tonemapping, exposure applies (R)",
-        "click: switch to the splat renderer",
-    );
-    if resp.clicked() {
-        app.set_render_mode(RenderMode::Splat);
+    let chosen = super::radio::radio(&mut app.ui_state, "render_mode", app.render_mode)
+        .option(
+            RenderMode::Points,
+            "points",
+            "Opaque depth-tested points — crisp, dusty edges (R)",
+            "click: switch to the points renderer",
+        )
+        .option(
+            RenderMode::Splat,
+            "splat",
+            "Additive log-density accumulation — smoother tonemapping, exposure applies (R)",
+            "click: switch to the splat renderer",
+        )
+        .show(ui);
+    if let Some(mode) = chosen {
+        app.set_render_mode(mode);
     }
 }
 

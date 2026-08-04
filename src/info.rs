@@ -252,14 +252,15 @@ pub fn report(scene: &Scene, source: &str) -> String {
             "path: {} keypoint{}, {}, {:.1}s",
             p.keys.len(),
             if p.keys.len() == 1 { "" } else { "s" },
-            match (&p.zoom_loop, p.closed) {
-                (Some(z), _) => format!(
+            match p.loops {
+                crate::path::Loop::Zoom(z) => format!(
                     "zoom loop: {} period{} down per loop, closing on an identical frame",
                     z.periods,
                     if z.periods == 1 { "" } else { "s" }
                 ),
-                (None, true) => "closed loop".to_string(),
-                (None, false) => "open".to_string(),
+                crate::path::Loop::PingPong =>
+                    "ping-pong loop: out to the last key and back again".to_string(),
+                l => l.kind().label().to_string(),
             },
             p.duration()
         )),

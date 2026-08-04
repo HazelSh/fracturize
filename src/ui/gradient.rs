@@ -149,54 +149,53 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// `transforms | palette`, the library dropdown, and the dice.
+/// `transforms | palette | mix`, then the library dropdown and the dice.
+///
+/// The three sources are a radio (see `ui::radio`): every point's colour comes
+/// from exactly one of them, and there is no fourth state where colour comes
+/// from nowhere. The library combo and the dice go on their own row underneath
+/// — they belong to palette mode alone, and hanging them off the end of the
+/// selector made a row too wide for the Render window at its default size.
 fn draw_mode_row(ui: &mut egui::Ui, app: &mut App) {
+    let mode = app.scene.color_mode;
+
     ui.horizontal(|ui| {
         ui.label("Color");
-        let mode = app.scene.color_mode;
-
-        let resp = ui.selectable_label(mode == ColorMode::Transforms, "transforms");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Colour from the per-transform RGBs, spread evenly around the gradient. \
-             Keeps each transform's identity — the mode for reading IFS structure. \
-             Note the spacing is 1/N, so adding a transform recolours them all.",
-            "click: colour from the transform colours",
-        );
-        if resp.clicked() {
-            app.set_color_mode(ColorMode::Transforms);
+        let chosen = super::radio::radio(&mut app.ui_state, "color_mode", mode)
+            .option(
+                ColorMode::Transforms,
+                "transforms",
+                "Colour from the per-transform RGBs, spread evenly around the gradient. \
+                 Keeps each transform's identity — the mode for reading IFS structure. \
+                 Note the spacing is 1/N, so adding a transform recolours them all.",
+                "click: colour from the transform colours",
+            )
+            .option(
+                ColorMode::Palette,
+                "palette",
+                "Colour through an independent gradient, Apophysis-style. Doesn't depend \
+                 on the transform count, and the gradient is a portable asset you can \
+                 restyle a finished flame with.",
+                "click: colour through a palette",
+            )
+            .option(
+                ColorMode::Mix,
+                "mix",
+                "Carry the per-transform colours through the walk as a 3-vector instead of a \
+                 gradient position, so they genuinely blend: a walker that came via a red map \
+                 and then a blue one is purple, and tells apart from one that came via two \
+                 magenta maps. Distinct transform *combinations* get distinct colours — the \
+                 thing a 1-D index cannot do. No colormap, so color contrast doesn't apply.",
+                "click: mix the transform colours through the walk",
+            )
+            .show(ui);
+        if let Some(m) = chosen {
+            app.set_color_mode(m);
         }
+    });
 
-        let resp = ui.selectable_label(mode == ColorMode::Palette, "palette");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Colour through an independent gradient, Apophysis-style. Doesn't depend \
-             on the transform count, and the gradient is a portable asset you can \
-             restyle a finished flame with.",
-            "click: colour through a palette",
-        );
-        if resp.clicked() {
-            app.set_color_mode(ColorMode::Palette);
-        }
-
-        let resp = ui.selectable_label(mode == ColorMode::Mix, "mix");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Carry the per-transform colours through the walk as a 3-vector instead of a \
-             gradient position, so they genuinely blend: a walker that came via a red map and \
-             then a blue one is purple, and tells apart from one that came via two magenta \
-             maps. Distinct transform *combinations* get distinct colours — the thing a 1-D \
-             index cannot do. No colormap, so color contrast doesn't apply.",
-            "click: mix the transform colours through the walk",
-        );
-        if resp.clicked() {
-            app.set_color_mode(ColorMode::Mix);
-        }
-
-        if mode == ColorMode::Palette {
+    if mode == ColorMode::Palette {
+        ui.horizontal(|ui| {
             let current = app
                 .scene
                 .palette
@@ -235,8 +234,8 @@ fn draw_mode_row(ui: &mut egui::Ui, app: &mut App) {
                 let described = app.randomize_palette(None);
                 log::info!("Random palette: {}", described);
             }
-        }
-    });
+        });
+    }
 }
 
 /// Mix mode's stand-in for the strip: the transform colours themselves, which

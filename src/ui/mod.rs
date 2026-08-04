@@ -25,6 +25,7 @@ pub mod gradient;
 pub mod hints;
 pub mod icons;
 pub mod labels;
+pub mod radio;
 pub mod render_job;
 pub mod render_panel;
 pub mod save_as;
@@ -155,6 +156,31 @@ impl WindowKey {
     fn id(self) -> egui::Id {
         egui::Id::new(("fracturize_window", self.name()))
     }
+
+    /// The smallest this window may be dragged to.
+    ///
+    /// Not cosmetic. A window whose fixed furniture doesn't fit hands its
+    /// flexible middle a *negative* height, and the thing in that middle draws
+    /// anyway — on top of the rows pinned below it. Worse, it draws on top
+    /// *interactively*: egui gives the pointer to whichever widget was
+    /// registered later, and a `Panel::bottom`'s contents are registered
+    /// before the body that follows them. So the buried controls still paint,
+    /// still highlight on hover and still show their tooltips, but their
+    /// clicks go to the thing lying over them — a control that looks alive and
+    /// isn't, which is a genuinely nasty thing to debug.
+    ///
+    /// The Camera window is the one that has to say so: it stacks a framing
+    /// block, saved views, a scrolling keypoint list, the transport and loop
+    /// rows, and the output buttons, and its own furniture wants ~290px before
+    /// the list gets a single pixel. The width is the widest fixed row (the
+    /// four output buttons), which merely clips rather than colliding — so it
+    /// is a legibility floor, where the height is a correctness one.
+    fn min_size(self) -> egui::Vec2 {
+        match self {
+            Self::Camera => egui::vec2(390.0, 310.0),
+            _ => egui::vec2(180.0, 100.0),
+        }
+    }
 }
 
 /// Default position and size for a panel, as a function of the viewport so
@@ -180,7 +206,7 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),
         WindowKey::Camera => (
             egui::pos2(right_x, top + 460.0),
-            egui::vec2(right_col_w, 300.0),
+            egui::vec2(right_col_w, 320.0),
         ),
     }
 }
@@ -189,14 +215,19 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
 pub fn window(ctx: &egui::Context, app: &crate::app::App, key: WindowKey, title: &str) -> egui::Window<'static> {
     let (default_pos, default_size) = default_layout(key, ctx.content_rect());
     let stored = app.window_geometry(key.name());
+    let min = key.min_size();
     let (pos, size) = match stored {
-        Some([x, y, w, h]) => (egui::pos2(x, y), egui::vec2(w, h)),
+        // Geometry saved before this window grew a minimum — or by a build
+        // that had a smaller one — comes back clamped rather than reinstating
+        // a size the content can't live in.
+        Some([x, y, w, h]) => (egui::pos2(x, y), egui::vec2(w.max(min.x), h.max(min.y))),
         None => (default_pos, default_size),
     };
     egui::Window::new(title.to_owned())
         .id(key.id())
         .default_pos(pos)
         .default_size(size)
+        .min_size(min)
         .resizable(true)
 }
 

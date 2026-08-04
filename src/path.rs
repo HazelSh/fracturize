@@ -47,8 +47,9 @@
 //!   *relative* rate (halving the distance always takes the same time).
 //! - `focus` travels on its own spline, so look directions blend smoothly
 //!   while the eye moves.
-//! - Open paths ease in/out by default (smoothstep on path time); closed
-//!   paths default to constant speed so the loop seam is invisible.
+//! - Easing (smoothstep on path time) defaults to whatever the [`Loop`] wants:
+//!   on for a one-shot and for a ping-pong, whose turnarounds it is what makes
+//!   smooth; off for the two closing loops, where it would stall the seam.
 
 use glam::Vec3;
 
@@ -132,6 +133,139 @@ impl ZoomLoop {
     }
 }
 
+/// How a path gets from its last frame back to its first — the whole of it,
+/// in one field.
+///
+/// There are four ways and a path is always on exactly one of them, which is
+/// why this is an enum and not the pair of flags it replaced (`closed: bool`
+/// plus `zoom_loop: Option<_>`). Two flags describe four states, but one of
+/// those four is "returns to the first key *and* descends a zoom period",
+/// which is a contradiction — two different loops claimed at once. Every
+/// writer had to remember to clear the other one, and the load path, the
+/// keybind and the panel each did it separately. Now it can't be said.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Loop {
+    /// Play from the first key to the last and stop.
+    Once,
+    /// Play to the last key, then back along the path to the first.
+    ///
+    /// The geometry is the open path; the loop lives entirely in the time
+    /// mapping, which folds `t` into a triangle. That's what makes it work on
+    /// a path whose ends are nowhere near each other — the return journey is
+    /// the outward one reversed, so there is nothing to close.
+    PingPong,
+    /// Loop back to the first key after the last, seamlessly.
+    Closed,
+    /// Close under the scene's zoom symmetry instead of by returning to the
+    /// first key: one loop descends whole zoom periods and lands on an
+    /// identical frame. See [`ZoomLoop`].
+    Zoom(ZoomLoop),
+}
+
+/// A loop named without the similarity a zoom loop resolves to.
+///
+/// This is what a radio button, a keybind or a scene file picks from;
+/// [`Loop`] is what the spline flies. The two are separate because a zoom
+/// loop's `ZoomLoop` is *derived* — from the scene's renormalizing map, and
+/// re-derived whenever that map is edited — so it can't be chosen, only
+/// resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopKind {
+    Once,
+    PingPong,
+    Closed,
+    Zoom,
+}
+
+impl LoopKind {
+    /// The scene-file spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::PingPong => "pingpong",
+            Self::Closed => "closed",
+            Self::Zoom => "zoom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "once" | "open" => Some(Self::Once),
+            "pingpong" | "ping-pong" => Some(Self::PingPong),
+            "closed" | "loop" => Some(Self::Closed),
+            "zoom" => Some(Self::Zoom),
+            _ => None,
+        }
+    }
+
+    /// A phrase for logs, `--info` and the CLI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Once => "plays once",
+            Self::PingPong => "ping-pong loop",
+            Self::Closed => "closed loop",
+            Self::Zoom => "zoom loop",
+        }
+    }
+}
+
+impl Loop {
+    pub fn kind(self) -> LoopKind {
+        match self {
+            Self::Once => LoopKind::Once,
+            Self::PingPong => LoopKind::PingPong,
+            Self::Closed => LoopKind::Closed,
+            Self::Zoom(_) => LoopKind::Zoom,
+        }
+    }
+
+    /// Whether playback repeats: the last frame runs into the first.
+    ///
+    /// True for all three loops, because everything that cares about *time* —
+    /// `t` wrapping, dropping the duplicate final frame of a render, not
+    /// easing into a seam — wants the same answer for all of them.
+    pub fn wraps(self) -> bool {
+        !matches!(self, Self::Once)
+    }
+
+    /// Whether the *spline* gains a closing segment.
+    ///
+    /// Not the same question as [`wraps`](Self::wraps), and conflating the two
+    /// is the bug ping-pong would otherwise have: it loops in time while its
+    /// geometry stays an open path, so it wraps but does not close.
+    pub fn closes(self) -> bool {
+        matches!(self, Self::Closed | Self::Zoom(_))
+    }
+
+    /// Traversals of the key list per loop — two for a there-and-back.
+    ///
+    /// Only the default duration reads this, so switching a path to ping-pong
+    /// keeps its *speed* and doubles its length, rather than flying the same
+    /// route twice as fast.
+    pub fn passes(self) -> f32 {
+        match self {
+            Self::PingPong => 2.0,
+            _ => 1.0,
+        }
+    }
+
+    /// Whether to smoothstep path time when the scene doesn't say.
+    ///
+    /// A closed loop must not, or the seam gets a visible stall. A ping-pong
+    /// very much must: the ease is what takes the camera's velocity to zero at
+    /// each turnaround, and without it the reversal is a hard bounce.
+    pub fn eases_by_default(self) -> bool {
+        matches!(self, Self::Once | Self::PingPong)
+    }
+
+    pub fn zoom(self) -> Option<ZoomLoop> {
+        match self {
+            Self::Zoom(z) => Some(z),
+            _ => None,
+        }
+    }
+}
+
 /// A spline camera path through two or more keypoints
 #[derive(Clone, Debug)]
 pub struct CameraPath {
@@ -143,15 +277,11 @@ pub struct CameraPath {
     /// entries read as `0`, so a path can always be built without thinking
     /// about it and a hand-written scene never has to mention it.
     pub windings: Vec<i32>,
-    /// Loop back to the first key after the last (seamless loops)
-    pub closed: bool,
-    /// Close under the scene's zoom symmetry instead of by returning to the
-    /// first key: one loop descends `periods` zoom periods and lands on an
-    /// identical frame. See [`ZoomLoop`].
-    pub zoom_loop: Option<ZoomLoop>,
-    /// Ease in/out (smoothstep on path time); None = default (!closed)
+    /// How playback gets from the last frame back to the first.
+    pub loops: Loop,
+    /// Ease in/out (smoothstep on path time); None = the loop's own default
     pub ease: Option<bool>,
-    /// Suggested playback/render duration; None = 3s per segment
+    /// Suggested playback/render duration; None = 3s per segment traversed
     pub seconds: Option<f32>,
 }
 
@@ -204,26 +334,19 @@ fn cumulative_basis(u: f32) -> [f32; 3] {
 
 impl CameraPath {
     /// A path through `keys`, taking the short way round on every segment.
-    pub fn new(keys: Vec<PathKey>, closed: bool) -> Self {
+    pub fn new(keys: Vec<PathKey>, loops: Loop) -> Self {
         Self {
             keys,
             windings: Vec::new(),
-            closed,
-            zoom_loop: None,
+            loops,
             ease: None,
             seconds: None,
         }
     }
 
     /// Whether playback loops: the last frame runs into the first.
-    ///
-    /// True for both kinds of loop — returning to the first key, and closing
-    /// under the zoom symmetry — because everything that cares about *time*
-    /// (t wrapping, dropping the duplicate final frame, not easing into a
-    /// seam) wants the same answer for both. Only the spline itself
-    /// distinguishes them.
     pub fn wraps(&self) -> bool {
-        self.closed || self.zoom_loop.is_some()
+        self.loops.wraps()
     }
 
     /// Whether there is enough here to interpolate.
@@ -233,16 +356,20 @@ impl CameraPath {
     /// closing segment runs to that key's own image under the symmetry, which
     /// is a real segment through real geometry.
     pub fn playable(&self) -> bool {
-        self.keys.len() >= 2 || (self.zoom_loop.is_some() && !self.keys.is_empty())
+        self.keys.len() >= 2 || (self.loops.zoom().is_some() && !self.keys.is_empty())
     }
 
-    /// Number of spline segments (looping paths add the wrap-around segment).
+    /// Number of spline segments (closing paths add the wrap-around segment).
+    ///
+    /// Keyed on `closes()`, not `wraps()`: a ping-pong loops without closing —
+    /// it flies these same segments back the other way, so it has exactly the
+    /// segments an open path has.
     ///
     /// A zoom loop is the one path that can have a single key and still be a
     /// path: its closing segment runs from that key to the key's own image
     /// under the symmetry, which is a real segment through real geometry.
     pub fn segments(&self) -> usize {
-        match (self.keys.len(), self.wraps()) {
+        match (self.keys.len(), self.loops.closes()) {
             (0, _) => 0,
             (1, true) => 1,
             (1, false) => 0,
@@ -251,15 +378,16 @@ impl CameraPath {
         }
     }
 
-    /// Playback duration: explicit `seconds`, or 3s per segment
+    /// Playback duration: explicit `seconds`, or 3s per segment *traversed* —
+    /// which a ping-pong does twice over.
     pub fn duration(&self) -> f32 {
         self.seconds
-            .unwrap_or(3.0 * self.segments().max(1) as f32)
+            .unwrap_or(3.0 * self.segments().max(1) as f32 * self.loops.passes())
             .max(0.1)
     }
 
     fn eased(&self) -> bool {
-        self.ease.unwrap_or(!self.wraps())
+        self.ease.unwrap_or_else(|| self.loops.eases_by_default())
     }
 
     /// Extra whole turns on segment `i`, or 0 where nothing was authored.
@@ -297,8 +425,7 @@ impl CameraPath {
         Self {
             keys,
             windings: vec![0; 4],
-            closed: true,
-            zoom_loop: None,
+            loops: Loop::Closed,
             ease: Some(false),
             seconds: Some(tau / ORBIT_RATE),
         }
@@ -312,17 +439,18 @@ impl CameraPath {
         let idx = i.rem_euclid(n) as usize;
         let turns = ((i - idx as isize) / n) as i32; // whole loops i is offset by
 
-        // Carrying by the symmetry is what makes the spline periodic *in
-        // appearance* rather than in parameter space. It also means no
-        // clamping at the ends: the seam gets the same treatment as any
-        // interior segment, so the loop has no velocity kink either.
-        if let Some(z) = &self.zoom_loop {
-            return z.advance(self.keys[idx], turns);
+        match self.loops {
+            // Carrying by the symmetry is what makes the spline periodic *in
+            // appearance* rather than in parameter space. It also means no
+            // clamping at the ends: the seam gets the same treatment as any
+            // interior segment, so the loop has no velocity kink either.
+            Loop::Zoom(z) => z.advance(self.keys[idx], turns),
+            Loop::Closed => self.keys[idx],
+            // A ping-pong's geometry is the open path — it turns round at the
+            // ends rather than continuing past them, so the neighbours out
+            // there are clamped copies just as they are for a one-shot.
+            Loop::Once | Loop::PingPong => self.keys[i.clamp(0, n - 1) as usize],
         }
-        if !self.closed {
-            return self.keys[i.clamp(0, n - 1) as usize];
-        }
-        self.keys[idx]
     }
 
     /// The turn along segment `i`, in the frame of the key it starts from.
@@ -338,16 +466,16 @@ impl CameraPath {
         // A zoom loop's segments are all the same turn — the symmetry's, seen
         // from the key. Conjugating preserves the magnitude exactly, so a
         // multi-period loop keeps its whole sweep and cannot fold.
-        if let Some(z) = &self.zoom_loop {
+        if let Loop::Zoom(z) = self.loops {
             let from = self.key(i);
             return Turn::from_rotation_vector(
                 from.orientation.inverse().rotate(z.turn.as_rotation_vector()),
             );
         }
 
-        // Past the ends of an open path the neighbour keys are clamped copies,
-        // so there is nowhere to go.
-        if !self.closed && (i < 0 || i >= segs) {
+        // Past the ends of a path that doesn't close, the neighbour keys are
+        // clamped copies, so there is nowhere to go.
+        if !self.loops.closes() && (i < 0 || i >= segs) {
             return Turn::ZERO;
         }
 
@@ -380,6 +508,19 @@ impl CameraPath {
         } else {
             t.clamp(0.0, 1.0)
         };
+        // A ping-pong is a triangle wave in path time: out over the first
+        // half, back over the second. This is the whole of it — the spline
+        // below never learns that the camera is coming home, and doesn't need
+        // to, because the return journey is the outward one read backwards.
+        let t = if self.loops == Loop::PingPong {
+            1.0 - (2.0 * t - 1.0).abs()
+        } else {
+            t
+        };
+        // Easing *after* the fold, which is what makes the turnaround smooth:
+        // smoothstep has zero derivative at both ends, so the camera decelerates
+        // into each end of the path and accelerates back out. Fold an eased t
+        // instead and you get a corner — full speed straight into a reversal.
         let t = if self.eased() { t * t * (3.0 - 2.0 * t) } else { t };
 
         let x = t * segs as f32;
@@ -707,8 +848,7 @@ mod tests {
         CameraPath {
             keys,
             windings: Vec::new(),
-            closed: false,
-            zoom_loop: Some(ZoomLoop {
+            loops: Loop::Zoom(ZoomLoop {
                 periods,
                 center: Vec3::ZERO,
                 scale: 0.6f32.powi(periods as i32),
@@ -719,7 +859,7 @@ mod tests {
         }
     }
 
-    fn linear_path(closed: bool) -> CameraPath {
+    fn linear_path(loops: Loop) -> CameraPath {
         CameraPath {
             keys: vec![
                 key(0.0, 0.1, 2.0, Vec3::ZERO),
@@ -727,8 +867,7 @@ mod tests {
                 key(2.0, 0.2, 3.0, Vec3::Y),
             ],
             windings: Vec::new(),
-            closed,
-            zoom_loop: None,
+            loops,
             ease: Some(false),
             seconds: None,
         }
@@ -769,16 +908,20 @@ mod tests {
 
     #[test]
     fn passes_through_keys() {
-        for closed in [false, true] {
-            let p = linear_path(closed);
-            let n = if closed { p.keys.len() } else { p.keys.len() - 1 };
+        for loops in [Loop::Once, Loop::PingPong, Loop::Closed] {
+            let p = linear_path(loops);
+            let n = p.segments();
+            // A ping-pong covers the same segments in the first *half* of its
+            // loop and then comes back over them, so its keys sit twice as
+            // close together in path time.
+            let span = if loops == Loop::PingPong { 0.5 } else { 1.0 };
             for (i, k) in p.keys.iter().enumerate() {
-                let t = i as f32 / n as f32;
+                let t = span * i as f32 / n as f32;
                 let cam = p.sample(t);
                 assert!(
                     cam.orientation.angle_to(k.orientation) < 1e-4,
-                    "closed={} key {} orientation",
-                    closed,
+                    "loops={:?} key {} orientation",
+                    loops,
                     i
                 );
                 assert!((cam.distance - k.distance).abs() < 1e-3, "key {} dist", i);
@@ -797,8 +940,7 @@ mod tests {
         let p = CameraPath {
             keys: yaws.iter().map(|&y| key(y, 0.35, 3.0, Vec3::ZERO)).collect(),
             windings: Vec::new(),
-            closed: false,
-            zoom_loop: None,
+            loops: Loop::Once,
             ease: Some(false),
             seconds: None,
         };
@@ -830,7 +972,7 @@ mod tests {
 
     #[test]
     fn closed_path_is_seamless() {
-        let p = linear_path(true);
+        let p = linear_path(Loop::Closed);
         let a = p.sample(0.0);
         let b = p.sample(1.0);
         assert!((a.eye() - b.eye()).length() < 1e-3);
@@ -857,8 +999,7 @@ mod tests {
         let p = CameraPath {
             keys: (0..4).map(|i| key(i as f32 * tau / 4.0, 0.2, 3.0, Vec3::ZERO)).collect(),
             windings: Vec::new(),
-            closed: true,
-            zoom_loop: None,
+            loops: Loop::Closed,
             ease: Some(false),
             seconds: None,
         };
@@ -879,8 +1020,8 @@ mod tests {
         // way round the houses. Both land on exactly the same framing — a route
         // can surprise you, but it cannot put the camera in the wrong place.
         let keys = vec![key(0.0, 0.0, 3.0, Vec3::ZERO), key(1f32.to_radians(), 0.0, 3.0, Vec3::ZERO)];
-        let short = CameraPath { windings: vec![0], ..CameraPath::new(keys.clone(), false) };
-        let long = CameraPath { windings: vec![1], ..CameraPath::new(keys.clone(), false) };
+        let short = CameraPath { windings: vec![0], ..CameraPath::new(keys.clone(), Loop::Once) };
+        let long = CameraPath { windings: vec![1], ..CameraPath::new(keys.clone(), Loop::Once) };
 
         for p in [&short, &long] {
             assert!(p.sample(0.0).orientation.angle_to(keys[0].orientation) < 1e-4);
@@ -908,8 +1049,7 @@ mod tests {
                 key(0.0, 0.0, 1.0, Vec3::ZERO),
             ],
             windings: vec![1, 1],
-            closed: false,
-            zoom_loop: None,
+            loops: Loop::Once,
             ease: Some(false),
             seconds: None,
         };
@@ -928,7 +1068,7 @@ mod tests {
             ease: Some(false),
             ..CameraPath::new(
                 vec![key(0.0, 0.0, 1.0, Vec3::ZERO), key(0.0, 0.0, 4.0, Vec3::ZERO)],
-                false,
+                Loop::Once,
             )
         };
         assert!((p.sample(0.5).distance - 2.0).abs() < 1e-3, "got {}", p.sample(0.5).distance);
@@ -942,7 +1082,7 @@ mod tests {
             ease: Some(false),
             ..CameraPath::new(
                 vec![rolled_key(0.0, 0.0, 0.0, 3.0), rolled_key(0.0, 0.0, 1.0, 3.0)],
-                false,
+                Loop::Once,
             )
         };
         assert!(p.sample(0.0).chart().roll.radians().abs() < 1e-4);
@@ -962,7 +1102,7 @@ mod tests {
                     key(0.0, std::f32::consts::FRAC_PI_2, 3.0, Vec3::ZERO),
                     key(std::f32::consts::PI, 1.2, 3.0, Vec3::ZERO),
                 ],
-                false,
+                Loop::Once,
             )
         };
         let mut prev = p.sample(0.0).forward();
@@ -987,7 +1127,7 @@ mod tests {
         // separates them.
         let path = zoom_loop_path(1, vec![key(0.3, 0.5, 3.6, Vec3::ZERO)]);
         let (start, end) = (path.sample(0.0), path.sample(SEAM));
-        let z = path.zoom_loop.unwrap();
+        let z = path.loops.zoom().unwrap();
         let rot = z.turn.exp();
         let vp_start = start.view_proj(16.0 / 9.0);
         let vp_end = end.view_proj(16.0 / 9.0);
@@ -1015,7 +1155,7 @@ mod tests {
     #[test]
     fn a_zoom_loop_is_continuous_across_the_seam() {
         let path = zoom_loop_path(1, vec![key(0.3, 0.5, 3.6, Vec3::ZERO)]);
-        let z = path.zoom_loop.unwrap();
+        let z = path.loops.zoom().unwrap();
         let carried = z.advance(PathKey::from_camera(&path.sample(SEAM)), -1);
         let start = PathKey::from_camera(&path.sample(0.0));
         assert!(
@@ -1038,7 +1178,7 @@ mod tests {
         // thing itself. Log-distance is linear for the same reason.
         let path = zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
         assert_eq!(path.segments(), 1, "a single key plus its image is one segment");
-        let z = path.zoom_loop.unwrap();
+        let z = path.loops.zoom().unwrap();
         let start = path.sample(0.0).orientation;
         for i in 0..=20 {
             let t = i as f32 / 20.0 * SEAM;
@@ -1077,8 +1217,7 @@ mod tests {
         let path = CameraPath {
             keys: vec![key(0.0, 0.4, 4.0, Vec3::ZERO)],
             windings: Vec::new(),
-            closed: false,
-            zoom_loop: Some(ZoomLoop {
+            loops: Loop::Zoom(ZoomLoop {
                 periods: 1,
                 center: Vec3::ZERO,
                 scale: 0.6,
@@ -1096,7 +1235,7 @@ mod tests {
         assert!(swept < 0.0, "359.5° is a turn the other way, swept {:.1}°", swept.to_degrees());
 
         // And it still closes exactly where the symmetry says.
-        let z = path.zoom_loop.unwrap();
+        let z = path.loops.zoom().unwrap();
         let carried = z.center + z.turn.exp().rotate((path.sample(0.0).eye() - z.center) * z.scale);
         assert!(
             (path.sample(SEAM).eye() - carried).length() < 1e-3,
@@ -1115,8 +1254,7 @@ mod tests {
         let path = CameraPath {
             keys: vec![key(0.0, 0.4, 4.0, Vec3::ZERO)],
             windings: Vec::new(),
-            closed: false,
-            zoom_loop: Some(ZoomLoop {
+            loops: Loop::Zoom(ZoomLoop {
                 periods: 4,
                 center: Vec3::ZERO,
                 scale: 0.6f32.powi(4),
@@ -1152,7 +1290,7 @@ mod tests {
         let base = scene.camera();
         let default = CameraPath::full_orbit(&base);
         let path = resolve(scene.camera_path.as_ref(), &default);
-        let z = path.zoom_loop.expect("pythagoras-zoomy closes under its zoom symmetry");
+        let z = path.loops.zoom().expect("pythagoras-zoomy closes under its zoom symmetry");
 
         let start = path.sample(0.0);
         let end = path.sample(SEAM);
@@ -1171,13 +1309,93 @@ mod tests {
     fn one_key_plus_a_zoom_loop_is_playable() {
         let one = zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
         assert!(one.playable(), "a single key closing under the symmetry is a path");
-        let bare = CameraPath { zoom_loop: None, ..one };
+        let bare = CameraPath { loops: Loop::Once, ..one };
         assert!(!bare.playable(), "one key and no zoom loop is a scene mid-authoring");
     }
 
     #[test]
     fn a_zoom_loop_does_not_ease() {
         assert!(!zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]).eased());
+    }
+
+    // -- ping-pong ---------------------------------------------------------
+
+    #[test]
+    fn a_ping_pong_comes_home_the_way_it_went_out() {
+        let p = CameraPath { ease: None, ..linear_path(Loop::PingPong) };
+
+        // Out to the last key by halfway...
+        let last = *p.keys.last().unwrap();
+        let mid = p.sample(0.5);
+        assert!(mid.orientation.angle_to(last.orientation) < 1e-4, "halfway is the last key");
+        assert!((mid.distance - last.distance).abs() < 1e-3);
+
+        // ...and the return leg is the outward one read backwards, frame for
+        // frame. This is the property that makes it work on a path whose ends
+        // are nowhere near each other: there is nothing to close.
+        for i in 0..=20 {
+            let t = i as f32 / 40.0;
+            let out = p.sample(t);
+            let back = p.sample(1.0 - t);
+            assert!(out.orientation.angle_to(back.orientation) < 1e-4, "t={}", t);
+            assert!((out.distance - back.distance).abs() < 1e-4, "t={}", t);
+            assert!((out.focus - back.focus).length() < 1e-4, "t={}", t);
+        }
+
+        // So the last frame runs into the first, with no jump.
+        assert!(p.sample(1.0).orientation.angle_to(p.keys[0].orientation) < 1e-4);
+    }
+
+    #[test]
+    fn a_ping_pong_turns_round_at_rest() {
+        // The ease is not decoration here: a triangle wave reverses direction
+        // instantaneously, and smoothstep's zero derivative at both ends is
+        // what turns that bounce into a decelerate-and-return. Hence the
+        // default, and hence this test.
+        let eased = CameraPath { ease: None, ..linear_path(Loop::PingPong) };
+        let hard = CameraPath { ease: Some(false), ..linear_path(Loop::PingPong) };
+        assert!(eased.eased(), "a ping-pong eases unless the scene says not to");
+
+        let step = |p: &CameraPath, a: f32, b: f32| {
+            p.sample(a).orientation.angle_to(p.sample(b).orientation)
+        };
+        const D: f32 = 0.01;
+        let cruise = step(&eased, 0.25 - D / 2.0, 0.25 + D / 2.0);
+        for turn in [0.5, 1.0] {
+            let eased_step = step(&eased, turn - D, turn);
+            assert!(
+                eased_step < 0.1 * cruise,
+                "t={}: {} into the turn vs {} cruising",
+                turn,
+                eased_step,
+                cruise
+            );
+            assert!(
+                eased_step < 0.25 * step(&hard, turn - D, turn),
+                "t={}: the ease is what slows the turnaround",
+                turn
+            );
+        }
+    }
+
+    #[test]
+    fn a_ping_pong_is_an_open_path_flown_twice() {
+        let once = linear_path(Loop::Once);
+        let pong = linear_path(Loop::PingPong);
+        // Same geometry — the loop is entirely in the time mapping.
+        assert_eq!(pong.segments(), once.segments());
+        assert!(!Loop::PingPong.closes(), "nothing to close");
+        assert!(Loop::PingPong.wraps(), "but playback repeats");
+
+        // Twice the journey at the same speed, rather than the same journey
+        // twice as fast.
+        let secs = |p: &CameraPath| CameraPath { seconds: None, ..p.clone() }.duration();
+        assert_eq!(secs(&pong), 2.0 * secs(&once));
+        assert_eq!(
+            CameraPath { seconds: Some(9.0), ..pong.clone() }.duration(),
+            9.0,
+            "a pinned duration is still the whole loop"
+        );
     }
 
     // -- defaults, resolution, housekeeping --------------------------------
@@ -1215,29 +1433,29 @@ mod tests {
         let default = CameraPath::full_orbit(&base);
 
         assert!(std::ptr::eq(resolve(None, &default), &default));
-        let one_key = CameraPath::new(vec![key(1.0, 0.2, 2.0, Vec3::Z)], false);
+        let one_key = CameraPath::new(vec![key(1.0, 0.2, 2.0, Vec3::Z)], Loop::Once);
         assert!(std::ptr::eq(resolve(Some(&one_key), &default), &default));
 
-        let authored = linear_path(false);
+        let authored = linear_path(Loop::Once);
         assert!(std::ptr::eq(resolve(Some(&authored), &default), &authored));
     }
 
     #[test]
     fn open_path_eases_by_default() {
-        let p = CameraPath { ease: None, ..linear_path(false) };
+        let p = CameraPath { ease: None, ..linear_path(Loop::Once) };
         assert!(p.eased());
         // Eased start moves slower than constant speed
         assert!(swept_about_y(&p, 0.0, 0.05, 32).abs() < 0.05);
-        let p_closed = CameraPath { ease: None, ..linear_path(true) };
+        let p_closed = CameraPath { ease: None, ..linear_path(Loop::Closed) };
         assert!(!p_closed.eased());
     }
 
     #[test]
     fn degenerate_paths_are_safe() {
-        let empty = CameraPath::new(vec![], false);
+        let empty = CameraPath::new(vec![], Loop::Once);
         assert!(empty.sample(0.5).distance > 0.0);
 
-        let single = CameraPath { closed: true, ..CameraPath::new(vec![key(1.0, 0.2, 2.0, Vec3::Z)], true) };
+        let single = CameraPath::new(vec![key(1.0, 0.2, 2.0, Vec3::Z)], Loop::Closed);
         let cam = single.sample(0.7);
         assert!(cam.orientation.angle_to(single.keys[0].orientation) < 1e-6);
         assert!((cam.focus - Vec3::Z).length() < 1e-6);
@@ -1247,7 +1465,7 @@ mod tests {
     fn windings_keep_pace_with_the_keys() {
         // The route list and the segment list must never drift apart, or a
         // winding silently starts describing a different segment.
-        let mut p = linear_path(false);
+        let mut p = linear_path(Loop::Once);
         p.fit_windings();
         assert_eq!(p.windings.len(), p.segments());
 
@@ -1255,7 +1473,7 @@ mod tests {
         p.fit_windings();
         assert_eq!(p.windings.len(), p.segments());
 
-        p.closed = true;
+        p.loops = Loop::Closed;
         p.fit_windings();
         assert_eq!(p.windings.len(), p.segments(), "closing adds the wrap-around segment");
 
@@ -1264,7 +1482,7 @@ mod tests {
         assert_eq!(p.windings.len(), p.segments());
 
         // A path that never mentions windings behaves as all-zero.
-        assert_eq!(CameraPath::new(vec![], false).winding(7), 0);
+        assert_eq!(CameraPath::new(vec![], Loop::Once).winding(7), 0);
     }
 }
 
