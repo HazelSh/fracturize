@@ -1,0 +1,72 @@
+[meta]
+name = "random-selection-1.toml"
+author = "fracturize random flame"
+point_size = 0.0012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.5
+color_falloff = 1.0892
+color_contrast = 1.0
+background = [0.0062, 0.0062, 0.0067]
+haze = 0.0
+
+[camera]
+focus = [-0.6352, 0.3295, -0.5811]
+distance = 4.8842
+yaw = 2.3794
+pitch = 0.6802
+roll = 0.1531
+path_loop = "pingpong"
+
+[[camera.path]]
+rotvec = [-0.009941, -2.711492, -1.564703]
+distance = 2.74
+focus = [0.1372, -0.4809, 0.2576]
+
+[[camera.path]]
+rotvec = [-1.562227, 0.280175, 0.282969]
+distance = 1.1795
+focus = [-0.2074, 0.1803, -0.3361]
+
+[[camera.path]]
+rotvec = [-0.435933, -2.188707, -1.418158]
+distance = 0.6965
+focus = [0.0677, 0.307, -0.2508]
+
+[[camera.path]]
+rotvec = [-0.452536, -2.019029, -0.645725]
+distance = 0.2998
+focus = [0.0677, 0.307, -0.2508]
+
+[[camera.path]]
+rotvec = [0.841235, -2.149209, -1.313221]
+distance = 0.0941
+focus = [0.0789, 0.336, -0.2273]
+
+[[transform]]
+name = "t0"
+translation = [-0.2031, 0.7058, -0.2499]
+scale = 0.6357
+rotation = [56.9842, 45.5517, -91.0795]
+color = [0.8145, 0.1501, 0.0784]
+weight = 0.9
+color_value = 0.0
+
+[[transform]]
+name = "t1"
+translation = [0.1013, 0.4665, -0.2657]
+scale = 0.4917
+rotation = [-54.171, -32.8025, -168.0163]
+color = [0.8216, 0.1526, 0.1902]
+weight = 1.2053
+color_value = 0.5
+
+[[transform]]
+name = "t2"
+translation = [-0.3153, 0.1514, -0.2032]
+scale = 0.4766
+rotation = [-105.8292, -52.0604, -88.5396]
+color = [0.8382, 0.6023, 0.2557]
+weight = 1.1916
+color_value = 1.0
+variations = { horseshoe = 0.2382, linear = 0.7618 }
