@@ -1,0 +1,118 @@
+# Blossom — an accident, kept
+#
+# This scene is a mistake that was better than what it interrupted. While
+# building `rimefall` I set the ornament maps' `absfold` weight to 0.55, which
+# is flatly wrong for that piece: the fold reflects everything into the positive
+# octant, so all three of the 120°-spaced facets collapse into the *same*
+# octant and the three-fold well flattens into a sheet (`--info` says it:
+# spread (0.23, 0.04, 0.19) — 0.04 on the vertical is not a well, it's a
+# tabletop). What came out instead was sparse floral rosettes strung along a
+# curving bough, which is nothing I would have thought to aim at.
+#
+# Keeping the accidents is standard practice in the flame community and this is
+# why. See CRAFT.md §5.
+#
+# The thing that actually makes it: it is an *infinite zoom* scene, and the
+# bough is the band. Renormalisation repeats the rosettes across octaves, so
+# the branch carries blossom at every scale and runs out of the frame in both
+# directions. Turn `[zoom]` off and it collapses to one small sparse cluster —
+# pretty, and a tenth of the picture. The flowers are the ornament; the
+# recursion is the branch.
+#
+#   fracturize --scene scenes/blossom.toml
+#   fracturize --scene scenes/blossom.toml --render blossom.png \
+#     --effort high --splat --exposure 2.4 --width 1600 --height 1600
+#
+# Claude Opus 5, 2026-08-04.
+
+[meta]
+name = "Blossom"
+author = "Claude Opus 5"
+point_size = 0.0018
+point_count = 8_000_000
+color_speed = 0.5
+color_falloff = 0.6
+color_contrast = 1.0
+haze = 0.5
+background = [0.010, 0.008, 0.016]
+
+[camera]
+distance = 3.4
+yaw = 0.0
+pitch = 1.12
+focus = [0.0, 0.0, 0.0]
+
+# Bark, then dusty mauve, then two pinks and a white — luminance rising and
+# falling once so the cyclic map has no seam. The renderer has no lights, so
+# this gradient is the only shading the flowers get.
+[palette]
+interpolate = "oklab"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#0d0a10" },
+  { at = 0.15, color = "#2e2630" },
+  { at = 0.35, color = "#6b4a55" },
+  { at = 0.55, color = "#c9788f" },
+  { at = 0.72, color = "#f2b8c6" },
+  { at = 0.86, color = "#fff2f5" },
+  { at = 0.95, color = "#241b22" },
+]
+
+# The bough: the scale symmetry, pure affine, fixed point at the origin.
+# Sits low on the gradient, so it stays bark against the flowers.
+[[transform]]
+name = "bough"
+translation = [0.0, 0.0, 0.0]
+scale = 0.60
+rotation = [0.0, 32.0, 0.0]
+color = [0.16, 0.30, 0.66]
+color_value = 0.12
+weight = 3.0
+
+# The flowers. absfold at 0.55 — deliberately the "wrong" dose — is what turns
+# three sweeping fronds into discrete five-petalled rosettes.
+[[transform]]
+name = "floret-1"
+translation = [-0.32, -0.30, -0.78]
+scale = 0.45
+rotation = [-24.0, 16.0, 0.0]
+color = [0.96, 0.70, 0.32]
+color_value = 0.60
+weight = 0.95
+variations = { absfold = 0.55, linear = 0.45 }
+
+[[transform]]
+name = "floret-2"
+translation = [-0.72, -0.30, 0.40]
+scale = 0.45
+rotation = [-24.0, 136.0, 0.0]
+color = [0.90, 0.32, 0.44]
+color_value = 0.72
+weight = 0.95
+variations = { absfold = 0.55, linear = 0.45 }
+
+[[transform]]
+name = "floret-3"
+translation = [0.72, -0.30, 0.40]
+scale = 0.45
+rotation = [-24.0, 256.0, 0.0]
+color = [0.36, 0.76, 0.94]
+color_value = 0.84
+weight = 0.95
+variations = { absfold = 0.55, linear = 0.45 }
+
+# Barnsley's degenerate map, at the fern's own dose (1.5% of the walk): the
+# twigs the flowers hang off.
+[[transform]]
+name = "twig"
+translation = [0.0, 0.30, 0.0]
+scale = [0.05, 0.62, 0.05]
+rotation = [0.0, 0.0, 0.0]
+color = [1.0, 0.94, 0.72]
+color_value = 0.86
+weight = 0.09
+
+[zoom]
+map = "bough"
+radius = 3.2
+levels = 14

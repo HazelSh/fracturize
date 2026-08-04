@@ -691,8 +691,17 @@ impl Scene {
 
     /// Load a scene from a TOML file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        Self::load_with(path, &[])
+    }
+
+    /// Load a scene, applying `--set path=value` overrides to its TOML first
+    /// (see `src/set.rs`). The overrides are textual and land before parsing,
+    /// so everything downstream sees an ordinary scene.
+    pub fn load_with<P: AsRef<Path>>(path: P, overrides: &[String]) -> Result<Self, String> {
         let content = fs::read_to_string(path.as_ref())
             .map_err(|e| format!("Failed to read scene file: {}", e))?;
+
+        let content = crate::set::apply(&content, overrides)?;
 
         let scene_file: SceneFile = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse scene file: {}", e))?;

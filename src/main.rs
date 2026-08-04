@@ -15,6 +15,9 @@ mod prefs;
 mod trace;
 mod pick;
 mod scene;
+mod set;
+mod sweep;
+mod glyphs;
 mod randomize;
 mod renorm;
 mod render_job;
@@ -40,254 +43,416 @@ use app::App;
 use scene::{Scene, TransformSpec};
 use view::View;
 
+/// How to read the option list. Shown at the foot of both `-h` and `--help`,
+/// because the two conventions it describes — the value name carries the
+/// type, the trailing bracket carries the fallback — are the whole reason the
+/// list can stay one line per flag.
+const LEGEND: &str = "\
+Reading the list: the value name is the type — <FILE> is a path, <X,Y,Z> is
+three comma-separated numbers, <NAME|INDEX> takes either a transform's name or
+its 0-based number, <0-1> and <1-24> are ranges. A trailing [bracket] says what
+you get when you leave the option out; \"the scene\" means the value in the scene
+file, \"--view\" means a loaded view file's, and both are overridden by the flag.";
+
+/// Worked examples, shown under `--help` only. `-h` is a scannable index of
+/// the flags; this is the "how do I actually do the thing" half, and it is
+/// cheap to read precisely because it isn't in both.
+const EXAMPLES: &str = "\
+Examples:
+  # Open a scene in the interactive window (-s is short for --scene)
+  fracturize -s scenes/blossom.toml
+
+  # Roll a random flame you can get back later (the seed is always printed)
+  fracturize --random --seed 42
+
+  # Read a scene without rendering it: transforms, weights, framing, zoom
+  fracturize --scene scenes/blossom.toml --info
+
+  # A still, at a quality preset (-r is short for --render)
+  fracturize -s scenes/blossom.toml -r out.png --effort high
+
+  # Endless zoom about a transform, named or numbered as --info lists them
+  fracturize -s scenes/rimefall.toml --zoom descent --zoom-levels 18 -r deep.png
+
+  # Eight views around one orbit, on a single contact sheet, to pick a framing
+  fracturize --scene scenes/blossom.toml --render sheet.png --orbit-grid 4x2
+
+  # The scene plus six mutations; each variant is written out as .mutN.toml
+  fracturize --scene scenes/blossom.toml --render muts.png --mutations 6
+
+  # Animate along the scene's camera path (.mp4 is H.264, .avif loops like a GIF)
+  fracturize --scene scenes/blossom.toml --render loop.mp4 --seconds 8
+
+  # Sweep a parameter without editing the file — -S/--set is repeatable
+  for w in 0.5 1 2; do
+    fracturize -s s.toml -S transform.0.weight=$w -r w-$w.png
+  done
+
+Scene files live in scenes/, saved views in views/. AGENTS.md documents the
+scene format and the maths behind --zoom.";
+
 /// 3D IFS Fractal Renderer inspired by Apophysis
 #[derive(Parser, Debug)]
 #[command(name = "fracturize")]
-#[command(about = "3D IFS Fractal Renderer", long_about = None)]
+#[command(
+    about = "3D IFS fractal renderer: an interactive window by default, stills and \
+             animation with --render",
+    long_about = None,
+    after_help = LEGEND,
+    after_long_help = format!("{LEGEND}\n\n{EXAMPLES}"),
+)]
 struct Args {
-    /// Scene file to load (TOML format). If not provided, uses built-in default.
-    #[arg(long)]
+    // ---------------------------------------------------------------- Scene
+    /// Scene file to load, TOML [the built-in default scene]
+    ///
+    /// Scenes live in scenes/. --info reads one without rendering it.
+    #[arg(short, long, value_name = "FILE", help_heading = "Scene")]
     scene: Option<String>,
 
-    /// Capture screenshot and exit after delay
-    #[arg(long)]
-    screenshot: bool,
+    /// Override any scene value without editing the file, repeatable [none]
+    ///
+    /// The path is dotted, and the section is required: `meta.haze=0.3`,
+    /// `camera.distance=4`, `zoom.octave_fade=3`, `palette.rotate=0.2`,
+    /// `transform.<name-or-index>.weight=0.5`,
+    /// `transform.facet-1.variations.absfold=0.15`,
+    /// `transform.0.translation.y=1.25`. Arrays index by x/y/z or 0/1/2, or
+    /// take a whole value (`transform.a.scale=[0.05,0.6,0.05]`). This is the
+    /// general form of --palette and --zoom, and it is what makes a parameter
+    /// sweep a shell loop instead of a code-generation task. A path that does
+    /// not resolve is an error, never a silent no-op.
+    #[arg(short = 'S', long = "set", value_name = "PATH=VALUE", help_heading = "Scene")]
+    set: Vec<String>,
 
-    /// Frames to wait before screenshot capture
-    #[arg(long, default_value = "120")]
-    delay: u32,
-
-    /// Turn on atmospheric haze at the legacy default strength. A scene's
-    /// own `haze` value wins over this; see "Haze" in AGENTS.md.
-    #[arg(long)]
-    fog: bool,
-
-    /// Disable vsync (uncapped frame rate, useful for benchmarking)
-    #[arg(long)]
-    no_vsync: bool,
-
-    /// Load a saved view file (camera framing, point size, haze).
-    /// In windowed mode the orbit starts paused; press O to resume.
-    #[arg(long)]
-    view: Option<String>,
-
-    /// Render headlessly (no window) and exit. A .png path renders stills
-    /// (and grids); a .avif or .mp4 path renders an animation along the
-    /// scene's [[camera.path]] (or a full-orbit loop when the scene has none).
-    /// .avif is AV1 — small, loops like a GIF; .mp4 is H.264, which is what
-    /// upload pipelines accept.
-    /// Prints camera mapping (for grids) and a timing breakdown to stdout.
-    #[arg(long)]
-    render: Option<String>,
-
-    /// Animation frame rate for --render <out.avif|out.mp4>
-    #[arg(long, default_value = "30")]
-    fps: u32,
-
-    /// Animation duration in seconds (default: the path's own duration —
-    /// path_seconds in the scene, or 3s per spline segment)
-    #[arg(long)]
-    seconds: Option<f32>,
-
-    /// Animation quality, 0-100 (higher = better quality, bigger file).
-    /// Maps to the AV1 quantizer for .avif and to H.264's QP for .mp4.
-    #[arg(long, default_value = "60")]
-    quality: u8,
-
-    /// Output width for --render (per tile when a grid mode is used)
-    #[arg(long, default_value = "1920")]
-    width: u32,
-
-    /// Output height for --render (per tile when a grid mode is used)
-    #[arg(long, default_value = "1080")]
-    height: u32,
-
-    /// Render effort preset for --render: sets point count and accumulation.
-    /// Explicit --points / --accumulate override it.
-    #[arg(long, value_enum)]
-    effort: Option<Effort>,
-
-    /// Override the scene's point buffer capacity (more points = denser render)
-    #[arg(long)]
-    points: Option<usize>,
-
-    /// Extra chaos-game frames after the buffer fills, for --render (default 32)
-    #[arg(long)]
-    accumulate: Option<u32>,
-
-    /// For --render: contact sheet of COLSxROWS views (e.g. 4x2) evenly
-    /// spaced around a full horizontal orbit, one fill shared by all tiles
-    #[arg(long, value_name = "COLSxROWS")]
-    orbit_grid: Option<String>,
-
-    /// For --render: contact sheet of COLSxROWS views (e.g. 3x3) with the
-    /// camera nudged left/right (columns) and up/down (rows) in the view
-    /// plane, all still looking at the focus
-    #[arg(long, value_name = "COLSxROWS")]
-    move_grid: Option<String>,
-
-    /// Camera nudge per --move-grid step, as a fraction of orbit distance
-    #[arg(long, default_value = "0.25")]
-    move_step: f32,
-
-    /// For --render: contact sheet of the scene plus N random mutations
-    /// (tile 0 = original). Each variant is saved as <out>.mutN.toml and
-    /// described on stdout. Mutually exclusive with the camera grids.
-    #[arg(long, value_name = "N")]
-    mutations: Option<u32>,
-
-    /// Scale factor for mutation perturbations (--mutations)
-    #[arg(long, default_value = "1.0")]
-    mutation_strength: f32,
-
-    /// RNG seed for --mutations (default: time-based; printed for reproduction)
-    #[arg(long)]
-    seed: Option<u64>,
-
-    /// Use the splat renderer: additive log-density accumulation
-    /// (flame-style) instead of opaque points. R toggles it in-app.
-    #[arg(long)]
-    splat: bool,
-
-    /// Splat-renderer exposure multiplier (default 1.0, or the view's saved
-    /// value). W / Shift+W adjust it in-app.
-    #[arg(long)]
-    exposure: Option<f32>,
-
-    /// Render with a transparent background: the PNG gets an alpha channel
-    /// carrying the fractal's own coverage, for compositing. Not supported for
-    /// animation output — neither AV1 nor H.264 carries an alpha plane here.
-    #[arg(long)]
-    transparent: bool,
-
-    /// Start from a randomly generated flame instead of a scene file.
+    /// Start from a randomly generated flame instead of a scene file
+    ///
     /// Quality-checked on the CPU before it's handed back, so it always
     /// renders. Pair with --seed to reproduce a roll (the seed used is
     /// always logged); combine with --render to explore offline.
-    #[arg(long, conflicts_with = "scene")]
+    #[arg(long, conflicts_with = "scene", help_heading = "Scene")]
     random: bool,
 
-    /// Start from a blank scene instead of a scene file: two plain half-scale
-    /// transforms and nothing else, for building an IFS up from nothing.
-    #[arg(long, conflicts_with_all = ["scene", "random"])]
+    /// Start from a blank scene: two plain half-scale transforms
+    ///
+    /// Nothing else — for building an IFS up from nothing.
+    #[arg(long, conflicts_with_all = ["scene", "random"], help_heading = "Scene")]
     blank: bool,
 
-    /// Turn on infinite zoom, renormalizing the attractor about the named (or
-    /// indexed) transform so it becomes scale-invariant: no biggest or
-    /// smallest feature, and zoom that never runs out. The map must be pure
-    /// affine and contract on all three axes. Overrides the scene's [zoom].
-    /// See "Infinite Zoom" in AGENTS.md.
-    #[arg(long, value_name = "TRANSFORM")]
-    zoom: Option<String>,
+    /// Seed for --random, --mutations and --random-palette [time-based]
+    ///
+    /// Whichever seed is used is printed, so any roll can be reproduced
+    /// exactly by passing it back.
+    #[arg(long, value_name = "INT", help_heading = "Scene")]
+    seed: Option<u64>,
 
-    /// Octaves of scale rendered by --zoom (default 15). More = deeper before
-    /// the core empties out, at the cost of density in each one.
-    #[arg(long, requires = "zoom")]
-    zoom_levels: Option<f32>,
+    // --------------------------------------------------------------- Camera
+    /// Load a saved view: framing, point size, haze [the scene's own]
+    ///
+    /// Views live in views/; press V in-app to write one. In windowed mode the
+    /// orbit starts paused; press O to resume.
+    #[arg(short, long, value_name = "FILE", help_heading = "Camera")]
+    view: Option<String>,
 
-    /// Outer radius of the --zoom band, as a multiple of camera distance
-    /// (default 4.8; below 2.42 the band's edge enters the frustum)
-    #[arg(long, requires = "zoom")]
-    zoom_radius: Option<f32>,
-
-    /// How steeply --zoom's point budget falls off toward the fixed point, as
-    /// a power of the contraction ratio (default 0 = flat). Non-zero makes a
-    /// wrap step the density; it is for stills.
-    #[arg(long, requires = "zoom")]
-    zoom_falloff: Option<f32>,
-
-    /// Octaves over which the --zoom band's outer edge fades out instead of
-    /// stopping dead (default 0 = hard edge). At 0 a wrap drops the whole
-    /// outermost octave between two frames; winding it up spreads that same
-    /// change across the outer octaves so nothing cuts. Worth it on a scene
-    /// whose bulk fills those octaves, a cost on one whose doesn't — see
-    /// "Infinite Zoom" in AGENTS.md.
-    #[arg(long, requires = "zoom")]
-    zoom_fade: Option<f32>,
-
-    /// Colour the fractal through an independent gradient instead of the
-    /// per-transform ring: a library name (see --palettes), a palette file
-    /// (.toml, or Apophysis .ugr / .gradient / .flame), or `file.ugr#name` to
-    /// pick one gradient out of a collection. Overrides the scene's own
-    /// [palette] — restyling a scene shouldn't require editing it, same
-    /// reasoning as --zoom.
-    #[arg(long, value_name = "NAME|PATH")]
-    palette: Option<String>,
-
-    /// Where point colour comes from. `transforms` spreads the per-transform
-    /// RGBs around a cyclic colormap; `palette` indexes an independent
-    /// gradient (the default for scenes with a [palette], and switching to
-    /// `transforms` keeps the palette so the two are A/B-able); `mix` carries
-    /// the transform colours through the walk as RGB so they genuinely blend
-    /// and transform *combinations* become distinguishable.
-    #[arg(long, value_enum)]
-    color_mode: Option<ColorModeArg>,
-
-    /// Roll a random gradient. Honours --seed and prints the [palette] table
-    /// so a good roll can be pasted into a scene (same convention as
-    /// --random). Optionally name a generator: cosine, harmony or library.
-    #[arg(long, value_name = "GENERATOR", num_args = 0..=1, default_missing_value = "any")]
-    random_palette: Option<String>,
-
-    /// Shift the palette along the colour index, 0-1 (wraps)
-    #[arg(long, value_name = "T", allow_hyphen_values = true)]
-    palette_rotate: Option<f32>,
-
-    /// Reverse the palette's direction
-    #[arg(long)]
-    palette_reverse: bool,
-
-    /// Interpolate the palette's control points in `rgb` (flam3-compatible)
-    /// or `oklab` (perceptually even, no grey midpoints)
-    #[arg(long, value_name = "SPACE")]
-    palette_interpolate: Option<String>,
-
-    /// List the built-in palette library, with a colour swatch each, and exit
-    #[arg(long)]
-    palettes: bool,
-
-    /// Print what this scene is — transforms with their share of the walk and
-    /// contraction, where the attractor actually lands, render properties, and
-    /// which maps could carry infinite zoom — then exit. Reads a scene without
-    /// rendering one.
-    #[arg(long)]
-    info: bool,
-
-    /// Override the camera's orbit angle, in radians. These five win over both
-    /// the scene and any --view, so a framing can be tried without authoring a
-    /// view file for it; --render prints the [camera] block it lands on.
-    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
+    /// Camera orbit angle, in radians [--view, else the scene]
+    ///
+    /// This and the four below win over both the scene and any --view, so a
+    /// framing can be tried without authoring a view file for it; --render
+    /// prints the [camera] block it lands on.
+    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true, help_heading = "Camera")]
     yaw: Option<f32>,
 
-    /// Override the camera's elevation, in radians (positive = above)
-    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
+    /// Camera elevation, in radians; positive is above [--view, else scene]
+    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true, help_heading = "Camera")]
     pitch: Option<f32>,
 
-    /// Override the camera's orbit radius
-    #[arg(long, value_name = "D")]
+    /// Camera orbit radius, in world units [--view, else the scene]
+    #[arg(long, value_name = "UNITS", help_heading = "Camera")]
     distance: Option<f32>,
 
-    /// Override the camera's roll about the view axis, in radians
-    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true)]
+    /// Camera roll about the view axis, in radians [--view, else scene]
+    #[arg(long, value_name = "RADIANS", allow_hyphen_values = true, help_heading = "Camera")]
     roll: Option<f32>,
 
-    /// Override the camera's framing exactly, as a rotation vector "x,y,z" in
-    /// radians. Wins over --yaw/--pitch/--roll.
+    /// Exact framing, as a rotation vector in radians [--view, else scene]
+    ///
+    /// Wins over --yaw/--pitch/--roll.
     ///
     /// Those three are a chart, and a chart has poles: looking straight up or
     /// down, yaw and roll become the same control and neither means anything
     /// on its own. Since the camera can now be dragged over the pole, those
     /// framings need a way to be named — this is it. `--render` prints the
     /// form it lands on, so a framing found by hand can be pasted back.
-    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3, allow_hyphen_values = true)]
+    #[arg(
+        long,
+        value_name = "X,Y,Z",
+        value_parser = parse_vec3,
+        allow_hyphen_values = true,
+        help_heading = "Camera",
+    )]
     rotvec: Option<Vec3>,
 
-    /// Override the camera's look-at point, as "x,y,z"
+    /// Camera look-at point, in world units [--view, else the scene]
     // allow_hyphen_values, or a focus with a negative coordinate — which is
     // half of them — is read as a flag and the run dies on "unexpected
     // argument '-0'".
-    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3, allow_hyphen_values = true)]
+    #[arg(
+        long,
+        value_name = "X,Y,Z",
+        value_parser = parse_vec3,
+        allow_hyphen_values = true,
+        help_heading = "Camera",
+    )]
     focus: Option<Vec3>,
+
+    // --------------------------------------------------------------- Colour
+    /// Colour through an independent gradient [the scene's palette]
+    ///
+    /// Instead of the per-transform ring: a library name (see --palettes), a
+    /// palette file (.toml, or Apophysis .ugr / .gradient / .flame), or
+    /// `file.ugr#name` to pick one gradient out of a collection. Overrides the
+    /// scene's own [palette] — restyling a scene shouldn't require editing it,
+    /// same reasoning as --zoom.
+    #[arg(long, value_name = "NAME|FILE", help_heading = "Colour")]
+    palette: Option<String>,
+
+    /// Where point colour comes from: transforms, palette or mix [scene's]
+    ///
+    /// `transforms` spreads the per-transform RGBs around a cyclic colormap;
+    /// `palette` indexes an independent gradient (the default for scenes with
+    /// a [palette], and switching to `transforms` keeps the palette so the two
+    /// are A/B-able); `mix` carries the transform colours through the walk as
+    /// RGB so they genuinely blend and transform *combinations* become
+    /// distinguishable.
+    #[arg(long, value_enum, value_name = "MODE", hide_possible_values = true, help_heading = "Colour")]
+    color_mode: Option<ColorModeArg>,
+
+    /// Roll a random gradient [cosine|harmony|library; any if bare]
+    ///
+    /// Honours --seed and prints the [palette] table so a good roll can be
+    /// pasted into a scene (same convention as --random). The generator name
+    /// is optional; without one, any of them may come up.
+    #[arg(
+        long,
+        value_name = "GENERATOR",
+        num_args = 0..=1,
+        default_missing_value = "any",
+        help_heading = "Colour",
+    )]
+    random_palette: Option<String>,
+
+    /// Shift the palette along the colour index, wraps [the scene's]
+    #[arg(long, value_name = "0-1", allow_hyphen_values = true, help_heading = "Colour")]
+    palette_rotate: Option<f32>,
+
+    /// Reverse the palette's direction
+    #[arg(long, help_heading = "Colour")]
+    palette_reverse: bool,
+
+    /// Interpolate control points in rgb or oklab [the scene's, else rgb]
+    ///
+    /// `rgb` is flam3-compatible; `oklab` is perceptually even, with no grey
+    /// midpoints.
+    #[arg(long, value_name = "SPACE", help_heading = "Colour")]
+    palette_interpolate: Option<String>,
+
+    // ------------------------------------------------------- Offline render
+    /// Render headlessly and exit — .png, .avif or .mp4 [else a window]
+    ///
+    /// A .png path renders stills (and grids); a .avif or .mp4 path renders an
+    /// animation along the scene's [[camera.path]] (or a full-orbit loop when
+    /// the scene has none). .avif is AV1 — small, loops like a GIF; .mp4 is
+    /// H.264, which is what upload pipelines accept.
+    /// Prints camera mapping (for grids) and a timing breakdown to stdout.
+    #[arg(short, long, value_name = "FILE", help_heading = "Offline render")]
+    render: Option<String>,
+
+    /// Output width, per tile when a grid mode is used
+    #[arg(long, default_value = "1920", value_name = "PX", help_heading = "Offline render")]
+    width: u32,
+
+    /// Output height, per tile when a grid mode is used
+    #[arg(long, default_value = "1080", value_name = "PX", help_heading = "Offline render")]
+    height: u32,
+
+    /// Effort preset: draft, low, medium, high or ultra [the scene's]
+    ///
+    /// draft is for fast composition checks, ultra for final frames on a real
+    /// GPU. Explicit --points / --accumulate override it.
+    #[arg(long, value_enum, value_name = "PRESET", hide_possible_values = true, help_heading = "Offline render")]
+    effort: Option<Effort>,
+
+    /// Point buffer capacity — more points is denser [--effort, else scene]
+    ///
+    /// In windowed mode the Render window's value, saved to prefs, sits
+    /// between this and the scene's own point_count.
+    #[arg(short, long, value_name = "N", help_heading = "Offline render")]
+    points: Option<usize>,
+
+    /// Extra chaos-game frames after the buffer fills [--effort, else 32]
+    #[arg(long, value_name = "FRAMES", help_heading = "Offline render")]
+    accumulate: Option<u32>,
+
+    /// Use the splat renderer: additive log-density accumulation
+    ///
+    /// Flame-style, instead of opaque points. R toggles it in-app, and a view
+    /// saved in splat mode selects it on load.
+    #[arg(long, help_heading = "Offline render")]
+    splat: bool,
+
+    /// Splat-renderer exposure multiplier [--view, else 1.0]
+    ///
+    /// W / Shift+W adjust it in-app.
+    #[arg(long, value_name = "MULT", help_heading = "Offline render")]
+    exposure: Option<f32>,
+
+    /// Render with a transparent background, for compositing
+    ///
+    /// The PNG gets an alpha channel carrying the fractal's own coverage. Not
+    /// supported for animation output — neither AV1 nor H.264 carries an alpha
+    /// plane here.
+    #[arg(long, help_heading = "Offline render")]
+    transparent: bool,
+
+    /// Turn on atmospheric haze at the legacy default strength
+    ///
+    /// A scene's own `haze` value wins over this; see "Haze" in AGENTS.md.
+    #[arg(long, help_heading = "Offline render")]
+    fog: bool,
+
+    // ------------------------------------------------------------ Animation
+    /// Frame rate for .avif / .mp4 output
+    #[arg(long, default_value = "30", value_name = "N", help_heading = "Animation")]
+    fps: u32,
+
+    /// Animation duration [the path's own: path_seconds, or 3s a segment]
+    #[arg(long, value_name = "SECONDS", help_heading = "Animation")]
+    seconds: Option<f32>,
+
+    /// Higher is better quality and a bigger file
+    ///
+    /// Maps to the AV1 quantizer for .avif and to H.264's QP for .mp4.
+    #[arg(long, default_value = "60", value_name = "0-100", help_heading = "Animation")]
+    quality: u8,
+
+    // ------------------------------------------------------- Contact sheets
+    /// Sheet of views spaced around a full orbit, e.g. 4x2 [one view]
+    ///
+    /// One fill of the point buffer is shared by all tiles.
+    #[arg(long, value_name = "COLSxROWS", help_heading = "Contact sheets")]
+    orbit_grid: Option<String>,
+
+    /// Sheet of views nudged across the view plane, e.g. 3x3 [one view]
+    ///
+    /// Left/right (columns) and up/down (rows), all still looking at the
+    /// focus.
+    #[arg(long, value_name = "COLSxROWS", help_heading = "Contact sheets")]
+    move_grid: Option<String>,
+
+    /// Nudge per --move-grid step, in orbit distances
+    #[arg(long, default_value = "0.25", value_name = "FRACTION", help_heading = "Contact sheets")]
+    move_step: f32,
+
+    /// Sheet of the scene plus N mutations, tile 0 = original [no sheet]
+    ///
+    /// Each variant is saved as <out>.mutN.toml and described on stdout.
+    /// Mutually exclusive with the camera grids.
+    #[arg(long, value_name = "1-24", help_heading = "Contact sheets")]
+    mutations: Option<u32>,
+
+    /// Scale factor for --mutations perturbations
+    #[arg(long, default_value = "1.0", value_name = "SCALE", help_heading = "Contact sheets")]
+    mutation_strength: f32,
+
+    /// Sheet varying one scene value, repeatable up to twice [no sheet]
+    ///
+    /// Takes a --set path and either a range or a list. Join paths with `+`
+    /// to move them in lockstep (`t.a.weight+t.b.weight=0.5:2`), which is what
+    /// you want when several maps must stay equal.
+    /// `transform.facet-1.variations.absfold=0.05:0.55` walks --sweep-steps
+    /// values between the ends; `palette.name=ember,abyss,peacock` uses the
+    /// list verbatim (checked for first, so a value containing a comma is
+    /// never read as a range). Give it twice and the first varies across
+    /// columns, the second down rows. Composes with --set, which sets the
+    /// base every tile starts from. Needs --scene, and each tile refills the
+    /// point buffer, so prefer --effort draft/low.
+    #[arg(long, value_name = "PATH=A:B|A,B,C", help_heading = "Contact sheets")]
+    sweep: Vec<String>,
+
+    /// Values per --sweep range; ignored by the list form
+    #[arg(long, default_value = "5", value_name = "2-12", help_heading = "Contact sheets")]
+    sweep_steps: usize,
+
+    /// Don't draw parameter labels into contact sheet tiles
+    ///
+    /// Labels are on by default: a sheet's per-tile parameters also go to
+    /// stdout, but anything reading the PNG can't see those.
+    #[arg(long, help_heading = "Contact sheets")]
+    no_labels: bool,
+
+    // -------------------------------------------------------- Infinite zoom
+    /// Endless, scale-invariant zoom about a transform [the scene's]
+    ///
+    /// Names the map to renormalize about, either by its name in the scene or
+    /// by its index (0-based, as --info lists them). The attractor then has no
+    /// biggest or smallest feature, and zoom that never runs out. The map must
+    /// be pure affine and contract on all three axes. Overrides the scene's
+    /// [zoom]. See "Infinite Zoom" in AGENTS.md.
+    #[arg(long, value_name = "NAME|INDEX", help_heading = "Infinite zoom")]
+    zoom: Option<String>,
+
+    /// Octaves of scale rendered [the scene's, else 15]
+    ///
+    /// More = deeper before the core empties out, at the cost of density in
+    /// each one.
+    #[arg(long, requires = "zoom", value_name = "OCTAVES", help_heading = "Infinite zoom")]
+    zoom_levels: Option<f32>,
+
+    /// Outer radius of the band, in camera distances [scene's, else 4.8]
+    ///
+    /// Below 2.42 the band's edge enters the frustum.
+    #[arg(long, requires = "zoom", value_name = "MULTIPLE", help_heading = "Infinite zoom")]
+    zoom_radius: Option<f32>,
+
+    /// Point-budget falloff toward the fixed point [scene's, else 0 = flat]
+    ///
+    /// Given as a power of the contraction ratio. Non-zero makes a wrap step
+    /// the density; it is for stills.
+    #[arg(long, requires = "zoom", value_name = "POWER", help_heading = "Infinite zoom")]
+    zoom_falloff: Option<f32>,
+
+    /// Octaves the band's outer edge fades over [scene's, else 0 = hard]
+    ///
+    /// At 0 a wrap drops the whole outermost octave between two frames;
+    /// winding it up spreads that same change across the outer octaves so
+    /// nothing cuts. Worth it on a scene whose bulk fills those octaves, a
+    /// cost on one whose doesn't — see "Infinite Zoom" in AGENTS.md.
+    #[arg(long, requires = "zoom", value_name = "OCTAVES", help_heading = "Infinite zoom")]
+    zoom_fade: Option<f32>,
+
+    // ----------------------------------------------------------- Inspecting
+    /// Print what this scene is, then exit
+    ///
+    /// Transforms with their share of the walk and contraction, where the
+    /// attractor actually lands, render properties, and which maps could carry
+    /// infinite zoom. Reads a scene without rendering one.
+    #[arg(short, long, help_heading = "Inspecting")]
+    info: bool,
+
+    /// List the built-in palette library, with a colour swatch each, and exit
+    #[arg(long, help_heading = "Inspecting")]
+    palettes: bool,
+
+    // -------------------------------------------------------- Windowed mode
+    /// Capture a screenshot and exit after --delay frames
+    #[arg(long, help_heading = "Windowed mode")]
+    screenshot: bool,
+
+    /// Frames to wait before screenshot capture
+    #[arg(long, default_value = "120", value_name = "FRAMES", help_heading = "Windowed mode")]
+    delay: u32,
+
+    /// Disable vsync (uncapped frame rate, useful for benchmarking)
+    #[arg(long, help_heading = "Windowed mode")]
+    no_vsync: bool,
 }
 
 /// Parse `--focus x,y,z`
@@ -534,9 +699,66 @@ fn print_palette_library() {
 /// The scene a run starts from: `--scene`, else `--blank`, `--random`, or the
 /// built-in default. One place, so `--info` reports on exactly what `--render`
 /// would draw.
+/// `--sweep`: build the tile list, then hand `offline` a closure that turns a
+/// tile's extra `--set` arguments into a scene.
+///
+/// The closure matters. A tile's scene has to go through exactly the pipeline
+/// the base scene did — load, `--zoom`, `--palette`, point count — and that
+/// pipeline lives here. Reloading from disk inside `offline` would quietly drop
+/// every one of those flags.
+fn run_sweep(
+    params: offline::OfflineParams,
+    args: &Args,
+    grid: offline::GridMode,
+    effort_points: Option<usize>,
+) -> Result<(), String> {
+    if !matches!(grid, offline::GridMode::Single) {
+        eprintln!("--sweep cannot be combined with --orbit-grid/--move-grid");
+        std::process::exit(1);
+    }
+    if args.mutations.is_some() {
+        eprintln!("--sweep cannot be combined with --mutations");
+        std::process::exit(1);
+    }
+    let Some(scene_path) = args.scene.clone() else {
+        eprintln!("--sweep needs --scene: it varies values in a scene file");
+        std::process::exit(1);
+    };
+
+    let axes: Vec<sweep::Axis> = args
+        .sweep
+        .iter()
+        .map(|spec| sweep::parse_axis(spec, args.sweep_steps))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        });
+    let (tiles, cols, rows) = sweep::tiles(&axes).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
+
+    let points = args.points.or(effort_points);
+    let build = |extra: &[String]| -> Result<Scene, String> {
+        let mut sets = args.set.clone();
+        sets.extend_from_slice(extra);
+        let mut scene = Scene::load_with(&scene_path, &sets)?;
+        // Quiet: the base scene already reported its zoom and palette once.
+        apply_zoom_args(&mut scene, args, false);
+        apply_palette_args(&mut scene, args, false);
+        if let Some(n) = points {
+            scene.point_count = n;
+        }
+        Ok(scene)
+    };
+
+    offline::render_sweep(params, &tiles, cols, rows, &build)
+}
+
 fn load_scene(args: &Args) -> Scene {
     match &args.scene {
-        Some(path) => Scene::load(path).unwrap_or_else(|e| {
+        Some(path) => Scene::load_with(path, &args.set).unwrap_or_else(|e| {
             eprintln!("Failed to load scene '{}': {}", path, e);
             std::process::exit(1);
         }),
@@ -636,7 +858,7 @@ impl ApplicationHandler for AppWrapper {
 
         // Load scene - panic if provided path fails, use default if no path given
         let mut scene = match &self.args.scene {
-            Some(path) => Scene::load(path).unwrap_or_else(|e| {
+            Some(path) => Scene::load_with(path, &self.args.set).unwrap_or_else(|e| {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
             None if self.args.blank => Scene::blank(),
@@ -1183,14 +1405,19 @@ fn main() {
             transparent: args.transparent,
             control: None,
             camera: args.camera_override(),
+            // A single tile has nothing to be told apart from.
+            labels: !args.no_labels,
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.
         let format = crate::video::Format::from_path(std::path::Path::new(out));
         let result = if let Some(format) = format {
-            if !matches!(grid, offline::GridMode::Single) || args.mutations.is_some() {
+            if !matches!(grid, offline::GridMode::Single)
+                || args.mutations.is_some()
+                || !args.sweep.is_empty()
+            {
                 eprintln!(
-                    "animation (.{}) cannot be combined with grid or mutation sheets",
+                    "animation (.{}) cannot be combined with grid, mutation or sweep sheets",
                     format.extension(),
                 );
                 std::process::exit(1);
@@ -1217,8 +1444,9 @@ fn main() {
                 },
             )
         } else {
-            match args.mutations {
-                Some(n) => {
+            match (args.sweep.is_empty(), args.mutations) {
+                (false, _) => run_sweep(params, &args, grid, effort_points),
+                (true, Some(n)) => {
                     if !matches!(grid, offline::GridMode::Single) {
                         eprintln!("--mutations cannot be combined with --orbit-grid/--move-grid");
                         std::process::exit(1);
@@ -1229,7 +1457,7 @@ fn main() {
                     }
                     offline::render_mutations(params, n, args.mutation_strength, args.seed)
                 }
-                None => offline::render(params),
+                (true, None) => offline::render(params),
             }
         };
         if let Err(e) = result {
@@ -1253,4 +1481,79 @@ fn main() {
     event_loop
         .run_app(&mut app_wrapper)
         .expect("Event loop error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_is_well_formed() {
+        Args::command().debug_assert();
+    }
+
+    /// `-h` is meant to be read top to bottom by a person, so every flag has
+    /// to belong to a section — an ungrouped one lands in a stray "Options:"
+    /// block above them all, where it reads as more important than it is.
+    #[test]
+    fn every_option_lives_in_a_section() {
+        let cmd = Args::command();
+        let loose: Vec<_> = cmd
+            .get_arguments()
+            .filter(|a| a.get_id() != "help" && a.get_help_heading().is_none())
+            .map(|a| a.get_id().to_string())
+            .collect();
+        assert!(loose.is_empty(), "no help_heading on: {}", loose.join(", "));
+    }
+
+    /// The summary is the whole of `-h`, one line per flag. Past ~78
+    /// characters it wraps on a normal terminal and the column stops being
+    /// scannable — the detail belongs after the blank line, where only
+    /// `--help` shows it.
+    #[test]
+    fn summaries_fit_on_one_line() {
+        let cmd = Args::command();
+        let long: Vec<_> = cmd
+            .get_arguments()
+            .filter_map(|a| {
+                let help = a.get_help()?.to_string();
+                (help.len() > 78).then(|| format!("{} ({} chars)", a.get_id(), help.len()))
+            })
+            .collect();
+        assert!(long.is_empty(), "over-long -h summaries: {}", long.join(", "));
+    }
+
+    /// "What do I get if I leave this out?" is the question the option list
+    /// exists to answer, and for most of these the answer isn't "nothing" —
+    /// it's the scene file, or a view, or a preset. Every option that takes a
+    /// value either carries a clap default (printed as `[default: x]`) or ends
+    /// its summary with a bracket saying where the value comes from instead.
+    #[test]
+    fn every_value_says_what_it_falls_back_to() {
+        let cmd = Args::command();
+        let silent: Vec<_> = cmd
+            .get_arguments()
+            .filter(|a| a.get_num_args().map(|n| n.takes_values()).unwrap_or(false))
+            .filter(|a| {
+                let documented = a.get_help().is_some_and(|h| h.to_string().trim_end().ends_with(']'));
+                a.get_default_values().is_empty() && !documented
+            })
+            .map(|a| a.get_id().to_string())
+            .collect();
+        assert!(silent.is_empty(), "no default and no [fallback] note: {}", silent.join(", "));
+    }
+
+    /// Short flags are rationed: they go to the handful of options typed over
+    /// and over, where the letter is the obvious one. Every letter spent makes
+    /// the next one less obvious, so this list is a decision, not a default —
+    /// -S/--set pairs with -s/--scene (load a scene / override part of one).
+    #[test]
+    fn short_flags_are_the_frequent_ones() {
+        let mut shorts: Vec<char> =
+            Args::command().get_arguments().filter_map(|a| a.get_short()).collect();
+        shorts.sort_unstable();
+        // -h is clap's own and isn't listed here until the command is built.
+        assert_eq!(shorts, vec!['S', 'i', 'p', 'r', 's', 'v']);
+    }
 }

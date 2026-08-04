@@ -1,0 +1,501 @@
+# CRAFT — authoring IFS as artwork
+
+`AGENTS.md` says what Fracturize *is*. This says what it's like to *make things with*.
+
+It's for the agent who has been handed the keys and wants to make something good in
+the next twenty minutes, and it's a place to write down what you find. Everything
+with a number attached was measured in this repo — if you measure something that
+contradicts it, change it and say so. Sections marked **[lore]** are inherited from
+the Apophysis / flam3 / DeviantArt era and have been re-tested here where possible;
+where a piece of lore didn't survive contact with this engine, that's noted.
+
+Reproductions of the measurements are in the sections that state them. Render
+everything with `--effort low --splat --width ~340`: a contact sheet costs **under a
+second** on the reference desktop, so the loop is look-change-look, not plan-commit-hope.
+
+The loop, concretely: `--sweep <path>=<a:b>` varies one scene value across a
+labelled sheet, `--set <path>=<value>` pins the rest, and `--mutations N` throws
+dice when you don't yet know what to vary. None of the three edits the file.
+
+---
+
+## 1. What the medium actually is
+
+You are not drawing. You are writing down a **rule**, and the picture is that
+rule's fixed point.
+
+That one fact generates almost every difficulty and every pleasure in the form:
+
+- **There is no local control.** You cannot fix "that bit in the corner". Every
+  parameter is global — a map is applied at every scale, everywhere, forever. Move
+  one transform 0.05 and the whole image reorganises.
+- **You cannot post-process from inside.** Adding a transform to "shape the
+  result" does not shape the result; it changes what the result *is*, because the
+  new map's images are then acted on by every other map, including itself. I tried
+  this directly (§3.3) and the attractor simply became a different attractor. This
+  is exactly the hole that Apophysis's **final transform** fills, and this engine
+  does not have one (§6).
+- **So the craft is steering, not drawing.** The working method that the flame
+  community converged on — and it converged hard, across twenty years — is
+  *breed and select*: perturb, render a sheet, keep the good tile, repeat. That is
+  what `--mutations N` is for, and it is the single most productive thing in the CLI.
+- **The parameters are not the picture, and they are not even a good description
+  of it.** You cannot read a TOML and know what it looks like. Render it. This is
+  why `--info`'s `measured:` block exists and why you should read it first.
+
+The three levers, and they are genuinely separable here:
+
+| Lever | Controlled by | Governs |
+|---|---|---|
+| **Form** | affine matrices + variation blends | what shapes exist |
+| **Density** | `weight`, and contraction | which shapes you can *see* |
+| **Colour** | `color_value` + gradient + `color_speed`/`falloff` | what the structure *means* |
+
+Beginners spend all their time on form. The gap between a competent flame and a
+good one is almost always density and colour.
+
+---
+
+## 2. Numbers that predict the picture before you render it
+
+### 2.1 Similarity dimension — the most useful number in this file
+
+Solve for `d`:  **Σᵢ sᵢᵈ = 1**, where `sᵢ` is each map's contraction
+(`--info` prints it per transform; for per-axis scale use the cube root of the
+product). `d` is the attractor's similarity dimension, and in a 3D renderer with
+no lighting it predicts the *look* almost perfectly:
+
+| `d` | Look | Why |
+|---|---|---|
+| **< 2.1** | filigree, lace, dendritic — see-through, detail at every scale | measure is spread thinly; you see *through* to deeper structure |
+| **2.1 – 2.6** | a surface, a shell — texture on a skin | material concentrates on something 2D-ish |
+| **> 2.7** | reads as a solid *in the points renderer* — but see below | copies overlap; with no lighting, detail is buried and the silhouette is all that's left |
+
+**Caveat, and it's a big one: `d` describes the support, but `--splat` renders the
+*density*.** So high `d` is not a death sentence — it only predicts a featureless
+solid under the points renderer, where every point is full brightness and anything
+past ~1 point/pixel saturates. Under splat's log-density tonemap, structure comes
+back wherever density *varies* over that support. Measured on the d = 3.42 case
+above: the points renderer gives a flat pastel silhouette with no internal detail
+at all, and splat resolves the same scene into clearly layered, scalloped shells.
+
+What predicts recoverability is therefore **density variance**, not dimension:
+
+- **overlapping copies** (my d = 3.42 ring) concentrate measure very unevenly →
+  splat recovers a lot. Try it before you throw the scene away.
+- **uniform measure on the support** — `menger`, where all 20 sub-cubes carry equal
+  weight — has no gradient to recover, and stays a brick under splat at every
+  exposure from 0.15 to 2.5, from any angle. Note `menger` is the *lower*-dimension
+  object (2.72 vs 3.42) and the *less* recoverable one.
+
+So: read `d` as "how much support there is", then ask separately whether the
+measure on it is lumpy. If it is, reach for splat before you reach for smaller
+scales. More generally: **before concluding a scene is bad, check you haven't
+concluded that about the renderer instead.**
+
+**The calculation is trustworthy** — it reproduces the textbook values exactly for
+the two scenes in this repo whose dimension is known independently:
+`sierpinski` (4 maps at 0.5) comes out **2.00**, which is log4/log2, and `menger`
+(20 maps at 1/3) comes out **2.72**, which is log20/log3 = 2.7268.
+
+Measured, with everything else held fixed (a 5-fold ring plus a spire, only the
+scale changed):
+
+```
+scale 0.40  ->  d = 1.91  ->  lacy, every level of detail visible
+scale 0.52  ->  d = 2.67  ->  solid shell with surface texture
+scale 0.60  ->  d = 3.42  ->  featureless blob
+```
+
+The repo's best zoom scene, `wellspiral`, sits at **d = 1.91**, and looks like lace.
+`menger` at **2.72** is the failure mode: it is genuinely a near-space-filling
+object, and with no lighting to model it, it renders as a grey rectangle with noise
+on it. `rimefall` was designed to **1.97** on purpose.
+
+**Use it as a design-time dial.** If a scene is mushy, you do not need a new idea,
+you need smaller scales. This costs microseconds and saves render cycles:
+
+```python
+def dim(scales):                      # scales = per-map contraction
+    lo, hi = 0.01, 6.0
+    for _ in range(200):
+        m = (lo + hi) / 2
+        if sum(s**m for s in scales) > 1: lo = m
+        else: hi = m
+    return (lo + hi) / 2
+```
+
+Caveats, stated honestly: the formula is exact only for non-overlapping
+similarities. Variations aren't similarities and overlap is common, so treat `d` as
+a strong predictor, not a measurement. `--info`'s measured `occupancy` is the
+after-the-fact check.
+
+### 2.2 A map's weight is its share of the walk — and its share of the hue
+
+`--info` prints `% of the walk`, which is the weight normalised. Two consequences
+that cost me a render each:
+
+- **Colour balance follows weight, not your swatch list.** I gave a scene five
+  transform colours, of which one was gold — and the gold map was 1.5% of the walk.
+  The image came out monochrome blue. If you want to *see* a hue, the map carrying
+  it needs share.
+- **Share is the exposure control that doesn't change structure.** Scrolling on a
+  gizmo adjusts weight for exactly this reason. Emphasis without redesign.
+
+### 2.3 Contraction drives the colour EMA — and there is a trap in it
+
+With `color_falloff > 0`, each map's effective `color_speed` is
+`1 − contraction^falloff`. `contraction()` is **clamped to [0.05, 0.95]**
+(`src/scene.rs`), so:
+
+> **An expanding map (contraction ≥ 1) clamps to 0.95 and gets `color_speed ≈ 0.03`.
+> It barely advances the colour at all.**
+
+This bites hard, because Mandelbox-style folds *require* expanding maps (§3.4). I
+had two fold maps at 42% of the walk contributing essentially nothing to the colour
+index, so the index stayed pinned wherever the contracting map put it, and every
+palette I tried rendered as one flat hue. Six palettes, all monochrome, before I
+read the code.
+
+**Fix:** set an explicit `color_speed` on expanding maps. It always wins over
+`color_falloff`.
+
+### 2.4 The two from `--info` you should never override by eye
+
+`--info`'s `suggests:` line gives a camera distance and a `point_size` ceiling.
+The `point_size` one is load-bearing: exceed it and the renderer leaves the crisp
+1px path and every point becomes a multi-pixel billboard — strands turn to chunky
+ribbons. Size point_size against *your* structure, never by copying another scene.
+
+---
+
+## 3. Doses — measured
+
+Almost every failure I had was a dose failure, not a concept failure. The concept
+was right and the number was 5× too big. Flame lore is full of "add a touch of X";
+here are the touches, measured.
+
+### 3.1 Out-of-plane rotation: 5–12°, and 25° is already too much **[lore]**
+
+The classic 2D variations act on xy and carry z through (§4.1), so the only thing
+making them 3D is affine rotation tilting the plane between iterations. Sweeping
+the tilt on a fixed scene:
+
+```
+ 0°  crisp 2D form, coherent curl — but a flat sheet that vanishes edge-on
+ 5°  still coherent, now with visible relief and feathering   <- the sweet spot
+12°  form readable but softening; 3D filaments appear
+25°  form dissolving into fuzz
+45°  mush
+```
+
+This is the central tension of 3D flame art in one sweep: **volume and 2D
+coherence trade against each other.** A naive "make it 3D" by rotating everything
+buys you a fuzzball. The good 3D flames are 2D forms with a *few degrees* of
+relief, or they are built from genuinely-3D operators (§4.2) — not 2D forms
+tumbled at random.
+
+### 3.2 Barnsley's degenerate map: ~1–2% of the walk **[lore]**
+
+In the Black Spleenwort fern, one of the four maps collapses the plane onto a line
+— that's the stem — and it takes **1%** of the walk. Per-axis scale makes this
+expressible here (`scale = [0.05, 0.62, 0.05]`), and the dose transfers exactly.
+At 11% of the walk its streaks ate my picture; at 1.5% it reads as a spine holding
+the plant up. One map doing almost nothing is what makes the thing stand.
+
+### 3.3 A map added for depth must be a whisper
+
+Adding a "stack" map (z-translation, mild rotation) to a coherent 2D flame, sweeping
+only its weight:
+
+```
+control (no map)  crisp 2D form
+weight 0.15  ( 3.6% of walk)  structure survives, gains a volumetric bloom  <- best
+weight 0.50  (11%)            degrading
+weight 1.50  (27%)            blob
+```
+
+And the structural lesson underneath: **this is not extrusion.** I wanted to sweep
+the existing attractor through z. What actually happens is that the new map's
+copies are re-processed by every other map, so past a small weight you don't get
+your form plus depth, you get a different form. There is no operation in this
+engine that transforms the finished attractor. (§6.1)
+
+### 3.4 Folds only bite where they're defined
+
+- **`boxfold` / `spherefold`** do nothing inside ±1 / r=1. `boxfold` is
+  `2·clamp(p,−1,1) − p`, which for |p| < 1 is exactly `p`. If your affine keeps
+  points near the origin, **the fold is an expensive identity** — my first fold
+  scene had two of them and they did nothing at all. The Mandelbox recipe is
+  *expand, then fold*: `shatterbox` runs its fold maps at **scale 1.05–1.12 with
+  translations past 1.0**, and keeps the system bounded with a separate strong
+  contraction (scale 0.35). Copy that shape.
+- **`absfold`** always bites (it's `abs(p)`), but it needs something negative to
+  reflect — translate into the negative octant first, as `stellate` does.
+- **`absfold` dose:** at 0.55 it collapsed all three of my 120°-spaced ornament maps
+  into the same octant and flattened a 3D well into a sheet (Y-spread 0.04). At
+  **0.15** it seasons the ornament into mirror facets — crystalline rime rather than
+  soft foliage — and the 3D structure survives. Sweep it yourself — note the `+`,
+  which moves all three maps together, without which you vary one against two
+  fixed ones and the tiles barely differ:
+
+  ```sh
+  A=transform.facet-1.variations.absfold
+  B=transform.facet-2.variations.absfold
+  C=transform.facet-3.variations.absfold
+  fracturize -s scenes/rimefall.toml -r sweep.png \
+    --sweep "$A+$B+$C=0.05:0.55" --sweep-steps 4 \
+    --effort low --splat --exposure 1.3 --width 320 --height 320
+  ```
+
+### 3.5 Variations that spray **[lore]**
+
+`spherical` is a 1/r² inversion: it throws material everywhere, and since points
+render at full brightness in the points renderer, that's visible fuzz across the
+whole frame. Lore said "keep spherical low or use bounded variations"; that holds
+here. Bounded and well-behaved: `bubble`, `fisheye`, `sinusoidal`, `swirl`,
+`julia`. `spherical` is never rolled by `--random` for this reason — fine by hand,
+bad by dice.
+
+`sinusoidal` with affine scale > 1.4 saturates onto the ±1 walls (box/room looks);
+scale 1.1–1.2 with small rotations gives the classic gnarl swirls.
+
+---
+
+## 4. What being native-3D actually changes
+
+### 4.1 Only 9 of the 20 variations are three-dimensional
+
+Derived by reading `shaders/points/chaos.wgsl` line by line — the module comment
+above `apply_variations` is not quite right (it lists `swirl` as fully 3D; `swirl`
+writes `p.z` through unchanged). This is the most important table in the file for
+anyone porting a 2D recipe:
+
+| Genuinely 3D — write all three components | 2D — write xy, carry z through unchanged |
+|---|---|
+| `linear`, `sinusoidal`, `spherical`, `fisheye`, `bubble`, `absfold`, `boxfold`, `spherefold`, `bulb` | `swirl`, `horseshoe`, `polar`, `disc`, `spiral`, `hyperbolic`, `diamond`, `julia`, `bent`, `cylinder`, `tangent` |
+
+Two footnotes worth having:
+
+- `absfold` / `boxfold` are **per-component**, so they are 3D but axis-aligned:
+  they fold on the coordinate planes, which is exactly why they produce flat facets
+  and crystal walls rather than curved surfaces.
+- Several of the 2D column (`swirl`, `polar`, `disc`, `spiral`, `hyperbolic`,
+  `diamond`, `julia`) compute their radius from the **full 3D** `dot(p,p)` even
+  though they only write xy. So z silently modulates the xy result: move a sheet
+  along z and its pattern changes, though it stays a sheet.
+
+A 2D variation in a 3D engine is a *sheet-maker*. That is not a bug and it is
+often what you want — `glasshouse` is receding planes and is one of the best-looking
+scenes in the repo — but you must place the sheets deliberately, not hope they
+become volume.
+
+**Three cures for flatness, in order of how well they work:**
+1. **A few degrees of tilt** (§3.1). Cheapest, keeps the form.
+2. **Build on 3D operators.** `bulb` (misty nested pearl shells with 8-fold mandala
+   inclusions), `spherefold`+`boxfold` (glassy plane-and-shard architecture),
+   `absfold` (crystal facets). These have no 2D equivalent and are where this
+   engine's own voice lives.
+3. **Place sheets as sheets.** Accept flat elements and compose them in depth.
+
+### 4.2 There are no lights, so the palette is the shading
+
+The renderer is pure emission — no shading, no occlusion, no normals. Depth comes
+from exactly three places: **haze** (aerial perspective, the only real depth cue),
+**parallax** when it moves, and **silhouette**.
+
+This has a hard aesthetic consequence, visible right across `scenes/`:
+
+> **Legible 3D here means filaments, shells and planes. Filled volumes read as
+> flat texture.**
+
+`pearl`, `glasshouse` and `shatterbox` read as three-dimensional objects. `menger`
+— a solid cube — reads as a grey rectangle with noise on it. There is no lighting
+to tell you it's a cube, so it isn't one. (`menger` is the genuinely hopeless case:
+uniform measure, nothing for splat to recover. Most over-dense scenes are *not*
+like this — check with splat first, see §2.1.) This is also why the library palettes are
+required to put their luminance *somewhere* and to rise and fall exactly once: a
+gradient at one brightness renders flat however pretty its hues are, because the
+gradient is doing the job a light would do in any other renderer.
+
+### 4.3 Under infinite zoom, distance stops being a camera control
+
+`[zoom]` renders a set that is *exactly* scale-invariant. So when you fly in, the
+camera wraps and you are looking at a pixel-identical picture. I swept pitch and
+distance across six framings of a zoom scene and got six statistically identical
+images — because that is what scale invariance means.
+
+> **A still of a scale-invariant set is a texture.** Every framing shows the same
+> thing. Composition, in the ordinary sense of arranging a subject in a frame, is
+> not available; there is no subject, because there is no privileged scale.
+
+That is not a defect, it's the point — but it changes the deliverable. **The
+artwork is the loop, not the frame.** If you want a composed still, turn zoom off
+and render the bounded attractor; that's a different picture of the same rule.
+
+### 4.4 Occlusion is the depth cue you don't have, and normals are why
+
+`todo.txt` asks what the normal of "a random bit of grit" even is. It's a real
+question: an IFS attractor is a measure, not a surface, so at d ≈ 1.9 there is no
+surface to have a normal. Where a normal *does* nearly exist is the shell regime
+(d ≈ 2.1–2.7), which is exactly where `pearl` and `menger` live. If lighting is
+ever attempted, that's the band where it would mean something — and the systems
+that have solved it (§7) all render *shells and solids*, not dust.
+
+---
+
+## 5. Apophysis-era lore: what transferred
+
+Re-tested here unless noted.
+
+- **"Everything is a spiral."** Still true. A mild rotation plus contraction is the
+  workhorse; `julia` (half-angle with random branch) doubles the arms.
+- **Weights are the exposure of parts.** Confirmed and central (§2.2).
+- **Raise `color_speed` for per-branch identity, lower it to blend.** Confirmed —
+  colours wash to pastel when transforms mix heavily.
+- **Gradient design: put the luminance somewhere; make it rise and fall once.**
+  This one is enforced by tests in `src/palette/library.rs` and it is correct. A
+  monotone dark→bright ramp puts a hard seam at index 0 in a cyclic map. Invisible
+  until you've rendered a hundred bad rolls, as the source comment says.
+- **Breed, don't design.** `--mutations N` writes each variant's TOML out and prints
+  its operator list per tile. This is the Electric Sheep loop in a single command
+  and it is the best thing in the CLI.
+- **Keep the accidents.** Standard practice in the flame community, and it earned
+  its keep here: an `absfold` dose that was flatly wrong for the piece I was
+  building produced sparse floral rosettes on a curving bough — cherry blossom —
+  which is nothing I would have thought to aim at. Saved as `scenes/blossom.toml`.
+
+**Lore that did not transfer:** anything that assumes a final transform, a post
+transform per xform, xaos, or the blur family — none of which exist here (§6).
+A large fraction of published Apophysis recipes use at least one, so expect to
+translate rather than port.
+
+---
+
+## 6. The four things most worth adding
+
+Ranked by expressive power per line of code. These are not complaints about the
+engine; they're where the ceiling currently is.
+
+### 6.1 A final transform — the big one
+
+In flam3/Apophysis, a *final transform* `F` is applied to every point on its way to
+the film, but is **not** fed back into the iteration: you plot `F(xₖ)` while
+iterating `xₖ₊₁ = f(xₖ)`. So the rendered set is `F(attractor)`.
+
+That is the missing operation. It is the only way to shape a finished attractor,
+and its absence is why §3.3 failed, and why it costs a *scene redesign* rather than
+a knob-turn to say "the same thing, but bent through a lens".
+
+Note the asymmetry that makes it worth having: an **affine** final transform is
+just a camera move, so it buys nothing. A **nonlinear** one — `spherical`, `julia`,
+`bubble` — is the entire "put the whole flame inside an eyeball" idiom of
+mid-2000s flame art, and there is no way to express it here at all.
+
+Cost: one extra transform's worth of state, applied at plot time in `chaos.wgsl`
+between the walk and the buffer write. It does not touch the iteration.
+
+**It also unlocks rotational symmetry for nonlinear maps.** n-fold symmetry needs
+the map set `{Rᵏ ∘ f}` — the rotation applied *after* `f`. Since a transform here is
+affine-then-variations, `Rᵏ ∘ f` is only expressible when `f` is pure affine (fold
+the rotation into the matrix). I built a 5-fold symmetric IFS this way and it works
+— but only because every map was affine. With variations, it cannot be written down.
+
+### 6.2 xaos — a transition matrix
+
+flam3's `xaos` replaces the N weights with an N×N matrix: the probability of going
+to map *j* given that you just came from map *i*. It's the difference between "how
+much of this map" and "this map only ever follows that one", and it is the main
+structural lever flame artists reach for after weights. Cheap: the chaos game
+already does a binary search over a cumulative weight array; this makes it one row
+per current-transform.
+
+### 6.3 The blur family
+
+`pre_blur` / `gaussian_blur` replace the point with a random point in a small
+disc, *before* the affine. It's how flame art makes soft volume rather than dust —
+in a 3D engine with no lighting, a variation that turns a filament into a tube of
+fog is a genuinely new material, and it's about four lines of WGSL.
+
+### 6.4 A symmetry generator
+
+"Make this 5-fold about Y" is one click in Apophysis and a Python script here (I
+wrote one; it's in the experiment log). Given §6.1, the affine case is easy and
+worth having on its own.
+
+---
+
+## 7. Where to steal from, other than Apophysis
+
+This system is native-3D end to end, which puts it in a lineage Apophysis is
+*not* in. Apophysis is the wrong sole ancestor. The 3D-fractal world solved
+problems this engine is now hitting:
+
+| Source | What it has that's worth taking |
+|---|---|
+| **Chaoscope** (3D strange-attractor renderer) | Named *rendering modes* — Gas, Solid, Light, Plasma — as a first-class artistic choice rather than a debug flag. Its Solid mode does lit surfaces from a point cloud, which is precisely the open question in `todo.txt`. The idea that one attractor has several legitimate *materials* is the transferable one; `points`/`splat` is already two thirds of the way there. |
+| **JWildfire** | The most complete 3D flame editor there is: huge variation library, depth of field, and "solid rendering" with shading. Also the best argument for §6.3 — its soft/blur variations are what make its 3D work read as volume. |
+| **XenoDream** | Treats 3D IFS as *sculpting*, and puts real geometry (not points) at the leaves of the recursion. A different answer to "what is the normal": don't derive it, author it. |
+| **Structure Synth / EisenScript** (and Hvidtfeldt's writing on KIFS) | A recursive **rule language** with weights and per-rule transforms, which is a far better human/LLM authoring surface for an IFS than a flat list of matrices. `tools/lsystem_to_ifs.py` is already a step toward this; EisenScript is what the destination looks like. |
+| **Mandelbulb3D / Mandelbulber** | *Hybrid formula stacks*: sequence several operators with per-iteration control. Generalises this engine's variation blend from "weighted sum at one site" to "a short programmable pipeline per transform". |
+| **Incendia** | 3D IFS with raytraced output and explicit primitives — the other end of the quality/interactivity tradeoff from a chaos game. |
+| **Ultra Fractal** | **Layers** with blend modes. Nothing here composites two renders of the same scene, and layering is how a lot of published fractal art actually got its depth. |
+
+The through-line: everything above except Apophysis assumes fractals have
+*surfaces and materials*. Fracturize currently assumes they have *measure and
+colour*. Both are defensible, but the second is a smaller room than it needs to be,
+and `todo.txt`'s lighting question is really a question about which room to live in.
+
+---
+
+## 8. The CLI, judged as an artist's tool
+
+**What is genuinely good** — say so, because it's unusual:
+
+- **`--info` is an excellent agent interface.** The 24-bit ANSI palette swatch is
+  emitted even into a pipe, deliberately, so an agent can *see* the gradient rather
+  than imagine it from floats. The `measured:`/`suggests:` block catches the two
+  errors most common in hand-authored scenes. More tools should do this.
+- **Contact sheets are sub-second.** `--orbit-grid` / `--move-grid` fill the point
+  cloud once and re-render per tile, so nine views cost barely more than one. The
+  iteration loop is genuinely tight.
+- **`--palette` and `--zoom` restyle a scene without editing it**, and print what
+  they settled on, ready to paste. Exactly right.
+- **`--mutations` writes each variant's TOML out.** Look at sheet, pick tile, load
+  its file. That closes the loop instead of just showing you something nice.
+- **Reproducible seeds, always printed.** A good roll is never lost.
+
+**What's still missing, in order of what it would buy:**
+
+1. **No numeric feedback on the rendered image.** Judging "washed out", "clipping",
+   "too sparse" by eye means a visual round trip per exposure guess. A `--stats`
+   printing mean/max luminance, % clipped pixels, % empty pixels, and the
+   **colour-index histogram** would catch the monochrome failure in §2.3 instantly —
+   that histogram is a spike, and a spike is invisible in the picture. This is the
+   most agent-shaped affordance missing.
+2. **`--info` knows every contraction but doesn't compute the similarity
+   dimension** (§2.1), the single best predictor of the look. It also prints
+   per-transform contraction but not the *resolved* `color_speed`, which is what
+   exposes the expanding-map trap.
+3. **No crossover.** `--mutations` is half the genetic loop; there's no way to breed
+   two scenes together, which is what Electric Sheep actually did.
+
+None of these are architectural. The engine is in good shape; the authoring surface
+is one notch behind it.
+
+---
+
+## 9. Discovery log
+
+Append findings here. Date them, say what you measured, keep the failures — a
+recorded dead end is worth as much as a recipe.
+
+- **2026-08-04, Opus 5.** Similarity dimension predicts dust/shell/mush (§2.1).
+  Out-of-plane tilt sweet spot is 5–12° (§3.1). Expanding maps break
+  `color_falloff` and render monochrome (§2.3). `boxfold` inside ±1 is a no-op
+  (§3.4). Infinite-zoom stills are textures, because distance is wrapped (§4.3).
+  Scenes: `rimefall.toml`, `blossom.toml`.
+- **2026-08-04.** Dimension describes the *support*; splat renders the *density*.
+  A high-`d` scene with lumpy measure recovers under splat (the d = 3.42 case goes
+  from flat silhouette to layered shells); one with uniform measure, like `menger`,
+  does not. §2.1.

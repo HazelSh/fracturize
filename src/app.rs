@@ -2269,6 +2269,8 @@ impl App {
                 // The dialog's framing is the view above; there are no flags
                 // in here to override it with.
                 camera: Default::default(),
+                // A render job produces one image or one animation.
+                labels: false,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

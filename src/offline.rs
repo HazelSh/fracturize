@@ -18,6 +18,7 @@ use glam::{Mat4, Vec3};
 use rand::SeedableRng;
 
 use crate::camera::{CameraOverride, OrbitCamera};
+use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
@@ -79,6 +80,9 @@ pub struct OfflineParams<'a> {
     /// the app's render-job dialog. `None` for the CLI paths, which are
     /// blocking by design and have a terminal to print to.
     pub control: Option<JobControl>,
+    /// Draw per-tile parameter labels into contact sheets. Single-tile
+    /// renders are never labelled — there is nothing to tell apart.
+    pub labels: bool,
     /// Camera flags (`--yaw` etc.), applied over the scene and any view
     pub camera: CameraOverride,
 }
@@ -570,6 +574,24 @@ impl TileTarget {
     }
 }
 
+/// Draw a tile's parameters into its top-left corner.
+///
+/// A contact sheet prints its per-tile mapping to stdout, which serves a human
+/// at a terminal and nothing that reads the PNG. Labelling the tile makes the
+/// sheet describe itself. Off with `--no-labels`.
+fn label_tile(sheet: &mut [u8], sheet_w: u32, sheet_h: u32, tile_w: u32, tile_h: u32,
+              col: u32, row: u32, text: &str) {
+    let scale = glyphs::scale_for_tile(tile_w);
+    let inset = 2 * scale;
+    let (ox, oy) = (col * tile_w + inset, row * tile_h + inset);
+    // Never let a label spill into the neighbouring tile.
+    let max_w = tile_w.saturating_sub(2 * inset);
+    if tile_h < glyphs::text_height(scale) + 2 * inset {
+        return;
+    }
+    glyphs::draw_label(sheet, sheet_w, sheet_h, ox, oy, text, scale, max_w);
+}
+
 fn save_sheet(out_path: &Path, sheet: &[u8], w: u32, h: u32) -> Result<(), String> {
     if let Some(dir) = out_path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -608,6 +630,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         transparent,
         control,
         camera: camera_over,
+        labels,
     } = params;
     let t_start = Instant::now();
 
@@ -679,6 +702,9 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
         );
         if tiles.len() > 1 {
             println!("tile [row {}, col {}]: {}", row, col, tile.label);
+            if labels {
+                label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, &tile.label);
+            }
         }
     }
     let t_render = Instant::now();
@@ -763,6 +789,8 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         transparent,
         control,
         camera: camera_over,
+        // animation writes frames, not a sheet: nothing to label
+        labels: _,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -926,6 +954,7 @@ pub fn render_mutations(
         transparent,
         control,
         camera: camera_over,
+        labels,
     } = params;
     let t_start = Instant::now();
 
@@ -1012,6 +1041,10 @@ pub fn render_mutations(
                 .map_err(|e| format!("Failed to save variant {}: {}", idx, e))?;
             println!("tile [row {}, col {}]: {} -> {}", row, col, label, toml_path);
         }
+        if labels {
+            let text = if idx == 0 { "ORIGINAL" } else { label.as_str() };
+            label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, text);
+        }
     }
     let t_render = Instant::now();
 
@@ -1028,6 +1061,136 @@ pub fn render_mutations(
         (t_setup - t_start).as_secs_f32(),
         fill_total,
         n,
+        (t_render - t_setup).as_secs_f32() - fill_total,
+        (t_done - t_render).as_secs_f32(),
+        (t_done - t_start).as_secs_f32(),
+    );
+    Ok(())
+}
+
+/// Render a parameter sweep as a labelled contact sheet.
+///
+/// Modelled on `render_mutations`, not on the camera grids, and the difference
+/// matters: a swept parameter changes the IFS, so **every tile refills the
+/// point buffer**. The camera grids share one fill because they only re-aim the
+/// camera; doing that here would render the same attractor N times.
+///
+/// `build` turns a tile's extra `--set` arguments into a scene. It's a closure
+/// rather than a path so that `main.rs` stays the single owner of the
+/// load-then-`--zoom`-then-`--palette` pipeline; reloading from disk in here
+/// would silently drop those.
+pub fn render_sweep(
+    params: OfflineParams,
+    tiles: &[crate::sweep::Tile],
+    cols: u32,
+    rows: u32,
+    build: &dyn Fn(&[String]) -> Result<Scene, String>,
+) -> Result<(), String> {
+    let OfflineParams {
+        scene,
+        view,
+        width,
+        height,
+        out_path,
+        accumulate,
+        haze_enabled,
+        grid: _,
+        splat,
+        exposure,
+        transparent,
+        control,
+        camera: camera_over,
+        labels,
+    } = params;
+    let t_start = Instant::now();
+
+    if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
+        // (the base scene is only used for framing and grading here)
+        let _ = f;
+    }
+    let color_contrast = view
+        .as_ref()
+        .and_then(|v| v.color_contrast)
+        .unwrap_or(scene.color_contrast);
+
+    // Build every variant BEFORE touching the GPU. A sweep over a path that
+    // doesn't resolve must fail once, up front — not N times, and not after a
+    // minute of rendering.
+    let variants: Vec<Scene> = tiles
+        .iter()
+        .map(|t| build(&t.sets))
+        .collect::<Result<_, _>>()?;
+
+    let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
+
+    let (device, queue) = create_device()?;
+    let t_setup = Instant::now();
+
+    // One framing and one haze band for the whole sheet: a contact sheet is
+    // read tile against tile, so only the swept parameter may differ.
+    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
+    let aspect = width as f32 / height as f32;
+    let view_proj = base_camera.view_proj(aspect);
+    let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
+    let (haze_near, haze_far) = haze.band(base_camera.distance);
+    let camera = CameraUniforms::new(
+        view_proj, height as f32, point_size, aspect, 1.0,
+        haze_near, haze_far, haze.transmittance, haze.saturation,
+        color_contrast, scene.background.to_array(),
+        transparent, scene.color_mode.packs_rgb(),
+    );
+
+    let target = TileTarget::new(&device, width, height, clear);
+    let sheet_w = width * cols;
+    let sheet_h = height * rows;
+    let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
+
+    let mut fill_total = 0.0f32;
+    for (idx, (variant, tile)) in variants.iter().zip(tiles).enumerate() {
+        if let Some(c) = &control {
+            c.progress(idx as u32, tiles.len() as u32);
+            if c.should_stop() {
+                return Err(CANCELLED.to_string());
+            }
+        }
+        let t0 = Instant::now();
+        let (compute, point_count) =
+            fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
+        let mut renderer = TileRenderer::new(
+            &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+        );
+        renderer.upload_camera(&queue, &camera);
+        fill_total += t0.elapsed().as_secs_f32();
+
+        let (col, row) = (idx as u32 % cols, idx as u32 / cols);
+        target.render_tile(
+            &device, &queue, &mut renderer, point_count, use_point_primitives,
+            &mut sheet, sheet_w, col, row,
+        );
+        if labels {
+            label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, &tile.label);
+        }
+        // The tile is fully described by one flag, so print that rather than
+        // writing a variant file: it is copy-pasteable to reproduce or adopt.
+        println!("tile [row {}, col {}]: {}", row, col, tile.description);
+    }
+    let t_render = Instant::now();
+
+    if let Some(c) = &control {
+        c.phase("saving");
+    }
+    save_sheet(out_path, &sheet, sheet_w, sheet_h)?;
+    let t_done = Instant::now();
+
+    println!(
+        "Rendered {}x{} ({} sweep tiles of {}x{}) -> {}",
+        sheet_w, sheet_h, tiles.len(), width, height, out_path.display(),
+    );
+    println!(
+        "Timing: setup {:.2}s | fills {:.2}s ({} tiles) | render+readback {:.2}s | encode+save {:.2}s | total {:.2}s",
+        (t_setup - t_start).as_secs_f32(),
+        fill_total,
+        tiles.len(),
         (t_render - t_setup).as_secs_f32() - fill_total,
         (t_done - t_render).as_secs_f32(),
         (t_done - t_start).as_secs_f32(),

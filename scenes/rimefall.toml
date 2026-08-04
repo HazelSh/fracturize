@@ -1,0 +1,144 @@
+# Rimefall — frost that falls forever
+#
+# Three borrowings, one object.
+#
+#   Barnsley (1988), the Black Spleenwort fern. Its fourth map is *degenerate*:
+#     it collapses the plane onto a line, and that line is the stem. One map
+#     doing almost nothing — 1% of the walk — is what makes the plant stand up.
+#     Here that map is "spine", at 1.5%, per-axis scale [0.05, 0.62, 0.05].
+#     Give it 10% and its streaks eat the picture; this is the fern's own dose.
+#
+#   Draves (1992), the fractal flame. Two ideas: log-density tonemapping, so
+#     one image holds isolated grit and a saturated core at once (--splat, and
+#     this scene is authored for it); and colour indexed by the walker's
+#     *history* rather than by position, so hue tells you which maps a point
+#     came through. Every color_value below is placed deliberately on the
+#     gradient — the funnel dark, the ornament in the band, the stem at the peak.
+#
+#   McGraw (2015), kaleidoscopic IFS — the paper is in this repo — and behind
+#     it Lowe's Mandelbox. Symmetry from *folds* rather than from copies:
+#     absfold reflects into the positive octant and gives the ornament mirror
+#     facets, so it crystallises instead of drifting. At 0.55 the fold collapses
+#     all three facets into one octant and flattens the well to a sheet; 0.15 is
+#     a seasoning, and is what makes the fronds read as rime rather than foliage.
+#
+# And the thing none of the three could do: it has no size. "descent" is
+# nominated as the scale symmetry, so the rendered set is exactly invariant
+# under contracting by 0.6 and turning 32° about the vertical. There is no
+# largest frond and no smallest one. Fly at the origin and after every 0.74
+# octaves you are looking at the frame you started from — not one like it, the
+# same one. That is why the artwork is the loop and not the still: a still of a
+# scale-invariant set is a texture, because every framing shows the same thing.
+# Distance is not even a camera control here — it gets wrapped into the band.
+#
+#   fracturize --scene scenes/rimefall.toml            # scroll in, keep going
+#   fracturize --scene scenes/rimefall.toml --render rimefall.mp4 \
+#     --effort medium --width 960 --height 960 --fps 24 --splat --exposure 1.35
+#
+# Claude Opus 5, 2026-08-04.
+
+[meta]
+name = "Rimefall"
+author = "Claude Opus 5"
+point_size = 0.0024
+point_count = 8_000_000
+color_speed = 0.5
+color_falloff = 0.6
+color_contrast = 1.0   # 1.0, not the usual 2+: the color_values below are placed
+                       # against this exact gradient, and a stretch would move them
+haze = 0.5
+background = [0.007, 0.008, 0.018]
+
+[camera]
+distance = 3.4
+yaw = 0.0
+pitch = 1.12
+focus = [0.0, 0.0, 0.0]
+
+# One period straight down, closing under the scale symmetry rather than by
+# returning to the first key — so the loop is an endless zoom, exactly.
+path_loop = "zoom"
+path_zoom_periods = 1
+path_seconds = 14.0
+
+[[camera.path]]
+yaw = 0.0
+pitch = 1.12
+distance = 3.4
+focus = [0.0, 0.0, 0.0]
+
+# Deep indigo, a teal shoulder, an amber band, one white peak, and back to the
+# dark: luminance rises and falls exactly once, so the cyclic map has no seam
+# at index 0. The renderer has no lights — the palette *is* the shading.
+[palette]
+interpolate = "oklab"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#06070f" },
+  { at = 0.13, color = "#101736" },
+  { at = 0.32, color = "#14505e" },
+  { at = 0.50, color = "#2a9a8c" },
+  { at = 0.66, color = "#d99a44" },
+  { at = 0.80, color = "#f8dc9c" },
+  { at = 0.88, color = "#fff6e2" },
+  { at = 0.96, color = "#3a2a3c" },
+]
+
+# The scale symmetry. Pure affine, zero translation so the fixed point is the
+# origin, and weighted heavily so the walk spends its time in the funnel and
+# the facets stay ornament.
+[[transform]]
+name = "descent"
+translation = [0.0, 0.0, 0.0]
+scale = 0.60
+rotation = [0.0, 32.0, 0.0]
+color = [0.16, 0.30, 0.66]
+color_value = 0.13
+weight = 3.0
+
+# Three of one shape at 120°, tilted down and out so they sweep into the well
+# instead of standing off it. absfold gives each one mirror facets.
+[[transform]]
+name = "facet-1"
+translation = [-0.32, -0.30, -0.78]
+scale = 0.45
+rotation = [-24.0, 16.0, 0.0]
+color = [0.96, 0.70, 0.32]
+color_value = 0.50
+weight = 0.95
+variations = { absfold = 0.15, linear = 0.85 }
+
+[[transform]]
+name = "facet-2"
+translation = [-0.72, -0.30, 0.40]
+scale = 0.45
+rotation = [-24.0, 136.0, 0.0]
+color = [0.90, 0.32, 0.44]
+color_value = 0.66
+weight = 0.95
+variations = { absfold = 0.15, linear = 0.85 }
+
+[[transform]]
+name = "facet-3"
+translation = [0.72, -0.30, 0.40]
+scale = 0.45
+rotation = [-24.0, 256.0, 0.0]
+color = [0.36, 0.76, 0.94]
+color_value = 0.80
+weight = 0.95
+variations = { absfold = 0.15, linear = 0.85 }
+
+# Barnsley's degenerate map: everything onto a filament. 1.5% of the walk.
+[[transform]]
+name = "spine"
+translation = [0.0, 0.30, 0.0]
+scale = [0.05, 0.62, 0.05]
+rotation = [0.0, 0.0, 0.0]
+color = [1.0, 0.94, 0.72]
+color_value = 0.88
+weight = 0.09
+
+[zoom]
+map = "descent"
+radius = 3.2
+levels = 14

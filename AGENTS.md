@@ -9,6 +9,13 @@ algorithm, entirely on the GPU. A compute shader runs thousands of parallel "wal
 that iterate through weighted random transforms (affine matrix + nonlinear variation
 blend), writing positions into a circular point buffer that is rendered every frame.
 
+**Making artwork with it? Read `CRAFT.md` first.** This file is the reference for
+what Fracturize *is*; CRAFT.md is the craft guide for authoring scenes as art —
+measured doses, the numbers that predict a picture before you render it (start with
+the similarity dimension), which variations are actually 3D, the traps, inherited
+Apophysis-era lore and what of it survives here. It has a discovery log at the end;
+add to it.
+
 ## Architecture
 
 ```
@@ -1300,6 +1307,36 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   tile prints its equivalent `yaw`/`pitch`/`distance`, so a good framing can
   be adopted directly into a `[camera]` block or view file.
 
+**Parameter sweeps** (`--sweep`, exploring the *scene* rather than the framing):
+
+- `--set <path>=<value>` (repeatable, `-S`) overrides any scene value without
+  editing the file — the general form of `--palette`/`--zoom`. Dotted, section
+  required: `meta.haze=0.3`, `zoom.octave_fade=3`,
+  `transform.<name-or-index>.weight=0.5`,
+  `transform.facet-1.variations.absfold=0.15`, `transform.0.translation.y=1.25`
+  (arrays index by x/y/z or 0/1/2, or take a whole `[a,b,c]`). Applied to the
+  TOML text before parsing (`src/set.rs`), so `--info`, grids and animation all
+  see an ordinary scene. **An unresolvable path is an error, never a silent
+  no-op** — it names the transforms the scene actually has.
+- `--sweep <path>=<a:b>` walks `--sweep-steps` values (default 5) between the
+  ends; `--sweep <path>=a,b,c` takes a list verbatim (checked first, so a value
+  containing a comma is never read as a range). Join paths with `+` to move
+  them in lockstep — `t.a.variations.absfold+t.b.variations.absfold=0.05:0.55`
+  — which is what you want when several maps must stay equal. Give `--sweep`
+  twice for a 2D grid: the first varies across columns, the second down rows.
+  Composes with `--set`, which sets the base every tile starts from.
+- Sweeps need `--scene`, and **each tile refills the point buffer** (the swept
+  parameter changes the IFS), so prefer `--effort draft|low`. Unlike mutation
+  sheets no variant files are written: a tile is fully described by one flag,
+  and that flag is printed per tile, ready to paste.
+
+**Tile labels.** Every sheet — orbit, move, mutation, sweep — draws its
+per-tile parameters into the tile in amber (`src/glyphs.rs`, a 5x7 bitmap font;
+the same colour the app uses for world-anchored transform names). Sheets print
+to stdout too, but stdout isn't in the PNG, and an agent reads the PNG. A label
+too long for its tile is truncated with a trailing `>` rather than running into
+its neighbour. `--no-labels` turns them off.
+
 **Animation** (`--render <out.avif|out.mp4>`): the camera flying
 the scene's path — its `[[camera.path]]` spline, or the default full-turn orbit
 of the base framing when it authors fewer than two keypoints. Same rule the app
@@ -1417,3 +1454,28 @@ way for agents to render specific framings without keyboard interaction.
   — update all four; size tests in buffers.rs/compute.rs guard the Rust side)
 - New variations: append to `VARIATION_NAMES` in scene.rs AND the matching slot
   in `apply_variations()` in chaos.wgsl; slots must stay in sync
+- New CLI flags: put the field in its section in `Args` (the `// ---- Camera`
+  banners) and give it that section's `help_heading`, so `-h` stays a grouped
+  index rather than one 100-line list. Write the doc comment as **one short
+  line, a blank line, then the detail** — clap shows the first line in `-h` and
+  the whole thing in `--help`, so the reasoning that belongs in this repo's
+  comments can stay without making the summary unreadable. Worked examples go
+  in `EXAMPLES` (`--help` only), not in the per-flag help. Three conventions
+  make the one-line summaries carry as much as the old paragraphs did, and all
+  three are enforced by tests at the bottom of main.rs:
+  - **The value name is the type.** `<NAME|INDEX>`, `<X,Y,Z>`, `<0-1>`,
+    `<FILE>`, `<OCTAVES>` — not clap's derived `<ACCUMULATE>`. Small enum
+    domains go in the summary text with `hide_possible_values`, because clap's
+    `[possible values: …]` tail is what pushes a section into its two-line
+    layout.
+  - **A trailing `[bracket]` says what you get without the flag.** `[the
+    scene's, else 15]`, `[--view, else 1.0]`, `[time-based]`, `[else a
+    window]`. Options with a real clap `default_value` are exempt — clap prints
+    `[default: x]` itself. The point is that *no* option leaves "what happens
+    if I omit this?" unanswered; `LEGEND` at the foot of the help explains the
+    notation.
+  - **Summaries stay under 78 characters**, or the column wraps.
+- Short flags are rationed to options typed constantly, with an obvious letter:
+  `-s/--scene -S/--set -v/--view -r/--render -p/--points -i/--info`. Adding one
+  costs the next flag its obvious letter, so the list is pinned by a test —
+  change it deliberately or not at all.
