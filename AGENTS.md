@@ -936,8 +936,39 @@ octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
   pop against 0.13%). Hence off by default. Reach for it — 3.0 is the value
   that measured best — when the bulk of the attractor sits far enough from the
   fixed point to fill the band's outer octaves, and check with the two-render
-  diagnostic below rather than guessing. Ignored when `octave_falloff` is
-  non-zero; nothing wants both.
+  diagnostic below rather than guessing.
+
+  **Measure it live; the offline renderer will lie to you.** The natural
+  end-to-end check — render the zoom loop and look for a step at the seam —
+  measures nothing at all. `--render out.mp4` wraps the camera every frame and
+  a `path_zoom_loop` covers exactly one period, so the seam comes out at 1.04×
+  an ordinary frame step whatever the radius and whatever the fade, *even at a
+  radius that makes `--info` print BAND TOO SHORT*. Screen-record the window
+  instead. On `scenes/octave-edge-visual.toml` that shows the wrap as a spike
+  every 2.5s at 35× the median frame step, going to 10× with the fade on —
+  42× smaller in absolute terms, and no longer periodic.
+
+  **It needs the edge at or beyond `MIN_RADIUS` to work.** Pulling the edge
+  into the frustum to make the artifact easier to see also removes the
+  full-density core the taper ramps up to meet, so the taper swings the whole
+  frame instead of a rim of it. Same scene at `radius = 1.4`: the fade takes
+  the spike from 61× to 86×. It fixes an edge, not a band that is mostly edge.
+- **`octave_falloff` acts on the opposite end of the band from `octave_fade`,**
+  and they are easy to reach for interchangeably. Octave 0 is the outermost
+  shell and octave `k` gets share `qᵏ`, so the falloff thins the *innermost*
+  octaves — the small ones around the fixed point, which is the middle of the
+  picture. On `octave-edge-test`, a falloff of 2 moves 40% of the material
+  within 12% of the frame radius of centre and 25% at the rim; the fade does
+  the reverse, 2% at centre and 27% at the rim. Neither is backwards.
+
+  They compose. The share of octave `k` is `qᵏ` inside the fade and `q^F·g^(F−k)`
+  across it, so the falloff envelope is untouched below the fade and the fade
+  ramps up to meet it. (The taper is anchored to the envelope's value *at* `F`
+  rather than multiplied through it — multiplying gives `g^F·(q/g)ᵏ`, which
+  falls instead of rising once `q < g`, and a steep falloff would invert the
+  taper and make the outermost shell the brightest.) These used to be mutually
+  exclusive with the falloff winning *silently*, which meant reaching for the
+  falloff turned the fade off under you and made the fade look broken.
 - **Leave `octave_falloff` at 0 for anything that will be flown.** A wrap moves
   the octave filling the screen along by one, so if neighbouring octaves hold
   different numbers of points, the density on screen jumps every period.
@@ -987,6 +1018,12 @@ fracturize --scene scenes/octave-edge-test.toml --splat --zoom halve \
   --zoom-radius 3.0 --zoom-levels 14 --zoom-fade 0 --render /tmp/full.png
 fracturize --scene scenes/octave-edge-test.toml --splat --zoom halve \
   --zoom-radius 1.5 --zoom-levels 14 --zoom-fade 0 --render /tmp/cut.png
+
+# ...and the version you can just watch. scenes/octave-edge-visual.toml opens
+# zooming with the fade off; the wrap is a visible blink every 2.5s. Drag
+# "edge fade" up in the Render window and it goes away. Note that rendering
+# this scene to a file will NOT show the artifact — see octave_fade above.
+fracturize --scene scenes/octave-edge-visual.toml
 
 # a map that can't be a scale symmetry says why and exits, rather than
 # quietly rendering the ordinary bounded attractor:

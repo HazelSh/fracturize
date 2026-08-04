@@ -162,6 +162,16 @@ const DEFAULT_RADIUS: f32 = 4.8;
 /// It survives as a knob because it is genuinely useful for a *still* — it
 /// evens out on-screen density, which is what an octave falloff is for — and
 /// because a scene that is never going to be flown doesn't care.
+///
+/// Note which end of the band it acts on, because it is the opposite end from
+/// [`DEFAULT_OCTAVE_FADE`] and the two are easy to reach for interchangeably.
+/// Octave 0 is the outermost shell and the share of octave `k` is `qᵏ`, so the
+/// falloff thins the *innermost* octaves — the small ones clustered around the
+/// fixed point, which is the middle of the picture. Measured on
+/// `octave-edge-test`, a falloff of 2 changes 40% of the material within 12% of
+/// the frame's radius of centre and 25% out at the rim. The fade does the
+/// reverse: 2% at centre, 27% at the rim. Neither is backwards; they are two
+/// knobs for two ends.
 const DEFAULT_OCTAVE_FALLOFF: f32 = 0.0;
 
 /// Octaves over which the band's *outer* edge fades out instead of stopping.
@@ -225,6 +235,24 @@ const DEFAULT_OCTAVE_FALLOFF: f32 = 0.0;
 /// far enough from the fixed point to fill the band's outer octaves. The
 /// two-render check above is cheap and is the way to tell;
 /// `scenes/octave-edge-test.toml` is built to fail it.
+///
+/// **Measure it live, not offline.** The two-render check above compares
+/// stills and is sound, but the obvious end-to-end version of it — render the
+/// zoom loop to a file and look for a step at the seam — measures nothing.
+/// `offline::render_animation` wraps the camera every frame and a
+/// `path_zoom_loop` covers exactly one period, so the seam comes out at 1.04x
+/// an ordinary frame step whatever the radius and whatever the fade, even at a
+/// radius that makes [`Renorm::summary`] print BAND TOO SHORT. Screen-recording
+/// the running app shows it immediately: on `scenes/octave-edge-visual.toml`
+/// the wrap is a spike every 2.5s at 35x the median frame step, and the fade
+/// takes it to 10x — 42x smaller in absolute terms.
+///
+/// And it needs the edge at or beyond [`MIN_RADIUS`] to work at all. Pulling
+/// the edge inside the frustum to make the artifact easier to see also removes
+/// the full-density core the taper ramps up to meet, at which point the taper
+/// swings the whole frame's brightness instead of a rim of it: same scene at
+/// radius 1.4, the fade takes the spike from 61x to 86x. It fixes an edge; it
+/// cannot fix a band that is mostly edge.
 const DEFAULT_OCTAVE_FADE: f32 = 0.0;
 
 /// The fade width to reach for on a scene that wants one, in octaves. Not a
@@ -243,6 +271,38 @@ pub const SUGGESTED_OCTAVE_FADE: f32 = 3.0;
 /// in a way nobody can see. A sixteenth is dim enough that losing it off the
 /// end of the band is not a visible event.
 const FADE_DEPTH: f32 = 1.0 / 16.0;
+
+/// `Σ rⁱ` for `i` in `0..n`, with the removable singularity at `r = 1` filled
+/// in. Both pieces of [`Renorm::octave_offset`]'s distribution are geometric,
+/// so this and [`geo_pick`] are the whole of its arithmetic.
+fn geo_sum(r: f32, n: f32) -> f32 {
+    if n <= 0.0 {
+        0.0
+    } else if (r - 1.0).abs() < 1e-4 {
+        n
+    } else {
+        (1.0 - r.powf(n)) / (1.0 - r)
+    }
+}
+
+/// Inverse of [`geo_sum`]: the largest `i` with `Σ_{j<i} rʲ ≤ x`, for `x` in
+/// `[0, geo_sum(r, n))`. Valid for `r` above and below 1 — above, the sum is
+/// rising and `1 − x(1−r) > 1`; below, `x`'s range keeps it above `rⁿ > 0`.
+///
+/// Capped at `ceil(n) − 1` rather than `n − 1`: a non-integer `n` means a
+/// partial top octave, which the flat deal reaches and so this must too, and
+/// clamping to `n − 1` would return a fractional octave offset.
+fn geo_pick(x: f32, r: f32, n: f32) -> f32 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let i = if (r - 1.0).abs() < 1e-4 {
+        x
+    } else {
+        (1.0 - x * (1.0 - r)).max(1e-30).ln() / r.ln()
+    };
+    i.floor().clamp(0.0, n.ceil() - 1.0)
+}
 
 /// How far a map may stray from being a similarity before the camera wrap
 /// stops being seamless and we say so. A pure scale+rotation scores 0.
@@ -451,18 +511,16 @@ impl Renorm {
         // most of what's left. Half keeps a substantial full-density core no
         // matter how the clamp bites.
         //
-        // Zero when `octave_falloff` is in play. That knob already makes every
-        // octave differ from its neighbour, is documented as stills-only for
-        // exactly that reason, and the taper exists for scenes that are flown;
-        // nothing wants both, and composing them would only obscure which one
-        // was responsible for a step.
-        let fade_periods = if octave_q < 0.9999 {
-            0.0
-        } else {
-            (spec.octave_fade.max(0.0) * std::f32::consts::LN_2 / log_scale)
-                .round()
-                .clamp(0.0, (periods * 0.5).floor())
-        };
+        // Composes with `octave_falloff` rather than deferring to it. It used
+        // to be forced to zero whenever the falloff was in play, on the theory
+        // that nothing wants both — which was wrong twice over. The falloff is
+        // the knob you reach for when the *centre* looks wrong and the fade is
+        // the knob for the *edge*, so wanting both is ordinary; and because the
+        // override was silent, dialling up the falloff turned the fade off
+        // under you, which reads as the fade being broken.
+        let fade_periods = (spec.octave_fade.max(0.0) * std::f32::consts::LN_2 / log_scale)
+            .round()
+            .clamp(0.0, (periods * 0.5).floor());
         // g such that fade_periods steps of it take a full share down to
         // FADE_DEPTH. Also the per-wrap density ratio in the faded region.
         let fade_g = if fade_periods >= 1.0 {
@@ -497,17 +555,34 @@ impl Renorm {
     /// runs, this is the copy that can be asserted about, and they must agree
     /// arithmetic for arithmetic.
     ///
-    /// Three regimes, in the order the shader branches on them:
+    /// One shape, two pieces, both geometric. The share of octave `k` is
     ///
-    /// 1. `octave_q < 1` — the stills-only geometric deal. Untouched by the
-    ///    taper; see [`Self::fade_periods`] for why they don't compose.
-    /// 2. `fade_periods == 0` — the flat deal, `floor(u · periods)`.
-    /// 3. otherwise the taper: the share of octave `k` is `g^(F−k)` for
-    ///    `k < F` and 1 for `k ≥ F`, so it climbs from [`FADE_DEPTH`] at the
-    ///    outermost shell to full and stays there. Both pieces are geometric,
-    ///    so the inverse CDF is closed-form and it is still one sample per
-    ///    point with no rejection — which is the property that makes this
-    ///    whole construction cost nothing.
+    /// ```text
+    ///     k ≥ F:   qᵏ                    the falloff envelope, untouched
+    ///     k < F:   q^F · g^(F−k)         the taper, rising to meet it at F
+    /// ```
+    ///
+    /// so it climbs from [`FADE_DEPTH`] of the envelope at the outermost shell
+    /// up to the envelope at `k = F` and is the envelope from there inward.
+    /// `q = 1` (no falloff) leaves a flat core; `F = 0` (no fade) leaves the
+    /// bare envelope; both off is `floor(u · periods)` exactly. The two knobs
+    /// therefore compose without either one having to know about the other.
+    ///
+    /// The taper is anchored to the envelope's value *at `F`* rather than
+    /// multiplied through it, and that is load-bearing. Multiplying would give
+    /// share `qᵏ·g^(F−k) = g^F·(q/g)ᵏ`, which falls rather than rises whenever
+    /// `q < g` — a steep falloff would invert the taper and make the outermost
+    /// shell the brightest, which is the exact opposite of the job. Anchoring
+    /// keeps the ramp monotone for every `q`.
+    ///
+    /// Both pieces being geometric is what keeps the inverse CDF closed-form:
+    /// still one sample per point, still no rejection, which is the property
+    /// that makes the whole construction cost nothing.
+    ///
+    /// **The reference implementation of `octave_offset()` in
+    /// `points/chaos.wgsl`** — the shader is the copy that runs, this is the
+    /// copy that can be asserted about, and they must agree arithmetic for
+    /// arithmetic.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn octave_offset(&self, u: f32) -> f32 {
         let levels = self.periods;
@@ -515,35 +590,24 @@ impl Renorm {
             return 0.0;
         }
         debug_assert!((0.0..1.0).contains(&u), "octave_offset wants a uniform in [0,1)");
-        if self.octave_q < 0.9999 {
-            let tail = self.octave_q.powf(levels);
-            let k = (1.0 - u * (1.0 - tail)).ln() / self.octave_q.ln();
-            return k.floor().min(levels - 1.0);
-        }
-        let f = self.fade_periods;
-        if !(f >= 1.0) || self.fade_g >= 0.9999 {
-            return (u * levels).floor();
-        }
-        let g = self.fade_g;
-        let tail = g.powf(f); // = FADE_DEPTH, up to rounding
-        // Mass of the ramp (shares g¹…g^F) and of the flat remainder.
-        let m1 = g * (1.0 - tail) / (1.0 - g);
-        let m2 = levels - f;
+        let f = if self.fade_periods >= 1.0 && self.fade_g < 0.9999 {
+            self.fade_periods
+        } else {
+            0.0
+        };
+        // Masses in units of q^F, which cancels between the two pieces and so
+        // never has to be computed.
+        let m1 = if f >= 1.0 {
+            FADE_DEPTH * geo_sum(1.0 / self.fade_g, f)
+        } else {
+            0.0
+        };
+        let m2 = geo_sum(self.octave_q, levels - f);
         let x = u * (m1 + m2);
         if x < m1 {
-            // Geometric in `j`, counting *inward* from the outermost faded
-            // shell — the same inversion as the falloff path above, because
-            // reindexing a rising ramp from its far end makes it a falling
-            // one. `j` is capped rather than trusted: `u` arbitrarily close to
-            // the top of the piece sends the log to `F` exactly.
-            let v = x / m1;
-            let j = ((1.0 - v * (1.0 - tail)).ln() / g.ln()).floor().min(f - 1.0);
-            (f - 1.0 - j).max(0.0)
+            geo_pick(x / FADE_DEPTH, 1.0 / self.fade_g, f)
         } else {
-            // Flat remainder. No cap: `x < m1 + m2 = levels`, so this floors
-            // to at most `floor(levels)` — exactly the range the flat deal
-            // above produces, partial top octave and all.
-            (f + (x - m1)).floor()
+            f + geo_pick(x - m1, self.octave_q, levels - f)
         }
     }
 
@@ -1052,21 +1116,17 @@ mod tests {
     }
 
     #[test]
-    fn the_falloff_path_is_left_alone() {
-        // octave_falloff is documented as stills-only because it makes every
-        // octave differ from its neighbour; the taper is for scenes that are
-        // flown. Composing them would only make it impossible to tell which
-        // one was responsible for a step, so asking for both gets falloff.
-        let spec = ZoomSpec { octave_falloff: 2.0, octave_fade: 3.0, ..ZoomSpec::default() };
-        let r = Renorm::from_affine(Mat4::from_scale(Vec3::splat(0.5)), 1.0, &spec, 1.0).unwrap();
-        assert_eq!(r.fade_periods, 0.0, "the taper must stand down for a falloff");
-        assert_eq!(r.fade_g, 1.0);
-        assert!(r.summary(None).contains("hard outer edge"));
-
-        // and the geometric deal is still geometric, ratio q per octave.
+    fn a_falloff_on_its_own_is_still_exactly_geometric() {
+        // The falloff's own shape has to survive the fade being bolted on
+        // beside it: with no fade asked for, every octave still holds q times
+        // its neighbour.
+        //
         // Only while there is mass to measure: a geometric deal empties fast,
         // and at q = 0.25 the sixth octave holds ninety samples out of half a
         // million, where the "ratio" is quantisation rather than distribution.
+        let spec = ZoomSpec { octave_falloff: 2.0, ..ZoomSpec::default() };
+        let r = Renorm::from_affine(Mat4::from_scale(Vec3::splat(0.5)), 1.0, &spec, 1.0).unwrap();
+        assert_eq!(r.fade_periods, 0.0);
         let hist = octave_histogram(&r, 500_000);
         for k in 0..(r.periods as usize - 1) {
             if hist[k + 1] < 1e-3 {
@@ -1080,6 +1140,55 @@ mod tests {
                 r.octave_q
             );
         }
+    }
+
+    #[test]
+    fn the_fade_and_the_falloff_compose_instead_of_overriding() {
+        // They used to be mutually exclusive, falloff winning and silently. It
+        // was the wrong call: they act on opposite ends of the band — falloff
+        // thins the middle of the picture, the fade thins its rim — so wanting
+        // both is ordinary, and because the override was silent, reaching for
+        // the falloff turned the fade off under you.
+        let spec =
+            ZoomSpec { octave_falloff: 2.0, octave_fade: 3.0, levels: 15.0, ..ZoomSpec::default() };
+        let r = Renorm::from_affine(Mat4::from_scale(Vec3::splat(0.5)), 1.0, &spec, 1.0).unwrap();
+        let f = r.fade_periods;
+        assert_eq!(f, 3.0, "the fade must survive a falloff");
+        assert!(r.summary(None).contains("octaves faded"));
+
+        let hist = octave_histogram(&r, 500_000);
+
+        // Inward of the fade the falloff is untouched: still q per octave.
+        let kf = f as usize;
+        for k in kf..(r.periods as usize - 1) {
+            if hist[k + 1] < 1e-3 {
+                break;
+            }
+            let ratio = hist[k + 1] / hist[k];
+            assert!(
+                (ratio / r.octave_q as f64 - 1.0).abs() < 0.01,
+                "octave {k}->{} ratio {ratio:.5} inside the envelope, wanted q",
+                k + 1
+            );
+        }
+
+        // Across the fade the ramp rises outward-to-inward — the property a
+        // naive product would lose, since q < g here would flip it — and it
+        // arrives at FADE_DEPTH of the octave it ramps up to meet.
+        for k in 0..kf {
+            assert!(
+                hist[k] < hist[k + 1],
+                "octave {k} ({}) must be dimmer than {} ({}) across the fade",
+                hist[k],
+                k + 1,
+                hist[k + 1]
+            );
+        }
+        let depth = hist[0] / hist[kf];
+        assert!(
+            (depth / FADE_DEPTH as f64 - 1.0).abs() < 0.02,
+            "outermost octave is {depth:.5} of the octave at F, wanted {FADE_DEPTH}"
+        );
     }
 
     #[test]

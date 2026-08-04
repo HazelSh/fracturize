@@ -84,6 +84,10 @@ struct ComputeParams {
 
 const PI: f32 = 3.14159265358979;
 
+// Density at the outermost shell as a fraction of the octave the fade ramps up
+// to meet. Mirrors renorm::FADE_DEPTH; the two must agree.
+const FADE_DEPTH: f32 = 0.0625;
+
 // xorshift128 random number generator
 fn xorshift128(s: ptr<function, vec4<u32>>) -> u32 {
     var t = (*s).w;
@@ -309,6 +313,37 @@ fn apply_variations(t_idx: u32, p: vec3<f32>, rng: ptr<function, vec4<u32>>) -> 
 // The share of octave k is g^(F-k) for k < F and 1 for k >= F. Both pieces are
 // geometric, so this stays one sample per point with no rejection — the
 // property that makes renormalization cost nothing in the first place.
+// Sum of r^i for i in 0..n, with the removable singularity at r = 1 filled in.
+fn geo_sum(r: f32, n: f32) -> f32 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    if abs(r - 1.0) < 1e-4 {
+        return n;
+    }
+    return (1.0 - pow(r, n)) / (1.0 - r);
+}
+
+// Inverse of geo_sum: the largest i with sum_{j<i} r^j <= x. Works for r above
+// and below 1. Capped at ceil(n)-1, not n-1: a fractional n means a partial top
+// octave, which must stay reachable and must stay a whole offset.
+fn geo_pick(x: f32, r: f32, n: f32) -> f32 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    var i = x;
+    if abs(r - 1.0) >= 1e-4 {
+        i = log(max(1.0 - x * (1.0 - r), 1e-30)) / log(r);
+    }
+    return clamp(floor(i), 0.0, ceil(n) - 1.0);
+}
+
+// Share of octave k is q^k for k >= F, and q^F * g^(F-k) for k < F: the
+// falloff envelope, with a taper over the outer F octaves rising from
+// FADE_DEPTH of the envelope up to meet it. Anchoring the taper to the
+// envelope's value at F instead of multiplying through it keeps the ramp
+// rising for every q — multiplying gives g^F*(q/g)^k, which inverts once
+// q < g and would make the outermost shell the brightest.
 fn octave_offset(rng: ptr<function, vec4<u32>>) -> f32 {
     let levels = params.zoom_levels;
     if levels <= 1.0 {
@@ -316,34 +351,23 @@ fn octave_offset(rng: ptr<function, vec4<u32>>) -> f32 {
     }
     let u = rand_float(rng);
     let q = params.zoom_octave_q;
-    if q < 0.9999 {
-        // Inverse CDF of a geometric distribution truncated to 0..levels-1
-        let tail = pow(q, levels);
-        return min(floor(log(1.0 - u * (1.0 - tail)) / log(q)), levels - 1.0);
-    }
-
-    let f = params.zoom_octave_fade;
     let g = params.zoom_fade_g;
+    var f = params.zoom_octave_fade;
     if f < 1.0 || g > 0.9999 {
-        return floor(u * levels);
+        f = 0.0;
     }
 
-    let tail = pow(g, f);              // the depth of the fade, ~1/16
-    let m1 = g * (1.0 - tail) / (1.0 - g);  // mass of the ramp: shares g^1..g^F
-    let m2 = levels - f;                    // mass of the flat remainder
+    // Masses in units of q^F, which cancels between the pieces.
+    var m1 = 0.0;
+    if f >= 1.0 {
+        m1 = FADE_DEPTH * geo_sum(1.0 / g, f);
+    }
+    let m2 = geo_sum(q, levels - f);
     let x = u * (m1 + m2);
     if x < m1 {
-        // Geometric in j, counting inward from the outermost faded shell:
-        // reindexing a rising ramp from its far end makes it a falling one, so
-        // this is the same inversion as the falloff branch above. j is capped
-        // because a u at the very top of the piece sends the log to exactly F.
-        let v = x / m1;
-        let j = min(floor(log(1.0 - v * (1.0 - tail)) / log(g)), f - 1.0);
-        return max(f - 1.0 - j, 0.0);
+        return geo_pick(x / FADE_DEPTH, 1.0 / g, f);
     }
-    // Flat remainder. x < m1 + m2 = levels, so this floors no higher than the
-    // flat deal above does — partial top octave included.
-    return floor(f + (x - m1));
+    return f + geo_pick(x - m1, q, levels - f);
 }
 
 // Rodrigues: rotate v about a unit axis by `ang`

@@ -1,0 +1,143 @@
+# Octave edge, for eyes — watch the cut, then watch the fade take it away
+#
+# The companion to scenes/octave-edge-test.toml. That one is built to be
+# *measured* by subtracting two stills, and it keeps enough haze that a person
+# watching it will not see anything much. This one is built to be *looked at*:
+# same band geometry, but no haze at all and heavier structure in the outer
+# shells, so the wrap is a thing you notice rather than a thing you compute.
+#
+# How to use it:
+#
+#   fracturize --scene scenes/octave-edge-visual.toml
+#
+#   It opens zooming, with `octave_fade = 0` — the broken case. Watch anywhere
+#   in the frame: every 2.5 seconds a slab of structure blinks out at once.
+#   Then open the Render window, "infinite zoom", and drag `edge fade` up to
+#   3. The blink becomes a fade-out that you have to look for.
+#
+# Why you can trust your eyes here. The zoom map is scale 0.5 with no rotation
+# and no translation, so a zoom period is exactly one octave and a wrap is
+# nothing but "double the camera distance". The rendered set is scale-invariant,
+# so a camera flying straight down that zoom projects *the same image at every
+# instant*: this scene should render a completely still picture while zooming
+# forever. It doesn't, and everything that moves is the artifact. There is no
+# animation, no rotation and no interpolation to mistake for one.
+#
+# What was turned up to make it visible:
+#
+#   * haze = 0.0. Haze is what normally hides the edge, and both of Hazel's
+#     own zoom drafts run it at 0.0, so this is not a contrived setting. This
+#     is the single biggest reason the edge is visible here and not elsewhere.
+#   * The arms throw structure far enough from the origin that the outer shells
+#     carry big legible branches rather than a fine mist. A mist would dim and
+#     nobody would notice; a branch vanishing is something you see.
+#
+# Measured, by screen-recording the running app for 10s (about four periods)
+# and taking the mean absolute frame-to-frame change. The wrap shows up as a
+# spike every 75 frames at 30fps — 2.5s, exactly one period:
+#
+#   radius   worst frame step, as a multiple of the median step
+#            fade 0            fade 3
+#     3.0    35x (0.0975)      10x (0.0023)   <- ships like this; fade fixes it
+#     1.4    61x (0.0964)      86x (0.1824)   <- fade makes it *worse*
+#
+# Two things worth knowing from that table.
+#
+# First, the fade works, and it is not subtle: at radius 3.0 the periodic spike
+# disappears into the noise, 42x smaller in absolute terms.
+#
+# Second, the obvious way to stage the bug — drag the edge into frame by
+# setting radius below renorm::MIN_RADIUS (2.42) — backfires. With the edge
+# inside the picture the outer octaves *are* the picture, so tapering them
+# swings the whole frame and the fade has no full-density core to ramp up to.
+# radius 1.4 makes the cut easy to see and impossible to fix. So visibility
+# here comes from the content and from haze = 0, not from breaking the band;
+# radius = 3.0 is a legal value that no --info check complains about.
+#
+# One trap for whoever measures this next. **The offline renderer will not show
+# you any of it.** `--render out.mp4` wraps the camera every frame and a
+# path_zoom_loop covers exactly one period, so the loop seam comes out at 1.04x
+# an ordinary frame step whatever the radius or fade — even at a radius that
+# makes --info print BAND TOO SHORT. The artifact is live-only. Screen-record
+# the window instead; that is where the numbers above come from.
+#
+# Claude Opus 5, 2026-08-04.
+
+[meta]
+name = "Octave edge (visual)"
+author = "Claude Opus 5"
+point_size = 0.0026
+point_count = 6_000_000
+color_speed = 0.5
+color_falloff = 0.7
+color_contrast = 2.4
+haze = 0.0
+background = [0.01, 0.011, 0.016]
+
+[camera]
+distance = 2.0
+yaw = 0.55
+pitch = 0.20
+focus = [0.0, 0.0, 0.0]
+# One period is one octave is one wrap. Slow enough to watch a single wrap
+# happen rather than seeing a strobe.
+path_seconds = 2.5
+path_zoom_loop = 1
+
+[[camera.path]]
+yaw = 0.55
+pitch = 0.20
+distance = 2.0
+focus = [0.0, 0.0, 0.0]
+
+# The scale symmetry, as plain as it gets: no translation puts the fixed point
+# on the origin, no rotation makes a wrap a pure dolly, and a half scale makes
+# one period exactly one octave.
+[[transform]]
+name = "halve"
+translation = [0.0, 0.0, 0.0]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.30, 0.58, 0.90]
+weight = 1.5
+
+# Three arms thrown well clear of the origin, at a scale that keeps them thick
+# rather than wispy. These are what the outer shells are made of, and what you
+# watch disappear.
+[[transform]]
+name = "arm_a"
+translation = [1.15, 0.30, -0.14]
+scale = 0.52
+rotation = [0.0, 27.0, 15.0]
+color = [0.97, 0.68, 0.24]
+weight = 1.4
+
+[[transform]]
+name = "arm_b"
+translation = [-0.58, 1.02, 0.38]
+scale = 0.52
+rotation = [18.0, -40.0, -22.0]
+color = [0.92, 0.32, 0.40]
+weight = 1.4
+
+[[transform]]
+name = "arm_c"
+translation = [-0.40, -0.86, -0.94]
+scale = 0.50
+rotation = [-30.0, 12.0, 48.0]
+color = [0.42, 0.92, 0.66]
+weight = 1.3
+
+[zoom]
+map = "halve"
+# At the bound, not under it — see the header for why going under makes the
+# fade worse rather than better.
+radius = 3.0
+# Twelve octaves below a radius of 3.0 puts the inner shell at ~0.0007 camera
+# distances, far below a pixel, so the inner end plays no part in what you see
+# here. All the interest is at the outer end, which is the point.
+levels = 12.0
+octave_falloff = 0.0
+# Ships at 0: the scene's whole job is to show what a hard edge does. Drag it
+# up in the Render window and watch the blink turn into a fade.
+octave_fade = 0.0

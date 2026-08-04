@@ -378,8 +378,6 @@ fn draw_zoom_band(ui: &mut egui::Ui, app: &mut App) {
                 z.fade_periods * z.log_scale / std::f32::consts::LN_2,
                 z.fade_g
             )
-        } else if spec.octave_falloff > 0.0 {
-            "hard edge — the octave falloff below overrides the fade".to_string()
         } else {
             "hard edge".to_string()
         }).small().weak());
@@ -447,11 +445,12 @@ fn draw_zoom_band(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Point budget falling off toward the fixed point. Leave at 0 for \
+                "Point budget falling off toward the fixed point — the opposite \
+                 end of the band from the edge fade above, and it thins the \
+                 middle of the picture rather than its rim. Leave at 0 for \
                  anything that will be flown: it makes neighbouring octaves hold \
                  different numbers of points, so the density jumps every time the \
-                 camera wraps. Useful for a still, which never wraps — and it \
-                 turns the edge fade off, since nothing wants both.",
+                 camera wraps. Useful for a still, which never wraps.",
                 "drag: bias the point budget inward",
             );
             if resp.changed() {
