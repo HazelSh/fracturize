@@ -83,6 +83,14 @@
  -- 
 
 ---- call in fable5 specifically, spend down credits, to review recent opus5 work
+ -- octave blending, quaternion rotation, both bugged & overengineered?
+
+---- vr support, test with Liz's Index headset
+
+---- camera pause/play staying on the path? rather than full reset
+
+
+
 
 ---- naming 
 🕮⊞◌⃘⁂
