@@ -88,9 +88,13 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
 
         // Roll's home. Right-drag sets it, but a gesture with no readout
         // can't be undone precisely, and "level" is a thing you want back
-        // exactly rather than approximately.
+        // exactly rather than approximately. Looking straight up or down,
+        // yaw and roll are one control and the number here means nothing on
+        // its own, so the field greys out rather than scrambling the framing.
+        let faithful = app.camera.orientation.chart_is_faithful();
         let mut roll_deg = app.camera.chart().roll.degrees();
-        let resp = ui.add(
+        let resp = ui.add_enabled(
+            faithful,
             egui::DragValue::new(&mut roll_deg)
                 .speed(0.5)
                 .suffix("°")
@@ -99,7 +103,12 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Rotation about the view axis — right-drag the viewport does this too",
+            if faithful {
+                "Rotation about the view axis — right-drag the viewport does this too"
+            } else {
+                "Looking straight up or down, roll and yaw are the same control — \
+                 right-drag the viewport to spin the view instead"
+            },
             "drag: roll the camera",
         );
         if resp.changed() {

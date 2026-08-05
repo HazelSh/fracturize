@@ -949,6 +949,13 @@ impl App {
     }
 
     pub fn set_camera_roll(&mut self, roll: f32) {
+        // Same guard as `level()`: within a whisker of straight up or down,
+        // yaw and roll are the same control and the chart's split of them is
+        // noise. Writing that noise back would scramble the framing — the
+        // panel disables the field there, and this catches everyone else.
+        if !self.camera.orientation.chart_is_faithful() {
+            return;
+        }
         let c = self.camera.chart();
         self.camera.orientation = crate::rot::Orientation::from_yaw_pitch_roll(
             c.yaw,

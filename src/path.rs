@@ -463,14 +463,25 @@ impl CameraPath {
             return Turn::ZERO;
         }
 
-        // A zoom loop's segments are all the same turn — the symmetry's, seen
-        // from the key. Conjugating preserves the magnitude exactly, so a
-        // multi-period loop keeps its whole sweep and cannot fold.
+        // A one-key zoom loop's only segment is the symmetry itself, seen from
+        // the key. Conjugating preserves the magnitude exactly, so a
+        // multi-period loop keeps its whole sweep and cannot fold. Only the
+        // one-key case may take this shortcut: with authored keys in between,
+        // the segments are ordinary key-to-key journeys (the last one to the
+        // first key's image under the symmetry, which `key()` already hands
+        // out), and pretending each was the whole symmetry skipped every
+        // authored framing and overswept the loop by the key count. A
+        // multi-key zoom takes each segment the short way plus its authored
+        // winding, like any other path — so spread the keys enough that no
+        // segment sweeps more than half a turn, or say `turns` on the one
+        // that does.
         if let Loop::Zoom(z) = self.loops {
-            let from = self.key(i);
-            return Turn::from_rotation_vector(
-                from.orientation.inverse().rotate(z.turn.as_rotation_vector()),
-            );
+            if self.keys.len() == 1 {
+                let from = self.key(i);
+                return Turn::from_rotation_vector(
+                    from.orientation.inverse().rotate(z.turn.as_rotation_vector()),
+                );
+            }
         }
 
         // Past the ends of a path that doesn't close, the neighbour keys are
@@ -539,12 +550,27 @@ impl CameraPath {
         // three weighted displacements. At u=0 the weights are (1,0,0), which
         // lands exactly on k1; at u=1 they are (1,1,0), which lands exactly on
         // k2. Keys are hit whatever the windings say.
+        //
+        // The neighbour turns are split before weighting. B̃₁ overshoots 1
+        // (peak 1.074) and B̃₃ undershoots 0 (trough −0.074) — that is what
+        // rounds corners, and on a short turn the few-percent excursion is
+        // invisible. But a neighbour carrying a winding is a displacement of
+        // whole turns, and 7% of three turns is ~80° of rotation injected
+        // mid-segment about the neighbour's axis and removed again by the
+        // end: a yaw segment next to a pitch corkscrew visibly *rolled*. The
+        // whole-turn part of a displacement is invisible at the endpoints, so
+        // it takes no part in corner-rounding: it is pinned at its endpoint
+        // weight — all of the previous segment's, none of the next's — and
+        // only the sub-π principal parts are smoothed. Both parts share the
+        // segment's axis, so each pair still composes as one turn.
         let b = cumulative_basis(u);
+        let prev = self.segment_turn(seg - 1);
+        let next = self.segment_turn(seg + 1);
         let orientation = k0
             .orientation
-            .then_body(self.segment_turn(seg - 1) * b[0])
+            .then_body(prev.principal() * b[0] + (prev - prev.principal()))
             .then_body(self.segment_turn(seg) * b[1])
-            .then_body(self.segment_turn(seg + 1) * b[2]);
+            .then_body(next.principal() * b[2]);
 
         let cr = |f: fn(&PathKey) -> f32| catmull_rom(f(&k0), f(&k1), f(&k2), f(&k3), u);
         OrbitCamera {
@@ -1204,6 +1230,118 @@ mod tests {
         let path = zoom_loop_path(3, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
         let ratio = path.sample(SEAM).distance / 4.0;
         assert!((ratio - 0.6f32.powi(3)).abs() < 1e-3, "descended {ratio}x");
+    }
+
+    #[test]
+    fn a_multi_key_zoom_loop_hits_its_keys_and_still_closes() {
+        // The point of allowing more than one key on a zoom loop: an infinite
+        // zoom that spirals in on a curving path, shaped by real keys partway
+        // down the descent. Each segment used to be replaced wholesale by the
+        // symmetry's turn, which skipped every authored framing and overswept
+        // the loop by the key count.
+        let keys = vec![
+            key(0.3, 0.5, 3.6, Vec3::ZERO),
+            key(1.1, 0.1, 2.4, Vec3::new(0.2, 0.0, -0.1)),
+        ];
+        let path = zoom_loop_path(1, keys.clone());
+        assert_eq!(path.segments(), 2, "two keys plus the first key's image is two segments");
+
+        for (i, k) in keys.iter().enumerate() {
+            let cam = path.sample(i as f32 / 2.0);
+            assert!(
+                cam.orientation.angle_to(k.orientation) < 1e-4,
+                "key {i}: framing missed by {}°",
+                cam.orientation.angle_to(k.orientation).to_degrees()
+            );
+            assert!((cam.distance - k.distance).abs() < 1e-3, "key {i} distance");
+            assert!((cam.focus - k.focus).length() < 1e-4, "key {i} focus");
+        }
+
+        // ...and the seam still closes under the symmetry, exactly as the
+        // one-key loop always has.
+        let z = path.loops.zoom().unwrap();
+        let carried = z.advance(PathKey::from_camera(&path.sample(SEAM)), -1);
+        let start = PathKey::from_camera(&path.sample(0.0));
+        assert!(
+            (carried.distance / start.distance - 1.0).abs() < 1e-3,
+            "distance {} vs {}",
+            carried.distance,
+            start.distance
+        );
+        assert!(
+            carried.orientation.angle_to(start.orientation) < 1e-3,
+            "framing drifted by {}° per loop",
+            carried.orientation.angle_to(start.orientation).to_degrees()
+        );
+        assert!((carried.focus - start.focus).length() < 1e-3, "focus drifted across the seam");
+    }
+
+    #[test]
+    fn a_winding_does_not_roll_the_segments_beside_it() {
+        // The corkscrew-injection bug, as a test. B̃₁ overshoots 1 by 7.4% and
+        // B̃₃ dips 7.4% below 0 — ordinary Catmull-Rom corner-rounding,
+        // invisible on a short turn. Applied to a neighbour whose displacement
+        // is three whole turns, it was ~80° of pitch-axis rotation swung
+        // through the middle of the adjacent yaw segments and back out: on
+        // screen, yawing visibly rolled the view. The whole-turn part of a
+        // neighbour now holds its endpoint weight, so the wobble is bounded by
+        // the sub-π parts, winding or none.
+        let p = 0.7f32;
+        let path = CameraPath {
+            keys: vec![
+                key(0.0, 0.0, 3.0, Vec3::ZERO),
+                key(0.0, p, 3.0, Vec3::ZERO),
+                key(1.2, p, 3.0, Vec3::ZERO),
+                key(-0.8, p, 3.0, Vec3::ZERO),
+            ],
+            windings: vec![3, 0, 0],
+            loops: Loop::Once,
+            ease: Some(false),
+            seconds: None,
+        };
+
+        // The corkscrew itself still happens: segment 0 sweeps its three whole
+        // turns of pitch, plus the 0.7 the keys ask for...
+        let mut swept_x = 0.0;
+        let mut prev = path.sample(0.0).orientation;
+        for i in 1..=300 {
+            let cur = path.sample(i as f32 / 900.0).orientation;
+            swept_x += Orientation::IDENTITY
+                .shortest_turn_to(prev.inverse().then(cur))
+                .as_rotation_vector()
+                .x;
+            prev = cur;
+        }
+        let want = 3.0 * std::f32::consts::TAU + p;
+        assert!(
+            (swept_x.abs() - want).abs() < 0.3,
+            "segment 0 swept {} rad of pitch, authored {}",
+            swept_x.abs(),
+            want
+        );
+
+        // ...and its keys are still hit exactly.
+        for (i, k) in path.keys.iter().enumerate() {
+            let cam = path.sample(i as f32 / 3.0);
+            assert!(
+                cam.orientation.angle_to(k.orientation) < 1e-4,
+                "key {i}: framing missed by {}°",
+                cam.orientation.angle_to(k.orientation).to_degrees()
+            );
+        }
+
+        // The yaw segments beside it stay level. Before the split, the worst
+        // horizon tilt here was 40°.
+        let mut worst = 0.0f32;
+        for i in 0..=300 {
+            let t = 1.0 / 3.0 + (2.0 / 3.0) * i as f32 / 300.0;
+            worst = worst.max(path.sample(t).right().y.abs().asin());
+        }
+        assert!(
+            worst.to_degrees() < 3.5,
+            "yawing next to a corkscrew tilted the horizon {}°",
+            worst.to_degrees()
+        );
     }
 
     #[test]

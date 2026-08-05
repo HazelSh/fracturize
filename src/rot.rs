@@ -242,7 +242,24 @@ impl Turn {
         Orientation::canonical(exp_rotvec(self.0))
     }
 
-
+    /// The principal representative: the shortest displacement landing on the
+    /// same orientation — this turn with its whole extra turns stripped.
+    ///
+    /// `self - self.principal()` is therefore the whole-turn part, colinear
+    /// with the axis and an exact multiple of 2π. The split exists for the
+    /// spline: whole turns are invisible at a segment's endpoints, so a
+    /// smoothing weight that overshoots 1 by a few percent turns them into
+    /// enormous mid-segment wobble unless they are weighted separately.
+    ///
+    /// Returns `self` unchanged (bit-for-bit) when the magnitude is already
+    /// at most π, so ordinary short segments cannot pick up round-trip noise.
+    pub fn principal(self) -> Turn {
+        if self.magnitude() <= PI {
+            self
+        } else {
+            Turn(principal_log(exp_rotvec(self.0)))
+        }
+    }
 }
 
 impl std::ops::Add for Turn {
@@ -718,6 +735,36 @@ mod tests {
                 mag,
                 back,
                 t
+            );
+        }
+    }
+
+    #[test]
+    fn principal_strips_whole_turns_and_nothing_else() {
+        // Short turns come back bit-identical — the spline relies on that to
+        // leave ordinary segments untouched.
+        let short = Turn::about(Vec3::new(0.3, 0.9, -0.2).normalize(), 2.5);
+        assert_eq!(short.principal().as_rotation_vector(), short.as_rotation_vector());
+
+        // A multi-turn corkscrew splits into a sub-π principal part and a
+        // colinear whole-turn remainder.
+        for &mag in &[4.0f32, 6.0, 10.43, 20.0] {
+            let axis = Vec3::new(0.1, -0.7, 0.4).normalize();
+            let t = Turn::about(axis, mag);
+            let p = t.principal();
+            assert!(p.magnitude() <= PI + 1e-4, "mag {}: |principal| = {}", mag, p.magnitude());
+            assert!(
+                p.exp().angle_to(t.exp()) < 1e-4,
+                "mag {}: principal must land on the same orientation",
+                mag
+            );
+            let whole = (t - p).as_rotation_vector();
+            let k = whole.length() / TAU;
+            assert!((k - k.round()).abs() < 1e-3, "mag {}: remainder is {} turns", mag, k);
+            assert!(
+                whole.normalize().dot(axis).abs() > 1.0 - 1e-4,
+                "mag {}: remainder must stay on the axis",
+                mag
             );
         }
     }
