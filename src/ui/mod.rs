@@ -65,6 +65,9 @@ pub struct UiState {
     /// Filter text for the Transforms rail. Session state, not a preference:
     /// it's a way of looking at *this* list right now.
     pub transform_filter: String,
+    /// Panel scale being dragged but not yet applied — see the slider in
+    /// `shortcuts::draw` for why this one can't apply live.
+    pub pending_ui_scale: Option<f32>,
     /// A transform's context menu, opened by right-clicking its *gizmo* in the
     /// viewport: the transform index, and where to draw the menu (filled in on
     /// the first frame from egui's pointer position, then held so the menu
@@ -119,6 +122,7 @@ impl UiState {
             renaming_transform: None,
             focus_name_field: false,
             transform_filter: String::new(),
+            pending_ui_scale: None,
             transform_menu: None,
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,

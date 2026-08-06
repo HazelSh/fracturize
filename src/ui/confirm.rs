@@ -229,6 +229,12 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         Pending::Quit => "quitting".to_string(),
         Pending::Load(p) => format!("opening {}", p.display()),
     };
+    // Say what the button does, not just what it throws away — the two acts
+    // are one click here, and "Discard" alone doesn't say you're also leaving.
+    let discard_label = match &pending {
+        Pending::Quit => "Discard & quit",
+        Pending::Load(_) => "Discard & open",
+    };
     let scene = app.scene.name.clone();
 
     let mut resolve: Option<Resolution> = None;
@@ -273,21 +279,24 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 resolve = Some(Resolution::Save);
             }
 
-            // The one irreversible button in the dialog gets the same two-stage
-            // guard as render-cancel, and for the same reason: it is reached at
-            // the exact moment a person is clicking fast.
-            let current = app.ui_state.discard_arm;
-            let (arm, fired) = danger_button(
-                ui,
+            // A plain button, deliberately — *not* the countdown guard that
+            // render-cancel uses. What already protects this case is that the
+            // dialog is a second click in a *different place* from the one that
+            // started the quit, and that getting out is free: Escape, Cancel,
+            // or a click anywhere outside. A three-second countdown on top of
+            // that is slow and distracting for something you'll do often, and
+            // it spends the person's patience on the wrong risk. Abandoning a
+            // render job is the bigger deal: it's minutes or hours of GPU time
+            // with nothing on disk, where this is edits you just made and can
+            // see.
+            let resp = ui.button(discard_label);
+            let resp = hinted(
+                resp,
                 &mut app.ui_state,
-                current,
-                "Discard",
-                "Discard edits",
-                "Throw the edits away and continue",
-                "Throw the edits away. There is no undo for this.",
+                "Throw the edits away and continue. There is no undo for this.",
+                "click: discard the edits",
             );
-            app.ui_state.discard_arm = arm;
-            if fired {
+            if resp.clicked() {
                 resolve = Some(Resolution::Discard);
             }
 

@@ -129,14 +129,25 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Keybinds, "Controls")
         .open(&mut open)
         .show(ctx, |ui| {
-            // The preferences that say how the *input* is read, rather than
-            // what it does — they belong with the keys, not with the camera
-            // they used to sit above. It also gives the one window a stranger
-            // is most likely to open first something to be besides a table.
+            // These three are settings, and they now look like enough of a
+            // settings dialog to want saying so. Left here rather than given a
+            // window of their own: three controls don't fill one, and this is
+            // the window a stranger opens first.
+            ui.label(egui::RichText::new("Settings").strong().small());
             draw_input_prefs(ui, app);
 
             ui.horizontal(|ui| {
-                let mut scale = app.ui_scale();
+                // Applied on *release*, not while dragging.
+                //
+                // This is a slider that sets how big sliders are, which makes
+                // live application a feedback loop: every frame it re-scales
+                // the widget you are holding, so the handle moves out from
+                // under the pointer, which moves the handle again. It flickers,
+                // it jumps, and it is close to unusable. Dragging shows the
+                // pending number and the panel only re-lays-out once you let
+                // go — the one control in the app where live application is
+                // actively wrong.
+                let mut scale = app.ui_state.pending_ui_scale.unwrap_or(app.ui_scale());
                 let resp = ui.add(
                     egui::Slider::new(&mut scale, 0.7..=2.0)
                         .fixed_decimals(2)
@@ -147,10 +158,19 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     &mut app.ui_state,
                     "Size of every panel, over and above the display's own scale factor. \
                      Saved to prefs.\n\n\
-                     The viewport is unaffected — this is the chrome, not the picture.",
-                    "drag: resize the panels",
+                     Applies when you let go. The viewport is unaffected — this \
+                     is the chrome, not the picture.",
+                    "drag: resize the panels (applies on release)",
                 );
-                if resp.changed() {
+                if resp.dragged() {
+                    app.ui_state.pending_ui_scale = Some(scale);
+                } else if resp.changed() {
+                    // A click on the track, or an arrow key: no drag to wait for.
+                    app.ui_state.pending_ui_scale = None;
+                    app.set_ui_scale(scale);
+                }
+                if resp.drag_stopped() {
+                    app.ui_state.pending_ui_scale = None;
                     app.set_ui_scale(scale);
                 }
             });

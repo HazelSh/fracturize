@@ -19,7 +19,15 @@ use crate::render_job::{
 use super::hints::hinted;
 
 /// Size presets, plus the custom escape hatch.
-const SIZE_PRESETS: [(&str, u32, u32); 4] = [
+/// Output sizes, smallest first.
+///
+/// The low end matters more than the high end: most renders are a check on
+/// whether the framing and the point count are right, and a 640x480 answers
+/// that in a fraction of the time. The list used to start at 720p, which made
+/// the cheapest available answer four times the cost of the one you wanted.
+const SIZE_PRESETS: [(&str, u32, u32); 6] = [
+    ("SD", 640, 480),
+    ("480p", 854, 480),
     ("720p", 1280, 720),
     ("1080p", 1920, 1080),
     ("1440p", 2560, 1440),
@@ -63,8 +71,11 @@ impl Default for RenderJobForm {
             mode: Mode::Still,
             filename: String::new(),
             filename_touched: false,
-            width: 2560,
-            height: 1440,
+            // 720p, not 1440p: the first render of a scene is usually a check
+            // rather than a keeper, and a default should cost what the common
+            // case is worth.
+            width: 1280,
+            height: 720,
             points: 20_000_000,
             accumulate: 96,
             splat: false,
@@ -269,27 +280,63 @@ const OUTPUTS: [(Mode, crate::video::Format, &str, &str); 4] = [
     ),
 ];
 
+/// The four things this dialog can produce, as the one-of-four choice it is.
+///
+/// A separate type rather than `(Mode, Format)` because it *is* one choice:
+/// picking `mp4` picks both the mode and the codec, and the radio needs a
+/// single value to compare against.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Still,
+    Avif,
+    Mp4,
+    View,
+}
+
+impl Output {
+    fn of(mode: Mode, format: crate::video::Format) -> Self {
+        match mode {
+            Mode::Still => Self::Still,
+            Mode::ViewDescriptor => Self::View,
+            Mode::Animation => match format {
+                crate::video::Format::Mp4 => Self::Mp4,
+                _ => Self::Avif,
+            },
+        }
+    }
+}
+
 fn draw_mode(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.label("Output");
+        // A segmented radio, not four loose toggles: exactly one of these is
+        // always in force, and "none of them" isn't a state the dialog can be
+        // in. See `ui::radio`.
+        let current = Output::of(app.ui_state.render_job.mode, app.ui_state.render_job.format);
+        let mut chooser = super::radio::radio(&mut app.ui_state, "render_output", current);
         for (mode, format, label, tip) in OUTPUTS {
-            // An animation button is only lit when the format matches too,
-            // otherwise both would look selected at once.
-            let selected = app.ui_state.render_job.mode == mode
-                && (mode != Mode::Animation || app.ui_state.render_job.format == format);
-            let resp = ui.selectable_label(selected, label);
-            let resp = hinted(resp, &mut app.ui_state, tip, "click: choose the output kind");
-            if resp.clicked() && !selected {
-                app.ui_state.render_job.mode = mode;
-                if mode == Mode::Animation {
-                    app.ui_state.render_job.format = format;
-                }
-                // The extension has to follow the choice, but not over a name
-                // the user has typed — only the default gets rewritten.
-                if !app.ui_state.render_job.filename_touched {
-                    let format = app.ui_state.render_job.format;
-                    app.ui_state.render_job.filename = default_filename(app, mode, format);
-                }
+            chooser = chooser.option(
+                Output::of(mode, format),
+                label,
+                tip,
+                "click: choose the output kind",
+            );
+        }
+        if let Some(chosen) = chooser.show(ui) {
+            let (mode, format) = OUTPUTS
+                .iter()
+                .find(|(m, f, ..)| Output::of(*m, *f) == chosen)
+                .map(|(m, f, ..)| (*m, *f))
+                .unwrap_or((Mode::Still, crate::video::Format::Avif));
+            app.ui_state.render_job.mode = mode;
+            if mode == Mode::Animation {
+                app.ui_state.render_job.format = format;
+            }
+            // The extension has to follow the choice, but not over a name the
+            // user has typed — only the default gets rewritten.
+            if !app.ui_state.render_job.filename_touched {
+                let format = app.ui_state.render_job.format;
+                app.ui_state.render_job.filename = default_filename(app, mode, format);
             }
         }
     });
@@ -325,7 +372,7 @@ fn draw_filename(ui: &mut egui::Ui, app: &mut App) {
 }
 
 fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Size");
         for (label, w, h) in SIZE_PRESETS {
             let selected =
@@ -427,24 +474,29 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             }
         });
 
-        let animation = app.ui_state.render_job.mode == Mode::Animation;
-        ui.add_enabled_ui(!animation, |ui| {
-            let mut transparent = app.ui_state.render_job.transparent;
-            let resp = ui.checkbox(&mut transparent, "transparent");
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                if animation {
-                    "Not available for animation — neither AV1 nor H.264 carries an alpha plane"
-                } else {
-                    "Write an alpha channel for compositing"
-                },
-                "click: toggle transparent output",
-            );
-            if resp.changed() {
-                app.ui_state.render_job.transparent = transparent;
-            }
-        });
+    });
+
+    // Transparency gets its own row. It was sharing a line with `splat` and its
+    // exposure, which put it inside that pair's enable/disable relationship and
+    // read as a third splat setting — it isn't one. It says what leaves the app
+    // (an alpha channel to composite against), not how the picture is drawn.
+    let animation = app.ui_state.render_job.mode == Mode::Animation;
+    ui.add_enabled_ui(!animation, |ui| {
+        let mut transparent = app.ui_state.render_job.transparent;
+        let resp = ui.checkbox(&mut transparent, "transparent background");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if animation {
+                "Not available for animation — neither AV1 nor H.264 carries an alpha plane"
+            } else {
+                "Write an alpha channel for compositing"
+            },
+            "click: toggle transparent output",
+        );
+        if resp.changed() {
+            app.ui_state.render_job.transparent = transparent;
+        }
     });
 
     if app.ui_state.render_job.mode == Mode::Animation {

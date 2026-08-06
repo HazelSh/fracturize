@@ -390,6 +390,14 @@ pub enum FrameOutcome {
     Reconfigure,
 }
 
+/// How long the zoom magnifier stays after the last wheel step, so the pauses
+/// inside one gesture don't drop it.
+const ZOOM_CURSOR_HOLD: Duration = Duration::from_millis(450);
+/// How far the zoom-direction accumulator can run either way. Three steps to
+/// cross from settled to reversed: enough that a stray step doesn't flip the
+/// icon, few enough that a deliberate reversal is followed promptly.
+const ZOOM_BIAS_CAP: f32 = 3.0;
+
 /// How long a discrete camera move takes. Roughly Blender's default, and about
 /// the shortest interval that still reads as motion rather than a cut.
 const CAMERA_GLIDE: Duration = Duration::from_millis(200);
@@ -509,6 +517,11 @@ pub struct App {
     fine_active: bool,
     /// A discrete camera move in flight (see `glide_camera_to`).
     camera_glide: Option<CameraGlide>,
+    /// The magnifier shown while scroll-zooming: which way it points, and when
+    /// it stops being shown. See `show_zoom_cursor`.
+    zoom_cursor: Option<(bool, Instant)>,
+    /// Accumulated scroll direction, for the hysteresis on that swap.
+    zoom_bias: f32,
     /// Gizmo part under the cursor (when not dragging)
     hovered: Option<crate::pick::GizmoHit>,
     pub shift_held: bool,
@@ -847,6 +860,8 @@ impl App {
             fine_from: (0.0, 0.0),
             fine_active: false,
             camera_glide: None,
+            zoom_cursor: None,
+            zoom_bias: 0.0,
             hovered: None,
             shift_held: false,
             ctrl_held: false,
@@ -2035,8 +2050,58 @@ impl App {
             return;
         }
         self.cancel_camera_glide();
+        self.show_zoom_cursor(steps);
         self.camera.zoom(steps);
         self.invalidate_default_path();
+    }
+
+    /// Point the cursor at what the wheel is doing, with hysteresis on the swap.
+    ///
+    /// A wheel is noisy: a burst of zooming in often contains a stray step the
+    /// other way, and a cursor that flipped on each one would strobe between
+    /// two icons through every gesture — worse than no cursor at all. So the
+    /// direction shown is the sign of an *accumulator*, capped a few steps
+    /// either side: one stray step against a settled direction doesn't reach
+    /// the boundary, while a genuine reversal crosses it in three.
+    ///
+    /// The icon then holds briefly after the last step, so the gaps inside one
+    /// gesture don't drop it either. `update` puts the pointer back.
+    fn show_zoom_cursor(&mut self, steps: f32) {
+        // A gizmo grab or a camera drag owns the pointer; don't fight it.
+        if !matches!(self.drag, Drag::None) {
+            return;
+        }
+        // A fresh gesture starts from neutral rather than from wherever the
+        // last one left off.
+        if self.zoom_cursor.is_none() {
+            self.zoom_bias = 0.0;
+        }
+        self.zoom_bias = (self.zoom_bias + steps).clamp(-ZOOM_BIAS_CAP, ZOOM_BIAS_CAP);
+        let zoom_in = self.zoom_bias >= 0.0;
+        let changed = self.zoom_cursor.map(|(dir, _)| dir) != Some(zoom_in);
+        self.zoom_cursor = Some((zoom_in, Instant::now() + ZOOM_CURSOR_HOLD));
+        if changed {
+            self.window.set_cursor(if zoom_in {
+                winit::window::CursorIcon::ZoomIn
+            } else {
+                winit::window::CursorIcon::ZoomOut
+            });
+        }
+    }
+
+    /// Drop the zoom cursor once the gesture has been over for a moment.
+    fn expire_zoom_cursor(&mut self) {
+        let Some((_, until)) = self.zoom_cursor else { return };
+        if Instant::now() < until {
+            return;
+        }
+        self.zoom_cursor = None;
+        self.zoom_bias = 0.0;
+        self.window.set_cursor(if self.hovered.is_some() {
+            winit::window::CursorIcon::Grab
+        } else {
+            winit::window::CursorIcon::Default
+        });
     }
 
     /// Toggle flightsim-style pitch inversion (persisted across sessions)
@@ -2227,11 +2292,17 @@ impl App {
                 &self.gpu.queue,
                 hit.map(|h| (h.transform, h.part)),
             );
-            self.window.set_cursor(if hit.is_some() {
-                CursorIcon::Grab
-            } else {
-                CursorIcon::Default
-            });
+            // Not while the zoom magnifier is up: scrolling moves the scene
+            // under a still pointer, so the hovered gizmo changes constantly
+            // mid-gesture and this would strobe against it. `expire_zoom_cursor`
+            // restores the right icon when the gesture ends.
+            if self.zoom_cursor.is_none() {
+                self.window.set_cursor(if hit.is_some() {
+                    CursorIcon::Grab
+                } else {
+                    CursorIcon::Default
+                });
+            }
             self.hovered = hit;
         }
     }
@@ -2252,8 +2323,11 @@ impl App {
         use winit::event::MouseButton;
         self.drag_origin = self.cursor;
         self.drag_moved = false;
-        // Taking the camera by hand beats any glide still in flight.
+        // Taking the camera by hand beats any glide still in flight, and ends
+        // the zoom gesture the magnifier was showing.
         self.cancel_camera_glide();
+        self.zoom_cursor = None;
+        self.zoom_bias = 0.0;
         // Fine-drag starts from wherever this gesture starts, at whatever the
         // modifier is right now.
         self.fine_anchor = self.cursor;
@@ -4135,6 +4209,7 @@ impl App {
         self.poll_job();
 
         self.advance_camera_glide();
+        self.expire_zoom_cursor();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;

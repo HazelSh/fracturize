@@ -137,10 +137,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 "Which way the world is pointing. Click a ball to look down that \
-                 axis — solid is the positive end, hollow the negative.\n\n\
-                 Worth more here than in most 3D tools: the default trackball \
-                 orbit accumulates roll on purpose, so nothing else on screen \
-                 says which way is up unless the Camera window is open.",
+                 axis — solid is the positive end, hollow the negative.",
                 "click an axis: look down it",
             );
         });

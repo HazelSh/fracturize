@@ -22,24 +22,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             draw_file_menu(ui, app);
             ui.separator();
 
-            // Ordered by task, not by module: what am I working on, then how am
-            // I looking at it, then help. Gizmos sits with Transforms because
-            // it's a *view of the same object*, not a peer of the panel
-            // toggles; Keybinds is pushed to the right end, where help lives in
-            // every toolbar ever made.
-            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Transforms — list + inspector",
-                "toggle the Transforms window",
-            );
-
-            // Not a window toggle, but the same kind of thing: "show me this
-            // layer of the interface or don't". It was labelled "Edit", which
-            // next to a row of window toggles reads as an Edit *menu*, and to
-            // anyone arriving from Blender reads as Edit *Mode* — a large
-            // concept that doesn't exist here. It shows gizmos. Call it that.
+            // Gizmos leads the toggle group. It isn't a window-opener — it
+            // turns a layer of the interface on and off, in the viewport — so
+            // it sits at the near end of the toggles rather than inside the
+            // run of panel buttons, where it read as one of them.
+            //
+            // It was labelled "Edit", which next to a row of window toggles
+            // reads as an Edit *menu*, and to anyone arriving from Blender as
+            // Edit *Mode* — a large concept that doesn't exist here. It shows
+            // gizmos. Call it that.
             let resp = ui.selectable_label(app.show_gizmos, (icons::CUBE, "Gizmos"));
             let resp = hinted(
                 resp,
@@ -52,6 +43,17 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             }
 
             ui.separator();
+
+            // Then the windows, ordered by task rather than by module: what am
+            // I working on, then how am I looking at it. Help is pushed to the
+            // right end, where it lives in every toolbar ever made.
+            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Transforms — list + inspector",
+                "toggle the Transforms window",
+            );
 
             let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, (icons::FLASK, "Explore"));
             hinted(
@@ -135,7 +137,10 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
     );
 
     egui::Popup::menu(&resp).show(|ui| {
-        ui.set_min_width(210.0);
+        // Just wide enough for the longest row ("Save as…  Ctrl+Shift+S"), so
+        // the accelerators have a column to line up in without the menu being
+        // a slab of empty space.
+        ui.set_min_width(168.0);
 
         if menu_item(ui, app, "New", "Ctrl+N", "Start over on an empty canvas. An edit like any other — one Ctrl+Z brings back what was on screen.") {
             app.new_blank_scene();
@@ -173,17 +178,20 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// One File-menu row: label on the left, its accelerator greyed on the right.
+/// One File-menu row: label on the left, its accelerator greyed on the right,
+/// and the *whole row* as one hit target that highlights at once.
+///
+/// `Button::shortcut_text` is the widget for this and egui already has it — it
+/// pushes a growing atom between the label and the accelerator, so the row
+/// fills the menu's width and the accelerators line up in a column. The first
+/// version of this wrapped a button and a label in a `horizontal`, which made
+/// the *button* the hit target rather than the row: a menu that behaved like a
+/// column of little buttons, with a dead gutter beside each one.
+///
+/// No frame work needed here — `Popup::menu` applies `egui::menu::menu_style`,
+/// which already strips the resting fill and leaves the hover highlight.
 fn menu_item(ui: &mut egui::Ui, app: &mut App, label: &str, key: &str, tip: &str) -> bool {
-    let resp = ui
-        .horizontal(|ui| {
-            let resp = ui.button(label);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(key).weak().small());
-            });
-            resp
-        })
-        .inner;
+    let resp = ui.add(egui::Button::new(label).shortcut_text(key));
     let resp = hinted(resp, &mut app.ui_state, tip, "click: run this command");
     if resp.clicked() {
         ui.close();
@@ -295,12 +303,8 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
                 );
             });
             app.set_scene_author(&author);
-
-            ui.label(
-                egui::RichText::new("Ctrl+S writes both to the scene file.")
-                    .small()
-                    .weak(),
-            );
+            // No "Ctrl+S writes these to the file" footnote: this is a file
+            // editing program, so that is the paradigm and not news.
         });
 }
 
