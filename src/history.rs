@@ -73,7 +73,23 @@ pub struct History {
     redo: Vec<HistoryEntry>,
     max_entries: usize,
     max_bytes: usize,
+    /// How many undo entries have been evicted since the last `clear`.
+    ///
+    /// Kept so the Explore window can *say so*. Silent eviction is the worst
+    /// kind: on an L-system scene one whole-scene snapshot runs to megabytes,
+    /// so the byte cap binds long before the entry cap and the stack can be
+    /// ground down to its floor with nothing on screen admitting it. A person
+    /// who thinks they have 60 steps of undo and has 10 finds out at the worst
+    /// possible moment.
+    dropped: usize,
 }
+
+/// Entries the byte cap may never take, however large the snapshots are.
+///
+/// The cap exists to stop history eating the machine; it is not a licence to
+/// leave a person with one step of undo. Ten is enough to get out of a mistake
+/// that took a few edits to make, which is what undo is *for*.
+pub const MIN_ENTRIES: usize = 10;
 
 impl Default for History {
     fn default() -> Self {
@@ -92,7 +108,14 @@ impl History {
             redo: Vec::new(),
             max_entries,
             max_bytes,
+            dropped: 0,
         }
+    }
+
+    /// Undo entries evicted since the last `clear`, for the history list's
+    /// "… N older edits dropped" footer.
+    pub fn dropped(&self) -> usize {
+        self.dropped
     }
 
     /// Record a commit. Clears the redo stack, unless this commit coalesces
@@ -123,7 +146,7 @@ impl History {
             at: now,
             before,
         });
-        Self::evict(&mut self.undo, self.max_entries, self.max_bytes);
+        self.dropped += Self::evict(&mut self.undo, self.max_entries, self.max_bytes);
     }
 
     /// Pop the most recent undo entry, push `current` onto redo, and return
@@ -137,7 +160,10 @@ impl History {
             at: Instant::now(),
             before: current,
         });
-        Self::evict(&mut self.redo, self.max_entries, self.max_bytes);
+        // Redo-side eviction isn't counted: the footer speaks about the undo
+        // list, and a redo entry lost to the caps is already unreachable by the
+        // time it matters.
+        let _ = Self::evict(&mut self.redo, self.max_entries, self.max_bytes);
         Some((entry.label, restore))
     }
 
@@ -151,7 +177,7 @@ impl History {
             at: Instant::now(),
             before: current,
         });
-        Self::evict(&mut self.undo, self.max_entries, self.max_bytes);
+        self.dropped += Self::evict(&mut self.undo, self.max_entries, self.max_bytes);
         Some((entry.label, restore))
     }
 
@@ -185,6 +211,7 @@ impl History {
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.dropped = 0;
     }
 
     pub fn undo_len(&self) -> usize {
@@ -210,16 +237,23 @@ impl History {
         self.redo.iter().map(|e| e.label.as_str())
     }
 
-    /// Evict oldest-first until both caps are satisfied. Never evicts the
-    /// last remaining entry purely for the byte cap — a single
-    /// oversized snapshot still leaves one step of undo available.
-    fn evict(stack: &mut Vec<HistoryEntry>, max_entries: usize, max_bytes: usize) {
+    /// Evict oldest-first until both caps are satisfied, returning how many
+    /// entries went.
+    ///
+    /// The byte cap stops at [`MIN_ENTRIES`] rather than at one: the cap is
+    /// there to stop history eating the machine, and grinding a person down to
+    /// a single step of undo because their scene has 40k transforms is not what
+    /// it was for. The entry cap has no such floor — it is a count, so it can
+    /// never be in tension with one.
+    fn evict(stack: &mut Vec<HistoryEntry>, max_entries: usize, max_bytes: usize) -> usize {
+        let was = stack.len();
         while stack.len() > max_entries {
             stack.remove(0);
         }
-        while stack.len() > 1 && Self::total_bytes(stack) > max_bytes {
+        while stack.len() > MIN_ENTRIES.min(max_entries) && Self::total_bytes(stack) > max_bytes {
             stack.remove(0);
         }
+        was - stack.len()
     }
 
     fn total_bytes(stack: &[HistoryEntry]) -> usize {
@@ -406,15 +440,49 @@ mod tests {
     }
 
     #[test]
-    fn byte_cap_evicts_oldest() {
-        // Each 1-transform snapshot estimates to 1*176 + 4096 = 4272 bytes;
-        // a 5000-byte cap allows only one such entry at a time.
+    fn byte_cap_evicts_oldest_but_stops_at_the_floor() {
+        // Each 1-transform snapshot estimates to 1*176 + 4096 = 4272 bytes, so
+        // a 5000-byte cap is exceeded by the second entry and never satisfied
+        // again. It used to grind the stack down to one; now it stops at
+        // MIN_ENTRIES, because a person with a 40k-transform scene still
+        // deserves an undo stack.
         let mut h = History::with_caps(64, 5000);
         let t0 = Instant::now();
-        h.commit("E0", None, snap(0.0), t0);
-        h.commit("E1", None, snap(1.0), t0 + Duration::from_secs(2));
-        assert_eq!(h.undo_len(), 1, "byte cap should evict the oldest entry once exceeded");
-        assert_eq!(h.undo_display().next(), Some("E1"));
+        for i in 0..15 {
+            h.commit(format!("E{}", i), None, snap(i as f32), t0 + Duration::from_secs(2 * i));
+        }
+        assert_eq!(h.undo_len(), MIN_ENTRIES, "the byte cap must not evict past the floor");
+        assert_eq!(h.undo_display().next(), Some("E14"), "newest is kept");
+        assert_eq!(
+            h.undo_display().last(),
+            Some("E5"),
+            "and the oldest survivor is the one the floor saved",
+        );
+    }
+
+    #[test]
+    fn eviction_is_counted_so_the_ui_can_say_so() {
+        let mut h = History::with_caps(3, usize::MAX);
+        let t0 = Instant::now();
+        for i in 0..7 {
+            h.commit(format!("E{}", i), None, snap(i as f32), t0 + Duration::from_secs(2 * i));
+        }
+        assert_eq!(h.undo_len(), 3);
+        assert_eq!(h.dropped(), 4, "four entries went, and the list should be able to say so");
+        h.clear();
+        assert_eq!(h.dropped(), 0, "a fresh document starts with a clean count");
+    }
+
+    #[test]
+    fn a_tiny_entry_cap_still_wins_over_the_floor() {
+        // The floor guards the *byte* cap. An explicitly-asked-for entry cap
+        // below it is a count, and a count can't be in tension with itself.
+        let mut h = History::with_caps(2, 1);
+        let t0 = Instant::now();
+        for i in 0..5 {
+            h.commit(format!("E{}", i), None, snap(i as f32), t0 + Duration::from_secs(2 * i));
+        }
+        assert_eq!(h.undo_len(), 2);
     }
 
     #[test]

@@ -125,10 +125,20 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                                 egui::Label::new(egui::RichText::new(format!("↷ {}", label)).weak())
                                     .sense(egui::Sense::click()),
                             );
+                            // These rows are drawn, and things you can see and
+                            // click read as durable — but committing any new
+                            // edit clears the redo stack, so nudging one slider
+                            // can make twenty visible rows vanish. Universal
+                            // behaviour, worth a word here because this app is
+                            // unusual in *showing* them.
                             let resp = hinted(
                                 resp,
                                 &mut app.ui_state,
-                                format!("Redo forward to after \"{}\"", label),
+                                format!(
+                                    "Redo forward to after \"{}\"\n\nRedo rows go away the \
+                                     moment you make a new edit.",
+                                    label
+                                ),
                                 "click: redo to this point",
                             );
                             if resp.clicked() {
@@ -155,6 +165,35 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                             if resp.clicked() {
                                 jump_undo = Some(j + 1);
                             }
+                        }
+
+                        // Eviction used to be silent, which is the worst way
+                        // for it to happen: on an L-system scene a single
+                        // whole-scene snapshot is megabytes, so the byte cap
+                        // binds long before the 64-entry one and the bottom of
+                        // this list quietly stops being the beginning.
+                        let dropped = app.history.dropped();
+                        if dropped > 0 {
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!(
+                                        "… {} older edit{} dropped",
+                                        dropped,
+                                        if dropped == 1 { "" } else { "s" },
+                                    ))
+                                    .small()
+                                    .weak(),
+                                )
+                                .sense(egui::Sense::hover()),
+                            );
+                            hinted(
+                                resp,
+                                &mut app.ui_state,
+                                "History is capped by entry count and by memory. Scenes with \
+                                 very many transforms make large snapshots, so the memory cap \
+                                 bites first — at least ten steps are always kept.",
+                                "older history was dropped to stay inside the memory cap",
+                            );
                         }
                     });
 

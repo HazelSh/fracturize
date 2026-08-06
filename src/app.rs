@@ -1087,6 +1087,7 @@ impl App {
     /// *until* the scene has two keypoints, and this is how it gets them.
     pub fn add_path_key(&mut self) {
         let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
         let key = crate::path::PathKey::from_camera(&self.camera);
         let path = self
             .scene
@@ -1108,17 +1109,22 @@ impl App {
             },
         );
         self.after_path_edit(was_default);
+        self.commit_edit("Add path keypoint", None, before);
     }
 
     /// Remove the last path keypoint (Shift+Y)
     pub fn remove_path_key(&mut self) {
-        let was_default = self.path_is_default();
-        let Some(path) = &mut self.scene.camera_path else {
+        if self.scene.camera_path.is_none() {
             log::warn!("Nothing to remove — this scene is on the default orbit");
             return;
-        };
-        path.keys.pop();
+        }
+        let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
+        if let Some(path) = &mut self.scene.camera_path {
+            path.keys.pop();
+        }
         self.after_path_edit(was_default);
+        self.commit_edit("Remove path keypoint", None, before);
     }
 
     // A `toggle_path_closed` used to live here, on Ctrl+Y. It's gone: Ctrl+Y is
@@ -1177,6 +1183,7 @@ impl App {
         let old = self.camera_path().loops;
         let inherited = self.camera_path().ease == Some(old.eases_by_default());
         let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
         let path = self.author_path();
         path.loops = loops;
         if inherited {
@@ -1184,6 +1191,7 @@ impl App {
         }
         log::info!("Camera path: {}", kind.label());
         self.after_path_edit(was_default);
+        self.commit_edit(format!("Path loop: {}", kind.label()), None, before);
     }
 
     /// Zoom periods descended per loop. Only meaningful on a zoom loop, and
@@ -1195,22 +1203,29 @@ impl App {
             return;
         }
         let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
         self.author_path().loops = crate::path::Loop::Zoom(zoom.loop_similarity(periods));
         log::info!("Camera path: zoom loop, {} period(s) per loop", periods);
         self.after_path_edit(was_default);
+        // Draggable, so it coalesces the way the inspector's fields do — one
+        // entry for the gesture, not one per pixel.
+        self.commit_edit("Zoom periods per loop", Some("path_zoom_periods"), before);
     }
 
     /// Remove one path keypoint by index (Camera window row ✕). The keyboard
     /// path (Shift+Y) only ever pops the last one.
     pub fn remove_path_key_at(&mut self, idx: usize) {
-        let was_default = self.path_is_default();
-        let Some(path) = &mut self.scene.camera_path else { return };
-        if idx >= path.keys.len() {
+        if !self.scene.camera_path.as_ref().is_some_and(|p| idx < p.keys.len()) {
             return;
         }
-        path.keys.remove(idx);
+        let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
+        if let Some(path) = &mut self.scene.camera_path {
+            path.keys.remove(idx);
+        }
         log::info!("Camera path keypoint {} removed", idx);
         self.after_path_edit(was_default);
+        self.commit_edit(format!("Remove path keypoint {}", idx + 1), None, before);
     }
 
     /// Housekeeping after the scene's own keypoints change. `was_default` is
@@ -1235,7 +1250,15 @@ impl App {
     /// Set the path's playback duration in seconds; `None` restores the
     /// default of 3s per segment.
     pub fn set_path_seconds(&mut self, seconds: Option<f32>) {
-        self.author_path().seconds = seconds.map(|s| s.max(0.1));
+        let seconds = seconds.map(|s| s.max(0.1));
+        if self.camera_path().seconds == seconds {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.author_path().seconds = seconds;
+        // The draggy one of the six: coalesced, so a drag across the field is
+        // one undo step rather than sixty.
+        self.commit_edit("Path duration", Some("path_seconds"), before);
     }
 
     /// Discard the scene's own keypoints and go back to the default orbit —
