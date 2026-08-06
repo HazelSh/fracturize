@@ -274,6 +274,22 @@ pub struct SceneMeta {
     /// and scenes were saved with it.
     #[serde(default, alias = "fog")]
     pub haze: f64,
+    /// Splat-renderer exposure multiplier. Scene data, because it is the splat
+    /// renderer's primary brightness control and a picture tuned without it is
+    /// simply wrong.
+    ///
+    /// It used to live only on `App`, fed by `--exposure`: tune it, Ctrl+S,
+    /// reopen, and the scene came back at 1.0 looking nothing like what you
+    /// saved. The shipped scenes worked around that by recording the flags in a
+    /// *comment* — `# fracturize --scene … --splat --exposure 1.8` at the top
+    /// of `ammonite.toml`. When a format's workaround for a missing field is a
+    /// comment telling you what to type on the command line, the field wants to
+    /// exist.
+    ///
+    /// Defaults to 1.0, which is what every scene authored before this was
+    /// getting anyway, so nothing moves.
+    #[serde(default = "default_exposure")]
+    pub exposure: f64,
     /// Total point buffer size for the simple point renderer.
     /// If unset, defaults to 500k.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,6 +298,10 @@ pub struct SceneMeta {
 
 fn default_point_size() -> f64 {
     0.012
+}
+
+fn default_exposure() -> f64 {
+    1.0
 }
 
 fn default_color_speed() -> f64 {
@@ -619,6 +639,8 @@ pub struct Scene {
     pub color_contrast: f32,
     /// Atmospheric-haze strength, 0 (off) to 1 — see `SceneMeta::haze`
     pub haze: f32,
+    /// Splat-renderer exposure multiplier — see `SceneMeta::exposure`
+    pub exposure: f32,
     /// Background colour, linear RGB — see `SceneMeta::background`
     pub background: Vec3,
     /// IFS transforms (affine matrix + variation blend weights)
@@ -711,6 +733,7 @@ impl Scene {
             color_falloff: 0.0,
             color_contrast: default_color_contrast() as f32,
             haze: 0.0,
+            exposure: default_exposure() as f32,
             transforms: vec![
                 map(0, Vec3::new(0.5, 0.5, 0.0)),
                 map(1, Vec3::new(-0.5, -0.5, 0.0)),
@@ -1103,6 +1126,7 @@ impl Scene {
             color_falloff: (scene_file.meta.color_falloff as f32).max(0.0),
             color_contrast: (scene_file.meta.color_contrast as f32).max(0.0),
             haze: (scene_file.meta.haze as f32).clamp(0.0, 1.0),
+            exposure: (scene_file.meta.exposure as f32).clamp(0.01, 100.0),
             background: Vec3::from(scene_file.meta.background.map(|v| v as f32))
                 .clamp(Vec3::ZERO, Vec3::ONE),
             transforms,
@@ -1239,6 +1263,7 @@ impl Scene {
                 color_falloff: tidy(self.color_falloff),
                 color_contrast: tidy(self.color_contrast),
                 haze: tidy(self.haze),
+                exposure: tidy(self.exposure),
                 background: self.background.to_array().map(tidy),
                 // Written only when the `[palette]` presence rule wouldn't
                 // reproduce the mode on the next load — in practice, only for
@@ -1630,6 +1655,7 @@ fn merge_scene_into_document(
         // old one in the same breath.
         meta.remove("fog");
         set_f64(meta, "haze", file.meta.haze, Some(0.0));
+        set_f64(meta, "exposure", file.meta.exposure, Some(default_exposure()));
         set_arr3(meta, "background", file.meta.background, Some(default_background()));
         if let Some(pc) = file.meta.point_count {
             set_i64(meta, "point_count", pc as i64, None);
@@ -2432,6 +2458,7 @@ color_speed = 0.4
 color_falloff = 0.8
 color_contrast = 2.0
 fog = 0.35
+exposure = 1.8
 point_count = 123456
 
 [camera]
@@ -2468,6 +2495,11 @@ color = [0.0, 1.0, 1.0]
         assert_eq!(reloaded.name, scene.name);
         assert_eq!(reloaded.color_falloff, scene.color_falloff);
         assert!((reloaded.haze - 0.35).abs() < 1e-4, "haze {}", reloaded.haze);
+        // The splat renderer's primary brightness control. It used to live only
+        // on `App`, so tuning it and pressing Ctrl+S wrote nothing and the scene
+        // reopened at 1.0 looking wrong — the shipped scenes worked around that
+        // in a *comment* saying what to type on the command line.
+        assert!((reloaded.exposure - 1.8).abs() < 1e-4, "exposure {}", reloaded.exposure);
         let roll = reloaded.camera_orientation.yaw_pitch_roll().roll.radians();
         assert!((roll - 0.35).abs() < 1e-4, "roll {}", roll);
         // point_count is deliberately *not* round-tripped: it's a render

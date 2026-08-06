@@ -313,6 +313,7 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Sc
         // else telling you which arm is in front — hand-authored scenes can opt
         // in, but a random one has no author to make that call.
         haze: 0.35,
+        exposure: 1.0,
         transforms: c.transforms,
         transform_names: c.names,
         colors: c.colors,

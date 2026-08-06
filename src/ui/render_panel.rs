@@ -20,17 +20,33 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Render, "Render")
         .open(&mut open)
         .show(ctx, |ui| {
+            // Grouped by *persistence class*, with headings that say so. This
+            // panel stacks three different kinds of value with nothing between
+            // them admitting it: the renderer mode evaporates at exit, the
+            // point count follows the person across every scene they open, and
+            // the rest goes in the file. Nothing on screen used to distinguish
+            // a slider whose value will be in your scene tomorrow from one that
+            // won't — and that gap is what let `exposure` go years without
+            // being saved at all.
+            //
+            // Grouped within the window rather than split across windows:
+            // splitting would scatter things that belong together by task, and
+            // the task is why you opened this panel.
+            class_heading(ui, "Scene", "Saved with the scene by Ctrl+S, and undoable.");
             draw_renderer(ui, app);
-            ui.separator();
-            draw_points(ui, app);
-            ui.separator();
+            draw_point_size(ui, app);
             draw_color(ui, app);
-            ui.separator();
             draw_haze(ui, app);
-            ui.separator();
             draw_zoom_band(ui, app);
-            ui.separator();
             draw_output(ui, app);
+
+            ui.add_space(6.0);
+            class_heading(
+                ui,
+                "Preference",
+                "Follows you across scenes, saved to prefs — never written to a scene file.",
+            );
+            point_count(ui, app);
         });
 
     super::remember(ctx, app, super::WindowKey::Render);
@@ -80,19 +96,29 @@ fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if splat {
-                "Splat exposure — log-density brightness (W / Shift+W)"
+                "Splat exposure — the log-density renderer's brightness (W / Shift+W).\n\n\
+                 Saved with the scene, and undoable."
             } else {
                 "Only applies to the splat renderer"
             },
             "drag: adjust splat exposure",
         );
         if resp.changed() {
-            app.exposure = exposure.clamp(0.01, 100.0);
+            app.set_exposure(exposure);
         }
     });
 }
 
-fn draw_points(ui: &mut egui::Ui, app: &mut App) {
+/// A persistence-class heading: the one line that answers "will this be in my
+/// file tomorrow?", which the UI previously gave no way to ask.
+fn class_heading(ui: &mut egui::Ui, title: &str, tip: &str) {
+    ui.separator();
+    let resp = ui
+        .add(egui::Label::new(egui::RichText::new(title).strong().small()).sense(egui::Sense::hover()));
+    resp.on_hover_text(tip);
+}
+
+fn draw_point_size(ui: &mut egui::Ui, app: &mut App) {
     let mut size = app.point_size;
     let resp = ui.add(
         egui::Slider::new(&mut size, 0.0001..=0.02)
@@ -108,8 +134,9 @@ fn draw_points(ui: &mut egui::Ui, app: &mut App) {
     if resp.changed() {
         app.set_point_size(size);
     }
-
-    point_count(ui, app);
+    // Point count used to follow straight on from point size — two sliders that
+    // read as a pair and aren't one. It's a *preference*, so it sits under the
+    // Preference heading at the foot of the panel now.
 }
 
 /// The point-count slider, shared by this panel and the toolbar's quick
@@ -338,31 +365,110 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
 /// spelled out on the camera panel's zoom-loop row: a control that vanishes
 /// can't tell you the feature exists.
 fn draw_zoom_band(ui: &mut egui::Ui, app: &mut App) {
-    ui.collapsing("infinite zoom", |ui| {
-        if let Some(err) = app.zoom_error.clone() {
-            ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
-            return;
+    // Open by default once the scene actually has a zoom map. A disclosure
+    // should hide *elaboration*, never the headline — and with a zoom map in
+    // play, the edge guard is the headline. Compare `haze`, which gets this
+    // right: the amount is always visible and only the band's pin/near/far are
+    // folded away. This section used to hide the entire feature, with the edge
+    // guard one level in and the band size two.
+    let has_map = app.zoom_spec().is_some();
+    egui::CollapsingHeader::new("infinite zoom")
+        .default_open(has_map)
+        .show(ui, |ui| draw_zoom_body(ui, app));
+}
+
+/// Which transform carries the scale symmetry — drawn as the one-of-n choice
+/// it actually is.
+///
+/// Picking the zoom map is a **choose-one-of-n over transforms**: only one map
+/// can carry it. It used to be drawn as a lone `Button::selected` on whichever
+/// transform you happened to have selected, with the other n−1 options not on
+/// screen at all — the exact defect `ui::radio`'s module doc was written to
+/// eliminate ("a lone toggle button says 'this is on or off'"), only spread
+/// across *time* instead of space. You couldn't see the alternatives, and
+/// nothing said only one could be lit.
+///
+/// And the app has always known which transforms qualify: `zoom_action` runs
+/// `Renorm::build` per transform and produces both an enabled flag and a
+/// sentence explaining the failure. So this turns "know the theory" into "read
+/// the list", out of code that already existed. Non-qualifying rows are greyed
+/// with their reason on hover, per the house convention.
+fn draw_zoom_map_picker(ui: &mut egui::Ui, app: &mut App) {
+    let n = app.scene.transforms.len();
+    if n == 0 {
+        return;
+    }
+    let current = app.zoom_map();
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("map").strong());
+        let resp = ui.add(egui::Button::new("off").selected(current.is_none()));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Render the attractor as itself — bounded, with a largest feature. \
+             The ordinary way to render an IFS.",
+            "click: turn infinite zoom off",
+        );
+        if resp.clicked() {
+            app.set_zoom_map(None);
         }
-        let (Some(spec), Some(z)) = (app.zoom_spec().cloned(), app.zoom().copied()) else {
-            ui.add_enabled_ui(false, |ui| {
-                ui.label("no zoom map");
-            });
-            ui.label(
-                egui::RichText::new("Transforms window → right-click a map → Zoom about this")
-                    .small()
-                    .weak(),
-            );
-            return;
-        };
-        let mut next = spec.clone();
+    });
 
-        ui.label(egui::RichText::new(format!(
-            "transform {} · {:.2} octaves per period · {:.0}° twist",
-            z.map,
-            z.log_scale / std::f32::consts::LN_2,
-            z.twist_degrees()
-        )).small().weak());
+    let mut chosen: Option<usize> = None;
+    let row_h = ui.spacing().interact_size.y;
+    // Virtualized: `zoom_action` builds a `Renorm` per row, and an L-system
+    // scene has tens of thousands of transforms. Only the rows actually on
+    // screen get built.
+    egui::ScrollArea::vertical()
+        .id_salt("fracturize_zoom_map_picker")
+        .max_height((row_h * 5.0).max(90.0))
+        .auto_shrink([false, false])
+        .show_rows(ui, row_h, n, |ui, range| {
+            for i in range {
+                let zoom = super::transforms::zoom_action(app, i);
+                let label = super::transforms::transform_label(app, i);
+                let resp = ui.add_enabled(
+                    zoom.enabled,
+                    egui::Button::new(label)
+                        .selected(current == Some(i))
+                        .frame(false),
+                );
+                let resp = hinted(resp, &mut app.ui_state, zoom.tooltip, zoom.hint);
+                if resp.clicked() && current != Some(i) {
+                    chosen = Some(i);
+                }
+            }
+        });
+    if let Some(i) = chosen {
+        app.set_zoom_map(Some(i));
+    }
+    ui.label(
+        egui::RichText::new("Greyed maps can't carry the symmetry — hover one to see why.")
+            .small()
+            .weak(),
+    );
+}
 
+fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
+    if let Some(err) = app.zoom_error.clone() {
+        ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
+        return;
+    }
+
+    draw_zoom_map_picker(ui, app);
+
+    let (Some(spec), Some(z)) = (app.zoom_spec().cloned(), app.zoom().copied()) else {
+        return;
+    };
+    let mut next = spec.clone();
+
+    ui.label(egui::RichText::new(format!(
+        "{:.2} octaves per period · {:.0}° twist",
+        z.log_scale / std::f32::consts::LN_2,
+        z.twist_degrees()
+    )).small().weak());
+    {
         // The headline control, and the reason this section exists. See
         // `renorm::DEFAULT_EDGE_GUARD` — in particular for why this one is a
         // render-time weight on the picture and not a taper on the point deal,
@@ -470,5 +576,5 @@ fn draw_zoom_band(ui: &mut egui::Ui, app: &mut App) {
                 app.set_zoom_spec(next);
             }
         });
-    });
+    }
 }

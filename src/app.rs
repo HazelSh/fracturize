@@ -733,9 +733,13 @@ impl App {
         } else {
             RenderMode::Points
         };
+        // Same precedence as everything else the scene now carries: the flag
+        // beats the view, the view beats the scene file, the scene file beats
+        // the default. Before `exposure` was scene data this bottomed out at a
+        // hardcoded 1.0, and a scene tuned for 1.8 came back looking wrong.
         let exposure = exposure
             .or(view.as_ref().and_then(|v| v.exposure))
-            .unwrap_or(1.0);
+            .unwrap_or(scene.exposure);
 
         // Everything drawn into the overlay pass shares its sample count.
         let overlay_samples = OverlayTargets::choose_samples(&gpu.surface_sample_counts);
@@ -1263,8 +1267,8 @@ impl App {
                 let Some(zoom) = self.point_compute.zoom else {
                     log::warn!(
                         "A zoom loop closes under the scene's scale symmetry, and this scene \
-                         has none. Select a transform in the Transforms window and press \
-                         \"Zoom about this\" first."
+                         has none. The Render window's infinite-zoom section lists every \
+                         transform and says which of them could carry one."
                     );
                     return;
                 };
@@ -1490,6 +1494,7 @@ impl App {
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
         self.scene.haze = self.haze_amount;
+        self.scene.exposure = self.exposure;
     }
 
     pub fn save_scene(&mut self) {
@@ -1631,6 +1636,7 @@ impl App {
             color_falloff: self.color_falloff,
             color_contrast: self.color_contrast,
             haze_amount: self.haze_amount,
+            exposure: self.exposure,
         }
     }
 
@@ -1689,6 +1695,7 @@ impl App {
         self.color_falloff = snap.color_falloff;
         self.color_contrast = snap.color_contrast;
         self.haze_amount = snap.haze_amount;
+        self.exposure = snap.exposure;
         self.bump_matrix_generation();
         self.after_scene_shape_change();
     }
@@ -2533,6 +2540,12 @@ impl App {
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
+        // `haze` and `exposure` were missing from this list, so opening a scene
+        // kept whatever the *previous* scene had — `adopt_scene` (random flame,
+        // blank canvas) has always taken both. Every value the scene file
+        // carries is restored here, or the file isn't really the document.
+        self.haze_amount = scene.haze;
+        self.exposure = scene.exposure;
         // Same precedence as startup: a point count the person chose in the
         // Render window follows them across scene loads; otherwise take the
         // scene file's own.
@@ -2913,6 +2926,7 @@ impl App {
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
         self.haze_amount = scene.haze;
+        self.exposure = scene.exposure;
         self.transform_enabled = vec![true; scene.transforms.len()];
         self.selected_transform = Some(0);
         self.selected_variation = 0;
@@ -3360,9 +3374,24 @@ impl App {
     }
 
     pub fn adjust_exposure(&mut self, increase: bool) {
+        let before = self.edit_snapshot();
         let factor = if increase { 1.25 } else { 0.8 };
         self.exposure = (self.exposure * factor).clamp(0.01, 100.0);
         log::info!("Splat exposure: {:.2}", self.exposure);
+        // An edit now, because it changes what Ctrl+S writes. That's the whole
+        // rule: if it changes the file, it goes on the history stack.
+        self.commit_edit("Exposure", Some("exposure"), before);
+    }
+
+    /// Set the splat exposure directly (the Render window's slider).
+    pub fn set_exposure(&mut self, exposure: f32) {
+        let exposure = exposure.clamp(0.01, 100.0);
+        if self.exposure == exposure {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.exposure = exposure;
+        self.commit_edit("Exposure", Some("exposure"), before);
     }
 
     pub fn adjust_point_size(&mut self, increase: bool) {

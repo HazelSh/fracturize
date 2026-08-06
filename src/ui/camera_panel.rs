@@ -484,8 +484,8 @@ fn draw_loop(
         None => "Loop by descending one zoom period instead of returning to the \
                  first key, so the animation plays as a zoom that never ends.\n\n\
                  Needs a scale symmetry to close under, and this scene has none \
-                 yet. Select a transform in the Transforms window and press \
-                 \"Zoom about this\" to nominate one."
+                 yet. The Render window's infinite-zoom section lists every \
+                 transform and says which of them could carry one."
             .to_string(),
     };
 
@@ -529,7 +529,7 @@ fn draw_loop(
                     // No arrow: the UI font has no U+2192, and a missing glyph
                     // in the one line that tells you where to go is worse than
                     // a comma.
-                    "needs a zoom map — Transforms window, Zoom about this"
+                    "needs a zoom map — Render window, infinite zoom"
                 },
             )
             .show(ui);

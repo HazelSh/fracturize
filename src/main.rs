@@ -1335,6 +1335,7 @@ fn default_scene() -> Scene {
         color_falloff: 0.0,
         color_contrast: 1.0,
         haze: 0.0,
+        exposure: 1.0,
         transform_names: vec![None; 4],
         colors: colors.to_vec(),
         transforms: [

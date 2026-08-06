@@ -58,6 +58,9 @@ pub struct UiState {
     /// its right-click context menu), and its in-progress text buffer. Only
     /// one row can be mid-rename at a time.
     pub renaming_transform: Option<(usize, String)>,
+    /// Set for one frame by the inspector's Rename button, asking the pane's
+    /// own Name field to take the caret (see `transforms::draw_identity`).
+    pub focus_name_field: bool,
     /// A transform's context menu, opened by right-clicking its *gizmo* in the
     /// viewport: the transform index, and where to draw the menu (filled in on
     /// the first frame from egui's pointer position, then held so the menu
@@ -110,6 +113,7 @@ impl UiState {
             status_hint: None,
             trs_cache: None,
             renaming_transform: None,
+            focus_name_field: false,
             transform_menu: None,
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,

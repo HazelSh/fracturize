@@ -325,10 +325,17 @@ fn draw_tab(
         tab_resp,
         &mut app.ui_state,
         row.summary.as_str(),
-        "click: select this transform · right-click: menu",
+        "click: select · double-click: rename · right-click: menu",
     );
     if tab_resp.clicked() {
         app.select_transform(Some(i));
+    }
+    // Double-click to rename: Blender's outliner, every file manager, every
+    // editor's tab bar. Free here, since the name is drawn on this very row —
+    // which is the whole reason the gesture is universal.
+    if tab_resp.double_clicked() {
+        app.select_transform(Some(i));
+        app.ui_state.renaming_transform = Some((i, row.name.clone()));
     }
     tab_resp.context_menu(|ui| {
         if context_menu(ui, app, i) {
@@ -403,13 +410,23 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
 /// Shared by the context menu and the detail pane's action row: the same
 /// operation wherever you find the transform, rather than two copies of a
 /// fiddly `Renorm::build` check that drift apart.
-struct ZoomAction {
+pub struct ZoomAction {
     /// Already the scene's zoom map, so clicking clears it
-    is_zoom: bool,
+    pub is_zoom: bool,
     /// The map renormalizes, or is already the one in use
-    enabled: bool,
-    tooltip: String,
-    hint: &'static str,
+    pub enabled: bool,
+    pub tooltip: String,
+    pub hint: &'static str,
+}
+
+/// A transform's display name, or `T<i>` when it hasn't got one.
+pub fn transform_label(app: &App, i: usize) -> String {
+    app.scene
+        .transform_names
+        .get(i)
+        .and_then(|n| n.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("T{}", i))
 }
 
 /// The button's label. Constant, because "this is the one" is carried by
@@ -418,7 +435,7 @@ struct ZoomAction {
 /// says *selected* more directly than a character does anyway.
 const ZOOM_LABEL: &str = "Zoom about this";
 
-fn zoom_action(app: &App, i: usize) -> ZoomAction {
+pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
     let is_zoom = app.zoom_map() == Some(i);
     let built = crate::renorm::Renorm::build(
         &crate::renorm::ZoomSpec { map: i, ..Default::default() },
@@ -502,22 +519,23 @@ fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             app.toggle_transform_enabled(idx);
         }
 
+        // This used to open an inline editor over in the *rail*, six rows away
+        // from the Name field sitting right below it — two visible rename
+        // controls in one window that put your caret in different places, which
+        // is worse than either alone. It focuses the pane's own field now, so
+        // the button and the field are one affordance rather than two. The
+        // rail's inline editor is still there, reached by double-clicking a tab
+        // where the name is actually drawn.
         let resp = ui.add(egui::Button::new("Rename").small());
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Rename this transform. The field opens on its tab in the rail, where \
-             the name lives.",
+            "Put the caret in this transform's Name field, below. \
+             Double-clicking its tab in the rail edits it there instead.",
             "click: rename this transform",
         );
         if resp.clicked() {
-            let name = app
-                .scene
-                .transform_names
-                .get(idx)
-                .and_then(|n| n.clone())
-                .unwrap_or_default();
-            app.ui_state.renaming_transform = Some((idx, name));
+            app.ui_state.focus_name_field = true;
         }
 
         let zoom = zoom_action(app, idx);
@@ -623,6 +641,13 @@ impl TrsCache {
     }
 }
 
+/// One of the inspector's four block headings.
+fn block_heading(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.separator();
+    ui.label(egui::RichText::new(title).strong().small());
+}
+
 fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     let Some(idx) = app.selected_transform() else {
         ui.add_space(4.0);
@@ -700,6 +725,20 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     let mut cache = app.ui_state.trs_cache.take().unwrap();
     let mut editing = false;
 
+    // Four blocks with headings, rather than fifteen-odd controls in a flat
+    // stack with two anonymous rules doing all the grouping work.
+    //
+    //   Shape       position, rotation, scale — already together
+    //   Behaviour   weight *and* variations: what this map does in the chaos
+    //               game. The two controls that most define the transform, and
+    //               they used to sit at opposite ends with colour in between.
+    //   Appearance  colour, colour value, colour speed
+    //   Identity    name
+    //
+    // Headings rather than disclosure sections: `todo.txt` is explicit that
+    // hidden bits are the problem and not the solution, and that instinct is
+    // right. Separate with rules and headings; don't close things.
+    block_heading(ui, "Shape");
     if cache.faithful {
         draw_trs_fields(ui, app, idx, &mut cache, &mut editing);
     } else {
@@ -709,10 +748,15 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     cache.editing = editing;
     app.ui_state.trs_cache = Some(cache);
 
-    ui.separator();
-    draw_weight_color(ui, app, idx);
-    ui.separator();
+    block_heading(ui, "Behaviour");
+    draw_weight(ui, app, idx);
     draw_variations(ui, app, idx);
+
+    block_heading(ui, "Appearance");
+    draw_appearance(ui, app, idx);
+
+    block_heading(ui, "Identity");
+    draw_identity(ui, app, idx);
 }
 
 fn drag_row(
@@ -957,7 +1001,13 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
     }
 }
 
-fn draw_weight_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
+/// Weight — how often the chaos game picks this map.
+///
+/// Sits with the variations, under **Behaviour**, because those two are the
+/// pair that most define what a transform *does*: one says how often it's
+/// chosen, the other says what it does when it is. They used to sit at opposite
+/// ends of the pane with the entire colour block between them.
+fn draw_weight(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let mut weight = app.scene.transforms[idx].weight;
     ui.horizontal(|ui| {
         ui.label("Weight");
@@ -971,14 +1021,16 @@ fn draw_weight_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Chaos-game selection weight (, / .)",
+            "How often the chaos game picks this map, relative to the others (, / .)",
             "drag: adjust weight · click: type exact value",
         );
         if resp.changed() {
             app.set_transform_weight(idx, weight);
         }
     });
+}
 
+fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     // In palette mode the per-transform RGB is not rendered at all — the
     // gradient owns the colours — so showing a swatch there would be a
     // control that does nothing. What matters instead is *where in the
@@ -1057,7 +1109,13 @@ fn draw_weight_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             app.set_transform_explicit_color_speed(idx, Some(speed));
         }
     }
+}
 
+/// The egui id of the inspector's Name field, so the action row's Rename button
+/// can put the caret in it (see `draw_transform_actions`).
+pub const NAME_FIELD_ID: &str = "fracturize_inspector_name";
+
+fn draw_identity(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let mut name = app
         .scene
         .transform_names
@@ -1066,15 +1124,27 @@ fn draw_weight_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         .unwrap_or_default();
     ui.horizontal(|ui| {
         ui.label("Name");
-        let resp = ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0));
+        let id = egui::Id::new(NAME_FIELD_ID);
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .id(id)
+                .desired_width(140.0)
+                .hint_text("unnamed"),
+        );
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Label shown in the list and the gizmo overlay",
+            "Label shown in the list and the gizmo overlay. Double-clicking the \
+             transform's tab in the rail edits it there instead.",
             "type: rename this transform",
         );
         if resp.changed() {
             app.rename_transform(idx, if name.trim().is_empty() { None } else { Some(name.clone()) });
+        }
+        // The action row's Rename button asks for the caret to land here.
+        if app.ui_state.focus_name_field {
+            app.ui_state.focus_name_field = false;
+            resp.request_focus();
         }
     });
 }
