@@ -8,15 +8,23 @@
 //! loop and duration controls either way, and editing any of them is what turns
 //! the default into scene data.
 //!
-//! None of the camera controls are history entries — per the Phase 3 design,
-//! moving the camera isn't an edit to the artwork. Path keypoints *are* scene
-//! data, but they follow the keyboard paths (Y / Shift+Y / Ctrl+Y), which
-//! aren't history-wired either; Ctrl+S is what makes them permanent.
+//! Moving the camera isn't an edit to the artwork, so the framing controls are
+//! not history entries — nobody expects Ctrl+Z to un-orbit a camera, and a drag
+//! produces thousands of intermediate states, none of which are decisions.
+//! Path keypoints are the other side of that line: adding one is a discrete,
+//! deliberate authoring act that changes what Ctrl+S writes, so every one of
+//! the six path operations goes through `App::commit_edit`.
 
 use crate::app::App;
 use crate::camera::OrbitStyle;
 
 use super::hints::hinted;
+use super::num;
+
+/// Character budget for the `yaw · pitch · focus` readout.
+const FRAMING_CHARS: usize = 46;
+/// Budget for a `N. d=X.XX yaw=X.XX pitch=X.XX` keypoint row.
+const PATH_KEY_CHARS: usize = 36;
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     let mut open = app.ui_state.panels.camera_open;
@@ -99,7 +107,13 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
 
     ui.horizontal(|ui| {
         let mut distance = app.camera.distance;
-        let resp = ui.add(
+        // `distance` is 0.05..=100.0, so "distance: 100.00" is the widest it
+        // gets — 16 characters, and the field is that wide whatever's in it, so
+        // the roll field and the level button beside it hold still.
+        let resp = num::drag(
+            ui,
+            16,
+            2,
             egui::DragValue::new(&mut distance)
                 .speed(0.02)
                 .range(0.05..=100.0)
@@ -125,13 +139,15 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         // its own, so the field greys out rather than scrambling the framing.
         let faithful = app.camera.orientation.chart_is_faithful();
         let mut roll_deg = app.camera.chart().roll.degrees();
-        let resp = ui.add_enabled(
-            faithful,
-            egui::DragValue::new(&mut roll_deg)
-                .speed(0.5)
-                .suffix("°")
-                .prefix("roll: "),
-        );
+        let resp = ui.add_enabled_ui(faithful, |ui| {
+            num::drag(
+                ui,
+                14,
+                1,
+                egui::DragValue::new(&mut roll_deg).speed(0.5).suffix("°").prefix("roll: "),
+            )
+        })
+        .inner;
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -159,18 +175,20 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 
-    ui.label(
-        egui::RichText::new(format!(
-            "yaw {:.2} · pitch {:.2} · focus ({:.2}, {:.2}, {:.2})",
-            app.camera.chart().yaw.radians(),
-            app.camera.chart().pitch.radians(),
-            app.camera.focus.x,
-            app.camera.focus.y,
-            app.camera.focus.z,
-        ))
-        .small()
-        .weak(),
+    // Five signed values that all cross zero while you orbit — the single
+    // worst vibration source outside the status bar, because every one of them
+    // flicks a minus sign in and out at whatever rate you're dragging.
+    let chart = app.camera.chart();
+    let focus = app.camera.focus;
+    let text = format!(
+        "yaw {} · pitch {} · focus ({}, {}, {})",
+        num::cell(chart.yaw.radians(), 2, 5),
+        num::cell(chart.pitch.radians(), 2, 5),
+        num::cell(focus.x, 2, 6),
+        num::cell(focus.y, 2, 6),
+        num::cell(focus.z, 2, 6),
     );
+    num::small_cell(ui, &text, FRAMING_CHARS);
 }
 
 fn draw_views(ui: &mut egui::Ui, app: &mut App) {
@@ -325,15 +343,16 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             for (i, (d, yaw, pitch)) in keys.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}. d={:.2} yaw={:.2} pitch={:.2}",
+                    num::small_cell(
+                        ui,
+                        &format!(
+                            "{:>3}. d={} yaw={} pitch={}",
                             i + 1,
-                            d,
-                            yaw,
-                            pitch
-                        ))
-                        .small(),
+                            num::cell(*d, 2, 6),
+                            num::cell(*yaw, 2, 6),
+                            num::cell(*pitch, 2, 6),
+                        ),
+                        PATH_KEY_CHARS,
                     );
                     if !authored {
                         return;

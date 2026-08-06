@@ -26,6 +26,7 @@ pub mod gradient;
 pub mod hints;
 pub mod icons;
 pub mod labels;
+pub mod num;
 pub mod radio;
 pub mod render_job;
 pub mod render_panel;

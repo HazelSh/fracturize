@@ -721,6 +721,11 @@ fn drag_row(
     label: &str,
     fields: &mut [f32; 3],
     speed: f64,
+    // `decimals`: how many places are shown, fixed, so the digit count can't
+    // change under the drag. `chars`: the character budget for the number,
+    // picked from the range the field can actually take.
+    decimals: usize,
+    chars: usize,
     suffix: &str,
     tooltip: &str,
     hint: &str,
@@ -730,7 +735,16 @@ fn drag_row(
     ui.horizontal(|ui| {
         ui.label(label);
         for (axis, v) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
-            let resp = ui.add(
+            // Three content-sized DragValues in a horizontal used to be the
+            // most hostile readout in the app: dragging **x** through zero
+            // changed x's width and shoved **y** and **z** sideways *while your
+            // pointer was on the control*. It moved the thing you were using,
+            // mid-gesture. Fixed cells, so the row's geometry doesn't depend on
+            // its contents at all.
+            let resp = super::num::drag(
+                ui,
+                chars,
+                decimals,
                 egui::DragValue::new(v)
                     .speed(speed)
                     .prefix(format!("{}: ", axis))
@@ -753,6 +767,10 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         "Position",
         &mut cache.position,
         0.01,
+        // Positions live in roughly -9..9 in every shipped scene; three
+        // decimals is what the gizmo drag resolves to.
+        3,
+        7,
         "",
         "Transform position (drag the gizmo's origin dot)",
         "drag: adjust position · click: type exact value",
@@ -767,6 +785,9 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         "Rotation",
         &mut cache.rotation_deg,
         0.5,
+        // Euler degrees: -180.0 to 180.0.
+        1,
+        6,
         "°",
         "Transform rotation, XYZ Euler degrees (drag an outer gizmo edge)",
         "drag: adjust rotation · click: type exact value",
@@ -791,7 +812,10 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         let contraction = app.scene.transforms[idx].contraction();
         let resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(format!("×{:.3}", contraction)).weak().small(),
+                egui::RichText::new(format!("×{}", super::num::cell(contraction, 3, 6)))
+                    .monospace()
+                    .weak()
+                    .small(),
             )
             .sense(egui::Sense::hover()),
         );
@@ -808,7 +832,10 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
             // Negative values are allowed: they mirror the transform, which
             // reads back as a det<0 matrix and routes the inspector to the
             // matrix (non-TRS) view — intentional, not an error.
-            let resp = ui.add(
+            let resp = super::num::drag(
+                ui,
+                10,
+                3,
                 egui::DragValue::new(v)
                     .speed(0.005)
                     .prefix(format!("{}: ", label))
@@ -935,10 +962,11 @@ fn draw_weight_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     ui.horizontal(|ui| {
         ui.label("Weight");
         let speed = (weight.abs().max(0.01) * 0.05) as f64;
-        let resp = ui.add(
-            egui::DragValue::new(&mut weight)
-                .speed(speed)
-                .range(0.01..=100.0),
+        let resp = super::num::drag(
+            ui,
+            6,
+            2,
+            egui::DragValue::new(&mut weight).speed(speed).range(0.01..=100.0),
         );
         let resp = hinted(
             resp,
@@ -1103,7 +1131,14 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                 }
 
                 let mut v = weights[slot];
-                let resp = ui.add(egui::DragValue::new(&mut v).speed(0.05).range(-4.0..=4.0));
+                // Apophysis-style negative weights mean this one crosses zero
+                // constantly, and it sits in a row with a remove button.
+                let resp = super::num::drag(
+                    ui,
+                    5,
+                    2,
+                    egui::DragValue::new(&mut v).speed(0.05).range(-4.0..=4.0),
+                );
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,

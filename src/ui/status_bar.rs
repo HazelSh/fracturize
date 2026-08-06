@@ -6,9 +6,24 @@
 use crate::app::App;
 
 use super::hints::HINT_VIEWPORT;
+use super::num;
 
 const BAR_HEIGHT: f32 = 22.0;
 const SPARKLINE_SIZE: egui::Vec2 = egui::vec2(100.0, 16.0);
+
+/// Character budget for the `FPS · ms · p99 · ui · wait` cluster: the fixed
+/// text plus five numeric cells of 3+5+5+5+5.
+const FPS_CLUSTER_CHARS: usize = 46;
+/// Budget for `X.XM/Y.YM pts (warming)` — sized for the parenthetical, which
+/// otherwise appears and disappears during every warmup and reflows the rest
+/// of the bar with it.
+const POINTS_CHARS: usize = 26;
+/// Budget for `zoom +NN`.
+const ZOOM_CHARS: usize = 8;
+/// Budget for `(drawing X.XM)`.
+const DRAWING_CHARS: usize = 17;
+/// Budget for `render <phase>: NNN% (paused)`.
+const JOB_CHARS: usize = 34;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     // Resolve the left-hand hint per the plan's three-tier precedence:
@@ -31,12 +46,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (valid, capacity, warming) = app.point_stats();
-                    let resp = ui.label(format!(
-                        "{:.1}M/{:.1}M pts{}",
-                        valid as f32 / 1e6,
-                        capacity as f32 / 1e6,
-                        if warming { " (warming)" } else { "" },
-                    ));
+                    let resp = num::text_cell(
+                        ui,
+                        &format!(
+                            "{}M/{}M pts{}",
+                            num::cell(valid as f32 / 1e6, 1, 5),
+                            num::cell(capacity as f32 / 1e6, 1, 5),
+                            if warming { " (warming)" } else { "" },
+                        ),
+                        POINTS_CHARS,
+                    );
                     // When the attractor has collapsed the renderer draws a
                     // fraction of the buffer (see `App::drawn_points`). Say so
                     // — a point count that doesn't match what's on screen is
@@ -51,10 +70,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                              normalized, so this is invisible except in the frame rate.",
                             drawn as f32 / 1e6,
                         ));
-                        ui.label(
-                            egui::RichText::new(format!("(drawing {:.1}M)", drawn as f32 / 1e6))
-                                .weak()
-                                .small(),
+                        num::text_cell(
+                            ui,
+                            &format!("(drawing {}M)", num::cell(drawn as f32 / 1e6, 1, 5)),
+                            DRAWING_CHARS,
                         );
                     }
 
@@ -71,11 +90,18 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         .on_hover_text(err);
                     } else if let Some(z) = app.zoom() {
                         ui.add_space(10.0);
-                        ui.label(format!(
-                            "zoom {}{}",
-                            if app.zoom_level >= 0 { "+" } else { "" },
-                            app.zoom_level
-                        ))
+                        num::text_cell(
+                            ui,
+                            &format!(
+                                "{:>7}",
+                                format!(
+                                    "zoom {}{}",
+                                    if app.zoom_level >= 0 { "+" } else { "" },
+                                    app.zoom_level
+                                ),
+                            ),
+                            ZOOM_CHARS,
+                        )
                         .on_hover_text(format!(
                             "Infinite zoom about transform {} — {:.2} octaves per \
                              period, {:.0}x total.\n\n\
@@ -95,12 +121,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     // it's using the GPU this readout is measuring.
                     if let Some(job) = app.job() {
                         let text = match job.fraction() {
-                            Some(f) => format!("render {}: {:.0}%", job.phase, f * 100.0),
+                            Some(f) => format!("render {}: {}%", job.phase, num::cell(f * 100.0, 0, 3)),
                             None => format!("render {}", job.phase),
                         };
                         let text = if job.paused() { format!("{} (paused)", text) } else { text };
                         ui.add_space(10.0);
-                        ui.label(egui::RichText::new(text).color(ui.visuals().warn_fg_color));
+                        // A percentage climbing 9% -> 10% -> 100% used to widen
+                        // this label twice during every render, shoving the
+                        // sparkline and the whole performance cluster leftwards
+                        // while you watched them.
+                        num::text_cell(ui, &text, JOB_CHARS);
                         ui.spinner();
                     }
 
@@ -111,14 +141,24 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     ui.add_space(6.0);
                     let (fps, avg_ms, p99_ms) = app.fps_stats();
                     let wait_ms = app.present_wait_ms();
-                    ui.label(format!(
-                        "{:.0} FPS · {:.1}ms · p99 {:.1}ms · ui {:.1}ms · wait {:.1}ms",
-                        fps,
-                        avg_ms,
-                        p99_ms,
-                        app.ui_ms(),
-                        wait_ms,
-                    ))
+                    // Five live numbers, several times a second, inside a
+                    // `right_to_left` layout — where widgets are placed from
+                    // the right edge, so a width change in *any* of them shifts
+                    // everything to its left: the sparkline, the zoom counter,
+                    // the point stats, the variation readout. This was the
+                    // continuous source of the whole bar's vibration. Each
+                    // number now sits in a declared character budget, in a
+                    // monospace face, in a widget sized to the budget rather
+                    // than to the string.
+                    let text = format!(
+                        "{} FPS · {}ms · p99 {}ms · ui {}ms · wait {}ms",
+                        num::cell(fps, 0, 3),
+                        num::cell(avg_ms, 1, 5),
+                        num::cell(p99_ms, 1, 5),
+                        num::cell(app.ui_ms(), 1, 5),
+                        num::cell(wait_ms, 1, 5),
+                    );
+                    num::text_cell(ui, &text, FPS_CLUSTER_CHARS)
                     .on_hover_text(
                         "ui: CPU cost of building this frame's panels.\n\
                          wait: time parked waiting for the display to take the \
