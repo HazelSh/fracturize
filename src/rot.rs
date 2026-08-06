@@ -421,6 +421,16 @@ impl Angle {
 }
 
 impl Turn1D {
+    /// A displacement of this many radians.
+    ///
+    /// Wanted by rotation snapping, which quantizes a turn that has already
+    /// been measured — the alternative, quantizing the two angles before
+    /// subtracting, snaps the *grab offset* into the result and so makes a
+    /// snapped drag depend on exactly where on the edge you took hold of it.
+    pub fn from_radians(r: f32) -> Self {
+        Self(r)
+    }
+
     pub fn radians(self) -> f32 {
         self.0
     }

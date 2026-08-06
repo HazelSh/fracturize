@@ -39,7 +39,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Camera paths",
         &[
             ("Y / Shift+Y", "add / remove a camera path keypoint of this scene's own", Some(HelpAction::PathKey)),
-            ("Ctrl+Y", "toggle camera path loop", None),
+            ("", "how it loops is the Camera window's four-way radio", None),
             ("", "no keypoints = a full orbit around the framing, flown the same way", None),
         ],
     ),
@@ -50,7 +50,9 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("drag on-axis edge", "move along that axis", None),
             ("drag outer edge", "rotate around third axis", None),
             ("ctrl+drag gizmo", "uniform scale", None),
-            ("scroll on gizmo", "adjust that transform's weight", None),
+            ("shift during a gizmo drag", "fine: a fifth of the travel", None),
+            ("alt+drag outer edge", "snap rotation to 15°", None),
+            ("alt+scroll on gizmo", "adjust that transform's weight", None),
             ("A / Shift+A", "duplicate selected / add new transform", Some(HelpAction::AddTransform)),
             ("Del", "delete selected transform", Some(HelpAction::DeleteTransform)),
             ("Enter", "enable / disable selected transform", Some(HelpAction::ToggleSelected)),
@@ -89,24 +91,28 @@ const SECTIONS: &[(&str, &[Row])] = &[
         &[
             ("U / Shift+U", "random mutation / undo it", Some(HelpAction::Mutate)),
             ("Ctrl+Z / Ctrl+Shift+Z", "undo / redo any edit", Some(HelpAction::Undo)),
+            ("Ctrl+Y", "redo (the Windows binding, for Apophysis fingers)", None),
             ("X / Shift+X", "chaos traces: show+re-roll / hide", Some(HelpAction::Traces)),
         ],
     ),
     (
         "Files",
         &[
-            ("B", "browse + load scenes", Some(HelpAction::Browse)),
+            ("Ctrl+O / B", "browse + load scenes", Some(HelpAction::Browse)),
+            ("Ctrl+N", "start over on a blank canvas (undoable)", Some(HelpAction::NewScene)),
             ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
             ("Ctrl+Shift+S", "save scene as… (fork it under a new name)", None),
             ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
+            ("P", "render job… (stills and animation)", None),
+            ("Ctrl+Q", "quit (asks first if the scene has unsaved edits)", Some(HelpAction::Quit)),
         ],
     ),
     (
         "Overlays",
         &[
-            ("H / ?", "toggle this window", Some(HelpAction::ToggleHelp)),
+            ("H / ? / F1", "toggle this window", Some(HelpAction::ToggleHelp)),
             ("G", "toggle transform gizmos + labels", Some(HelpAction::ToggleGizmos)),
-            ("Esc", "quit", None),
+            ("Esc", "cancel: close a menu, a dialog, the browser, or the selection", None),
         ],
     ),
 ];

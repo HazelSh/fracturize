@@ -100,10 +100,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 /// The scene's name and author: a readout that opens an editor for itself.
 fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
     let author = app.scene.author.trim().to_string();
+    // The same `*` the window title carries, for the same reason: whether
+    // there is work on screen that isn't on disk is worth being able to see
+    // without opening anything.
+    let dirty = if app.is_dirty() { "*" } else { "" };
     let label = if author.is_empty() {
-        app.scene.name.clone()
+        format!("{}{}", dirty, app.scene.name)
     } else {
-        format!("{} — {}", app.scene.name, author)
+        format!("{}{} — {}", dirty, app.scene.name, author)
     };
     let resp = ui.add(
         egui::Button::new(egui::RichText::new(label).weak())

@@ -20,6 +20,7 @@ use crate::prefs::PanelPrefs;
 
 pub mod browser;
 pub mod camera_panel;
+pub mod confirm;
 pub mod explore;
 pub mod gradient;
 pub mod hints;
@@ -85,6 +86,11 @@ pub struct UiState {
     /// something to act on, and updated by `App::set_palette_stop_at` when a
     /// drag reorders the stops out from under the index.
     pub palette_stop: Option<usize>,
+    /// Click-wait-click state for the unsaved-changes dialog's Discard button
+    /// (see `confirm::Arm`). Lives here rather than in the dialog because the
+    /// dialog is redrawn from scratch every frame and the arm has to outlive
+    /// that; reset whenever the dialog isn't up.
+    pub discard_arm: confirm::Arm,
     /// The control point currently being dragged, followed through reorders.
     ///
     /// Stops are kept sorted, so dragging one past its neighbour swaps their
@@ -110,6 +116,7 @@ impl UiState {
             render_job: render_job::RenderJobForm::default(),
             palette_stop: None,
             palette_drag: None,
+            discard_arm: confirm::Arm::default(),
         }
     }
 }
@@ -293,6 +300,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     render_job::draw(&ctx, app);
     step("render_job", t, &mut timings);
+    let t = std::time::Instant::now();
+    // Last of the dialogs, and modal: it draws over everything else, which is
+    // the point — it stands between the person and work they can't get back.
+    confirm::draw(&ctx, app);
+    step("confirm", t, &mut timings);
     let t = std::time::Instant::now();
     status_bar::draw(ui, app);
     step("status_bar", t, &mut timings);

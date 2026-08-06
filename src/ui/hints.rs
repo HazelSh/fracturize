@@ -10,13 +10,13 @@ use super::UiState;
 
 /// Dragging a gizmo's origin dot
 pub const HINT_ORIGIN: &str =
-    "drag: move in view plane · ctrl+drag: uniform scale · scroll: chaos weight";
+    "drag: move in view plane (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
 /// Dragging an origin→axis gizmo edge
 pub const HINT_AXIS: &str =
-    "drag: slide along axis · ctrl+drag: uniform scale · scroll: chaos weight";
+    "drag: slide along axis (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
 /// Dragging an outer gizmo edge
 pub const HINT_ROT_EDGE: &str =
-    "drag: rotate around axis · ctrl+drag: uniform scale · scroll: chaos weight";
+    "drag: rotate around axis (shift: fine, alt: snap 15°) · alt+scroll: chaos weight";
 /// Nothing hinted, nothing hovered: the bare-viewport default
 pub const HINT_VIEWPORT: &str =
     "drag: orbit · shift/middle-drag: pan · right-drag: roll · scroll: zoom";

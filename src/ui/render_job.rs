@@ -571,7 +571,7 @@ fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
 
 fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // Read what the display needs before taking `&mut` for the buttons.
-    let (phase, fraction, elapsed, remaining, paused, cancelling, armed, log, out) = {
+    let (phase, fraction, elapsed, remaining, paused, cancelling, cancel_label, cancel_hint, log, out) = {
         let job = app.job().expect("caller checked");
         (
             job.phase,
@@ -580,7 +580,8 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             job.remaining_secs(),
             job.paused(),
             job.cancelling(),
-            job.cancel_armed(),
+            job.cancel_arm.label("Cancel"),
+            job.cancel_arm.hint("Cancel"),
             job.log.clone(),
             job.params.out_path.clone(),
         )
@@ -643,24 +644,17 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             }
         }
 
-        let label = if cancelling {
-            "Cancelling…"
-        } else if armed {
-            "Cancel? click again"
+        // Three discrete labels — `Cancel` → `Cancel? wait…` → `Cancel? click
+        // again` — rather than a fill animation, because this button is most
+        // often reached for on a box that has stopped compositing, and a label
+        // change still reads at one frame per second where a wipe does not.
+        let (label, tip) = if cancelling {
+            ("Cancelling…".to_string(), "The job is stopping. Nothing is written.".to_string())
         } else {
-            "Cancel"
+            (cancel_label, cancel_hint)
         };
         let resp = ui.add_enabled(!cancelling, egui::Button::new(label));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            if armed {
-                "Click again to throw the job away. Nothing is written."
-            } else {
-                "Two clicks to stop — a long render is expensive to lose to a misclick"
-            },
-            "click: cancel the job (twice)",
-        );
+        let resp = hinted(resp, &mut app.ui_state, tip, "click twice: cancel the job");
         if resp.clicked() {
             if let Some(job) = app.job_mut() {
                 job.click_cancel();

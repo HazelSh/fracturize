@@ -38,10 +38,11 @@ pub struct JobHandle {
     pub done: u32,
     pub total: u32,
     pub log: Vec<String>,
-    /// When the first click of the two-step cancel landed. A long render is
-    /// expensive to lose to a misclick, so the button arms rather than fires,
-    /// and disarms itself if it isn't confirmed.
-    pub cancel_armed_at: Option<Instant>,
+    /// The two-step cancel's arm state. A long render is expensive to lose to
+    /// a misclick, so the button arms rather than fires — and, crucially,
+    /// refuses the second click until a wall-clock second has passed, so a
+    /// double-click can't span the guard. See `ui::confirm::Arm`.
+    pub cancel_arm: crate::ui::confirm::Arm,
     /// When the current pause began, and how long previous pauses lasted.
     ///
     /// Kept so the time estimate can run on *working* time. Without it,
@@ -51,10 +52,6 @@ pub struct JobHandle {
     paused_at: Option<Instant>,
     paused_total: Duration,
 }
-
-/// How long an armed cancel stays armed before it goes back to being a button
-/// that does nothing dangerous.
-pub const CANCEL_ARM_WINDOW: Duration = Duration::from_secs(4);
 
 impl JobHandle {
     pub fn paused(&self) -> bool {
@@ -81,21 +78,18 @@ impl JobHandle {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Whether the cancel button is currently armed (first click landed,
-    /// still inside the window).
-    pub fn cancel_armed(&self) -> bool {
-        self.cancel_armed_at
-            .is_some_and(|t| t.elapsed() < CANCEL_ARM_WINDOW)
-    }
-
-    /// First click arms, second confirms. A cancelled job also un-pauses, or
-    /// it would sit in the pause loop never noticing.
+    /// First click arms, a later click confirms. A cancelled job also
+    /// un-pauses, or it would sit in the pause loop never noticing.
+    ///
+    /// The wait is deliberately evaluated here, at click time, against the wall
+    /// clock — not against whether the button has been *drawn* as ready. The
+    /// reason you are usually reaching for this button is that the machine has
+    /// run out of resources and stopped repainting; the click has to be
+    /// accepted on its own merits regardless of whether the UI caught up.
     pub fn click_cancel(&mut self) {
-        if self.cancel_armed() {
+        if self.cancel_arm.click() {
             self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             self.set_paused(false);
-        } else {
-            self.cancel_armed_at = Some(Instant::now());
         }
     }
 
@@ -371,6 +365,8 @@ pub enum HelpAction {
     /// there's one motion.
     CameraMotion,
     PathKey,
+    NewScene,
+    Quit,
 }
 
 /// Which point renderer draws the fractal. Points is the classic opaque
@@ -396,6 +392,12 @@ pub enum FrameOutcome {
     /// Surface needs reconfiguring (lost/outdated).
     Reconfigure,
 }
+
+/// How far the pointer must travel, in physical pixels, before a button-down
+/// becomes a drag rather than a click. Three to four pixels is what every other
+/// drag-capable surface uses, and it is enough to absorb the twitch a hand
+/// makes while clicking a mouse button.
+const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// What a mouse drag is currently doing
 #[derive(Clone, Copy, Debug)]
@@ -449,10 +451,34 @@ pub struct App {
     // Mouse state
     cursor: (f32, f32),
     drag: Drag,
+    /// Where the pointer was when the button went down, and whether it has
+    /// since travelled far enough to count as a drag rather than a click.
+    ///
+    /// Without this a one-pixel twitch during a click rotates the view, which
+    /// is what every drag-capable surface in the world uses a dead zone to
+    /// prevent — and it's the prerequisite for click-to-deselect, since telling
+    /// a click from a drag is exactly the question.
+    drag_origin: (f32, f32),
+    drag_moved: bool,
+    /// Shift-for-fine during a gizmo drag: the virtual-cursor position and the
+    /// real cursor position at the moment the modifier last changed, plus the
+    /// state currently in force.
+    ///
+    /// Held as an anchor pair rather than a plain gain so pressing or releasing
+    /// Shift *mid-drag* doesn't teleport the thing you're dragging — the new
+    /// gain applies from where the pointer is now, which is what every tool
+    /// that has this does and what makes it usable as a mid-gesture correction
+    /// rather than a decision you make before you start.
+    fine_anchor: (f32, f32),
+    fine_from: (f32, f32),
+    fine_active: bool,
     /// Gizmo part under the cursor (when not dragging)
     hovered: Option<crate::pick::GizmoHit>,
     pub shift_held: bool,
     pub ctrl_held: bool,
+    /// Alt: the modifier that turns scroll from navigation into an edit (see
+    /// `on_scroll`), and rotation snapping on a gizmo drag.
+    pub alt_held: bool,
 
     pub show_gizmos: bool,
     pub show_help: bool,
@@ -592,6 +618,26 @@ pub struct App {
     /// Snapshot taken at gizmo-grab time, consumed (and committed) at
     /// release — a drag is a single history entry, not one per frame.
     gizmo_drag_before: Option<EditSnapshot>,
+
+    /// Whether the scene has edits that haven't been written to disk.
+    ///
+    /// The cheapest honest version of the question: set by `commit_edit` (the
+    /// one choke point every scene-mutating path already goes through),
+    /// cleared by a successful save and by opening a different scene. It
+    /// drives the window title's `*` marker and the unsaved-changes prompt.
+    scene_dirty: bool,
+    /// Last string handed to `Window::set_title`, so the title is only pushed
+    /// to the window manager when it actually changes (see
+    /// `refresh_window_title`).
+    window_title: String,
+    /// A destructive action waiting on the unsaved-changes prompt
+    /// (`ui::confirm`). `Some` means the modal is up and the action happens
+    /// only if the person says so.
+    pub pending_action: Option<crate::ui::confirm::Pending>,
+    /// Set when the app should leave. The event loop owns the actual exit, so
+    /// quitting from inside a UI frame — the Save/Discard buttons of the
+    /// unsaved-changes prompt — has to ask rather than do.
+    pub exit_requested: bool,
 
     depth_texture: wgpu::Texture,
 
@@ -749,9 +795,15 @@ impl App {
             frame_dt: 1.0 / 60.0,
             cursor: (0.0, 0.0),
             drag: Drag::None,
+            drag_origin: (0.0, 0.0),
+            drag_moved: false,
+            fine_anchor: (0.0, 0.0),
+            fine_from: (0.0, 0.0),
+            fine_active: false,
             hovered: None,
             shift_held: false,
             ctrl_held: false,
+            alt_held: false,
             show_gizmos: true,
             // Env override lets automated captures verify the help overlay
             show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
@@ -803,6 +855,10 @@ impl App {
             browser_selected: 0,
             history: History::new(),
             gizmo_drag_before: None,
+            scene_dirty: false,
+            window_title: String::new(),
+            pending_action: None,
+            exit_requested: false,
             depth_texture,
             screenshot_texture,
             screenshot_depth,
@@ -1065,28 +1121,11 @@ impl App {
         self.after_path_edit(was_default);
     }
 
-    /// Toggle whether the path loops back to its first key (Ctrl+Y).
-    ///
-    /// A path that closes under the zoom symmetry is already a loop, and a
-    /// different one: returning to the first key would undo the descent that
-    /// makes it endless. Say so rather than silently doing the other thing,
-    /// and leave the scene's choice alone. The Camera window's radio *can*
-    /// make that swap, because there you can see what you're picking between.
-    pub fn toggle_path_closed(&mut self) {
-        if let Some(z) = self.camera_path().loops.zoom() {
-            log::info!(
-                "Camera path already loops under the zoom symmetry ({} period(s) per \
-                 loop). Turn that off first if you want a key-to-key loop instead.",
-                z.periods
-            );
-            return;
-        }
-        let next = match self.camera_path().loops.kind() {
-            LoopKind::Closed => LoopKind::Once,
-            _ => LoopKind::Closed,
-        };
-        self.set_path_loop(next);
-    }
+    // A `toggle_path_closed` used to live here, on Ctrl+Y. It's gone: Ctrl+Y is
+    // Redo on Windows and so in an Apophysis refugee's fingers, and a keystroke
+    // that could only reach one of the four loop kinds — and couldn't be undone
+    // — was the worst possible thing for a mistaken redo to land on. The Camera
+    // window's four-way radio does the whole job, visibly.
 
     /// How the path loops, as the Camera window's radio names it.
     pub fn path_loop(&self) -> crate::path::Loop {
@@ -1362,6 +1401,7 @@ impl App {
         self.scene.save(path).map_err(|e| e.to_string())?;
         log::info!("Scene saved as {} ({})", path, self.scene.name);
         self.scene_path = Some(path.to_string());
+        self.scene_dirty = false;
         // The slug feeds views/ lookups and render filenames, and it comes
         // from the scene name, not the path — but the *saved views* cache is
         // keyed on it, so a rename has to drop it.
@@ -1421,6 +1461,7 @@ impl App {
             Ok(()) => {
                 log::info!("Scene saved to {}", path);
                 self.scene_path = Some(path.to_string());
+                self.scene_dirty = false;
             }
             Err(e) => log::error!("{}", e),
         }
@@ -1474,6 +1515,45 @@ impl App {
     /// bursts) merge into one entry instead of flooding the stack.
     pub fn commit_edit(&mut self, label: impl Into<String>, coalesce_key: Option<&str>, before: EditSnapshot) {
         self.history.commit(label, coalesce_key, before, Instant::now());
+        self.scene_dirty = true;
+    }
+
+    /// Whether the scene has edits not yet on disk. Drives the title bar's
+    /// dirty marker and every "are you sure" prompt.
+    pub fn is_dirty(&self) -> bool {
+        self.scene_dirty
+    }
+
+    // === Losing work: the prompts that stand in the way (see ui::confirm) ===
+
+    /// Ask to leave. Prompts first if there is unsaved work; otherwise the
+    /// event loop is told to exit on its next pass.
+    pub fn request_quit(&mut self) {
+        if self.scene_dirty {
+            self.pending_action = Some(crate::ui::confirm::Pending::Quit);
+        } else {
+            self.exit_requested = true;
+        }
+    }
+
+    /// Ask to open a scene. Same shape as `request_quit`: opening replaces the
+    /// scene *and* clears the undo stack, so it is exactly as destructive.
+    pub fn request_load_scene(&mut self, path: &Path) {
+        if self.scene_dirty {
+            self.pending_action = Some(crate::ui::confirm::Pending::Load(path.to_path_buf()));
+        } else {
+            self.load_scene_file(path);
+        }
+    }
+
+    /// Carry out whatever the unsaved-changes prompt was standing in front of.
+    /// Called once the person has chosen Save or Discard.
+    pub fn proceed_with_pending(&mut self) {
+        match self.pending_action.take() {
+            Some(crate::ui::confirm::Pending::Quit) => self.exit_requested = true,
+            Some(crate::ui::confirm::Pending::Load(path)) => self.load_scene_file(&path),
+            None => {}
+        }
     }
 
     /// Restore a snapshot and rebuild the GPU pipelines — the same path
@@ -1734,11 +1814,20 @@ impl App {
         self.camera.zoom(-1.0);
     }
 
-    /// Mouse wheel: zoom — unless a gizmo is hovered, in which case it
-    /// adjusts that transform's chaos weight (its selection probability),
-    /// the lever that emphasizes an element without changing structure
+    /// Mouse wheel: zoom, always. **Alt**+wheel over a hovered gizmo adjusts
+    /// that transform's chaos weight (its selection probability) — the lever
+    /// that emphasizes an element without changing structure.
+    ///
+    /// The weight lever used to be on plain scroll, and it had to move. Scroll
+    /// is *the* navigation gesture: people use it continuously and without
+    /// looking, and the fractal fully occludes gizmos while they keep taking
+    /// input — so zooming through a scene silently edited whatever happened to
+    /// pass under the pointer, which is exactly what `todo.txt` records as
+    /// "zooming breaks horribly as things move under the scrollwheel without
+    /// visibility". A navigation gesture must not be able to change the
+    /// artwork. Alt costs one finger and the hint line is right there.
     pub fn on_scroll(&mut self, steps: f32) {
-        if let Some(hit) = self.hovered {
+        if let Some(hit) = self.hovered.filter(|_| self.alt_held) {
             self.selected_transform = Some(hit.transform);
             let before = self.edit_snapshot();
             let w = &mut self.scene.transforms[hit.transform].weight;
@@ -1791,6 +1880,22 @@ impl App {
         let (dx, dy) = (x - self.cursor.0, y - self.cursor.1);
         self.cursor = (x, y);
 
+        // The dead zone. Below it the gesture is still a click and nothing
+        // moves; on the frame it's crossed, the motion applied is the whole
+        // travel from the press, so the view ends up exactly where the pointer
+        // says it should rather than four pixels behind.
+        let (dx, dy) = if matches!(self.drag, Drag::None) || self.drag_moved {
+            (dx, dy)
+        } else {
+            let (ox, oy) = (x - self.drag_origin.0, y - self.drag_origin.1);
+            if ox * ox + oy * oy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
+                return;
+            }
+            self.drag_moved = true;
+            self.set_drag_cursor();
+            (ox, oy)
+        };
+
         match self.drag {
             Drag::None => {
                 if suppress_hover {
@@ -1821,6 +1926,64 @@ impl App {
                 self.update_gizmo_drag(transform, mode, start_matrix);
             }
         }
+    }
+
+    /// The cursor position a gizmo drag should be read from: the real one, or
+    /// a slowed-down virtual one while Shift is held.
+    ///
+    /// Shift-during-drag means *precision* in every drawing and modelling tool
+    /// in the world, and it was free here — the gizmo path never consulted it.
+    /// It's worth more in this app than in most, because these drags run the
+    /// chaos game live and are therefore very high gain: a few pixels of hand
+    /// travel can be the difference between a structure and a smear.
+    ///
+    /// See `fine_anchor` for why this is anchored rather than a bare multiply.
+    fn fine_cursor(&mut self) -> (f32, f32) {
+        if self.shift_held != self.fine_active {
+            // Re-anchor at the current virtual position, so the gain changes
+            // without the thing being dragged jumping.
+            self.fine_anchor = self.fine_cursor_with(self.fine_active);
+            self.fine_from = self.cursor;
+            self.fine_active = self.shift_held;
+        }
+        self.fine_cursor_with(self.fine_active)
+    }
+
+    fn fine_cursor_with(&self, fine: bool) -> (f32, f32) {
+        /// A fifth of normal travel: slow enough to be a different instrument,
+        /// fast enough that you can still cross a gizmo with one hand movement.
+        const FINE_GAIN: f32 = 0.2;
+        let gain = if fine { FINE_GAIN } else { 1.0 };
+        (
+            self.fine_anchor.0 + (self.cursor.0 - self.fine_from.0) * gain,
+            self.fine_anchor.1 + (self.cursor.1 - self.fine_from.1) * gain,
+        )
+    }
+
+    /// Say which gesture is in flight, with the pointer.
+    ///
+    /// The viewport is one surface that does four different things depending
+    /// on which button you held and whether Shift was down, and until now the
+    /// only one that changed the cursor was a gizmo grab — so orbit, pan and
+    /// roll all left it an arrow and the viewport never confirmed what it had
+    /// decided you meant.
+    ///
+    /// Set on crossing the drag threshold rather than on press: below the dead
+    /// zone the gesture is still a click, and a cursor that flickered on every
+    /// click would be worse than none.
+    fn set_drag_cursor(&mut self) {
+        use winit::window::CursorIcon;
+        let icon = match self.drag {
+            Drag::None => return,
+            Drag::Orbit | Drag::Gizmo { .. } => CursorIcon::Grabbing,
+            Drag::Pan => CursorIcon::Move,
+            // `winit` has no trackball or rotate cursor. Roll is driven purely
+            // by horizontal travel, so the horizontal-resize arrows are at
+            // least honest about which axis of the mouse is being read; the
+            // status bar carries the word itself.
+            Drag::Roll => CursorIcon::EwResize,
+        };
+        self.window.set_cursor(icon);
     }
 
     /// Re-pick the gizmo part under the cursor; update the glow highlight and
@@ -1875,6 +2038,13 @@ impl App {
 
     pub fn on_mouse_press(&mut self, button: winit::event::MouseButton) {
         use winit::event::MouseButton;
+        self.drag_origin = self.cursor;
+        self.drag_moved = false;
+        // Fine-drag starts from wherever this gesture starts, at whatever the
+        // modifier is right now.
+        self.fine_anchor = self.cursor;
+        self.fine_from = self.cursor;
+        self.fine_active = self.shift_held;
         match button {
             MouseButton::Left => {
                 // The keybinds and scene-browser overlays used to hand-roll
@@ -1889,6 +2059,11 @@ impl App {
                     self.window.set_cursor(winit::window::CursorIcon::Grabbing);
                     return;
                 }
+                // Nothing under the pointer. If this turns out to be a click
+                // rather than a drag, `on_mouse_release` reads that as "I meant
+                // *nothing*" and drops the selection — the universal editor
+                // convention, and the only exit from a selection this app used
+                // to have no way out of.
                 self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
                 // Taking the camera by hand stops it flying the path — they'd
                 // fight over the same framing otherwise.
@@ -1921,6 +2096,18 @@ impl App {
     pub fn on_mouse_release(&mut self, button: winit::event::MouseButton) {
         use winit::event::MouseButton;
         if matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right) {
+            // A left-click on empty viewport space that never became a drag is
+            // a deselect. Only the plain orbit grab: a shift-click is a
+            // modified gesture and a right-click is the roll/menu button, and
+            // neither reads as "select nothing".
+            if matches!(button, MouseButton::Left)
+                && matches!(self.drag, Drag::Orbit)
+                && !self.drag_moved
+                && self.selected_transform.is_some()
+            {
+                self.select_transform(None);
+                log::info!("Selection cleared");
+            }
             if let Drag::Gizmo { transform, mode, start_matrix } = self.drag {
                 let spec = &self.scene.transforms[transform];
                 let t = spec.matrix.w_axis.truncate();
@@ -1940,7 +2127,17 @@ impl App {
                 }
             }
             self.drag = Drag::None;
+            self.drag_moved = false;
             self.update_hover();
+            // `update_hover` only touches the cursor when the *hit* changed,
+            // and after an orbit over empty space it hasn't (None before, None
+            // after) — so the drag cursor would stay on the pointer for good.
+            // Put it back explicitly.
+            self.window.set_cursor(if self.hovered.is_some() {
+                winit::window::CursorIcon::Grab
+            } else {
+                winit::window::CursorIcon::Default
+            });
         }
     }
 
@@ -2029,7 +2226,11 @@ impl App {
         let (w, h) = (w as f32, h as f32);
         let view_proj = self.current_view_proj();
         let inv_vp = view_proj.inverse();
-        let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, self.cursor.0, self.cursor.1, w, h);
+        // Every drag mode below is a pure function of *a* cursor position, so
+        // Shift-for-fine is one substitution here rather than four separate
+        // gain factors.
+        let cursor = self.fine_cursor();
+        let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, cursor.0, cursor.1, w, h);
         let start_origin = start.w_axis.truncate();
 
         let new_matrix = match mode {
@@ -2048,10 +2249,20 @@ impl App {
                 m
             }
             GizmoDragMode::Rotate { axis, center, start_angle } => {
-                let angle = crate::pick::screen_angle(center, self.cursor);
+                let angle = crate::pick::screen_angle(center, cursor);
                 // Shortest way round is right for a drag: nobody swings the
                 // pointer more than half a turn between two frames.
-                let delta = start_angle.shortest_to(angle);
+                let mut delta = start_angle.shortest_to(angle);
+                // Alt snaps to 15°. Worth more here than in a general 3D tool:
+                // IFS aesthetics live on clean rotational symmetry, and a
+                // fifteenth of a degree off exact is visible as a smear in the
+                // attractor. Ctrl is taken by uniform scale, so Alt it is.
+                if self.alt_held {
+                    const SNAP: f32 = std::f32::consts::FRAC_PI_2 / 6.0; // 15°
+                    delta = crate::rot::Turn1D::from_radians(
+                        (delta.radians() / SNAP).round() * SNAP,
+                    );
+                }
                 let rot = Mat4::from_quat(
                     crate::rot::Turn::about(axis, delta.radians()).exp().as_quat(),
                 );
@@ -2066,7 +2277,7 @@ impl App {
                 m
             }
             GizmoDragMode::Scale { start_y } => {
-                let factor = ((start_y - self.cursor.1) * 0.005).exp().clamp(0.02, 50.0);
+                let factor = ((start_y - cursor.1) * 0.005).exp().clamp(0.02, 50.0);
                 let mut m = start;
                 m.x_axis *= factor;
                 m.y_axis *= factor;
@@ -2157,7 +2368,7 @@ impl App {
 
     pub fn browser_load_selected(&mut self) {
         if let Some(path) = self.browser_files.get(self.browser_selected).cloned() {
-            self.load_scene_file(&path);
+            self.request_load_scene(&path);
         }
         self.show_browser = false;
     }
@@ -2195,7 +2406,11 @@ impl App {
         self.scene = scene;
         self.scene_path = Some(path.to_string_lossy().into_owned());
         self.invalidate_saved_views();
+        // Opening a document gives you a fresh undo stack, as it does in every
+        // editor ever written. The surprise was never the clear — it was that
+        // it happened without asking, which is what `request_load_scene` fixes.
         self.history.clear();
+        self.scene_dirty = false;
         self.rebuild_pipelines();
     }
 
@@ -2265,7 +2480,7 @@ impl App {
             done: 0,
             total: 0,
             log: Vec::new(),
-            cancel_armed_at: None,
+            cancel_arm: Default::default(),
             paused_at: None,
             paused_total: Duration::ZERO,
         };
@@ -3697,17 +3912,10 @@ impl App {
         // path — and the picture it lands on is identical to the one it left.
         self.wrap_zoom();
 
+        self.refresh_window_title();
+
         if should_log {
             let point_count = self.point_compute.valid_point_count();
-            let warmup_done = self.point_compute.current_frame >= self.point_compute.warmup_frames;
-            let title = format!(
-                "Fracturize | {:.0} FPS | {:.1}ms | {}k points{}",
-                self.fps_tracker.current_fps,
-                self.fps_tracker.current_frametime_ms,
-                point_count / 1000,
-                if warmup_done { "" } else { " (warming up)" },
-            );
-            self.window.set_title(&title);
             log::info!(
                 "FPS: {:.1} | Frametime: {:.2}ms | Points: {}",
                 self.fps_tracker.current_fps,
@@ -3716,6 +3924,40 @@ impl App {
             );
         }
 
+    }
+
+    /// Keep the window title saying which document is open.
+    ///
+    /// `document — application`, with a leading `*` while there are unsaved
+    /// edits: the convention every file-editing program has used for decades,
+    /// and the only place the taskbar, the alt-tab list and the window switcher
+    /// can read it. It used to be a frame-rate HUD — which is genuinely useful
+    /// information that the status bar already carries with more detail and a
+    /// sparkline, and which told the window switcher nothing at all about what
+    /// you had open. The FPS line still goes to `RUST_LOG` once a second.
+    ///
+    /// Recomputed every frame but only *set* when it changes: `set_title` is a
+    /// round trip to the window manager, and the string is stable for minutes
+    /// at a time.
+    fn refresh_window_title(&mut self) {
+        // The filename, not the scene's display name: it's what the person
+        // typed, what Ctrl+S writes, and what they'll look for on disk.
+        let doc = self
+            .scene_path
+            .as_deref()
+            .and_then(|p| Path::new(p).file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{} (unsaved)", self.scene.name));
+        let title = format!(
+            "{}{} — Fracturize",
+            if self.scene_dirty { "*" } else { "" },
+            doc,
+        );
+        if self.window_title != title {
+            self.window.set_title(&title);
+            self.window_title = title;
+        }
     }
 
     pub fn take_screenshot(&mut self) {
@@ -3935,6 +4177,8 @@ impl App {
                 }
             }
             HelpAction::Browse => self.toggle_browser(),
+            HelpAction::NewScene => self.new_blank_scene(),
+            HelpAction::Quit => self.request_quit(),
             HelpAction::Traces => self.toggle_traces(shift),
             HelpAction::InvertPitch => self.toggle_invert_pitch(),
             HelpAction::RenderMode => self.toggle_render_mode(),

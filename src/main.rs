@@ -932,6 +932,7 @@ impl ApplicationHandler for AppWrapper {
         if let WindowEvent::ModifiersChanged(mods) = &event {
             app.shift_held = mods.state().shift_key();
             app.ctrl_held = mods.state().control_key();
+            app.alt_held = mods.state().alt_key();
         }
         if let WindowEvent::CursorMoved { position, .. } = &event {
             // Suppress gizmo hover picking while the pointer is over an egui
@@ -943,7 +944,10 @@ impl ApplicationHandler for AppWrapper {
 
         match event {
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                // Asks rather than exits: with unsaved edits this puts up the
+                // prompt and the actual exit happens (or doesn't) once it's
+                // been answered.
+                app.request_quit();
             }
 
             WindowEvent::ModifiersChanged(_) => {} // handled above
@@ -987,17 +991,29 @@ impl ApplicationHandler for AppWrapper {
                     // Handle special keys by physical key (layout-independent)
                     match event.physical_key {
                         PhysicalKey::Code(KeyCode::Escape) => {
-                            // Escape quits, which makes it the worst possible
-                            // key to leave unhandled while something modal is
-                            // up: dismiss that first.
+                            // Escape means *cancel the thing in front of me*,
+                            // and nothing else. It used to quit, which made the
+                            // reflex that dismisses a popup the reflex that
+                            // closed the app with an hour of work in it. Quit
+                            // is Ctrl+Q and the window's close button now.
+                            //
+                            // The fall-through runs outermost-first and ends by
+                            // dropping the transform selection — which is also
+                            // the only way that selection could ever be
+                            // cleared, and so the exit from Up/Down being stuck
+                            // on "step transforms" forever.
                             if app.ui_state.transform_menu.is_some() {
                                 app.ui_state.transform_menu = None;
+                            } else if app.pending_action.is_some() {
+                                app.pending_action = None;
                             } else if app.ui_state.save_as.is_open() {
                                 app.ui_state.save_as = Default::default();
+                            } else if app.ui_state.render_job.open {
+                                app.ui_state.render_job.open = false;
                             } else if app.show_browser {
                                 app.toggle_browser();
-                            } else {
-                                event_loop.exit();
+                            } else if app.selected_transform().is_some() {
+                                app.select_transform(None);
                             }
                             return;
                         }
@@ -1031,6 +1047,12 @@ impl ApplicationHandler for AppWrapper {
                         }
                         PhysicalKey::Code(KeyCode::Delete) => {
                             app.delete_selected_transform();
+                            return;
+                        }
+                        PhysicalKey::Code(KeyCode::F1) => {
+                            // The universal "what are the keys" key, alongside
+                            // this app's own H.
+                            app.toggle_help();
                             return;
                         }
                         _ => {}
@@ -1069,7 +1091,23 @@ impl ApplicationHandler for AppWrapper {
                                 app.toggle_help();
                             }
                             "o" | "O" => {
-                                app.toggle_camera_motion();
+                                if app.ctrl_held {
+                                    // Ctrl+O opens, everywhere in the world.
+                                    // The scene browser is what "open" shows.
+                                    app.toggle_browser();
+                                } else {
+                                    app.toggle_camera_motion();
+                                }
+                            }
+                            "n" | "N" => {
+                                if app.ctrl_held {
+                                    app.new_blank_scene();
+                                }
+                            }
+                            "q" | "Q" => {
+                                if app.ctrl_held {
+                                    app.request_quit();
+                                }
                             }
                             "z" | "Z" => {
                                 // Ctrl must be checked first: Ctrl+Z / Ctrl+Shift+Z
@@ -1089,7 +1127,16 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "y" | "Y" => {
                                 if app.ctrl_held {
-                                    app.toggle_path_closed();
+                                    // Ctrl+Y is Redo on Windows, so it's what
+                                    // an Apophysis refugee's hand reaches for.
+                                    // It used to toggle the camera-path loop —
+                                    // an edit Ctrl+Z couldn't take back, which
+                                    // is the worst thing a mistaken redo could
+                                    // possibly have done. The loop is fully
+                                    // served by the Camera window's four-way
+                                    // radio, which can reach all four states
+                                    // where the keystroke could reach one.
+                                    app.redo();
                                 } else if app.shift_held {
                                     app.remove_path_key();
                                 } else {
@@ -1224,6 +1271,15 @@ impl ApplicationHandler for AppWrapper {
 
                 // Exit after screenshot in --screenshot mode
                 if self.args.screenshot && app.frame_count > self.args.delay {
+                    event_loop.exit();
+                    return;
+                }
+
+                // Quitting is asked for, not done: Ctrl+Q, the window's close
+                // button and the unsaved-changes prompt all set this flag, and
+                // the loop leaves here — after the frame that put the prompt on
+                // screen has actually been presented.
+                if app.exit_requested {
                     event_loop.exit();
                     return;
                 }
