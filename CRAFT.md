@@ -41,7 +41,9 @@ That one fact generates almost every difficulty and every pleasure in the form:
   what `--mutations N` is for, and it is the single most productive thing in the CLI.
 - **The parameters are not the picture, and they are not even a good description
   of it.** You cannot read a TOML and know what it looks like. Render it. This is
-  why `--info`'s `measured:` block exists and why you should read it first.
+  why `--info`'s `shape` block exists — and why `notes`, one line above it, is
+  where you should actually start: it is every diagnostic the report found, or
+  the word `none`.
 
 The three levers, and they are genuinely separable here:
 
@@ -61,8 +63,8 @@ good one is almost always density and colour.
 ### 2.1 Similarity dimension — the most useful number in this file
 
 Solve for `d`:  **Σᵢ sᵢᵈ = 1**, where `sᵢ` is each map's contraction
-(`--info` prints it per transform; for per-axis scale use the cube root of the
-product). `d` is the attractor's similarity dimension, and in a 3D renderer with
+(`--info` prints it per transform, signed — negative means the map reflects; for
+per-axis scale use the cube root of the product). `d` is the attractor's similarity dimension, and in a 3D renderer with
 no lighting it predicts the *look* almost perfectly:
 
 | `d` | Look | Why |
@@ -132,7 +134,8 @@ after-the-fact check.
 
 ### 2.2 A map's weight is its share of the walk — and its share of the hue
 
-`--info` prints `% of the walk`, which is the weight normalised. Two consequences
+`--info`'s `maps` block prints each map's share as a percentage, which is the
+weight normalised. Two consequences
 that cost me a render each:
 
 - **Colour balance follows weight, not your swatch list.** I gave a scene five
@@ -162,10 +165,20 @@ read the code.
 
 ### 2.4 The two from `--info` you should never override by eye
 
-`--info`'s `suggests:` line gives a camera distance and a `point_size` ceiling.
+`--info`'s `shape` block gives a camera distance and a `point_size` ceiling, as
+two flags you can paste:
+
+```
+to fill the frame   -S camera.distance=1.42
+for crisp points    -S meta.point_size=0.0020
+the scene sets      distance 3.400, point_size 0.0018
+```
+
 The `point_size` one is load-bearing: exceed it and the renderer leaves the crisp
 1px path and every point becomes a multi-pixel billboard — strands turn to chunky
-ribbons. Size point_size against *your* structure, never by copying another scene.
+ribbons. Exceeding it also raises a `notes` line, so you no longer have to
+compare the two numbers yourself. Size point_size against *your* structure,
+never by copying another scene.
 
 ---
 
@@ -452,10 +465,18 @@ and `todo.txt`'s lighting question is really a question about which room to live
 
 **What is genuinely good** — say so, because it's unusual:
 
-- **`--info` is an excellent agent interface.** The 24-bit ANSI palette swatch is
-  emitted even into a pipe, deliberately, so an agent can *see* the gradient rather
-  than imagine it from floats. The `measured:`/`suggests:` block catches the two
-  errors most common in hand-authored scenes. More tools should do this.
+- **`--info` is an excellent agent interface.** `notes` gives you one line to
+  branch on before spending a render, `shape` catches the two errors most common
+  in hand-authored scenes, and where it has computed a number you will act on it
+  emits the flag rather than the number. More tools should do this.
+
+  It used to emit the 24-bit ANSI palette swatch even into a pipe, deliberately,
+  on the theory that an agent could then *see* the gradient rather than imagine
+  it from floats. That was wrong on the facts — an agent reading Bash output gets
+  the escape bytes as literal text — and it was a third of the report's bytes and
+  about half its tokens. The hex ramp was always the channel that worked; it now
+  carries twelve stops, and the swatch lives behind `--color` for people at a
+  terminal.
 - **Contact sheets are sub-second.** `--orbit-grid` / `--move-grid` fill the point
   cloud once and re-render per tile, so nine views cost barely more than one. The
   iteration loop is genuinely tight.

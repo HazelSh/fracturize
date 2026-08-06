@@ -438,18 +438,39 @@ struct Args {
     // ----------------------------------------------------------- Inspecting
     /// Print what this scene is, then exit
     ///
-    /// Transforms with their share of the walk and contraction, where the
-    /// attractor actually lands, render properties, and which maps could carry
-    /// infinite zoom. Reads a scene without rendering one.
+    /// Eleven labelled sections, no GPU device. Read `notes` first: it is
+    /// every diagnostic the report found, or the word `none`, so "is this
+    /// scene sound?" is one line rather than fifty.
     ///
-    /// Add --view to have it report the view file too — what that file sets,
-    /// what each value replaced, and the framing the two of them land on.
+    /// Then `shape` — where the attractor actually lands, with the camera
+    /// distance and point size that measurement implies, printed as -S flags
+    /// you can paste. Then the transforms with their share of the walk,
+    /// contraction and rendered colour; the render and colour properties; the
+    /// camera and its path; and the infinite-zoom band, or every map eligible
+    /// to carry one as a --zoom command.
+    ///
+    /// Add --view or -S and it reports those too: what each one set, and what
+    /// each value replaced. Add --color for a painted gradient.
     #[arg(short, long, help_heading = "Inspecting")]
     info: bool,
 
-    /// List the built-in palette library, with a colour swatch each, and exit
+    /// List the built-in palette library, one per line, and exit
     #[arg(long, help_heading = "Inspecting")]
     palettes: bool,
+
+    /// Paint --info and --palettes with 24-bit ANSI colour
+    ///
+    /// Off by default. Both commands are read far more often through a pipe,
+    /// by something that receives escape codes as literal bytes and cannot see
+    /// a gradient, than by a person at a terminal — and on a typical scene the
+    /// swatch alone was a third of the report's bytes.
+    ///
+    /// This adds to the output rather than replacing part of it: the hex stops
+    /// stay exactly where they are and wear their own colours, and --info
+    /// gains a continuous swatch. Everything you get without it, you also get
+    /// with it.
+    #[arg(long, help_heading = "Inspecting")]
+    color: bool,
 
     // -------------------------------------------------------- Windowed mode
     /// Capture a screenshot and exit after --delay frames
@@ -684,21 +705,23 @@ fn roll_palette(
     (p, seed)
 }
 
-/// `--palettes`: the library, one per line, each with a swatch you can
-/// actually see. Printing twenty-four floats and asking someone to imagine
-/// the gradient is not a listing.
-fn print_palette_library() {
+/// `--palettes`: the library, one per line. Printing twenty-four floats and
+/// asking someone to imagine the gradient is not a listing, so each one comes
+/// with its gradient — as hex stops, which survive a pipe, and with `--color`
+/// as a swatch too.
+fn print_palette_library(color: bool) {
     println!("{} built-in palettes:\n", palette::library::len());
     let width = palette::library::names().iter().map(|n| n.len()).max().unwrap_or(8);
     for p in palette::library::all() {
         let name = p.name.clone().unwrap_or_default();
-        println!(
-            "  {:<width$}  {}  {}",
-            name,
-            info::swatch(&p, 32),
-            palette::library::blurb(&name).unwrap_or(""),
-            width = width
-        );
+        let blurb = palette::library::blurb(&name).unwrap_or("");
+        match color {
+            true => {
+                println!("  {:<width$}  {}  {}", name, info::swatch(&p, 32), blurb, width = width)
+            }
+            false => println!("  {:<width$}  {}", name, blurb, width = width),
+        }
+        println!("  {:<width$}  {}", "", info::hex_ramp(&p, 8), width = width);
     }
     println!(
         "\nUse with --palette <name>. Apophysis .ugr / .gradient / .flame files\n\
@@ -767,20 +790,60 @@ fn run_sweep(
 }
 
 fn load_scene(args: &Args) -> Scene {
-    match &args.scene {
-        Some(path) => Scene::load_with(path, &args.set).unwrap_or_else(|e| {
-            eprintln!("Failed to load scene '{}': {}", path, e);
-            std::process::exit(1);
-        }),
-        None if args.blank => Scene::blank(),
-        None if args.random => random_scene(args.seed),
-        None => default_scene(),
+    let (scene, _, seed) = load_scene_reporting(args);
+    // Every caller but `--info` gets the seed here, on its own line. `--info`
+    // carries it inside the report instead, so a captured report keeps it.
+    if let Some(seed) = seed {
+        println!("Random flame seed: {}", seed);
     }
+    scene
+}
+
+/// [`load_scene`], plus what each `--set` displaced and the seed a `--random`
+/// roll came from. Only `--info` wants the rest of the tuple; everything that
+/// renders wants the scene.
+fn load_scene_reporting(args: &Args) -> (Scene, Vec<set::Applied>, Option<u64>) {
+    match &args.scene {
+        Some(path) => {
+            let (scene, applied) =
+                Scene::load_reporting(path, &args.set).unwrap_or_else(|e| {
+                    eprintln!("Failed to load scene '{}': {}", path, e);
+                    std::process::exit(1);
+                });
+            (scene, applied, None)
+        }
+        None if args.blank => (Scene::blank(), warn_set_cannot_apply(args), None),
+        None if args.random => {
+            let (scene, seed) = random_scene(args.seed);
+            (scene, warn_set_cannot_apply(args), Some(seed))
+        }
+        None => (default_scene(), warn_set_cannot_apply(args), None),
+    }
+}
+
+/// `-S` patches a scene file's TOML text before it is parsed, so it has nothing
+/// to reach on a scene that was generated rather than read.
+///
+/// `--set` promises that a path which doesn't resolve is an error and never a
+/// silent no-op; this is the other half of that promise. Returns the empty
+/// applied-list so the caller reads as a plain arm.
+fn warn_set_cannot_apply(args: &Args) -> Vec<set::Applied> {
+    if !args.set.is_empty() {
+        eprintln!(
+            "warning: --set had no effect. It rewrites a scene file's TOML before \n\
+             parsing, and --blank/--random/the built-in default have no file to \n\
+             rewrite. Save the scene first, or edit it after loading."
+        );
+    }
+    Vec::new()
 }
 
 /// Roll a random flame for `--random`, honouring `--seed` and logging the
 /// seed either way so any roll can be reproduced exactly.
-fn random_scene(seed: Option<u64>) -> Scene {
+///
+/// The seed comes back rather than only going to stdout: `--info` carries it
+/// inside the report, where a capture to a file keeps it.
+fn random_scene(seed: Option<u64>) -> (Scene, u64) {
     use rand::SeedableRng;
     let seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -791,8 +854,7 @@ fn random_scene(seed: Option<u64>) -> Scene {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let scene = randomize::random_flame(&mut rng);
     log::info!("Random flame seed: {} (reproduce with --random --seed {})", seed, seed);
-    println!("Random flame seed: {}", seed);
-    scene
+    (scene, seed)
 }
 
 /// Named effort presets for offline rendering: (points, accumulate frames).
@@ -872,7 +934,11 @@ impl ApplicationHandler for AppWrapper {
                 panic!("Failed to load scene '{}': {}", path, e);
             }),
             None if self.args.blank => Scene::blank(),
-            None if self.args.random => random_scene(self.args.seed),
+            None if self.args.random => {
+                let (scene, seed) = random_scene(self.args.seed);
+                println!("Random flame seed: {}", seed);
+                scene
+            }
             None => {
                 log::info!("No scene specified, using built-in default");
                 default_scene()
@@ -1335,6 +1401,7 @@ fn default_scene() -> Scene {
         point_size: 0.002,
         points_per_frame: 100_000,
         point_count: 500_000,
+        point_count_defaulted: true,
         decay: 0.8,
         color_speed: 0.5,
         color_falloff: 0.0,
@@ -1384,7 +1451,7 @@ fn main() {
 
     // --palettes: show the library and stop. No scene, no device.
     if args.palettes {
-        print_palette_library();
+        print_palette_library(args.color);
         return;
     }
 
@@ -1398,7 +1465,9 @@ fn main() {
                 (_, true) => "--random".to_string(),
                 _ => "built-in default".to_string(),
             });
-        let mut scene = load_scene(&args);
+        // Reporting rather than plain loading, so the report can say what each
+        // --set displaced. Nothing that renders wants the second half.
+        let (mut scene, applied, seed) = load_scene_reporting(&args);
         // --info reports the zoom in its own section; don't say it twice
         apply_zoom_args(&mut scene, &args, false);
         // --info prints the palette in its own section; don't say it twice
@@ -1411,7 +1480,11 @@ fn main() {
                 std::process::exit(1);
             })
         });
-        let mut subject = info::Subject::new(&scene, &source).with_camera(args.camera_override());
+        let mut subject = info::Subject::new(&scene, &source)
+            .with_camera(args.camera_override())
+            .with_set(&applied)
+            .with_seed(seed)
+            .with_color(args.color);
         if let (Some(path), Some(v)) = (args.view.as_deref(), view.as_ref()) {
             subject = subject.with_view(path, v);
         }

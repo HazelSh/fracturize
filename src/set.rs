@@ -24,28 +24,62 @@
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
+/// One override, and the value it displaced.
+///
+/// Recorded so `--info` can say the command line moved something. A report
+/// that shows `haze 0.90` without mentioning that the file says `0.50` answers
+/// "what is this scene?" but not "did my edit land?", and the second question
+/// is half of what the command is for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Applied {
+    /// The dotted path, exactly as written on the command line
+    pub path: String,
+    /// The value that was there before, as TOML text. `None` when the key was
+    /// not set at all — a `variations` table invented on the spot, mostly.
+    pub from: Option<String>,
+    /// The value now in its place, as TOML text
+    pub to: String,
+}
+
 /// Apply `path=value` overrides to a scene's TOML source, returning the
-/// rewritten source. Formatting and comments are preserved (toml_edit only
-/// rewrites the values that are touched).
-pub fn apply(src: &str, overrides: &[String]) -> Result<String, String> {
+/// rewritten source and what each override displaced. Formatting and comments
+/// are preserved (toml_edit only rewrites the values that are touched).
+///
+/// The old value is read at the moment it is overwritten rather than diffed
+/// afterwards, so two `--set`s on the same path report the chain honestly:
+/// the second says it replaced the first, not the file.
+pub fn apply_recording(
+    src: &str,
+    overrides: &[String],
+) -> Result<(String, Vec<Applied>), String> {
     if overrides.is_empty() {
-        return Ok(src.to_string());
+        return Ok((src.to_string(), Vec::new()));
     }
     let mut doc: DocumentMut = src
         .parse()
         .map_err(|e| format!("scene is not valid TOML: {e}"))?;
+    let mut applied = Vec::with_capacity(overrides.len());
     for spec in overrides {
-        apply_one(&mut doc, spec)?;
+        applied.push(apply_one(&mut doc, spec)?);
     }
-    Ok(doc.to_string())
+    Ok((doc.to_string(), applied))
 }
 
-fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<(), String> {
+/// A TOML value as the shortest text that means it — `0.5`, `"ember"`,
+/// `[0.0, 0.5, 0.0]`. `Value`'s own `Display` carries the decor it was parsed
+/// with, including the leading space in `key = value`, so it is trimmed.
+fn shown(v: &Value) -> String {
+    v.to_string().trim().to_string()
+}
+
+fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
     let (path, raw) = spec
         .split_once('=')
         .ok_or_else(|| format!("--set '{spec}': expected <path>=<value>"))?;
     let path = path.trim();
     let value = parse_value(raw.trim());
+    let to = shown(&value);
+    let record = |from: Option<String>| Applied { path: path.to_string(), from, to: to.clone() };
 
     let segs: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
     if segs.len() < 2 {
@@ -59,7 +93,7 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<(), String> {
     let rest = &segs[1..];
 
     if section == "transform" {
-        return set_in_transform(doc, rest, value, path);
+        return set_in_transform(doc, rest, value, path).map(record);
     }
 
     if !matches!(section, "meta" | "camera" | "zoom" | "palette") {
@@ -74,7 +108,7 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<(), String> {
         .ok_or_else(|| {
             format!("--set '{path}': this scene has no [{section}] table to set into")
         })?;
-    set_path(&mut TableRef::Table(table), rest, value, path)
+    set_path(&mut TableRef::Table(table), rest, value, path).map(record)
 }
 
 /// Resolve `transform.<name-or-index>.<rest>` against the `[[transform]]` array.
@@ -83,7 +117,7 @@ fn set_in_transform(
     segs: &[&str],
     value: Value,
     path: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (selector, rest) = segs
         .split_first()
         .ok_or_else(|| format!("--set '{path}': expected transform.<name-or-index>.<field>"))?;
@@ -150,32 +184,35 @@ impl TableRef<'_> {
         }
     }
 
-    /// Replace a key, keeping the old value's decor (a trailing `# comment`).
-    fn put(&mut self, key: &str, mut new: Value) {
-        if let Some(old) = self.get_value(key) {
+    /// Replace a key, keeping the old value's decor (a trailing `# comment`),
+    /// and hand back what was there.
+    fn put(&mut self, key: &str, mut new: Value) -> Option<String> {
+        let old = self.get_value(key).map(|old| {
             *new.decor_mut() = old.decor().clone();
-        }
+            shown(old)
+        });
         match self {
             TableRef::Table(t) => t[key] = Item::Value(new),
             TableRef::Inline(t) => {
                 t.insert(key, new);
             }
         }
+        old
     }
 }
 
-/// Walk `segs` from `container` and set the leaf.
+/// Walk `segs` from `container` and set the leaf, returning the value the leaf
+/// held before — `None` if it held nothing.
 fn set_path(
     container: &mut TableRef,
     segs: &[&str],
     value: Value,
     path: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (key, rest) = segs.split_first().expect("non-empty by construction");
 
     if rest.is_empty() {
-        container.put(key, value);
-        return Ok(());
+        return Ok(container.put(key, value));
     }
 
     // One more level. Two shapes actually occur in a scene file: an inline
@@ -197,9 +234,9 @@ fn set_path(
 
     match existing {
         Value::InlineTable(mut it) => {
-            set_path(&mut TableRef::Inline(&mut it), rest, value, path)?;
+            let was = set_path(&mut TableRef::Inline(&mut it), rest, value, path)?;
             container.put(key, Value::InlineTable(it));
-            Ok(())
+            Ok(was)
         }
         Value::Array(mut arr) => {
             if rest.len() != 1 {
@@ -217,9 +254,9 @@ fn set_path(
                     arr.len()
                 ));
             }
-            set_array_elem(&mut arr, i, value);
+            let was = set_array_elem(&mut arr, i, value);
             container.put(key, Value::Array(arr));
-            Ok(())
+            Ok(was)
         }
         other => Err(format!(
             "--set '{path}': '{key}' is a {} and cannot be indexed further",
@@ -228,11 +265,13 @@ fn set_path(
     }
 }
 
-fn set_array_elem(arr: &mut Array, i: usize, mut new: Value) {
-    if let Some(old) = arr.get(i) {
+fn set_array_elem(arr: &mut Array, i: usize, mut new: Value) -> Option<String> {
+    let old = arr.get(i).map(|old| {
         *new.decor_mut() = old.decor().clone();
-    }
+        shown(old)
+    });
     arr.replace(i, new);
+    old
 }
 
 /// `x`/`y`/`z` or a plain integer.
@@ -299,11 +338,11 @@ variations = { swirl = 0.35, linear = 0.65 }
 
     fn set(specs: &[&str]) -> String {
         let owned: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
-        apply(SCENE, &owned).expect("should apply")
+        apply_recording(SCENE, &owned).expect("should apply").0
     }
 
     fn err(spec: &str) -> String {
-        apply(SCENE, &[spec.to_string()]).unwrap_err()
+        apply_recording(SCENE, &[spec.to_string()]).unwrap_err()
     }
 
     #[test]
@@ -408,12 +447,55 @@ variations = { swirl = 0.35, linear = 0.65 }
 
     #[test]
     fn setting_into_a_missing_section_is_an_error() {
-        let e = apply("[meta]\nname = \"x\"\n", &["palette.rotate=0.5".into()]).unwrap_err();
+        let e = apply_recording("[meta]\nname = \"x\"\n", &["palette.rotate=0.5".into()])
+            .unwrap_err();
         assert!(e.contains("no [palette] table"), "{e}");
     }
 
     #[test]
     fn no_overrides_is_the_identity() {
-        assert_eq!(apply(SCENE, &[]).unwrap(), SCENE);
+        assert_eq!(apply_recording(SCENE, &[]).unwrap().0, SCENE);
+    }
+
+    // --- what each override displaced, which is what `--info` reports ---
+
+    fn record(specs: &[&str]) -> Vec<Applied> {
+        let owned: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
+        apply_recording(SCENE, &owned).expect("should apply").1
+    }
+
+    #[test]
+    fn records_what_each_override_replaced() {
+        let a = record(&["meta.haze=0.75", "transform.b.weight=9.0"]);
+        assert_eq!(a[0], Applied {
+            path: "meta.haze".into(),
+            from: Some("0.1".into()),
+            to: "0.75".into(),
+        });
+        assert_eq!(a[1].path, "transform.b.weight");
+        assert_eq!(a[1].from.as_deref(), Some("2.0"));
+    }
+
+    #[test]
+    fn records_an_element_of_an_array_not_the_whole_array() {
+        let a = record(&["transform.a.translation.y=1.25"]);
+        assert_eq!(a[0].from.as_deref(), Some("0.5"));
+        assert_eq!(a[0].to, "1.25");
+    }
+
+    #[test]
+    fn a_key_that_did_not_exist_reports_no_previous_value() {
+        let a = record(&["transform.a.variations.absfold=0.15"]);
+        assert_eq!(a[0].from, None);
+    }
+
+    /// Two sets on one path are a chain, and the second replaced the first —
+    /// which is what happened. Diffing against the file afterwards would lose
+    /// the middle value and imply an edit nobody made.
+    #[test]
+    fn a_repeated_path_reports_the_value_it_actually_displaced() {
+        let a = record(&["meta.haze=0.4", "meta.haze=0.6"]);
+        assert_eq!(a[0].from.as_deref(), Some("0.1"));
+        assert_eq!(a[1].from.as_deref(), Some("0.4"));
     }
 }

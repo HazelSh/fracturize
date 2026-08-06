@@ -304,6 +304,7 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Sc
         point_size: (radius * 0.0018).clamp(0.0008, 0.012),
         points_per_frame: 100_000,
         point_count: 500_000,
+        point_count_defaulted: true,
         decay: 0.8,
         color_speed,
         color_falloff,

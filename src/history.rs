@@ -279,6 +279,7 @@ mod tests {
             point_size: 0.002,
             points_per_frame: 1000,
             point_count: 1000,
+            point_count_defaulted: false,
             decay: 0.8,
             color_speed: 0.5,
             color_falloff: 0.0,
