@@ -241,6 +241,24 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             "“{}” has edits that aren't written to disk. They'll be lost by {}.",
             scene, verb
         ));
+
+        // A save that didn't work says so *here*, next to the button that was
+        // supposed to have done it, rather than only in the log.
+        if let Some(err) = app.last_save_error().map(str::to_string) {
+            ui.add_space(6.0);
+            // The error already says what went wrong ("Failed to write scene
+            // file: Permission denied"); a prefix would only restate it.
+            ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color));
+            ui.label(
+                egui::RichText::new(
+                    "Nothing has been lost yet. Try “Save as…” somewhere else, \
+                     or Cancel and sort it out.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+
         ui.add_space(10.0);
 
         ui.horizontal(|ui| {
@@ -294,7 +312,15 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     match resolve {
         Some(Resolution::Save) => {
             app.save_scene();
-            app.proceed_with_pending();
+            // Only leave if the write actually happened. A save can fail for
+            // entirely ordinary reasons, and quitting on the *assumption* that
+            // it worked would lose the work in the one path where the person
+            // did everything right — which is the failure this whole dialog
+            // exists to prevent. A successful save clears the dirty flag; if
+            // it's still set, the dialog stays up and says why.
+            if !app.is_dirty() {
+                app.proceed_with_pending();
+            }
         }
         Some(Resolution::Discard) => app.proceed_with_pending(),
         Some(Resolution::Cancel) => {

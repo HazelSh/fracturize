@@ -663,6 +663,9 @@ pub struct App {
     /// cleared by a successful save and by opening a different scene. It
     /// drives the window title's `*` marker and the unsaved-changes prompt.
     scene_dirty: bool,
+    /// Why the last attempt to write the scene failed, if it did (see
+    /// `write_scene_to`).
+    last_save_error: Option<String>,
     /// Last string handed to `Window::set_title`, so the title is only pushed
     /// to the window manager when it actually changes (see
     /// `refresh_window_title`).
@@ -903,6 +906,7 @@ impl App {
             history: History::new(),
             gizmo_drag_before: None,
             scene_dirty: false,
+            last_save_error: None,
             window_title: String::new(),
             pending_action: None,
             exit_requested: false,
@@ -1634,9 +1638,24 @@ impl App {
                 log::info!("Scene saved to {}", path);
                 self.scene_path = Some(path.to_string());
                 self.scene_dirty = false;
+                self.last_save_error = None;
             }
-            Err(e) => log::error!("{}", e),
+            Err(e) => {
+                log::error!("{}", e);
+                // Kept, not just logged. A save can fail for ordinary reasons —
+                // a read-only file, a full disk, a directory that went away
+                // with a removable drive — and the unsaved-changes prompt has
+                // to be able to say so rather than quitting on the assumption
+                // that Save worked. See `ui::confirm::draw`.
+                self.last_save_error = Some(e.to_string());
+            }
         }
+    }
+
+    /// Why the last `save_scene` failed, if it did. Cleared by a save that
+    /// works.
+    pub fn last_save_error(&self) -> Option<&str> {
+        self.last_save_error.as_deref()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
