@@ -19,7 +19,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, icons::LIST);
+            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -27,7 +27,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Transforms window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, icons::FLASK);
+            let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, (icons::FLASK, "Explore"));
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -35,7 +35,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Explore window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, icons::VIDEO_CAMERA);
+            let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, (icons::VIDEO_CAMERA, "Camera"));
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -43,7 +43,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Camera window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.render_open, icons::SLIDERS);
+            let resp = ui.toggle_value(&mut app.ui_state.panels.render_open, (icons::SLIDERS, "Render"));
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -57,24 +57,24 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             // of thing — "show me this layer of the interface or don't" — and
             // it's the one such toggle with no home in a panel, since every
             // panel it might live in is a thing you'd have to open to reach it.
-            let resp = ui.selectable_label(app.show_gizmos, icons::CUBE);
+            let resp = ui.selectable_label(app.show_gizmos, (icons::CUBE, "Edit"));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Transform gizmos + name labels (G)",
+                "Show transform gizmos + name labels (G)",
                 "toggle the transform gizmos",
             );
             if resp.clicked() {
                 app.toggle_gizmos();
             }
 
-            let resp = ui.selectable_label(app.show_help, icons::KEYBOARD);
+            let resp = ui.selectable_label(app.show_help, (icons::KEYBOARD, "Keybind Help"));
             let resp = hinted(resp, &mut app.ui_state, "Keybind reference (H)", "toggle the keybind help panel");
             if resp.clicked() {
                 app.toggle_help();
             }
 
-            let resp = ui.selectable_label(app.show_browser, icons::FOLDER_OPEN);
+            let resp = ui.selectable_label(app.show_browser, (icons::FOLDER_OPEN, "Scene Browser"));
             let resp = hinted(resp, &mut app.ui_state, "Scene browser (B)", "toggle the scene browser");
             if resp.clicked() {
                 app.toggle_browser();
@@ -192,7 +192,7 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         .show(|ui| render_panel::point_count(ui, app));
 
     let moving = app.camera_moving();
-    let resp = ui.button(if moving { icons::PAUSE } else { icons::PLAY });
+    let resp = ui.button(if moving { (icons::PAUSE, "Pause") } else { (icons::PLAY, "Play") });
     let resp = hinted(
         resp,
         &mut app.ui_state,

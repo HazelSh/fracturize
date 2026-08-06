@@ -1,6 +1,8 @@
 ---- needs to go faster! I want 100m points in realtime!
  -- "motherfucking realtime motherfucking raytracing"
-  - limits currently: points need data needs vram, very limiting esp. on laptop. 
+  - limits currently: points need data needs vram, very limiting esp. on laptop.
+   - fill points, accumulate points, run both in parellel, discard old points?
+    - fizz inside the frame. fine with enough points? or deliberatly don't fizz some    
 
 ---- lighting/shadowing?
  -- (how the actual fuck? well, fairlight were doing it realtime in 2010, so...)
@@ -15,18 +17,12 @@
 ---- ...particle system things? 'motion transforms'? velocity, acceleration, mass, per-point?
  -- make the points 'flow'?
 
----- in-engine scene browser, super lo-res preview?
+---- previews for scene browser?
  -- consider little preview windows for other things. mutation especially, do apophysis 3x3 grid of mutation-directions?
 
----- rework keyboard shortcuts + list → into real GUI with buttons etc
-
----- dynamic point density / infinite zoom
----- infinite zoom plan / 'space-filling'
- -- fractals that are 'lines' across all scales, not rays. can zoom into mandelbrot forever, but not out. 
-  - have some demoscene analyticlly-defined fractals that take infinite zoom in/out. what about IFSs? 
-  - fixed-point 'structure' with no privledged scale? any point in/out self-similar to other points in/out
-   - for linear transforms, at least. what about nonlinear? 
-
+---- infinite zoom into nonlinear transforms?
+ -- get Fable to solve the math first?
+ 
 ---- better handling of fizz / sparkle 
  -- tuned lower for more stable renders, higher for... no idea. add some persistance to the framebuffer, do temporal AA style shit? 
 
@@ -40,12 +36,6 @@
  -- suggest camera paths? available for mutation?
 
 ---- [DONE] random colorschemes / palette gen / coloring broken out & swappable
- -- see PALETTE-PLAN.md for the thinking, "Colour: two sources, one colormap" in AGENTS.md for what shipped.
- -- stage 2 (index -> RGB) is now the swappable seam: `color_mode = transforms | palette`, src/palette/.
- -- gradients' weak points, since I asked: 1-D can order structure but never *label* it, the index is
-    arbitrary, it hides transform identity, and it's 8-bit. that's why the per-transform mode stays.
- -- random gen: cosine palettes + harmony schemes + library, all gated on a luminance sweep with no
-    seam at index 0. the cyclic-seam thing is the non-obvious one.
  -- still open, deliberately: widen the colour channel (PALETTE-PLAN.md §6). carry a Vec3 through the
     walker and pack 8/8/8 into Point's free 24 bits, so transform *combinations* get distinct colours
     rather than just positions. free in memory, one branch in the chaos shader. this is the thing that
@@ -61,35 +51,35 @@
 ---- unfuck extended gizmo indicators (rotation, displacement). 
  -- start with gizmo / UI design thinking & nail it down, *then* go to implement. 
   - took me *way* to long to recognise 'arrows' built from lines / quad-shaped. needs billboards or something, closer to flat ui not 3d. 
-
+  - but: instinct not wrong. what matters: *offset* from default-triangle-position.
+   - need to show position, rotation offsets, emphasis on the change with the transform. 
+  
 ---- camera path point editing. 
  -- gizmos enabled on selection?
  -- 'adopt' a point, move camera as usual, drop adoption -- as a workflow?
-
----- DONE: quaternions for rotations
- -- was: getting gimbal lock on camera + camera paths
- -- camera framing is an Orientation now; no pitch clamp, roll works at the
-    poles, paths spline framings not angles (src/rot.rs, cumulative Catmull-Rom)
- -- yaw/pitch/roll survive as a *chart* for files + CLI + readouts, with
-    `rotvec` as the exact fallback where a chart has poles
- -- routes ("which way round") are explicit data, so the 359-vs-1 bug class
-    can't be written: Orientation and Angle have no Sub
- -- found + fixed a live one on the way: a multi-period zoom loop swept the
-    short way round a twist that wasn't about the vertical
-
+ 
 ---- think about gizmos vs fractal render
  -- currently, fractal occludes gizmo fully, but gizmo retains UI interaction. 
   - zooming breaks horribly as things move to under scrollwheel without visibility
- -- 
-
----- call in fable5 specifically, spend down credits, to review recent opus5 work
- -- octave blending, quaternion rotation, both bugged & overengineered?
 
 ---- vr support, test with Liz's Index headset
 
 ---- camera pause/play staying on the path? rather than full reset
 
+---- UI restructure.
+ -- WIP: adding text labels to icons
+  - need to also add icons to text buttons!
+ -- break out save, save as, etc into scene browser, rename to files/open?
+ -- break out renderer to toplayer option, "render" to something else -- 'view' / 'display'? etc
+ -- no hidden bits in render -- color dropdown thing with palette octaves, collapsable infzoom bits
+ --
 
+---- cursor for mouse actions!
+ -- click -> trackball motion of scene, mid-click -> drag scene, rightclick -> roll scene
+  - & scroll -> zoom scene. all need to activate cursor icon as-appropriate!
+   - may need to look hard for trackball-motion icon...
+ -- hand when mouseover gizmos, etc. 
+ 
 
 
 ---- naming 

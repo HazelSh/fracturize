@@ -12,8 +12,10 @@
 //! text name elsewhere in the UI, never by icon — icons are for actions/
 //! windows only.
 
-/// Transforms window toggle
+/// General menu toggle
 pub const LIST: &str = "\u{E2F0}";
+/// Transforms window toggle
+pub const SHAPES: &str = "\u{EC5E}";
 /// Explore window toggle (mutate / undo / random-flame exploration)
 pub const FLASK: &str = "\u{E79E}";
 /// Camera window toggle
