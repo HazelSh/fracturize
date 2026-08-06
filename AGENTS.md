@@ -30,18 +30,21 @@ src/
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
-    toolbar.rs     # Top icon strip: panel toggles + scene name
+    toolbar.rs     # Top strip: File menu, panel toggles, undo/redo, quick controls
     status_bar.rs  # Bottom bar: context hints, FPS/p99 sparkline, point stats
     hints.rs       # hinted(): tooltip + status-bar hint on one widget response
+    num.rs         # Numeric readouts that don't move: the fixed-width house rule
+    confirm.rs     # Click-wait-click Arm, and the unsaved-changes modal
     transforms.rs  # Transform tab rail + selected-transform detail pane
     explore.rs     # Random flame, mutate + strength, undo/redo, history list
-    render_panel.rs# Renderer mode, exposure, point size + count, color, haze, output
+    render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
   render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
-    camera_panel.rs# Framing, saved views, the camera path (incl. how it loops), output
+    camera_panel.rs# Framing, saved views, the camera path (incl. how it loops)
+    axis_widget.rs # Corner orientation cross; click a ball to look down that axis
     radio.rs       # Segmented one-of-n radio, used by all three such settings
-    browser.rs     # Scene picker (B)
-    shortcuts.rs   # Keybind reference window (H)
+    browser.rs     # Scene picker (Ctrl+O / B) — what File > Open… shows
+    shortcuts.rs   # Controls window (H / F1): input prefs + the keybind table
     labels.rs      # World-anchored transform name labels
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
@@ -191,15 +194,33 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | shift+drag / middle-drag | pan the focus in the view plane |
 | right-drag (empty space) | roll the camera about its view axis |
 | right-click a gizmo | that transform's context menu: duplicate / enable / delete / rename — the same menu its row in the Transforms window has |
-| scroll | zoom |
+| scroll | zoom — **always**, whatever is under the pointer |
+| click empty space | deselect (the only way to clear a selection) |
 | drag a gizmo's origin dot | select + translate the transform in the view plane |
 | drag an origin→axis gizmo edge | translate along that axis |
 | drag an outer gizmo edge | rotate around the third local axis (edge x-y rotates around z) |
 | ctrl+drag any gizmo part | uniform scale (drag up = grow) |
-| scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
+| shift during a gizmo drag | fine: a fifth of the travel. Anchored, so pressing or releasing it mid-drag doesn't jump |
+| alt+drag an outer gizmo edge | snap the rotation to 15° |
+| alt+scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
+| double-click a Transforms row | rename it inline |
+| drag a row's weight bar | change that transform's chaos weight |
+| alt+click a row's eye | solo it; alt+click again brings everything back |
 | right-click a Transforms row | duplicate / enable-disable / delete / rename |
+| click the corner axis cross | look down that axis (the six balls, bottom right) |
 | drag any panel DragValue | change the value; click it to type an exact one |
+
+A button-down only becomes a drag past a **4px dead zone**, so a twitch during
+a click doesn't rotate the view — and so a click can be told from a drag, which
+is what click-to-deselect needs. The pointer says which gesture is in flight:
+grabbing for orbit, move for pan, horizontal-resize for roll.
+
+**Scroll is navigation and only navigation.** The chaos-weight lever used to be
+on plain scroll and had to move: scroll is the gesture people use continuously
+and without looking, the fractal fully occludes gizmos while they keep taking
+input, and so zooming through a scene silently edited whatever happened to pass
+under the pointer. A navigation gesture must not be able to change the artwork.
 
 Grabbable gizmo parts glow and grow on hover (edges widen and whiten, the
 origin dot enlarges) and the cursor switches to a grab hand. Gizmo drags
@@ -230,15 +251,17 @@ and `--render` prints whichever form the framing it landed on needs.
 
 | Key | Action |
 |-----|--------|
-| H / ? | toggle the Keybinds window |
-| Esc | quit |
+| H / ? / F1 | toggle the Controls window (input prefs + every keybind) |
+| Esc | **cancel**: a menu, then a dialog, then the browser, then the selection |
+| Ctrl+Q | quit (asks first if the scene has unsaved edits, as does the window's close button) |
 | Space | re-seed points (reset) |
-| Up / Down | zoom in / out (selects transform when a transform is selected) |
+| Up / Down | zoom in / out (steps the selection when a transform is selected) |
+| Home | put the camera on the selected transform's fixed point |
 | Enter | enable/disable selected transform |
 | G | toggle transform gizmos and their name labels |
 | O or Z | play / stop the camera flying its path (two keys, one action) |
 | Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
-| Ctrl+Y | toggle camera path closed (seamless loop; the Camera window has all four loops) |
+| Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
@@ -246,7 +269,8 @@ and `--render` prints whichever form the framing it landed on needs.
 | Ctrl+Z / Ctrl+Shift+Z | undo / redo *any* edit (see `src/history.rs`) |
 | X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
 | I | invert mouse pitch, flightsim style (persisted to prefs) |
-| B | Scenes window: arrows + Enter, or click a row, to load a scene in place |
+| Ctrl+O or B | Scenes window: arrows + Enter, or click a row, to load a scene in place |
+| Ctrl+N | start over on a blank canvas (an edit, so one Ctrl+Z brings back what was there) |
 | P | open the Render job dialog (see Render Jobs) |
 | A / Shift+A | duplicate selected transform / add a fresh one (rebuilds pipelines) |
 | Delete | delete selected transform |
@@ -262,11 +286,25 @@ and `--render` prints whichever form the framing it landed on needs.
 | F / Shift+F | more / less atmospheric haze (the depth cue; see "Haze") |
 | Ctrl+Shift+S | save scene as… (fork under a new name) |
 
-The Keybinds window (H) is clickable: each row triggers its first-listed
+The Controls window (H or F1) is clickable: each row triggers its first-listed
 binding, shift+click the second. `I` persists to
 `~/.config/fracturize/prefs.toml` (user preferences, not scene data).
 
-**Orbit style** (Camera window, `orbit_style` in prefs) picks what a
+**Escape never quits.** In every desktop program written this century it means
+*cancel the thing in front of me*, so making it the quit key means the reflex
+that closes a popup closes the app. It falls through: transform menu → dialog →
+scene browser → the transform selection → nothing. Quitting is Ctrl+Q or the
+window's close button, and both check for unsaved edits first, as does opening
+a scene (which clears the undo stack).
+
+**A scene is a document.** It has a dirty bit, set by `commit_edit` and cleared
+by saving or opening; the window title is `document — application` with a `*`
+when dirty, and the toolbar's scene name carries the same marker. The rule that
+settles what counts as an edit: **if it changes what Ctrl+S writes, it is an
+undoable edit** — with one conventional exception, continuous view state, since
+nobody expects Ctrl+Z to un-orbit a camera and no 3D application offers it.
+
+**Orbit style** (Controls window, `orbit_style` in prefs) picks what a
 horizontal drag yaws about, and is the other preference of this kind.
 `trackball` (the default) yaws about the camera's *own* up: body-frame turns
 compose on the right, so a drag applies the same rotation from every framing
@@ -305,19 +343,49 @@ CLI interface. Both drive the same `App` methods, so an edit made by dragging
 a slider and one made by a keybind are the same edit, land in the same
 history, and save identically.
 
-Layout: a thin top toolbar of icon toggles (with the scene name at its right
-end), floating `egui::Window` panels over a full-surface viewport, and an
-Inkscape-style bottom status bar. Nothing shrinks the drawable area, so
-aspect and picking math are unaffected by which panels are open.
+Layout: a thin top toolbar over a full-surface viewport, floating
+`egui::Window` panels, and an Inkscape-style bottom status bar. Nothing shrinks
+the drawable area, so aspect and picking math are unaffected by which panels
+are open. The toolbar runs
+
+```
+File | Transforms  Gizmos | Explore | Camera  Render | Undo Redo | quick controls … scene name | Help
+```
+
+ordered by task rather than by module: what am I working on, then how am I
+looking at it, then help. Gizmos sits with Transforms because it is a *view of
+the same object*, not a peer of the panel toggles.
+
+**File is a menu, and the only one** — not the first entry of a
+File/Edit/View/Help bar. The scene is a document, and the value of that
+abstraction is that people can port intuition from every file-editing program
+they have used; but intuition needs furniture to attach to, and a File menu
+with the conventional contents in the conventional order is that furniture.
+What it deliberately is *not* is a menu bar: Edit and View would be near-empty
+duplicates of the toolbar toggles and the Explore window, and a menu bar that
+is mostly empty teaches people that menus here aren't worth opening. File
+operations are numerous, conventional and infrequent — the trade a menu is
+right for. Undo and redo are the opposite trade, so they get visible buttons.
 
 | Window | What lives there |
 |--------|------------------|
-| Transforms | Vertical tab rail (colour swatch, name, eye toggle, relative-weight bar) plus a detail pane for the selected transform: position/rotation/scale, weight, colour, variations |
+| Transforms | Vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Behaviour / Appearance / Identity |
 | Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
-| Render | Renderer mode, exposure, point size, point count, color falloff/contrast, haze |
-| Camera | Framing, saved views, the camera path (keypoints, how it loops, playback), render job / screenshot / save scene |
-| Scenes (B) | Scene picker; the same selection the arrow keys walk |
-| Keybinds (H) | The table above, scrollable, rows clickable |
+| Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
+| Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
+| Scenes (Ctrl+O, B) | Scene picker; the same selection the arrow keys walk. What File → Open… shows you |
+| Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
+
+All six persist their open state to prefs, and all six behave alike.
+
+**Panels group by persistence class, with headings that say so.** Three kinds
+of value used to stack with nothing admitting it: session state that evaporates
+at exit, preferences that follow the person across every scene, and scene data
+that goes in the file. Nothing on screen distinguished a slider whose value
+would be in your file tomorrow from one that wouldn't — and that gap is exactly
+what let `exposure` go years without being saved at all. Group *within* a
+window rather than splitting across windows: splitting would scatter things
+that belong together by task, and the task is why the panel was opened.
 
 Conventions worth keeping:
 
@@ -342,6 +410,35 @@ Conventions worth keeping:
   is the *monospace* family, and buttons are proportional. egui draws its own
   for the same reason; check `fc-list`/fontTools before putting a symbol in a
   label here.
+- **Every numeric readout goes through `src/ui/num.rs`.** A house rule, not a
+  per-site fix, and the one convention here whose absence no screenshot can
+  show. `format!("{:.N}", v)` into a proportional label sized to its own
+  content is unstable twice over: the *string* changes length as the value
+  changes, and the *widget* is sized to the string. A value dithering around a
+  boundary re-lays-out its whole row every frame, at up to 120fps, and it reads
+  as a physical vibration of the interface. Four rules: **round to display
+  precision before testing the sign** (`-0.004` is `"0.00"`, not `"-0.00"` —
+  and note this is *not* IEEE negative zero, so a `v == 0.0` guard catches
+  neither case); **monospace**, so digit advances are equal; **a declared
+  character budget** per readout, right-aligned, picked from the range the
+  value can actually take; and **size the widget, not just the string**
+  (`add_sized`), because a short string in a content-sized widget still shrinks
+  the widget. The last is the one that can't be done by formatting alone, and
+  it is what stops dragging **x** through zero from shoving **y** and **z**
+  sideways while your pointer is on the control.
+- **Destructive confirmations are click-wait-click** (`ui::confirm::Arm`): the
+  first click arms, and the second is accepted only after a wall-clock second,
+  *evaluated when the click arrives* — never against a frame counter, and never
+  against whether the button is currently drawn as ready. The reason you are
+  usually reaching for render-cancel is that the machine has run out of
+  resources and stopped repainting, so the click has to be accepted on its own
+  merits. Three discrete labels rather than a fill animation, for the same
+  reason: a label change reads at one frame per second and a wipe does not. A
+  plain two-click guard is defeated by a double-click, which is the single most
+  common accidental mouse input there is. Note that confirmation-as-a-*checkbox*
+  (Save-As's overwrite acknowledgement) is inherently safe here in a way
+  confirmation-as-a-second-click is not — the second click of a double-click
+  toggles a checkbox back off.
 - **Every interactive widget goes through `hints::hinted()`**, which attaches
   a tooltip *and* sets the status bar's left-hand hint while hovered. The one
   documented exception is a bare camera drag on empty viewport space, which
@@ -395,9 +492,46 @@ Conventions worth keeping:
   per-panel breakdown run with `FRACTURIZE_UI_PROFILE=1 RUST_LOG=info`.
 - **All edits funnel through `App::commit_edit`** (`src/history.rs`), which
   coalesces same-key edits inside 1s so a held key or a whole drag is one
-  undo step. Camera moves are deliberately *not* history entries.
+  undo step. Camera *moves* are deliberately not history entries; camera
+  *paths* are, all six operations of them — adding a keypoint is a discrete
+  authoring act that changes what Ctrl+S writes. History is capped by entry
+  count and by bytes, but the byte cap stops at ten entries (`MIN_ENTRIES`)
+  rather than grinding down to one on a 40k-transform scene, and it counts what
+  it dropped so the Explore list can say so instead of quietly ceasing to be
+  the beginning.
+- **A disclosure hides elaboration, never the headline.** Haze gets this right:
+  the amount is always visible and only the band's pin/near/far fold away. If a
+  section is closed while its feature is *on*, the disclosure is hiding the
+  wrong thing — which is why infinite zoom opens by default once a scene has a
+  zoom map.
+- **Disabled, not hidden, with the tooltip saying how to un-disable.** A
+  control that vanishes cannot tell you the feature exists. `hinted()` handles
+  the greyed path explicitly, because egui silently drops `on_hover_text` on a
+  disabled widget — so every "disabled rather than hidden, because it says why"
+  control in this UI was at one point saying nothing at all.
 - When testing anything that touches prefs, set an isolated `XDG_CONFIG_HOME`
   rather than writing the developer's real `~/.config/fracturize/prefs.toml`.
+
+### Deferred on purpose
+
+Not oversights. Each is a real gap, and each is a deliberate no-for-now — an
+undefended absence reads as an accident, so they are written down:
+
+- **Multi-select.** One transform at a time; moving three arms together isn't
+  possible. A real gap for the modelling workflow, and the largest of these.
+- **Numeric entry mid-drag** (Blender's `G`, then type `2.5`, Enter). A deep
+  Blender idiom, but the fallback here — drag roughly, then type exactly into
+  the inspector — is acceptable.
+- **Transform reordering.** Meaningless for an IFS: order doesn't affect the
+  attractor, weights do. This one is deferred permanently.
+- **A menu bar.** See the File-menu note above.
+- **The 3×3 mutation grid** — Apophysis's signature exploration UI, showing
+  eight perturbations around the current flame so mutation becomes *look,
+  choose* rather than *roll, judge, undo*. The highest-value single addition
+  left, and the largest job: it needs offscreen thumbnail rendering, which
+  `render_job.rs` / `offline.rs` can already do at arbitrary point counts.
+  Eight 200×200 thumbnails at low point counts are cheap next to a 50M-point
+  live view. Still on `todo.txt`.
 
 ## Random Flames
 
@@ -544,6 +678,10 @@ color_falloff = 0.0       # scale-aware color accumulation exponent (0 = off, ~1
 color_contrast = 1.0      # render-time cyclic palette contrast stretch (1 = off)
 haze = 0.0                # aerial-perspective depth cue, 0-1 (see "Haze";
                           # reads `fog` as an alias, its old name)
+exposure = 1.0            # splat-renderer brightness. Scene data because it is
+                          # the splat renderer's primary look control — before
+                          # it was, scenes recorded it in a *comment* saying
+                          # which --exposure to pass. Ignored by `points`.
 background = [0.02, 0.02, 0.05]   # LINEAR rgb behind the fractal. Linear, not
                           # sRGB: this is the clear value, and 0.02 reads as
                           # sRGB #282a45. Use the Render window's picker.
@@ -589,8 +727,8 @@ path_ease = false         # smoothstep time; default: once and pingpong ease,
 # directions blend smoothly while the eye moves. Omitted fields inherit the
 # base [camera] framing. Closed paths take the shortest yaw route back to key
 # 1. In-app: Y appends the current framing as a keypoint, Shift+Y removes,
-# Ctrl+Y toggles the loop, O or Z flies it; the Camera window's Loop radio
-# picks any of the four.
+# O or Z flies it; the Camera window's Loop radio picks any of the four. All
+# six path operations are undoable.
 #
 # ROUTES. Which way round a segment goes is data, not something re-derived
 # from its endpoints — that is what used to make a 1° change swing 359° the
@@ -1071,18 +1209,28 @@ octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
   camera wrap can't reproduce it, so the zoom shows a seam. `Renorm::defect`
   measures this and the CLI/status bar say so rather than pretending.
 
-In the app: right-click a transform (its row or its gizmo) → **Zoom about this**,
-which toggles, tells you the period and fixed point on hover, and greys out with
-the reason when that map can't be a scale symmetry. The status bar reads
-`zoom +N`.
+**In the app, infinite zoom has one home: the Render window → infinite zoom.**
+It opens by default once a scene has a zoom map, and it carries the whole
+control surface:
 
-The band itself is in the **Render window → infinite zoom**: `edge guard` at the
-top, with `radius`, `levels` and `octave falloff` under *band size*. All four
-are undoable and are what Ctrl+S writes into `[zoom]`. It sits next to haze
-deliberately — haze is the other half of whether the band's edge is visible —
-and it greys out with a pointer to the Transforms window when no map carries the
-zoom, rather than vanishing. Changing any of them re-forms the point cloud,
-since every point's octave is drawn from them.
+- a **map picker** listing every transform, the qualifying ones selectable and
+  the rest greyed with their reason on hover. `zoom_action()` already ran
+  `Renorm::build` per transform and produced both the enabled flag and a
+  sentence explaining the failure, so this turns "know the theory" into "read
+  the list" out of code that already existed. Picking the zoom map is a
+  **choose-one-of-n over transforms** and is now drawn as one, rather than as a
+  lone selected button on whichever transform you happened to have selected —
+  which had `ui::radio`'s defect spread across time instead of space: you
+  couldn't see the alternatives, and nothing said only one could be lit.
+- `edge guard`, with `radius`, `levels` and `octave falloff` under *band size*.
+
+All of it is undoable and is what Ctrl+S writes into `[zoom]`. It sits next to
+haze deliberately — haze is the other half of whether the band's edge is
+visible. Changing any of it re-forms the point cloud, since every point's
+octave is drawn from them. The status bar reads `zoom +N`.
+
+**Zoom about this** stays on a transform's row and gizmo context menus, and in
+the inspector's action row, as shortcuts for the map you already have selected.
 
 From the CLI, on any scene, without editing it:
 
@@ -1156,7 +1304,7 @@ one period lower; the last key is still synthesized, never written.
 - It is a *different* loop from `"closed"`, not a variant: closing back to the
   first key would undo the descent. The two were once separate keys that could
   both be set at once, which is a contradiction — now they're two values of
-  one, and Ctrl+Y declines to touch a zoom loop.
+  one, picked from the Camera window's four-way radio.
 - Like any looping path it doesn't ease (a stall at the seam is the one thing a
   zoom must not do) and the final duplicate frame is dropped.
 - **In the app**: `zoom` is the fourth segment of the Camera window's Loop
