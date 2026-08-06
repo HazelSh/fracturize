@@ -211,10 +211,20 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | click the corner axis cross | look down that axis (the six balls, bottom right) |
 | drag any panel DragValue | change the value; click it to type an exact one |
 
-A button-down only becomes a drag past a **4px dead zone**, so a twitch during
-a click doesn't rotate the view — and so a click can be told from a drag, which
-is what click-to-deselect needs. The pointer says which gesture is in flight:
-grabbing for orbit, move for pan, horizontal-resize for roll.
+A button-down becomes a drag past a **4px threshold**, which is what lets a
+click be told from a drag — needed by click-to-deselect, and by "a click on a
+gizmo that didn't move shouldn't land a history entry".
+
+**It is not a dead zone on the camera.** The obvious reading is to withhold
+movement until the pointer has travelled far enough, and that's wrong here:
+orbiting is the gesture you use continuously, so a dead zone on it is felt as
+stiction at the start of every single drag — a constant cost, paid to prevent a
+two-pixel camera nudge that is imperceptible and that nothing records. The
+camera tracks the pointer from the first pixel. **Gizmo** drags do wait for the
+threshold, because those write to the artwork and land an undo entry, and
+they're a careful deliberate gesture where a few pixels of settling costs
+nothing. The pointer says which gesture is in flight: grabbing for orbit, move
+for pan, horizontal-resize for roll.
 
 **Scroll is navigation and only navigation.** The chaos-weight lever used to be
 on plain scroll and had to move: scroll is the gesture people use continuously
@@ -435,7 +445,13 @@ Conventions worth keeping:
   merits. Three discrete labels rather than a fill animation, for the same
   reason: a label change reads at one frame per second and a wipe does not. A
   plain two-click guard is defeated by a double-click, which is the single most
-  common accidental mouse input there is. Note that confirmation-as-a-*checkbox*
+  common accidental mouse input there is.
+
+  The arm expires after **3 seconds** — scaled to the gesture rather than to the
+  worst case. Reading a relabelled button and clicking it again is about a
+  second of human time, so three is already generous, and longer is not safer:
+  an armed control is one click from firing, and holding it that way long after
+  the person has looked away is the risk rather than the protection. Note that confirmation-as-a-*checkbox*
   (Save-As's overwrite acknowledgement) is inherently safe here in a way
   confirmation-as-a-second-click is not — the second click of a double-click
   toggles a checkbox back off.

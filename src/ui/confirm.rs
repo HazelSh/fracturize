@@ -23,11 +23,23 @@ pub const MIN_WAIT: Duration = Duration::from_secs(1);
 
 /// How long an armed control stays armed before going back to harmless.
 ///
-/// Deliberately generous. The commonest reason to cancel a render is that the
-/// machine has run out of resources and the desktop is crawling — at a frame
-/// every few seconds a four-second expiry can close before the armed state has
-/// been *drawn* even once, which is a bound in exactly the wrong direction.
-pub const ARM_WINDOW: Duration = Duration::from_secs(30);
+/// Scaled to the gesture, not to the worst case. Reading a button that has just
+/// relabelled itself and clicking it again is a second or so of human time —
+/// simple reaction is a quarter of that, and the rest is reading and deciding —
+/// so a window of three seconds is already two to three times what the act
+/// needs, and the *usable* slot after [`MIN_WAIT`] is the two seconds either
+/// side of that. Longer isn't safer: an armed control is a control one click
+/// from firing, and holding it in that state for half a minute after the person
+/// has looked away is the risk, not the protection.
+///
+/// The cost is on a machine so degraded it isn't repainting: there, a click can
+/// arrive after the window has closed and will re-arm rather than confirm, so
+/// the job takes an extra click or two to stop. That is a bounded annoyance,
+/// and it is bounded in the right direction — the failure is "it didn't cancel
+/// yet", not "it cancelled when I didn't mean it to". If it ever bites, the
+/// better fix is to disarm on the pointer *leaving* the button rather than on a
+/// clock, which reads disengagement directly instead of guessing at it.
+pub const ARM_WINDOW: Duration = Duration::from_secs(3);
 
 /// What an [`Arm`] currently is, as far as the label is concerned.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

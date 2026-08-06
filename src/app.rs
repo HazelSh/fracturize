@@ -425,9 +425,9 @@ fn lerp_camera(a: &OrbitCamera, b: &OrbitCamera, s: f32) -> OrbitCamera {
 }
 
 /// How far the pointer must travel, in physical pixels, before a button-down
-/// becomes a drag rather than a click. Three to four pixels is what every other
-/// drag-capable surface uses, and it is enough to absorb the twitch a hand
-/// makes while clicking a mouse button.
+/// counts as a drag rather than a click. Three to four pixels is what every
+/// other drag-capable surface uses, and it is enough to absorb the twitch a
+/// hand makes while clicking a mouse button.
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// What a mouse drag is currently doing
@@ -485,10 +485,18 @@ pub struct App {
     /// Where the pointer was when the button went down, and whether it has
     /// since travelled far enough to count as a drag rather than a click.
     ///
-    /// Without this a one-pixel twitch during a click rotates the view, which
-    /// is what every drag-capable surface in the world uses a dead zone to
-    /// prevent — and it's the prerequisite for click-to-deselect, since telling
-    /// a click from a drag is exactly the question.
+    /// This is what tells a click from a drag at release, which is what
+    /// click-to-deselect needs and what keeps a click on a gizmo from
+    /// committing a one-pixel edit.
+    ///
+    /// **It does not gate camera motion.** The obvious reading of "add a drag
+    /// threshold" is to withhold movement until the pointer has travelled far
+    /// enough, and that is wrong here: orbiting is the gesture you use
+    /// continuously, and a dead zone on it is felt as stiction at the start of
+    /// every single drag — a constant cost, paid to prevent a two-pixel camera
+    /// nudge that is imperceptible and that nothing records. So the camera
+    /// tracks the pointer from the first pixel and this flag only *observes*.
+    /// Gizmo drags are the other way round (see `on_cursor_moved`).
     drag_origin: (f32, f32),
     drag_moved: bool,
     /// Shift-for-fine during a gizmo drag: the virtual-cursor position and the
@@ -2067,21 +2075,15 @@ impl App {
         let (dx, dy) = (x - self.cursor.0, y - self.cursor.1);
         self.cursor = (x, y);
 
-        // The dead zone. Below it the gesture is still a click and nothing
-        // moves; on the frame it's crossed, the motion applied is the whole
-        // travel from the press, so the view ends up exactly where the pointer
-        // says it should rather than four pixels behind.
-        let (dx, dy) = if matches!(self.drag, Drag::None) || self.drag_moved {
-            (dx, dy)
-        } else {
+        // Travel from the press, tracked for every drag — but it *gates*
+        // almost nothing. See `drag_moved` for why the camera doesn't wait.
+        if !self.drag_moved && !matches!(self.drag, Drag::None) {
             let (ox, oy) = (x - self.drag_origin.0, y - self.drag_origin.1);
-            if ox * ox + oy * oy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
-                return;
+            if ox * ox + oy * oy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
+                self.drag_moved = true;
+                self.set_drag_cursor();
             }
-            self.drag_moved = true;
-            self.set_drag_cursor();
-            (ox, oy)
-        };
+        }
 
         match self.drag {
             Drag::None => {
@@ -2110,7 +2112,15 @@ impl App {
                 self.invalidate_default_path();
             }
             Drag::Gizmo { transform, mode, start_matrix } => {
-                self.update_gizmo_drag(transform, mode, start_matrix);
+                // The dead zone applies *here* and nowhere else. A gizmo drag
+                // writes to the artwork and lands a history entry, so a twitch
+                // during a click is a real edit you then have to undo; the
+                // camera has neither problem. The gesture is also a careful,
+                // deliberate one where a few pixels of settling costs nothing —
+                // unlike orbiting, which you do constantly.
+                if self.drag_moved {
+                    self.update_gizmo_drag(transform, mode, start_matrix);
+                }
             }
         }
     }
