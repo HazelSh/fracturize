@@ -436,22 +436,40 @@ Conventions worth keeping:
   the widget. The last is the one that can't be done by formatting alone, and
   it is what stops dragging **x** through zero from shoving **y** and **z**
   sideways while your pointer is on the control.
-- **Destructive confirmations are click-wait-click** (`ui::confirm::Arm`): the
-  first click arms, and the second is accepted only after a wall-clock second,
-  *evaluated when the click arrives* — never against a frame counter, and never
-  against whether the button is currently drawn as ready. The reason you are
-  usually reaching for render-cancel is that the machine has run out of
-  resources and stopped repainting, so the click has to be accepted on its own
-  merits. Three discrete labels rather than a fill animation, for the same
-  reason: a label change reads at one frame per second and a wipe does not. A
-  plain two-click guard is defeated by a double-click, which is the single most
-  common accidental mouse input there is.
+- **Destructive confirmations use `ui::confirm::danger_button`.** One widget,
+  five steps, and every step is visible:
 
-  The arm expires after **3 seconds** — scaled to the gesture rather than to the
-  worst case. Reading a relabelled button and clicking it again is about a
-  second of human time, so three is already generous, and longer is not safer:
-  an armed control is one click from firing, and holding it that way long after
-  the person has looked away is the risk rather than the protection. Note that confirmation-as-a-*checkbox*
+  1. Click it. It becomes **disabled and greyed**, reading `waiting (3)`.
+  2. It counts down, taking no input at all.
+  3. At zero it becomes **enabled again in danger colours**, with a different
+     and more explicit label — `Cancel` → `Abort render`, `Discard` →
+     `Discard edits`.
+  4. **It sits there.** Nothing expires.
+  5. **Clicking anywhere else puts it back**, with no other effect.
+
+  The disabled countdown is the load-bearing part. A plain two-click guard is
+  defeated by a double-click — the commonest accidental mouse input there is —
+  and the obvious fix, *ignoring* clicks during a wait, is worse than it looks:
+  a button that silently swallows input is indistinguishable from a broken one,
+  and the person this guard exists for is precisely the one clicking fast. A
+  disabled control with a number ticking on it is the affordance everyone
+  already has from download and install dialogs: it says "not yet, and here is
+  exactly how long". The second click then lands on a control that has visibly
+  *become available*.
+
+  Step 4 is why there is no arm window. A timeout is a clock guessing at whether
+  you are still engaged, and it guesses wrong in the dangerous direction — too
+  short and your confirming click quietly does nothing, too long and a live
+  one-click trigger outlives your attention. Clicking elsewhere is the same
+  signal, measured instead of guessed. It also disposes of the
+  degraded-machine worry that shaped an earlier design: if the box has stopped
+  repainting you just wait longer for the frame that draws the confirm, and it
+  is still there when it arrives.
+
+  All three states are drawn in **one fixed-width cell**, sized to the longest,
+  so the row doesn't re-lay-out under a pointer that is aimed at it.
+
+  Note that confirmation-as-a-*checkbox*
   (Save-As's overwrite acknowledgement) is inherently safe here in a way
   confirmation-as-a-second-click is not — the second click of a double-click
   toggles a checkbox back off.

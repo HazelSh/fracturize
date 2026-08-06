@@ -78,19 +78,15 @@ impl JobHandle {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// First click arms, a later click confirms. A cancelled job also
-    /// un-pauses, or it would sit in the pause loop never noticing.
+    /// Stop the job for good. Guarded by `ui::confirm::danger_button`, which
+    /// owns the arm-and-confirm interaction; by the time this is called the
+    /// person has confirmed.
     ///
-    /// The wait is deliberately evaluated here, at click time, against the wall
-    /// clock — not against whether the button has been *drawn* as ready. The
-    /// reason you are usually reaching for this button is that the machine has
-    /// run out of resources and stopped repainting; the click has to be
-    /// accepted on its own merits regardless of whether the UI caught up.
-    pub fn click_cancel(&mut self) {
-        if self.cancel_arm.click() {
-            self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.set_paused(false);
-        }
+    /// A cancelled job also un-pauses, or it would sit in the pause loop never
+    /// noticing it had been cancelled.
+    pub fn cancel_now(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.set_paused(false);
     }
 
     /// Fraction complete within the current phase, when it reports one.

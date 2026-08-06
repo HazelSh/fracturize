@@ -571,7 +571,7 @@ fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
 
 fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // Read what the display needs before taking `&mut` for the buttons.
-    let (phase, fraction, elapsed, remaining, paused, cancelling, cancel_label, cancel_hint, log, out) = {
+    let (phase, fraction, elapsed, remaining, paused, cancelling, cancel_arm, log, out) = {
         let job = app.job().expect("caller checked");
         (
             job.phase,
@@ -580,8 +580,7 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             job.remaining_secs(),
             job.paused(),
             job.cancelling(),
-            job.cancel_arm.label("Cancel"),
-            job.cancel_arm.hint("Cancel"),
+            job.cancel_arm,
             job.log.clone(),
             job.params.out_path.clone(),
         )
@@ -644,20 +643,32 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             }
         }
 
-        // Three discrete labels — `Cancel` → `Cancel? wait…` → `Cancel? click
-        // again` — rather than a fill animation, because this button is most
-        // often reached for on a box that has stopped compositing, and a label
-        // change still reads at one frame per second where a wipe does not.
-        let (label, tip) = if cancelling {
-            ("Cancelling…".to_string(), "The job is stopping. Nothing is written.".to_string())
+        // Two stages: `Cancel` arms it, it counts down disabled, then it comes
+        // back as a red `Abort render`. See `ui::confirm::danger_button`.
+        if cancelling {
+            let resp = ui.add_enabled(false, egui::Button::new("Aborting…"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "The job is stopping. Nothing is written.",
+                "the job is stopping",
+            );
         } else {
-            (cancel_label, cancel_hint)
-        };
-        let resp = ui.add_enabled(!cancelling, egui::Button::new(label));
-        let resp = hinted(resp, &mut app.ui_state, tip, "click twice: cancel the job");
-        if resp.clicked() {
+            let (arm, fired) = super::confirm::danger_button(
+                ui,
+                &mut app.ui_state,
+                cancel_arm,
+                "Cancel",
+                "Abort render",
+                "Stop the render and throw it away",
+                "Throw the job away. Nothing is written, and the time it has \
+                 already spent is lost.",
+            );
             if let Some(job) = app.job_mut() {
-                job.click_cancel();
+                job.cancel_arm = arm;
+                if fired {
+                    job.cancel_now();
+                }
             }
         }
 

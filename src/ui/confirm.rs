@@ -13,58 +13,56 @@ use crate::app::App;
 
 use super::hints::hinted;
 
-/// How long after arming the second click starts being accepted.
+/// How long the control spends counting down before the confirm is available.
 ///
-/// Long enough that no double-click can span it (the OS threshold is
-/// typically 400-500ms and the *interval* far shorter), short enough not to
-/// feel punitive. The whole point of the guard is that the two clicks of a
-/// double-click cannot both land, so this floor is the guard.
-pub const MIN_WAIT: Duration = Duration::from_secs(1);
+/// Long enough that no double-click, and no impatient burst of clicking, can
+/// carry you through it — that is the whole guard. It is spent with the button
+/// *visibly disabled and counting*, so the wait is something you watch rather
+/// than something you run into.
+pub const COUNTDOWN: Duration = Duration::from_secs(3);
 
-/// How long an armed control stays armed before going back to harmless.
-///
-/// Scaled to the gesture, not to the worst case. Reading a button that has just
-/// relabelled itself and clicking it again is a second or so of human time —
-/// simple reaction is a quarter of that, and the rest is reading and deciding —
-/// so a window of three seconds is already two to three times what the act
-/// needs, and the *usable* slot after [`MIN_WAIT`] is the two seconds either
-/// side of that. Longer isn't safer: an armed control is a control one click
-/// from firing, and holding it in that state for half a minute after the person
-/// has looked away is the risk, not the protection.
-///
-/// The cost is on a machine so degraded it isn't repainting: there, a click can
-/// arrive after the window has closed and will re-arm rather than confirm, so
-/// the job takes an extra click or two to stop. That is a bounded annoyance,
-/// and it is bounded in the right direction — the failure is "it didn't cancel
-/// yet", not "it cancelled when I didn't mean it to". If it ever bites, the
-/// better fix is to disarm on the pointer *leaving* the button rather than on a
-/// clock, which reads disengagement directly instead of guessing at it.
-pub const ARM_WINDOW: Duration = Duration::from_secs(3);
-
-/// What an [`Arm`] currently is, as far as the label is concerned.
+/// What an [`Arm`] currently is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArmState {
-    /// Not armed: a click here only arms.
+    /// Not armed. The control is an ordinary button, and a click arms it.
     Idle,
-    /// Armed, but inside [`MIN_WAIT`] — a click here is refused.
-    Waiting,
-    /// Armed and past the wait: the next click fires.
+    /// Counting down, with this many whole seconds left to show. The control is
+    /// drawn disabled and takes no input at all.
+    Counting(u32),
+    /// Armed and available. The control is drawn in danger colours and the next
+    /// click on it fires.
     Ready,
 }
 
-/// A click-wait-click confirmation: the first click arms, and the second is
-/// accepted only once a wall-clock minimum has passed.
+/// A two-stage destructive confirmation.
 ///
-/// Everything here is evaluated **at click time against the wall clock**, never
-/// against a frame counter and never against "is the button currently *drawn*
-/// as ready". On a box that has stopped compositing, the repaint that would
-/// have re-labelled the button may not have happened yet even though the timer
-/// fired long ago; the click still has to be accepted on its own merits. Two
-/// discrete events and a timer survive that. A hold-to-confirm gesture with a
-/// fill animation — the obvious alternative — degrades precisely when it is
-/// needed most, since both its feedback channel and its input model assume a
-/// responsive frame loop.
-#[derive(Default)]
+/// The shape, and why each part of it is the way it is:
+///
+/// 1. Click the button. It becomes **disabled and greyed**, reading
+///    `waiting (3)`, and counts down.
+/// 2. It takes no input at all while counting. This is the point: a guard that
+///    merely *ignores* clicks looks identical to a broken button, and the
+///    person it exists to protect is precisely the one clicking fast. A
+///    disabled control with a number ticking on it is the affordance everyone
+///    already knows from download and install dialogs — it says "not yet, and
+///    here is exactly how long".
+/// 3. At zero it becomes enabled again in **danger colours**, with a different
+///    and more explicit label (`Cancel` → `Abort render`). The second click is
+///    on a control that has visibly *become available*, not on one that was
+///    silently pretending to be unavailable.
+/// 4. **It then sits there.** Nothing expires. An arm window is a clock
+///    guessing at whether you are still engaged, and it guesses wrong in the
+///    dangerous direction: too short and your confirming click quietly does
+///    nothing, too long and a live one-click trigger outlives your attention.
+/// 5. **Clicking anywhere else puts it back**, with no other effect. That is
+///    the real disengagement signal — you demonstrated your attention went
+///    somewhere else — and it needs no timer to read.
+///
+/// Because nothing expires, the degraded-machine case that shaped the earlier
+/// design stops mattering: if the box has stopped repainting you simply wait
+/// longer for the frame that draws the confirm, and it is still there when it
+/// arrives. Nothing can time out from under you.
+#[derive(Default, Clone, Copy)]
 pub struct Arm {
     at: Option<Instant>,
 }
@@ -72,57 +70,138 @@ pub struct Arm {
 impl Arm {
     pub fn state(&self) -> ArmState {
         match self.at {
-            Some(t) if t.elapsed() >= ARM_WINDOW => ArmState::Idle,
-            Some(t) if t.elapsed() >= MIN_WAIT => ArmState::Ready,
-            Some(_) => ArmState::Waiting,
             None => ArmState::Idle,
+            Some(t) => {
+                let elapsed = t.elapsed();
+                if elapsed >= COUNTDOWN {
+                    ArmState::Ready
+                } else {
+                    // Round *up*, so the first frame shows the full count and it
+                    // never displays a zero it isn't honouring.
+                    let left = (COUNTDOWN - elapsed).as_secs_f32().ceil() as u32;
+                    ArmState::Counting(left.max(1))
+                }
+            }
         }
     }
 
-    /// Register a click. `true` means *confirmed, do the thing*.
-    ///
-    /// A click during [`ArmState::Waiting`] is neither a confirmation nor a
-    /// re-arm: it is swallowed, leaving the original arm time in place. Were it
-    /// to re-arm, an impatient click every 900ms would hold the control
-    /// permanently out of reach.
-    pub fn click(&mut self) -> bool {
-        match self.state() {
-            ArmState::Ready => {
-                self.at = None;
-                true
-            }
-            ArmState::Waiting => false,
-            ArmState::Idle => {
-                self.at = Some(Instant::now());
-                false
-            }
-        }
+    pub fn armed(&self) -> bool {
+        self.at.is_some()
+    }
+
+    pub fn arm(&mut self) {
+        self.at = Some(Instant::now());
     }
 
     pub fn disarm(&mut self) {
         self.at = None;
     }
+}
 
-    /// The button's text for this state.
-    ///
-    /// Three discrete strings rather than an animation: a label change reads
-    /// correctly at one frame per second, and a smooth fill does not.
-    pub fn label(&self, idle: &str) -> String {
-        match self.state() {
-            ArmState::Idle => idle.to_string(),
-            ArmState::Waiting => format!("{}? wait…", idle),
-            ArmState::Ready => format!("{}? click again", idle),
-        }
+/// Draw a two-stage destructive confirmation as one button. Returns the new
+/// arm state and whether *this* click confirmed.
+///
+/// `Arm` is passed and returned by value rather than borrowed because the state
+/// it guards usually lives on `App` next to `ui_state`, and the two can't both
+/// be borrowed mutably. It is two words; copying it is free.
+///
+/// `idle` is the resting label (`Cancel`); `danger` is the confirm label
+/// (`Abort render`). Deliberately different words: the confirm is a different
+/// act from the request, and reusing the label would invite the second click to
+/// be made on the memory of the first.
+pub fn danger_button(
+    ui: &mut egui::Ui,
+    ui_state: &mut super::UiState,
+    mut arm: Arm,
+    idle: &str,
+    danger: &str,
+    idle_tip: &str,
+    danger_tip: &str,
+) -> (Arm, bool) {
+    let state = arm.state();
+    let counting = format!("waiting ({})", COUNTDOWN.as_secs());
+
+    let (text, enabled) = match state {
+        ArmState::Idle => (idle.to_string(), true),
+        ArmState::Counting(n) => (format!("waiting ({})", n), false),
+        ArmState::Ready => (danger.to_string(), true),
+    };
+
+    // One width for all three states, so the row doesn't re-lay-out under the
+    // pointer at the exact moment the pointer is aimed at it — see `ui::num`.
+    let w = [idle, counting.as_str(), danger]
+        .iter()
+        .map(|t| text_width(ui, t))
+        .fold(0.0f32, f32::max)
+        + 2.0 * ui.spacing().button_padding.x
+        + 6.0;
+    let h = ui.spacing().interact_size.y;
+
+    let mut button = egui::Button::new(match state {
+        // White on red: this is the one control in the app allowed to shout.
+        ArmState::Ready => egui::RichText::new(text).strong().color(egui::Color32::WHITE),
+        _ => egui::RichText::new(text),
+    });
+    if state == ArmState::Ready {
+        button = button.fill(ui.visuals().error_fg_color.gamma_multiply(0.55));
     }
 
-    /// The tooltip that goes with [`label`](Self::label).
-    pub fn hint(&self, idle: &str) -> String {
-        match self.state() {
-            ArmState::Idle => format!("{} — click once to arm, then again to confirm", idle),
-            ArmState::Waiting => "Armed. Click again in a moment to confirm.".to_string(),
-            ArmState::Ready => "Click again to confirm. Move away to cancel.".to_string(),
+    let resp = ui
+        .add_enabled_ui(enabled, |ui| ui.add_sized([w, h], button))
+        .inner;
+    let resp = super::hints::hinted(
+        resp,
+        ui_state,
+        match state {
+            ArmState::Idle => idle_tip.to_string(),
+            ArmState::Counting(_) => format!(
+                "{}\n\nAvailable in a moment. Click anywhere else to call it off.",
+                danger_tip
+            ),
+            ArmState::Ready => format!("{}\n\nClick anywhere else to call it off.", danger_tip),
+        },
+        match state {
+            ArmState::Idle => "click: arm this, then confirm",
+            ArmState::Counting(_) => "waiting — click anywhere else to call it off",
+            ArmState::Ready => "click: confirm · click anywhere else: call it off",
+        },
+    );
+
+    let mut fired = false;
+    if resp.clicked() {
+        match state {
+            ArmState::Idle => arm.arm(),
+            ArmState::Ready => {
+                arm.disarm();
+                fired = true;
+            }
+            // Unreachable: the control is disabled while counting.
+            ArmState::Counting(_) => {}
         }
+    } else if arm.armed()
+        && ui.input(|i| i.pointer.any_pressed())
+        && !resp.contains_pointer()
+    {
+        // Attention went elsewhere. Note this is checked on the *press*, while
+        // `clicked()` lands on the release — so the press that arms the control
+        // can't disarm it on the same frame, because that press is over it.
+        arm.disarm();
     }
+
+    // Keep the seconds ticking even if nothing else asks for a frame.
+    if matches!(state, ArmState::Counting(_)) {
+        ui.ctx().request_repaint();
+    }
+
+    (arm, fired)
+}
+
+/// Width of `s` in the button text style.
+fn text_width(ui: &egui::Ui, s: &str) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    ui.ctx().fonts_mut(|f| {
+        f.layout_no_wrap(s.to_owned(), font, egui::Color32::WHITE).size().x
+    })
 }
 
 /// Something that would throw away unsaved work, waiting on an answer.
@@ -176,14 +255,21 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 resolve = Some(Resolution::Save);
             }
 
-            // The one destructive button in the dialog gets the same
-            // click-wait-click guard as render-cancel, and for the same reason:
-            // it is reached at the exact moment a person is clicking fast.
-            let label = app.ui_state.discard_arm.label("Discard");
-            let hint = app.ui_state.discard_arm.hint("Discard");
-            let resp = ui.button(label);
-            let resp = hinted(resp, &mut app.ui_state, hint, "click twice: discard the edits");
-            if resp.clicked() && app.ui_state.discard_arm.click() {
+            // The one irreversible button in the dialog gets the same two-stage
+            // guard as render-cancel, and for the same reason: it is reached at
+            // the exact moment a person is clicking fast.
+            let current = app.ui_state.discard_arm;
+            let (arm, fired) = danger_button(
+                ui,
+                &mut app.ui_state,
+                current,
+                "Discard",
+                "Discard edits",
+                "Throw the edits away and continue",
+                "Throw the edits away. There is no undo for this.",
+            );
+            app.ui_state.discard_arm = arm;
+            if fired {
                 resolve = Some(Resolution::Discard);
             }
 
@@ -230,46 +316,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_double_click_cannot_confirm() {
-        // The whole point: two clicks 20ms apart must not get through.
+    fn arming_starts_a_full_countdown() {
         let mut arm = Arm::default();
-        assert!(!arm.click(), "the first click only arms");
-        assert!(!arm.click(), "a double-click's second click is refused");
-        assert_eq!(arm.state(), ArmState::Waiting, "and it stays armed, not re-armed");
-    }
-
-    #[test]
-    fn a_click_after_the_wait_confirms_and_disarms() {
-        let mut arm = Arm { at: Some(Instant::now() - MIN_WAIT) };
-        assert_eq!(arm.state(), ArmState::Ready);
-        assert!(arm.click(), "past the minimum wait, the second click fires");
-        assert_eq!(arm.state(), ArmState::Idle, "firing disarms");
-    }
-
-    #[test]
-    fn an_impatient_click_does_not_push_the_deadline_back() {
-        // If a refused click re-armed, clicking every 900ms would hold the
-        // control out of reach forever.
-        let mut arm = Arm { at: Some(Instant::now() - MIN_WAIT / 2) };
-        assert!(!arm.click());
-        let waited = arm.at.expect("still armed").elapsed();
-        assert!(waited >= MIN_WAIT / 2, "the original arm time survives the refusal");
-    }
-
-    #[test]
-    fn an_old_arm_has_gone_back_to_harmless() {
-        let mut arm = Arm { at: Some(Instant::now() - ARM_WINDOW) };
         assert_eq!(arm.state(), ArmState::Idle);
-        assert!(!arm.click(), "an expired arm's next click arms afresh, it does not fire");
+        arm.arm();
+        assert_eq!(
+            arm.state(),
+            ArmState::Counting(COUNTDOWN.as_secs() as u32),
+            "the first frame shows the whole count, not one less",
+        );
     }
 
     #[test]
-    fn the_label_says_which_of_the_three_states_it_is_in() {
-        assert_eq!(Arm::default().label("Cancel"), "Cancel");
-        assert_eq!(Arm { at: Some(Instant::now()) }.label("Cancel"), "Cancel? wait…");
-        assert_eq!(
-            Arm { at: Some(Instant::now() - MIN_WAIT) }.label("Cancel"),
-            "Cancel? click again"
+    fn the_countdown_never_shows_a_zero_it_is_not_honouring() {
+        // A hair before the end is still "1": showing "0" on a control that
+        // hasn't become available yet is the one number it must not display.
+        let arm = Arm { at: Some(Instant::now() - COUNTDOWN + Duration::from_millis(10)) };
+        assert_eq!(arm.state(), ArmState::Counting(1));
+    }
+
+    #[test]
+    fn the_confirm_becomes_available_at_zero() {
+        let arm = Arm { at: Some(Instant::now() - COUNTDOWN) };
+        assert_eq!(arm.state(), ArmState::Ready);
+    }
+
+    #[test]
+    fn an_armed_control_never_expires() {
+        // The whole reason there is no arm window: a clock guessing at whether
+        // you are still engaged guesses wrong in the dangerous direction. It
+        // sits in `Ready` until it fires or something else is clicked.
+        let arm = Arm { at: Some(Instant::now() - Duration::from_secs(60 * 60)) };
+        assert_eq!(arm.state(), ArmState::Ready, "an hour later it is still waiting for you");
+    }
+
+    #[test]
+    fn disarming_puts_it_all_the_way_back() {
+        let mut arm = Arm::default();
+        arm.arm();
+        assert!(arm.armed());
+        arm.disarm();
+        assert_eq!(arm.state(), ArmState::Idle);
+        assert!(!arm.armed());
+    }
+
+    #[test]
+    fn a_double_click_cannot_reach_the_confirm() {
+        // The guard, stated: the control spends the whole double-click interval
+        // disabled, so the second click of a double-click has nothing to hit.
+        let mut arm = Arm::default();
+        arm.arm();
+        assert!(
+            matches!(arm.state(), ArmState::Counting(_)),
+            "still counting an instant later, so the confirm isn't there to be hit",
+        );
+        assert!(
+            COUNTDOWN >= Duration::from_millis(600),
+            "the countdown must outlast any plausible double-click interval",
         );
     }
 }
