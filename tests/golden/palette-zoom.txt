@@ -1,0 +1,68 @@
+scene    Fixture                                                  fixture.toml
+         by the test suite, 3 maps, palette colour, zoom on, 4.0M points,
+         camera path
+
+notes    3
+         shape   frames at distance 2.04, 2.6x the 0.80 that fills the frame
+         render  point_size 0.0018 is over the 0.0011 crisp bound at 1080p
+         zoom    edge-guard ramp reaches into the view; raise zoom.radius
+
+shape    centre  ( 0.021,  0.023,  0.021)
+         spread  ( 0.016,  0.048,  0.033)
+         radius     0.061   occupancy      1.8%
+         to fill the frame   -S camera.distance=0.80
+         for crisp points    -S meta.point_size=0.0011
+         the scene sets      distance 3.400, point_size 0.0018
+         radius is the 95th percentile of the walk's distance from the centre
+
+maps     3   share of the walk, contraction, colour as rendered
+         [0] bough         74.3%   contraction  0.600   #38242e @0.12
+             scale 0.600                    rot (   0,  32,   0)°   speed 0.26
+             move  ( 0.000,  0.000,  0.000)
+             vars  linear
+         [1] mirror-fold   23.5%   contraction -0.450   #dfa4b3 @0.60
+             scale [-0.450, 0.450, 0.450]   rot ( -24,  16,   0)°   speed 0.38
+             move  (-0.320, -0.300, -0.780)
+             vars  absfold 0.55 + linear 0.45
+         [2] twig           2.2%   contraction  0.116   #fff2f5 @0.86
+             scale [0.050, 0.620, 0.050]    rot (   0,   0,   0)°   speed 0.73
+             move  ( 0.000,  0.300,  0.000)
+             vars  linear
+         a negative contraction is a map that reflects; one at or past 1.0
+         expands. rotations are re-derived from the matrix, so the euler
+         branch may differ from the file — the rotation itself is the same
+
+render   point_size    0.0018   point_count   4000000
+         haze            0.50   decay            0.80
+         exposure        1.00   background   ( 0.010,  0.008,  0.016)
+         background is linear RGB, as the shader takes it, not sRGB
+
+colour   mode        palette   3 stops, oklab
+         speed          0.50   falloff      0.60   contrast      1.00
+         luminance      0.31   swing        0.91
+         ramp    #0d0a10 #2a1c24 #4b2f3a #6d4352 #92596b #b96f84
+                 #d0879b #dc9faf #e8b8c4 #f2d1d9 #fceaee #92898e
+
+camera   yaw         0.5585 rad (  32.0°)
+         pitch       1.1200 rad (  64.2°)
+         roll        0.0000 rad (   0.0°)
+         distance     2.040
+         focus     ( 0.000,  0.000,  0.000)
+         from the scene
+         under infinite zoom, reported in the canonical period as it renders
+
+path     2 keypoints, closed loop, 8.0s
+         key        yaw    pitch     roll   distance   route
+         [0]   0.0000   0.4000   0.0000      3.400   short
+         [1]   1.5708   0.4000   0.0000      3.400   +1 turn
+         [0] focus ( 0.000,  0.000,  0.000)
+         route is how each segment gets to the next key: the short way, or
+         that plus whole extra turns
+
+zoom     on   map [0] bough
+         fixed point     ( 0.000,  0.000,  0.000)
+         scale              0.600   0.74 octaves/period, 32° twist
+         radius              3.20   levels         14.00
+         octave_falloff      0.00   edge_guard      1.00
+         guard band      1.60x-3.20x   of the eye distance, 1.0 octaves wide
+         rendered              19   periods (14.0 octaves)

@@ -998,14 +998,40 @@ than one that refused to load.
 --random-palette [cosine|harmony|library]   # honours --seed; prints the
                                             # [palette] table so a roll can be kept
 --palette-rotate <t>  --palette-reverse  --palette-interpolate rgb|oklab
---palettes                     # list the library with swatches, and exit
+--palettes                     # list the library, and exit
+--color                        # paint --info and --palettes with 24-bit ANSI
 ```
 
 `--palette` restyles a scene without editing it, same spirit as `--zoom`.
-`--info` gains a colour section: mode, source, a **24-bit ANSI swatch**, a hex
-ramp, and the luminance profile. The swatch is emitted even when stdout is a
-pipe — `--info` is a diagnostic read by people *and agents*, and an agent that
-can see the gradient makes better decisions than one imagining it from floats.
+`--info` gains a colour section: mode, source, a **12-stop hex ramp**, and the
+luminance profile.
+
+**Colour is opt-in, via `--color`, and it is additive.** The hex ramp is the
+channel that works everywhere, so it is always there; `--color` adds a
+continuous 24-bit ANSI swatch beneath it and paints each hex stop in the colour
+it names. Nothing is replaced, so the coloured output is a strict superset of
+the default and the golden files test what most callers actually receive.
+
+This used to run the other way: the swatch was emitted unconditionally,
+including into a pipe, on the reasoning that an agent which can see the
+gradient decides better than one imagining it from floats. It cannot see it. An
+agent reading Bash output receives the escape bytes as literal text — and they
+are expensive text: 898 of blossom's 2837 bytes were the swatch line, and
+because escape sequences are runs of digits and punctuation that BPE splits
+near one token per one or two characters, that was a little over *half* the
+report's tokens for a line rendering as nothing.
+
+The same arithmetic runs the other way for whitespace, which is why `--info`
+aligns its columns: a run of spaces merges into one or two tokens, so padding
+every row of the report to a grid costs tens of tokens, not hundreds. **Buy the
+alignment; sell the escape codes.**
+
+Auto-detecting a TTY would get the same answer nine times in ten, and was
+rejected: the same command would emit different bytes depending on how the
+harness spawned it, a golden test would have to pin the environment, and an
+agent in a pty-allocating harness would silently pay for a picture it cannot
+see. A flag says plainly that colour is a human affordance; a heuristic
+pretends the tool can tell.
 
 ### The library, and importing
 
@@ -1435,48 +1461,95 @@ path).
 
 ### Reading a scene without rendering it
 
-`--info` prints what a scene *is*: every transform with its share of the chaos
-walk (weights are unnormalized in the file, so this is the number you actually
-wanted), its contraction and variation blend; what the attractor **measures**
-— centre, 95th-percentile radius, per-axis spread, occupancy, from the same CPU
-walkers `randomize.rs` gates on — with the camera distance and maximum
-`point_size` that measurement implies; the render and colour properties; the
-camera and path; and which maps are eligible to carry infinite zoom, with the
-reason for each that isn't.
+`--info` prints what a scene *is*, in eleven labelled sections, without opening
+a GPU device. It answers two questions, and the layout is built around which
+one you came with:
+
+- **Orient.** A scene you have never seen — a `--random` roll, a `.mutN.toml`
+  off the mutation sheet, someone else's file. What is this, is it sound, and
+  what do I do to it next?
+- **Verify.** You changed something — a hand edit, a `-S`, a `--view` — and you
+  want to know it landed and what else it moved. This is a **diff** job:
+  `diff <(fracturize -s a.toml --info) <(fracturize -s b.toml --info)`.
 
 ```
 fracturize --scene scenes/koru.toml --info
 fracturize --random --seed 42 --info      # inspect a roll before rendering it
+fracturize -s s.toml -S meta.haze=0.9 --info   # what did that actually move?
+fracturize -s s.toml --info --color            # ...with the gradient painted
 ```
 
-The measurement block is the part worth reading first: `point_size` and
-`camera distance` are the two things most often wrong in a hand-authored scene,
-and neither can be checked by looking at the file. Rotations are re-derived
-from the matrix, so an authored `(-26, 138, 0)` can print as `(154, 42, -180)`
-— same rotation, other euler branch.
+The sections, in the order they print:
 
-`--info` reports on a `--view` too, and on the camera flags: the `view:` block
-says what the file sets, what each value replaced (`scene: 0.0024`), and — in
-the closing line — what a view never carries. The `camera:` line below it is
-then the framing that would actually **render**, resolved through the same
-`offline::effective_camera` a `--render` frames with, with the scene's own
-framing kept on the line under it so nothing is lost by asking about a view.
+| | |
+|---|---|
+| `scene` | name, source, and one line of what it is |
+| `notes` | **every diagnostic, or `none`** |
+| `set` | what each `-S` displaced (only when one was given) |
+| `view` | what a `--view` sets and what each value replaced |
+| `shape` | where the attractor lands, and the two flags that would frame it |
+| `maps` | four fixed lines per transform |
+| `render` | point size, count, haze, decay, exposure, background |
+| `colour` | mode, the three dials, luminance, the ramp |
+| `camera` | the framing that would render, and the scene's own under it |
+| `path` | every keypoint, not just the count |
+| `zoom` | the band as rows, or every eligible map as a `--zoom` command |
 
-Two conventions hold that block together, and any block added to `--info`
-should follow them (`src/info.rs`):
+**Read `notes` first.** It is one block, second, listing every diagnostic the
+report found with the section each is about, and a count on its first line —
+so "is this scene sound?" is one line to read rather than fifty. `notes none`
+is the cheapest possible signal that nothing is wrong. It catches, among
+others: a `point_size` over the crisp bound, a framing far from the one that
+fills the frame, a map that expands or never fires, a flat gradient, a
+`--view` framed against a different scene, an `edge_guard` ramp reaching into
+the picture.
 
+**Where the report has computed a number you will act on, it emits the action.**
+`shape` prints `-S camera.distance=1.42`, not `~1.42`; the zoom eligibility
+list prints `--zoom descent`. A suggestion you have to reassemble into a flag
+is a suggestion half-given, and the reader who has the flags memorised is the
+smallest slice of who reads this.
+
+`shape` is the part a TOML cannot answer: `point_size` and `camera distance`
+are the two things most often wrong in a hand-authored scene, and neither can
+be checked by looking at the file. In `maps`, contraction is the **signed** cube
+root of the determinant — negative means the map reflects, at or past 1.0 means
+it expands — and rotations are re-derived from the matrix, so an authored
+`(-26, 138, 0)` can print as `(154, 42, -180)`: same rotation, other euler
+branch.
+
+`--info` reports on a `--view` too, and on the camera flags: the `view` block
+says what the file sets, what each value replaced, and — in its closing lines —
+what a view never carries. The `camera` block below it is then the framing that
+would actually **render**, resolved through the same `offline::effective_camera`
+a `--render` frames with, with the scene's own kept under it so nothing is lost
+by asking about a view.
+
+#### The conventions, if you add to it
+
+Four hold `src/info.rs` together, and anything added should follow them:
+
+- **The report is a value, not a string.** `Section`s of `Row`s, rendered to
+  text at the end. Nothing appends to a string mid-computation, which is what
+  lets a diagnostic raised while measuring be printed second — and what makes
+  the eventual `--info --json` an afternoon rather than a rewrite.
 - **Fixed schema.** Every row prints every time, including ones the file left
   out — those read `unset` rather than vanishing. A row that disappears when
-  empty is a row nobody can learn to look for, and two reports of different
-  views diff row for row only if both have the same rows.
+  empty is a row nobody can learn to look for, and two reports diff row for row
+  only if both have the same rows. Three golden files in `tests/golden/` hold
+  this; re-bless them with `FRACTURIZE_BLESS=1 cargo test golden` and **read
+  the diff** — that is the review.
 - **One writer per quantity.** `point()`, `angle()`, `length()`, `amount()`,
-  `size()`, `word()` — a position is always `(x, y, z)` to 3dp, an angle always
-  carries radians *and* degrees, and a word standing in for a number is right
-  aligned with the numbers. Reach for the helper rather than a fresh
-  `format!`, so the shape is learned once by whoever (or whatever) reads it.
-
-Alignment is two narrow columns, not a table: a few spaces buy scannability,
-padding out to a grid just burns another agent's context.
+  `size()`, `count()`, `word()` — a position is always `(x, y, z)` to 3dp in 24
+  columns, an angle always carries radians *and* degrees, and a word standing
+  in for a number is right aligned with the numbers. Each is fixed width with
+  the sign in its own column, which is what makes the decimal points line up
+  without any column having to know what is in it. Reach for the helper rather
+  than a fresh `format!`.
+- **78 columns, hard**, and there is a test. A row that wraps is *worse* than
+  no table, because wrapping destroys exactly the alignment the table was
+  built to provide. Prose goes through `wrap()`; a footnote goes at the end of
+  its section, never welded to the header.
 
 ### Framing from the command line
 

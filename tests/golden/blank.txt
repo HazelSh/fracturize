@@ -1,0 +1,53 @@
+scene    untitled                                                      --blank
+         2 maps, transforms colour, no zoom, 500k points
+
+notes    2
+         render  point_size 0.0120 is over the 0.0045 crisp bound at 1080p
+         colour  the gradient is flat (swing 0.02) — renders unshaded
+
+shape    centre  (-0.010, -0.010,  0.000)
+         spread  ( 0.575,  0.575,  0.000)
+         radius     1.344   occupancy      0.8%
+         to fill the frame   -S camera.distance=3.23
+         for crisp points    -S meta.point_size=0.0045
+         the scene sets      distance 3.000, point_size 0.0120
+         radius is the 95th percentile of the walk's distance from the centre
+
+maps     2   share of the walk, contraction, colour as rendered
+         [0] #0       50.0%   contraction  0.500   #f3bc89 @0.00
+             scale 0.500   rot (   0,   0,   0)°
+             move  ( 0.500,  0.500,  0.000)
+             vars  linear
+         [1] #1       50.0%   contraction  0.500   #89cbf3 @0.50
+             scale 0.500   rot (   0,   0,   0)°
+             move  (-0.500, -0.500,  0.000)
+             vars  linear
+         a negative contraction is a map that reflects; one at or past 1.0
+         expands. rotations are re-derived from the matrix, so the euler
+         branch may differ from the file — the rotation itself is the same
+
+render   point_size    0.0120   point_count    500000   (default)
+         haze            0.00   decay            0.80
+         exposure        1.00   background   ( 0.020,  0.020,  0.050)
+         background is linear RGB, as the shader takes it, not sRGB
+
+colour   mode       transforms   2 transform colours, evenly spread
+         speed          0.50   falloff      0.00   contrast      1.00
+         luminance      0.56   swing        0.02
+         ramp    #f3bc89 #e6bea1 #d8c1b6 #c8c4c8 #b6c6d8 #a1c9e6
+                 #89cbf3 #a1c9e6 #b6c6d8 #c8c4c8 #d8c1b6 #e6bea1
+
+camera   yaw         0.0000 rad (   0.0°)
+         pitch       0.3000 rad (  17.2°)
+         roll        0.0000 rad (   0.0°)
+         distance     3.000
+         focus     ( 0.000,  0.000,  0.000)
+         from the scene
+
+path     none authored (the default full-turn turntable applies)
+
+zoom     off   maps that could carry it, and why the others cannot
+         --zoom 0             1.00 octaves/period,   0° twist
+                              fixed point ( 1.000,  1.000,  0.000)
+         --zoom 1             1.00 octaves/period,   0° twist
+                              fixed point (-1.000, -1.000,  0.000)

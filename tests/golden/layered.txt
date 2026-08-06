@@ -1,0 +1,94 @@
+scene    Fixture                                                  fixture.toml
+         by the test suite, 3 maps, mix colour, zoom on, 4.0M points, camera
+         path
+
+notes    4
+         shape   frames at distance 2.50, 3.1x the 0.80 that fills the frame
+         render  point_size 0.0018 is over the 0.0011 crisp bound at 1080p
+         camera  focus is 0.32 from the centre, outside the 0.24 radius
+         zoom    edge_guard is 0 — the wrap will step at the band edge
+
+set      3 overrides applied to fixture.toml
+         meta.color_mode        "mix"   was  (unset)
+         transform.twig.weight    0.5   was  0.09
+         zoom.edge_guard            0   was  (unset)
+
+view     views/v.toml
+         of scene        unset
+         yaw               1.2500 rad (  71.6°)
+         pitch             0.3500 rad (  20.1°)
+         roll              0.0000 rad (   0.0°)
+         distance           4.000
+         focus           ( 0.100,  0.200,  0.300)
+         point_size        0.0020   scene      0.0018
+         haze                0.00   scene        0.50
+         haze band           auto   ranged from the camera distance
+         color_falloff      unset   scene        0.60
+         color_contrast     unset   scene        1.00
+         renderer           unset   default  points
+         exposure           unset   default  1.00, splat only
+         a view sets only the rows above; transforms, colours, background,
+         point_count, camera path and zoom always come from the scene
+
+shape    centre  ( 0.018,  0.070,  0.021)
+         spread  ( 0.017,  0.111,  0.033)
+         radius     0.244   occupancy      1.1%
+         to fill the frame   -S camera.distance=0.80
+         for crisp points    -S meta.point_size=0.0011
+         the scene sets      distance 3.400, point_size 0.0018
+         radius is the 95th percentile of the walk's distance from the centre
+
+maps     3   share of the walk, contraction, colour as rendered
+         [0] bough         67.4%   contraction  0.600   #6f95d4 @0.12
+             scale 0.600                    rot (   0,  32,   0)°   speed 0.26
+             move  ( 0.000,  0.000,  0.000)
+             vars  linear
+         [1] mirror-fold   21.3%   contraction -0.450   #fada99 @0.60
+             scale [-0.450, 0.450, 0.450]   rot ( -24,  16,   0)°   speed 0.38
+             move  (-0.320, -0.300, -0.780)
+             vars  absfold 0.55 + linear 0.45
+         [2] twig          11.2%   contraction  0.116   #fff8dd @0.86
+             scale [0.050, 0.620, 0.050]    rot (   0,   0,   0)°   speed 0.73
+             move  ( 0.000,  0.300,  0.000)
+             vars  linear
+         a negative contraction is a map that reflects; one at or past 1.0
+         expands. rotations are re-derived from the matrix, so the euler
+         branch may differ from the file — the rotation itself is the same
+
+render   point_size    0.0018   point_count   4000000
+         haze            0.50   decay            0.80
+         exposure        1.00   background   ( 0.010,  0.008,  0.016)
+         background is linear RGB, as the shader takes it, not sRGB
+
+colour   mode            mix   3 transform colours mixed as RGB
+         speed          0.50   falloff      0.60   contrast      1.00
+         luminance      0.65   swing        0.63
+         colours #6f95d4 #fada99 #fff8dd
+         mix mode has no colormap, so transform *combinations* are
+         distinguishable and color_contrast does not apply
+
+camera   yaw         1.2500 rad (  71.6°)
+         pitch       0.3500 rad (  20.1°)
+         roll        0.0000 rad (   0.0°)
+         distance     2.500
+         focus     ( 0.100,  0.200,  0.300)
+         from --view, then the camera flags
+         the scene's own: yaw 0.0000 pitch 1.1200 distance 3.400
+                          focus ( 0.000,  0.000,  0.000)
+         under infinite zoom, reported in the canonical period as it renders
+
+path     2 keypoints, closed loop, 8.0s
+         key        yaw    pitch     roll   distance   route
+         [0]   0.0000   0.4000   0.0000      3.400   short
+         [1]   1.5708   0.4000   0.0000      3.400   +1 turn
+         [0] focus ( 0.000,  0.000,  0.000)
+         route is how each segment gets to the next key: the short way, or
+         that plus whole extra turns
+
+zoom     on   map [0] bough
+         fixed point     ( 0.000,  0.000,  0.000)
+         scale              0.600   0.74 octaves/period, 32° twist
+         radius              3.20   levels         14.00
+         octave_falloff      0.00   edge_guard      0.00
+         guard band          none   hard outer edge
+         rendered              19   periods (14.0 octaves)

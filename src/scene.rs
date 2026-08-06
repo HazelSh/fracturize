@@ -629,6 +629,14 @@ pub struct Scene {
     pub points_per_frame: usize,
     /// Total point buffer size for the simple point renderer
     pub point_count: usize,
+    /// Whether `point_count` is [`DEFAULT_POINT_COUNT`] because the file said
+    /// nothing, rather than because the file said this.
+    ///
+    /// Point count is a render property rather than part of the scene, so a
+    /// file that omits it is the normal case — but `--info` reporting 500 000
+    /// with no hint of where it came from sends people looking for a line that
+    /// isn't there. Derived, never serialized.
+    pub point_count_defaulted: bool,
     /// Temporal decay factor (0.0-1.0)
     #[allow(dead_code)]
     pub decay: f32,
@@ -728,6 +736,7 @@ impl Scene {
             point_size: default_point_size() as f32,
             points_per_frame: 100_000,
             point_count: DEFAULT_POINT_COUNT,
+            point_count_defaulted: true,
             decay: default_decay() as f32,
             color_speed: default_color_speed() as f32,
             color_falloff: 0.0,
@@ -765,10 +774,22 @@ impl Scene {
     /// (see `src/set.rs`). The overrides are textual and land before parsing,
     /// so everything downstream sees an ordinary scene.
     pub fn load_with<P: AsRef<Path>>(path: P, overrides: &[String]) -> Result<Self, String> {
+        Self::load_reporting(path, overrides).map(|(scene, _)| scene)
+    }
+
+    /// [`Self::load_with`], plus what each `--set` displaced.
+    ///
+    /// Only `--info` wants the second half: everything that renders wants the
+    /// scene and nothing else, and the report is the one place that has to
+    /// answer "did my edit land, and what did it move?".
+    pub fn load_reporting<P: AsRef<Path>>(
+        path: P,
+        overrides: &[String],
+    ) -> Result<(Self, Vec<crate::set::Applied>), String> {
         let content = fs::read_to_string(path.as_ref())
             .map_err(|e| format!("Failed to read scene file: {}", e))?;
 
-        let content = crate::set::apply(&content, overrides)?;
+        let (content, applied) = crate::set::apply_recording(&content, overrides)?;
 
         let scene_file: SceneFile = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse scene file: {}", e))?;
@@ -1115,12 +1136,13 @@ impl Scene {
             }
         }
 
-        Ok(Scene {
+        Ok((Scene {
             name: scene_file.meta.name,
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
             point_size: scene_file.meta.point_size as f32,
             points_per_frame: scene_file.meta.points_per_frame,
             point_count: scene_file.meta.point_count.unwrap_or(DEFAULT_POINT_COUNT),
+            point_count_defaulted: scene_file.meta.point_count.is_none(),
             decay: scene_file.meta.decay as f32,
             color_speed: scene_file.meta.color_speed as f32,
             color_falloff: (scene_file.meta.color_falloff as f32).max(0.0),
@@ -1140,7 +1162,7 @@ impl Scene {
             camera_orientation: folded.orientation,
             camera_path,
             zoom,
-        })
+        }, applied))
     }
 
     /// The gradient this scene actually renders through, whichever mode it is
