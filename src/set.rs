@@ -11,7 +11,7 @@
 //!     --set meta.color_falloff=0.3
 //!     --set transform.facet-1.variations.absfold=0.15
 //!     --set transform.2.weight=0.5
-//!     --set zoom.octave_fade=3.0
+//!     --set zoom.edge_guard=1.5
 //!
 //! Because it rewrites the TOML text and hands the result to the ordinary
 //! loader, everything downstream — `--info`, grids, animation, the mutation

@@ -66,11 +66,16 @@ struct ComputeParams {
     zoom_octave_q: f32,
     zoom_similar: u32,
     zoom_scale: f32,
-    zoom_octave_fade: f32,      // periods of tapered outer edge; 0 = hard cut
-    zoom_fade_g: f32,           // per-period attenuation across that taper
+    // Eleven scalars, so five words of padding before the vec4s. The band's
+    // outer edge is faded at *render* time now (see guard_weight() in
+    // points/splat.wgsl); it cannot be done here, because this buffer is
+    // filled over ~800 frames and a camera-dependent deal would mix that many
+    // camera positions into one image.
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
     zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
     zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
     zoom_a: mat3x3<f32>,
@@ -83,10 +88,6 @@ struct ComputeParams {
 @group(0) @binding(3) var<uniform> params: ComputeParams;
 
 const PI: f32 = 3.14159265358979;
-
-// Density at the outermost shell as a fraction of the octave the fade ramps up
-// to meet. Mirrors renorm::FADE_DEPTH; the two must agree.
-const FADE_DEPTH: f32 = 0.0625;
 
 // xorshift128 random number generator
 fn xorshift128(s: ptr<function, vec4<u32>>) -> u32 {
@@ -286,33 +287,27 @@ fn apply_variations(t_idx: u32, p: vec3<f32>, rng: ptr<function, vec4<u32>>) -> 
 // Mirrored on the CPU by `Renorm::octave_offset` in renorm.rs, which is where
 // this is tested; keep the two arithmetically identical.
 //
-// Three deals, in the order branched on:
+// Two deals:
+//
+//   flat      every octave the same share (q = 1). Correct for a scene that is
+//             flown, because a wrap moves the octave filling any screen region
+//             along by one and equal shares are what make that invisible.
 //
 //   q < 1     the stills-only geometric falloff. Octave k covers s^k of the
 //             frame's width and so wants fewer points for the same on-screen
 //             density; `zoom_octave_q = s^octave_falloff` is that ratio, and
 //             its inverse CDF is closed form. It makes every octave differ
 //             from its neighbour, which a wrap turns into a density step, so
-//             it is for things that never move. The taper does not compose
-//             with it and is switched off on the CPU when it is in use.
+//             it is for things that never move.
 //
-//   flat      every octave the same share. Correct for a scene that is flown,
-//             because a wrap moves the octave filling any screen region along
-//             by one and equal shares are what make that invisible.
+// And nothing else — in particular nothing about where the camera is. The
+// point buffer is circular and turns over at 1/800th per frame, so a deal that
+// looked at the camera would mix thirteen seconds of stale camera positions
+// into every frame. Fading the band's outer edge is therefore a render-time
+// weight (guard_weight() in points/splat.wgsl and points/render.wgsl), where
+// every point is re-weighted every frame; there used to be a taper here and it
+// could not be made to work.
 //
-//   tapered   flat, except that the outermost `zoom_octave_fade` periods ramp
-//             down to a sixteenth of a share at the edge. Without it the band
-//             simply stops, and a wrap walks the picture off that cliff: the
-//             outermost octave is replaced by one that isn't there, and a
-//             whole slab of structure goes between two frames. Fading trades
-//             that for a factor-of-g density step per wrap in the faded
-//             region only — which is a real cost, but g is nearer 1 than
-//             infinity is, and by the time material falls off the end there
-//             is a sixteenth of it left.
-//
-// The share of octave k is g^(F-k) for k < F and 1 for k >= F. Both pieces are
-// geometric, so this stays one sample per point with no rejection — the
-// property that makes renormalization cost nothing in the first place.
 // Sum of r^i for i in 0..n, with the removable singularity at r = 1 filled in.
 fn geo_sum(r: f32, n: f32) -> f32 {
     if n <= 0.0 {
@@ -338,36 +333,15 @@ fn geo_pick(x: f32, r: f32, n: f32) -> f32 {
     return clamp(floor(i), 0.0, ceil(n) - 1.0);
 }
 
-// Share of octave k is q^k for k >= F, and q^F * g^(F-k) for k < F: the
-// falloff envelope, with a taper over the outer F octaves rising from
-// FADE_DEPTH of the envelope up to meet it. Anchoring the taper to the
-// envelope's value at F instead of multiplying through it keeps the ramp
-// rising for every q — multiplying gives g^F*(q/g)^k, which inverts once
-// q < g and would make the outermost shell the brightest.
+// Share of octave k is q^k: the falloff envelope, and nothing else. q = 1 is a
+// flat deal, floor(u * levels) exactly.
 fn octave_offset(rng: ptr<function, vec4<u32>>) -> f32 {
     let levels = params.zoom_levels;
     if levels <= 1.0 {
         return 0.0;
     }
-    let u = rand_float(rng);
     let q = params.zoom_octave_q;
-    let g = params.zoom_fade_g;
-    var f = params.zoom_octave_fade;
-    if f < 1.0 || g > 0.9999 {
-        f = 0.0;
-    }
-
-    // Masses in units of q^F, which cancels between the pieces.
-    var m1 = 0.0;
-    if f >= 1.0 {
-        m1 = FADE_DEPTH * geo_sum(1.0 / g, f);
-    }
-    let m2 = geo_sum(q, levels - f);
-    let x = u * (m1 + m2);
-    if x < m1 {
-        return geo_pick(x / FADE_DEPTH, 1.0 / g, f);
-    }
-    return f + geo_pick(x - m1, q, levels - f);
+    return geo_pick(rand_float(rng) * geo_sum(q, levels), q, levels);
 }
 
 // Rodrigues: rotate v about a unit axis by `ang`

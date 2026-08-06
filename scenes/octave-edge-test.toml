@@ -102,11 +102,11 @@ map = "halve"
 radius = 3.0
 levels = 14.0
 octave_falloff = 0.0
-# This scene is the reason octave_fade exists, and one of the few that should
-# set it. With it at 0 the outermost octave carries 3.4% of the frame and goes
-# as one solid slab at every wrap (worst pixel 0.40). At 3.0 the same total
-# change is spread across the outer third of the band: worst pixel 0.30, and
-# the difference image is faint texture instead of a chunk of tree. It does not
-# make the wrap's *total* brightness step smaller — nothing can, the shares
-# telescope — it makes it stop looking like a cut.
-octave_fade = 3.0
+# This scene is the reason the edge guard exists: with it at 0 the outermost
+# octave carries 3.4% of the frame and goes as one solid slab at every wrap
+# (worst pixel 0.40). Asked for wide, and clamped to what this radius has room
+# for — at radius 3.0 that is one octave, running [1.5, 3.0] eye distances,
+# which does reach a little way into the view. The honest fix for that is a
+# bigger radius; this scene keeps 3.0 because its whole job is to have the
+# outermost octave *in* the picture where it can be measured.
+edge_guard = 3.0

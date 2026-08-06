@@ -25,14 +25,22 @@ struct CameraUniforms {
     transparent: f32,
     // 1 when point colour is packed RGB rather than a colormap index
     color_rgb_mode: f32,
+    // Infinite-zoom edge guard; see guard_weight() below and renorm.rs.
+    guard_x: f32,
+    guard_y: f32,
+    guard_z: f32,
+    guard_ln_near: f32,
+    guard_inv_ln_width: f32,
     _pad0: f32,
-    _pad1: f32,
 }
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) depth: f32,
+    // The edge guard, evaluated per point: it needs the world position, which
+    // only the vertex stage has.
+    @location(2) guard: f32,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -64,6 +72,22 @@ fn lookup_color(color_idx: u32) -> vec3<f32> {
     return colormap[u32(stretched * 256.0) & 0xFFu].rgb;
 }
 
+/// The share of this point that survives the infinite-zoom edge guard. Kept
+/// arithmetically identical to `guard_weight` in points/splat.wgsl and to
+/// `Renorm::guard_weight` in renorm.rs, which is where it is tested; the short
+/// version is that it is a smoothstep in log radius, measured in multiples of
+/// this frame's eye-to-fixed-point distance, so a zoom wrap leaves it exactly
+/// unchanged. Zero width = no zoom, or a scene that asked for a hard edge.
+fn guard_weight(pos: vec3<f32>) -> f32 {
+    if camera.guard_inv_ln_width == 0.0 {
+        return 1.0;
+    }
+    let centre = vec3<f32>(camera.guard_x, camera.guard_y, camera.guard_z);
+    let r = length(pos - centre);
+    let t = (log(max(r, 1e-20)) - camera.guard_ln_near) * camera.guard_inv_ln_width;
+    return 1.0 - smoothstep(0.0, 1.0, t);
+}
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) corner_index: u32,
@@ -81,6 +105,7 @@ fn vs_main(
         out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
         out.color = vec3<f32>(0.0);
         out.depth = 0.0;
+        out.guard = 0.0;
         return out;
     }
 
@@ -115,6 +140,7 @@ fn vs_main(
     // Look up color from colormap
     out.color = lookup_color(point.color_idx);
     out.depth = depth;
+    out.guard = guard_weight(point.position);
 
     return out;
 }
@@ -133,12 +159,14 @@ fn vs_point(@builtin(vertex_index) point_index: u32) -> VertexOutput {
         out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
         out.color = vec3<f32>(0.0);
         out.depth = 0.0;
+        out.guard = 0.0;
         return out;
     }
 
     out.clip_position = vec4<f32>(clip.xyz / clip.w, 1.0);
     out.color = lookup_color(point.color_idx);
     out.depth = depth;
+    out.guard = guard_weight(point.position);
     return out;
 }
 
@@ -157,7 +185,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sat = mix(1.0, camera.haze_saturation, t);
     let desaturated = mix(vec3<f32>(lum), in.color, sat);
 
-    let transmittance = mix(1.0, camera.haze_transmittance, t);
+    // The edge guard rides on transmittance, which is exactly what it is: the
+    // last stretch of haze, taken all the way to zero, in units of the eye
+    // distance rather than of world depth. See guard_weight() above.
+    let transmittance = mix(1.0, camera.haze_transmittance, t) * in.guard;
     let background = vec3<f32>(camera.bg_r, camera.bg_g, camera.bg_b);
 
     if camera.transparent > 0.5 {

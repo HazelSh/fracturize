@@ -12,11 +12,13 @@
 //! apart the other way, and both are real journeys someone might want.
 //!
 //! So this module never derives that from the endpoints. Each segment carries
-//! an explicit `winding`: `0` is the short way, `1` takes an extra whole turn,
-//! `-1` goes the long way against it. The endpoints are always hit exactly,
-//! whatever the winding says — a route can be surprising, but it can never
-//! land in the wrong place. See [`crate::rot`] for why this is a `i32` and not
-//! a stored displacement.
+//! an explicit [`Route`], normally a winding: `0` is the short way, `1` takes
+//! an extra whole turn, `-1` goes the long way against it. The endpoints are
+//! always hit exactly, whatever the winding says — a route can be surprising,
+//! but it can never land in the wrong place. See [`crate::rot`] for why an
+//! integer is enough to pin a route down, and [`Route::Exact`] for the one
+//! case where it isn't: between two *equal* framings no axis is implied, so a
+//! loop in place has to store the displacement itself and be checked on load.
 //!
 //! # The spline
 //!
@@ -266,17 +268,62 @@ impl Loop {
     }
 }
 
+/// How a segment's route between its two keys is named.
+///
+/// A winding integer is the ordinary spelling and the safe one. When the
+/// endpoints differ, the axis of the journey between them is *forced* — see
+/// the log-set argument in [`crate::rot`] — so a single integer pins the route
+/// down completely, and it cannot disagree with the keys it connects. That
+/// covers everything anyone writes by hand.
+///
+/// [`Exact`] is for the case that argument excludes. Between *equal*
+/// orientations no axis is forced: every axis has a whole-turn route back to
+/// where it started, so "pitch three full turns and come back" cannot be said
+/// with a winding at all — [`Orientation::turn_to`] has nothing to go on and
+/// falls back to guessing world Y, which flies a yaw loop instead. A corkscrew
+/// about an axis the endpoints don't imply is unsayable for the same reason.
+/// Storing the displacement itself is the only way to say either.
+///
+/// The price is exactly the one the integer was chosen to avoid: a stored
+/// displacement *can* disagree with its endpoints. The loader pays it once, up
+/// front — a scene file's `route` is checked against the far key as it is read
+/// and refused if it misses (`scene.rs`). Nothing else constructs one, and
+/// there is no UI for it: it is a file-format door, opened because some routes
+/// have no other spelling.
+///
+/// [`Exact`]: Route::Exact
+/// [`Orientation::turn_to`]: crate::rot::Orientation::turn_to
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Route {
+    /// Extra whole turns beyond the short way round, about the short way's own
+    /// axis. `Turns(0)` is the short way, and the default for every segment.
+    Turns(i32),
+    /// The journey itself, in the frame of the key it starts from.
+    Exact(Turn),
+}
+
+impl Default for Route {
+    /// The short way round: what a segment does when nobody has said otherwise.
+    fn default() -> Self {
+        Self::Turns(0)
+    }
+}
+
 /// A spline camera path through two or more keypoints
 #[derive(Clone, Debug)]
 pub struct CameraPath {
     pub keys: Vec<PathKey>,
-    /// Extra whole turns taken on each segment, beyond the short way round.
+    /// The route each segment takes between its keys — the short way round
+    /// unless something says otherwise.
     ///
     /// One entry per segment (see [`CameraPath::segments`]); segment `i` runs
     /// from key `i` to key `i+1`, wrapping on a closed path. Missing or short
-    /// entries read as `0`, so a path can always be built without thinking
-    /// about it and a hand-written scene never has to mention it.
-    pub windings: Vec<i32>,
+    /// entries read as [`Route::Turns(0)`], so a path can always be built
+    /// without thinking about it and a hand-written scene never has to mention
+    /// it.
+    ///
+    /// [`Route::Turns(0)`]: Route::Turns
+    pub routes: Vec<Route>,
     /// How playback gets from the last frame back to the first.
     pub loops: Loop,
     /// Ease in/out (smoothstep on path time); None = the loop's own default
@@ -337,7 +384,7 @@ impl CameraPath {
     pub fn new(keys: Vec<PathKey>, loops: Loop) -> Self {
         Self {
             keys,
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops,
             ease: None,
             seconds: None,
@@ -390,15 +437,28 @@ impl CameraPath {
         self.ease.unwrap_or_else(|| self.loops.eases_by_default())
     }
 
-    /// Extra whole turns on segment `i`, or 0 where nothing was authored.
-    pub fn winding(&self, i: usize) -> i32 {
-        self.windings.get(i).copied().unwrap_or(0)
+    /// The route on segment `i`, or the short way where nothing was authored.
+    pub fn route(&self, i: usize) -> Route {
+        self.routes.get(i).copied().unwrap_or_default()
     }
 
-    /// Grow or shrink `windings` to match the segment count, so the two never
+    /// Extra whole turns on segment `i`, as the scene file's `turns` column
+    /// spells it.
+    ///
+    /// An exact route is not a winding and reports `0` here: it is written to
+    /// disk as `route` instead, and the yaw column is left saying only what the
+    /// chart can honestly say about it.
+    pub fn winding(&self, i: usize) -> i32 {
+        match self.route(i) {
+            Route::Turns(w) => w,
+            Route::Exact(_) => 0,
+        }
+    }
+
+    /// Grow or shrink `routes` to match the segment count, so the two never
     /// drift apart as keys are added and removed.
-    pub fn fit_windings(&mut self) {
-        self.windings.resize(self.segments(), 0);
+    pub fn fit_routes(&mut self) {
+        self.routes.resize(self.segments(), Route::default());
     }
 
     /// A seamless full-turn orbit at the given base framing.
@@ -424,7 +484,7 @@ impl CameraPath {
             .collect();
         Self {
             keys,
-            windings: vec![0; 4],
+            routes: vec![Route::default(); 4],
             loops: Loop::Closed,
             ease: Some(false),
             seconds: Some(tau / ORBIT_RATE),
@@ -492,8 +552,14 @@ impl CameraPath {
 
         let from = self.key(i);
         let to = self.key(i + 1);
-        from.orientation
-            .turn_to(to.orientation, self.winding(i.rem_euclid(segs) as usize))
+        match self.route(i.rem_euclid(segs) as usize) {
+            Route::Turns(w) => from.orientation.turn_to(to.orientation, w),
+            // Used exactly as authored — the loader has already checked that
+            // it lands on `to`. Body-frame displacements are invariant under
+            // the zoom symmetry (`advance` composes on the left), so the same
+            // stored route is right on the closing segment too.
+            Route::Exact(t) => t,
+        }
     }
 
     /// Sample the path at t in [0, 1] (clamped; closed paths wrap seamlessly)
@@ -716,7 +782,7 @@ mod golden {
 
             // Routes specifically, not just where the curve happens to pass.
             if let (Some(x), Some(y)) = (&before.camera_path, &after.camera_path) {
-                assert_eq!(x.windings, y.windings, "{}: routes changed across a save", name);
+                assert_eq!(x.routes, y.routes, "{}: routes changed across a save", name);
             }
         }
         let _ = std::fs::remove_file(&tmp);
@@ -873,7 +939,7 @@ mod tests {
     fn zoom_loop_path(periods: u32, keys: Vec<PathKey>) -> CameraPath {
         CameraPath {
             keys,
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops: Loop::Zoom(ZoomLoop {
                 periods,
                 center: Vec3::ZERO,
@@ -892,7 +958,7 @@ mod tests {
                 key(1.0, 0.3, 4.0, Vec3::X),
                 key(2.0, 0.2, 3.0, Vec3::Y),
             ],
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops,
             ease: Some(false),
             seconds: None,
@@ -965,7 +1031,7 @@ mod tests {
         let yaws = [0.3f32, 1.1, 2.4, 3.0, 3.9];
         let p = CameraPath {
             keys: yaws.iter().map(|&y| key(y, 0.35, 3.0, Vec3::ZERO)).collect(),
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops: Loop::Once,
             ease: Some(false),
             seconds: None,
@@ -1024,7 +1090,7 @@ mod tests {
         let tau = std::f32::consts::TAU;
         let p = CameraPath {
             keys: (0..4).map(|i| key(i as f32 * tau / 4.0, 0.2, 3.0, Vec3::ZERO)).collect(),
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops: Loop::Closed,
             ease: Some(false),
             seconds: None,
@@ -1046,8 +1112,12 @@ mod tests {
         // way round the houses. Both land on exactly the same framing — a route
         // can surprise you, but it cannot put the camera in the wrong place.
         let keys = vec![key(0.0, 0.0, 3.0, Vec3::ZERO), key(1f32.to_radians(), 0.0, 3.0, Vec3::ZERO)];
-        let short = CameraPath { windings: vec![0], ..CameraPath::new(keys.clone(), Loop::Once) };
-        let long = CameraPath { windings: vec![1], ..CameraPath::new(keys.clone(), Loop::Once) };
+        let with = |w: i32| CameraPath {
+            routes: vec![Route::Turns(w)],
+            ..CameraPath::new(keys.clone(), Loop::Once)
+        };
+        let short = with(0);
+        let long = with(1);
 
         for p in [&short, &long] {
             assert!(p.sample(0.0).orientation.angle_to(keys[0].orientation) < 1e-4);
@@ -1074,7 +1144,7 @@ mod tests {
                 key(0.0, 0.0, 3.0, Vec3::ZERO),
                 key(0.0, 0.0, 1.0, Vec3::ZERO),
             ],
-            windings: vec![1, 1],
+            routes: vec![Route::Turns(1); 2],
             loops: Loop::Once,
             ease: Some(false),
             seconds: None,
@@ -1294,7 +1364,7 @@ mod tests {
                 key(1.2, p, 3.0, Vec3::ZERO),
                 key(-0.8, p, 3.0, Vec3::ZERO),
             ],
-            windings: vec![3, 0, 0],
+            routes: vec![Route::Turns(3), Route::default(), Route::default()],
             loops: Loop::Once,
             ease: Some(false),
             seconds: None,
@@ -1354,7 +1424,7 @@ mod tests {
         let twist = Orientation::IDENTITY.shortest_turn_to(nearly_round);
         let path = CameraPath {
             keys: vec![key(0.0, 0.4, 4.0, Vec3::ZERO)],
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops: Loop::Zoom(ZoomLoop {
                 periods: 1,
                 center: Vec3::ZERO,
@@ -1391,7 +1461,7 @@ mod tests {
         let per_period = 46.9f32.to_radians();
         let path = CameraPath {
             keys: vec![key(0.0, 0.4, 4.0, Vec3::ZERO)],
-            windings: Vec::new(),
+            routes: Vec::new(),
             loops: Loop::Zoom(ZoomLoop {
                 periods: 4,
                 center: Vec3::ZERO,
@@ -1600,27 +1670,73 @@ mod tests {
     }
 
     #[test]
-    fn windings_keep_pace_with_the_keys() {
+    fn an_exact_route_loops_in_place_about_the_axis_it_names() {
+        // Between two *equal* framings there is no implied axis — every axis
+        // has a whole-turn route back to where it started — so a winding has
+        // nothing to be a winding of, and `turn_to` falls back to guessing
+        // world Y. "Pitch two full turns and come back" came out as a yaw
+        // loop. An exact route is the only way to say it, and this is it said.
+        let tau = std::f32::consts::TAU;
+        let here = key(0.0, 0.0, 3.0, Vec3::ZERO);
+        let looped = |route: Route| CameraPath {
+            routes: vec![route],
+            ease: Some(false),
+            ..CameraPath::new(vec![here, here], Loop::Once)
+        };
+
+        let pitched = looped(Route::Exact(Turn::about(Vec3::X, 2.0 * tau)));
+        let c = pitched.sample(0.125);
+        assert!(
+            c.forward().y.abs() > 0.5,
+            "an eighth of the way in, a pitch loop should be looking well off the \
+             horizontal; forward is {:?}",
+            c.forward()
+        );
+        assert!(
+            (c.right() - Vec3::X).length() < 1e-5,
+            "pitching about the camera's own X must leave right where it was: {:?}",
+            c.right()
+        );
+
+        // And it comes back: the keys are still hit exactly.
+        for &t in &[0.0f32, 1.0] {
+            assert!(
+                pitched.sample(t).orientation.angle_to(here.orientation) < 1e-5,
+                "the loop must start and end on its key"
+            );
+        }
+
+        // The winding spelling of the same wish can only guess, and guesses
+        // world Y — which is the bug this exists to route around.
+        let guessed = looped(Route::Turns(2));
+        assert!(
+            guessed.sample(0.125).forward().y.abs() < 1e-3,
+            "a winding between equal framings has no axis to use but the fallback"
+        );
+    }
+
+    #[test]
+    fn routes_keep_pace_with_the_keys() {
         // The route list and the segment list must never drift apart, or a
-        // winding silently starts describing a different segment.
+        // route silently starts describing a different segment.
         let mut p = linear_path(Loop::Once);
-        p.fit_windings();
-        assert_eq!(p.windings.len(), p.segments());
+        p.fit_routes();
+        assert_eq!(p.routes.len(), p.segments());
 
         p.keys.push(key(3.0, 0.1, 2.0, Vec3::ZERO));
-        p.fit_windings();
-        assert_eq!(p.windings.len(), p.segments());
+        p.fit_routes();
+        assert_eq!(p.routes.len(), p.segments());
 
         p.loops = Loop::Closed;
-        p.fit_windings();
-        assert_eq!(p.windings.len(), p.segments(), "closing adds the wrap-around segment");
+        p.fit_routes();
+        assert_eq!(p.routes.len(), p.segments(), "closing adds the wrap-around segment");
 
         p.keys.truncate(2);
-        p.fit_windings();
-        assert_eq!(p.windings.len(), p.segments());
+        p.fit_routes();
+        assert_eq!(p.routes.len(), p.segments());
 
-        // A path that never mentions windings behaves as all-zero.
-        assert_eq!(CameraPath::new(vec![], Loop::Once).winding(7), 0);
+        // A path that never mentions its routes takes the short way everywhere.
+        assert_eq!(CameraPath::new(vec![], Loop::Once).route(7), Route::Turns(0));
     }
 }
 

@@ -112,7 +112,7 @@ struct Args {
     /// Override any scene value without editing the file, repeatable [none]
     ///
     /// The path is dotted, and the section is required: `meta.haze=0.3`,
-    /// `camera.distance=4`, `zoom.octave_fade=3`, `palette.rotate=0.2`,
+    /// `camera.distance=4`, `zoom.edge_guard=1`, `palette.rotate=0.2`,
     /// `transform.<name-or-index>.weight=0.5`,
     /// `transform.facet-1.variations.absfold=0.15`,
     /// `transform.0.translation.y=1.25`. Arrays index by x/y/z or 0/1/2, or
@@ -419,14 +419,21 @@ struct Args {
     #[arg(long, requires = "zoom", value_name = "POWER", help_heading = "Infinite zoom")]
     zoom_falloff: Option<f32>,
 
-    /// Octaves the band's outer edge fades over [scene's, else 0 = hard]
+    /// Octaves the picture's outer edge fades over [scene's, else 1]
     ///
-    /// At 0 a wrap drops the whole outermost octave between two frames;
-    /// winding it up spreads that same change across the outer octaves so
-    /// nothing cuts. Worth it on a scene whose bulk fills those octaves, a
-    /// cost on one whose doesn't — see "Infinite Zoom" in AGENTS.md.
-    #[arg(long, requires = "zoom", value_name = "OCTAVES", help_heading = "Infinite zoom")]
-    zoom_fade: Option<f32>,
+    /// The edge guard: material is taken to nothing over the outermost octave
+    /// of the field, measured against the camera, so a wrap costs nothing and
+    /// old structure leaves at a steady rate. 0 restores the hard edge, where
+    /// a wrap drops a whole octave between two frames — for measuring the
+    /// artifact, not for looking at. See "Infinite Zoom" in AGENTS.md.
+    #[arg(
+        long,
+        alias = "zoom-fade",
+        requires = "zoom",
+        value_name = "OCTAVES",
+        help_heading = "Infinite zoom"
+    )]
+    zoom_guard: Option<f32>,
 
     // ----------------------------------------------------------- Inspecting
     /// Print what this scene is, then exit
@@ -509,8 +516,8 @@ fn apply_zoom_args(scene: &mut Scene, args: &Args, announce: bool) {
     if let Some(f) = args.zoom_falloff {
         spec.octave_falloff = f;
     }
-    if let Some(f) = args.zoom_fade {
-        spec.octave_fade = f;
+    if let Some(w) = args.zoom_guard {
+        spec.edge_guard = w;
     }
     // Resolve once here so a bad map is a startup error with a clear message,
     // not a silently-disabled feature discovered in the output.

@@ -1,5 +1,28 @@
 # Plan: a camera-relative edge guard, replacing the octave fade
 
+> **Landed 2026-08-05.** Built as designed, with three deviations, all noted
+> in place below: the scene/CLI key was *renamed* to `edge_guard` rather than
+> keeping the name (`octave_fade` still parses, via a serde alias); `0` means
+> "hard edge" rather than "default width", with the default coming from
+> `ZoomSpec::default()` so an omitted key still gets the guard; and the
+> two-still wrap check was **replaced**, not re-run — it holds the camera fixed
+> and moves the band, which is the right proxy only for a fade attached to the
+> world. `tools/zoom_seam.py` is the instrument that took its place, and it
+> reports 11.9x → 0.0x on `octave-edge-visual`. The live screen-record
+> acceptance test is still Hazel's to run.
+>
+> One consequence, measured rather than feared: **every shipped zoom scene is
+> authored at `radius` 3.0–3.2**, not the 4.8 default this plan's ramp geometry
+> assumes, so the clamp keeps the default one-octave width and lets the ramp
+> start at ~1.5×d instead of 2.42×d — inside the frustum. `--info` says so per
+> scene. In practice that costs a scene with ordinary haze nothing:
+> `wellspiral` (haze 0.5) loses **0.1%** of mean frame brightness with the
+> guard on, because haze had already taken that material to nearly nothing.
+> `octave-edge-visual` loses 16%, which is the scene doing its job — it runs
+> `haze = 0` and deliberately fills the outer octaves. Raising those scenes to
+> `radius ≥ 4.84` is still the tidy fix (it costs 0.68 octaves at the inner
+> edge, far below a pixel either way), but nothing needs it.
+
 Written after a review of the octave-fade work (OCTAVE-FADE-PLAN.md and what
 landed from it). The arithmetic that shipped is correct — the CPU and GPU
 copies of `octave_offset` agree, the taper hits its target distribution, the

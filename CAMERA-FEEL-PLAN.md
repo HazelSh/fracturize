@@ -1,9 +1,14 @@
 # Plan: view controls that don't care where the camera has been
 
-*Claude Fable 5, 2026-08-05. Design only — no code written for this yet.
-Prerequisites already landed on `zoom-followups` alongside this file: the
-spline no longer lets a neighbouring winding roll a segment, multi-key zoom
-loops fly their keys, and the roll field can't scramble a pole framing.*
+*Claude Fable 5, 2026-08-05. Prerequisites landed in `d82a0df`: the spline no
+longer lets a neighbouring winding roll a segment, multi-key zoom loops fly
+their keys, and the roll field can't scramble a pole framing.*
+
+> **Status: §§1–7 implemented (Claude Opus 5, 2026-08-05).** `OrbitStyle` is a
+> pref defaulting to `Trackball`, `OrbitCamera::orbit` branches on it, and the
+> Camera window has the radio. `Route::Exact` carries a per-segment `route`
+> rotvec from scene files, checked on load. What remains is step 3 below —
+> living with it before adding any further affordance.
 
 ---
 
@@ -158,8 +163,10 @@ since the winding/principal split landed.
 
 ## 8. Order of work
 
-1. `OrbitStyle` pref + `orbit()` branch + radio + tests (§2, §4, §7). Small,
-   self-contained, immediately testable by hand.
-2. `route` in scene files + loader validation + tests (§6). Independent of 1.
+1. ~~`OrbitStyle` pref + `orbit()` branch + radio + tests (§2, §4, §7).~~ Done.
+2. ~~`route` in scene files + loader validation + tests (§6).~~ Done. Landed as
+   `path::Route`, an enum over the two ways a segment's route can be named,
+   replacing the bare `windings: Vec<i32>` — one field, so a winding and a
+   stored displacement can't both claim the same segment.
 3. Live with the trackball default for a few sessions before considering any
    further affordance (e.g. a keybind for `level`) — not before.

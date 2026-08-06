@@ -176,7 +176,7 @@ impl GpuTransform {
     }
 }
 
-/// Camera uniforms (128 bytes, must be 16-byte aligned)
+/// Camera uniforms (144 bytes, must be 16-byte aligned)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CameraUniforms {
@@ -206,7 +206,23 @@ pub struct CameraUniforms {
     /// coherent across every invocation, so it costs nothing measurable, and
     /// the alternative is duplicating four pipelines to change two lines.
     pub color_rgb_mode: f32, // 4 bytes
-    pub _pad: [f32; 2],     // 8 bytes - struct size must be a multiple of 16
+    /// The infinite-zoom edge guard: the fixed point, and the ramp that takes
+    /// material to nothing before the band's outer edge can be seen. See
+    /// `renorm::DEFAULT_EDGE_GUARD` — the short version is that it is a
+    /// function of `|pos − centre| / |eye − centre|`, which the zoom wrap
+    /// leaves exactly unchanged, so it fades the edge out over the progress of
+    /// the zoom instead of at the wrap.
+    ///
+    /// Three scalars rather than a `vec3` because the run lands at offset 120,
+    /// which is not 16-aligned — same reason `background` above is spelled
+    /// this way, and the WGSL side must match field for field.
+    pub guard_center: [f32; 3], // 12 bytes
+    /// `ln(ρ_start · d)` for this frame's eye distance `d`
+    pub guard_ln_near: f32, // 4 bytes
+    /// `1 / ln(ρ_end / ρ_start)`. **Zero disables the guard**, which is what
+    /// an ordinary scene (and a zoom scene with `edge_guard = 0`) gets.
+    pub guard_inv_ln_width: f32, // 4 bytes
+    pub _pad: f32,          // 4 bytes - struct size must be a multiple of 16
 }
 
 impl CameraUniforms {
@@ -239,8 +255,35 @@ impl CameraUniforms {
             background,
             transparent: if transparent { 1.0 } else { 0.0 },
             color_rgb_mode: if color_rgb_mode { 1.0 } else { 0.0 },
-            _pad: [0.0; 2],
+            // No guard unless a zoom asks for one: see `with_zoom_guard`
+            guard_center: [0.0; 3],
+            guard_ln_near: 0.0,
+            guard_inv_ln_width: 0.0,
+            _pad: 0.0,
         }
+    }
+
+    /// Arm the infinite-zoom edge guard for a camera whose eye is at `eye`.
+    /// A `None` zoom, or a zoom with the guard turned off, leaves it disabled.
+    ///
+    /// **Every frame, from that frame's eye.** The ramp is expressed in
+    /// multiples of the current eye-to-fixed-point distance, and that is the
+    /// whole trick: it makes the guard invariant across a zoom wrap and gives
+    /// it a constant fade rate per octave of zoom. Passing a stale eye — the
+    /// scene's authored distance, say — turns it back into the static
+    /// world-space fade this replaced, artifact and all.
+    pub fn with_zoom_guard(
+        mut self,
+        zoom: Option<&crate::renorm::Renorm>,
+        eye: glam::Vec3,
+    ) -> Self {
+        if let Some(z) = zoom {
+            let (ln_near, inv_ln_width) = z.guard_params(eye);
+            self.guard_center = z.fixed_point.to_array();
+            self.guard_ln_near = ln_near;
+            self.guard_inv_ln_width = inv_ln_width;
+        }
+        self
     }
 }
 
@@ -295,16 +338,16 @@ pub struct PointComputeParams {
     pub zoom_similar: u32,
     /// Contraction ratio (the closed form needs it on its own, not as a log)
     pub zoom_scale: f32,
-    /// Periods at the outer end of the band whose point share is tapered, so
-    /// the edge fades instead of cutting. 0 = hard edge (see `renorm.rs`)
-    pub zoom_octave_fade: f32,
-    /// Per-period attenuation across that taper
-    pub zoom_fade_g: f32,
     /// std140 pads the scalar run out to the following vec4's alignment.
-    /// **Thirteen scalars, so this is three words, not one** — get it wrong
-    /// and the `vec4`s below land somewhere else and the zoom silently
-    /// renders from garbage rather than failing to compile.
-    pub _pad: [u32; 3],
+    /// **Eleven scalars, so this is five words, not one** — get it wrong and
+    /// the `vec4`s below land somewhere else and the zoom silently renders
+    /// from garbage rather than failing to compile.
+    ///
+    /// Five rather than three since the outer-edge taper left: the edge is
+    /// guarded at render time now (`CameraUniforms::guard_*`), because the
+    /// deal cannot depend on the camera — this buffer is filled over ~800
+    /// frames and would mix that many camera positions into one image.
+    pub _pad: [u32; 5],
     /// xyz = the map's fixed point, w = target radius
     pub zoom_fixed: [f32; 4],
     /// xyz = the rotation axis of `A`, w = its angle
@@ -324,8 +367,6 @@ impl PointComputeParams {
                 self.zoom_levels = z.periods;
                 self.zoom_log_scale = z.log_scale;
                 self.zoom_octave_q = z.octave_q;
-                self.zoom_octave_fade = z.fade_periods;
-                self.zoom_fade_g = z.fade_g;
                 self.zoom_similar = z.similar as u32;
                 self.zoom_scale = z.scale;
                 self.zoom_fixed = z.fixed_point.extend(z.radius).to_array();
@@ -359,12 +400,18 @@ mod tests {
 
     #[test]
     fn test_camera_uniforms_size() {
-        assert_eq!(std::mem::size_of::<CameraUniforms>(), 128, "CameraUniforms must be 128 bytes to match WGSL struct");
+        // 128 + the guard's five scalars, rounded up to a multiple of 16.
+        // Declared in five shaders (points/render, points/splat, trace,
+        // gizmo, density/voxel_render); they all have to grow together.
+        assert_eq!(std::mem::size_of::<CameraUniforms>(), 144, "CameraUniforms must be 144 bytes to match WGSL struct");
+        // The guard block starts where `_pad` used to, so nothing before it
+        // moved and a shader that doesn't read it is unaffected.
+        assert_eq!(std::mem::offset_of!(CameraUniforms, guard_center), 120);
     }
 
     #[test]
     fn test_point_compute_params_size() {
-        // std140: 13 scalars + 3 pad (64) + two vec4 (32) + two mat3x3 as
+        // std140: 11 scalars + 5 pad (64) + two vec4 (32) + two mat3x3 as
         // padded columns (48 each)
         assert_eq!(
             std::mem::size_of::<PointComputeParams>(),

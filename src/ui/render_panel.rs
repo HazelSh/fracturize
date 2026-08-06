@@ -267,11 +267,26 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
             app.haze_band = pinned.then_some((auto_near, auto_far));
         }
 
+        // A pinned band does not survive a zoom wrap — it is nailed to world
+        // space while the wrap rescales everything else — so infinite zoom
+        // ignores it. Say so, rather than leaving two sliders that move and
+        // change nothing.
+        let overridden = app.haze_band_overridden();
+        if overridden {
+            ui.label(
+                egui::RichText::new(
+                    "auto-ranged: a pinned band can't follow the zoom's wrap",
+                )
+                .small()
+                .weak(),
+            );
+        }
+
         // Shown disabled rather than hidden when auto: the resolved band is
         // worth being able to read, and hiding it would leave "pin the band"
         // with nothing to say what it would pin.
         let (mut near, mut far) = app.haze_range();
-        ui.add_enabled_ui(pinned, |ui| {
+        ui.add_enabled_ui(pinned && !overridden, |ui| {
             ui.horizontal(|ui| {
                 let resp = ui.add(
                     egui::DragValue::new(&mut near)
@@ -349,36 +364,35 @@ fn draw_zoom_band(ui: &mut egui::Ui, app: &mut App) {
         )).small().weak());
 
         // The headline control, and the reason this section exists. See
-        // `renorm::DEFAULT_OCTAVE_FADE` for the measurements behind the
-        // wording — in particular that it does not make the wrap's total
-        // brightness step smaller, it spreads it out so there is no
-        // discontinuity in any one place.
+        // `renorm::DEFAULT_EDGE_GUARD` — in particular for why this one is a
+        // render-time weight on the picture and not a taper on the point deal,
+        // which is what it was and which put the whole of its change into the
+        // one frame where the camera wraps.
         let resp = ui.add(
-            egui::Slider::new(&mut next.octave_fade, 0.0..=6.0)
+            egui::Slider::new(&mut next.edge_guard, 0.0..=4.0)
                 .fixed_decimals(1)
-                .text("edge fade"),
+                .text("edge guard"),
         );
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Octaves over which the band's outer edge thins out instead of \
-             stopping dead. At 0 the outermost octave vanishes in one frame at \
-             every wrap, taking a recognisable slab of structure with it. \
-             Winding it up spreads that same change across the outer octaves, \
-             so nothing cuts — the picture dims a little instead.",
+            "Octaves over which the outer edge of the picture fades to \
+             nothing, measured against the camera rather than the world. At 0 \
+             the band simply stops, and every wrap drops a recognisable slab \
+             of structure between two frames. Above 0 that material leaves \
+             gradually and at a steady rate as you zoom, and the wrap itself \
+             costs nothing. Wider than the band has room for is clamped.",
             "drag: widen or narrow the outer fade",
         );
         if resp.changed() {
             app.set_zoom_spec(next.clone());
         }
-        ui.label(egui::RichText::new(if z.fade_periods >= 1.0 {
-            format!(
-                "outer {:.1} octaves faded, x{:.2} per period",
-                z.fade_periods * z.log_scale / std::f32::consts::LN_2,
-                z.fade_g
-            )
-        } else {
-            "hard edge".to_string()
+        ui.label(egui::RichText::new(match z.guard_span() {
+            Some((start, end)) => format!(
+                "outer {:.1} octaves guarded, {:.2}x-{:.2}x the eye distance",
+                z.guard_width, start, end
+            ),
+            None => "hard edge — the wrap will step".to_string(),
         }).small().weak());
 
         ui.collapsing("band size", |ui| {

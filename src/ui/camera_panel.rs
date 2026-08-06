@@ -14,6 +14,7 @@
 //! aren't history-wired either; Ctrl+S is what makes them permanent.
 
 use crate::app::App;
+use crate::camera::OrbitStyle;
 
 use super::hints::hinted;
 
@@ -51,6 +52,37 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 }
 
 fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        ui.label("Orbit");
+        let style = app.orbit_style();
+        let chosen = super::radio::radio(&mut app.ui_state, "orbit_style", style)
+            .option(
+                OrbitStyle::Trackball,
+                "trackball",
+                "Horizontal drag yaws about the camera's own up, so a drag does \
+                 the same thing on screen from every framing — step off the path \
+                 anywhere, or open any scene, and the controls feel the same.\n\n\
+                 There's no level-horizon guarantee in exchange: circling drags \
+                 accumulate a little roll, which the roll field reads out and \
+                 \"level\" removes.",
+                "click: screen-relative orbit",
+            )
+            .option(
+                OrbitStyle::Turntable,
+                "turntable",
+                "Horizontal drag yaws about world up, holding the horizon level \
+                 however the camera is rolled.\n\n\
+                 The classic orbit, and the feel depends on where you're looking: \
+                 near straight up or down world up is nearly the view axis, so the \
+                 same drag reads as roll instead of yaw.",
+                "click: world-up orbit, level horizon",
+            )
+            .show(ui);
+        if let Some(style) = chosen {
+            app.set_orbit_style(style);
+        }
+    });
+
     ui.horizontal(|ui| {
         let mut invert = app.invert_pitch();
         let resp = ui.checkbox(&mut invert, "invert pitch");

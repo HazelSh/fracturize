@@ -452,6 +452,17 @@ pub struct CameraDef {
     pub path: Option<Vec<PathKeyDef>>,
 }
 
+/// How far a `route` may miss the key it runs to before the scene is refused,
+/// in degrees.
+///
+/// Not zero, because a route is written out rounded and read back in `f32`,
+/// and a hand-written `6.28` for a full turn is a route someone means. Small
+/// enough that anything wrong enough to see is refused: the spline hits its
+/// keys by composing these displacements, so whatever slack is allowed here is
+/// how far off a key the curve may pass, and half a degree is under three
+/// pixels of a 1080-tall frame.
+const ROUTE_MISS_LIMIT_DEG: f32 = 0.5;
+
 /// One [[camera.path]] spline keypoint. Every field is optional and falls
 /// back to the base [camera] framing, so a key only states what changes.
 #[derive(Deserialize, Serialize, Clone, Copy, Default)]
@@ -465,6 +476,20 @@ pub struct PathKeyDef {
     /// route on its own — so a hand-edited `yaw` can never contradict it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<i32>,
+    /// The exact journey out of this key, as a rotation vector in radians:
+    /// the displacement the segment leaving this key travels, instead of the
+    /// short way plus `turns`. Wins over `turns` where both are given.
+    ///
+    /// This is the spelling for a route the endpoints cannot imply, and the
+    /// only one: a loop *in place* about a chosen axis (equal framings leave
+    /// the axis free, so a winding has nothing to be a winding of), or a
+    /// corkscrew about an axis that isn't the short way's. Everything else
+    /// should stay in `turns`, which cannot contradict its keys.
+    ///
+    /// Checked as the scene loads — `exp(route)` must land on the next key, or
+    /// the load fails naming this key and the miss. See [`crate::path::Route`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<[f64; 3]>,
     /// Orbit angle in radians. Unbounded: successive keys spanning more than
     /// a full turn author spirals; nothing is wrapped.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,16 +529,31 @@ pub struct ZoomDef {
     /// still, where it evens out density and nothing ever wraps.
     #[serde(default = "default_zoom_octave_falloff")]
     pub octave_falloff: f64,
-    /// Octaves over which the band's *outer* edge fades out instead of
-    /// stopping dead. The edge is a cliff otherwise, and a wrap walks the
-    /// picture off it — a whole octave of structure disappears between two
-    /// frames. Set 0 for the old hard edge. Ignored when `octave_falloff` is
-    /// non-zero, which already varies density per octave.
+    /// Octaves over which the picture's *outer* edge is faded to nothing, at
+    /// render time, in multiples of the current eye distance. The band's edge
+    /// is a cliff otherwise, and a wrap walks the picture off it — a whole
+    /// octave of structure disappears between two frames.
     ///
-    /// **Omit it and it is derived from `haze`** (`renorm::auto_octave_fade`),
-    /// because haze is what decides whether the edge is visible at all and so
-    /// whether fading it is worth anything. Written back out resolved, so a
-    /// saved scene says what it is actually doing.
+    /// Leave it alone. The default (1 octave) fades the edge out exactly where
+    /// full haze would have hidden it anyway, and costs nothing at a wrap: the
+    /// ramp is measured against the camera, so the wrap's similarity leaves it
+    /// unchanged. Setting 0 restores the hard edge, which is a tool for
+    /// measuring the artifact (`scenes/octave-edge-visual.toml`) rather than a
+    /// look. A wider one is clamped to the room the band has.
+    ///
+    /// See `renorm::DEFAULT_EDGE_GUARD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_guard: Option<f64>,
+    /// Legacy: what this was called when it was a taper on the *point deal* —
+    /// a design that could not work, because a static density profile delivers
+    /// all of its change at the wrap instant. Still read, below `edge_guard`,
+    /// and never written back; saving over a file that has it drops it, the
+    /// same treatment `meta.fog` gets.
+    ///
+    /// Two fields rather than a serde alias, and for a reason worth keeping: an
+    /// alias makes a file holding *both* keys a hard parse error, and `--set
+    /// zoom.edge_guard=…` on a scene written against the old name produces
+    /// exactly that file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub octave_fade: Option<f64>,
 }
@@ -528,6 +568,10 @@ fn default_zoom_levels() -> f64 {
 
 fn default_zoom_octave_falloff() -> f64 {
     crate::renorm::ZoomSpec::default().octave_falloff as f64
+}
+
+fn default_zoom_edge_guard() -> f64 {
+    crate::renorm::ZoomSpec::default().edge_guard as f64
 }
 
 
@@ -929,13 +973,29 @@ impl Scene {
                     (n, true) => n,
                     (n, false) => n - 1,
                 };
-                // An explicit `turns` wins; otherwise read the route off the
-                // chart the author drew. A key written as an exact rotvec has
-                // no chart to read, so it takes the short way unless told.
-                let windings = (0..segments)
+                // An explicit `route` is the journey itself and wins over
+                // everything; then an explicit `turns`; otherwise read the
+                // route off the chart the author drew. A key written as an
+                // exact rotvec has no chart to read, so it takes the short way
+                // unless told.
+                let routes: Vec<crate::path::Route> = (0..segments)
                     .map(|i| {
                         let j = (i + 1) % n;
-                        match defs[i].turns {
+                        if let Some(v) = defs[i].route {
+                            if defs[i].turns.is_some() {
+                                log::warn!(
+                                    "camera.path key {}: both `route` and `turns` given; \
+                                     the route is the exact journey, so `turns` is ignored",
+                                    i + 1
+                                );
+                            }
+                            return crate::path::Route::Exact(
+                                crate::rot::Turn::from_rotation_vector(Vec3::from(
+                                    v.map(|x| x as f32),
+                                )),
+                            );
+                        }
+                        crate::path::Route::Turns(match defs[i].turns {
                             Some(t) => t,
                             // A closed path's last segment is the one nobody
                             // wrote: it runs back to key 0, and the documented
@@ -946,13 +1006,42 @@ impl Scene {
                             None if j < i => 0,
                             None if defs[i].rotvec.is_some() || defs[j].rotvec.is_some() => 0,
                             None => crate::rot::winding_from_chart(charts[i], charts[j]),
-                        }
+                        })
                     })
                     .collect();
 
+                // A stored displacement can disagree with the keys it connects
+                // — the one thing a winding integer could never do — so it is
+                // checked here, once, before anything flies it.
+                for (i, r) in routes.iter().enumerate() {
+                    if let crate::path::Route::Exact(t) = r {
+                        let j = (i + 1) % n;
+                        let miss = keys[i]
+                            .orientation
+                            .then_body(*t)
+                            .angle_to(keys[j].orientation)
+                            .to_degrees();
+                        if miss > ROUTE_MISS_LIMIT_DEG {
+                            let v = defs[i].route.unwrap_or_default();
+                            return Err(format!(
+                                "camera.path key {}: route = [{}, {}, {}] does not arrive at \
+                                 key {} — it misses by {:.2}°. A route is the exact journey \
+                                 between two framings, so either the route or the framing it \
+                                 runs to is wrong.",
+                                i + 1,
+                                v[0],
+                                v[1],
+                                v[2],
+                                j + 1,
+                                miss
+                            ));
+                        }
+                    }
+                }
+
                 Some(CameraPath {
                     keys,
-                    windings,
+                    routes,
                     loops: match loop_kind {
                         crate::path::LoopKind::Once => crate::path::Loop::Once,
                         crate::path::LoopKind::PingPong => crate::path::Loop::PingPong,
@@ -979,7 +1068,10 @@ impl Scene {
                 radius: z.radius as f32,
                 levels: z.levels as f32,
                 octave_falloff: z.octave_falloff as f32,
-                octave_fade: z.octave_fade.unwrap_or(0.0) as f32,
+                edge_guard: z
+                    .edge_guard
+                    .or(z.octave_fade)
+                    .unwrap_or_else(default_zoom_edge_guard) as f32,
             }),
             None => None,
         };
@@ -1230,10 +1322,8 @@ impl Scene {
                 radius: tidy(z.radius),
                 levels: tidy(z.levels),
                 octave_falloff: tidy(z.octave_falloff),
-                // Always written out resolved: a scene file should say what
-                // it is doing, not leave it to be re-derived from a haze
-                // value that may since have moved.
-                octave_fade: Some(tidy(z.octave_fade)),
+                edge_guard: Some(tidy(z.edge_guard)),
+                octave_fade: None,
             }),
             transforms,
         }
@@ -1343,9 +1433,18 @@ fn path_keys_to_defs(p: &CameraPath) -> Vec<PathKeyDef> {
 
     (0..n)
         .map(|i| {
-            let turns = (i < segments).then(|| route_stated(i)).flatten();
+            // An exact route is written as it stands: the yaw column can't
+            // carry it (that is why it exists), and `turns` can't name it.
+            let (turns, route) = match (i < segments).then(|| p.route(i)) {
+                Some(crate::path::Route::Exact(t)) => {
+                    (None, Some(tidy_rotvec(t.as_rotation_vector())))
+                }
+                Some(crate::path::Route::Turns(_)) => (route_stated(i), None),
+                None => (None, None),
+            };
             let common = PathKeyDef {
                 turns,
+                route,
                 distance: Some(tidy(p.keys[i].distance)),
                 focus: Some(p.keys[i].focus.to_array().map(tidy)),
                 ..Default::default()
@@ -1622,6 +1721,26 @@ fn merge_scene_into_document(
                                 t.remove("roll");
                             }
                         }
+                        // The route out of this key. Not a framing like the
+                        // fields above — it says which way the segment
+                        // *travels* — and it has to be written here too, or
+                        // saving over an existing file with the same number of
+                        // keys drops the corkscrew and quietly straightens the
+                        // shot. Both spellings are rewritten from what the
+                        // path actually holds, so the file can never end up
+                        // with a `turns` and a `route` disagreeing.
+                        match def.turns {
+                            Some(n) => set_i64(t, "turns", n as i64, None),
+                            None => {
+                                t.remove("turns");
+                            }
+                        }
+                        match def.route {
+                            Some(r) => set_arr3(t, "route", r, None),
+                            None => {
+                                t.remove("route");
+                            }
+                        }
                     }
                 } else {
                     // Key count changed: rebuild from the fresh serialization
@@ -1633,6 +1752,33 @@ fn merge_scene_into_document(
                         .clone();
                 }
             }
+        }
+    }
+
+    // The band. This used to be missing entirely, which meant editing the zoom
+    // in the app and pressing Ctrl+S over an existing file dropped every one of
+    // those edits without a word — the merge only wrote tables it had a case
+    // for, and `[zoom]` wasn't one. Same class of miss as `path_zoom_loop`.
+    match &file.zoom {
+        Some(z) => {
+            let zoom = doc
+                .entry("zoom")
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_mut()?;
+            set_str(zoom, "map", &z.map);
+            set_f64(zoom, "radius", z.radius, None);
+            set_f64(zoom, "levels", z.levels, None);
+            set_f64(zoom, "octave_falloff", z.octave_falloff, None);
+            if let Some(g) = z.edge_guard {
+                set_f64(zoom, "edge_guard", g, None);
+            }
+            // The old name for `edge_guard`, dropped as it is written, so a
+            // file can never end up holding both and being ambiguous about
+            // which one meant it. `meta.fog` gets the same treatment.
+            zoom.remove("octave_fade");
+        }
+        None => {
+            doc.remove("zoom");
         }
     }
 
@@ -2452,40 +2598,64 @@ color = [0.9, 0.5, 0.3]
         std::fs::create_dir_all(&dir).unwrap();
 
         // A [zoom] with only a map takes every band setting from ZoomSpec's
-        // defaults — including the fade, which is on unless a scene says not.
+        // defaults — including the edge guard, which is on unless a scene
+        // says otherwise.
         let bare = dir.join("bare.toml");
         std::fs::write(&bare, src("[zoom]\nmap = \"descent\"")).unwrap();
         let scene = Scene::load(&bare).unwrap();
         let spec = scene.zoom.as_ref().expect("zoom");
         assert_eq!(*spec, crate::renorm::ZoomSpec { map: 0, ..Default::default() });
-        assert_eq!(spec.octave_fade, 0.0, "the fade is opt-in; see DEFAULT_OCTAVE_FADE");
+        assert_eq!(spec.edge_guard, 1.0, "the guard is the default; see DEFAULT_EDGE_GUARD");
 
-        // An authored fade reaches the spec.
-        let faded = dir.join("faded.toml");
-        std::fs::write(&faded, src("[zoom]\nmap = \"descent\"\noctave_fade = 3.0")).unwrap();
-        let faded_spec = Scene::load(&faded).unwrap().zoom.take().expect("zoom");
-        assert_eq!(faded_spec.octave_fade, 3.0);
+        // An authored width reaches the spec, and so does the old key: the
+        // guard replaced a deal-side taper called `octave_fade`, and scenes
+        // written against that must keep loading.
+        let guarded = dir.join("guarded.toml");
+        std::fs::write(&guarded, src("[zoom]\nmap = \"descent\"\nedge_guard = 3.0")).unwrap();
+        let guarded_spec = Scene::load(&guarded).unwrap().zoom.take().expect("zoom");
+        assert_eq!(guarded_spec.edge_guard, 3.0);
 
-        // Authored values survive a load/save/load round trip. The fade is
-        // written back out even though it matches the default, so a saved
-        // scene states what its band is doing rather than leaving it implied.
+        let legacy = dir.join("legacy.toml");
+        std::fs::write(&legacy, src("[zoom]\nmap = \"descent\"\noctave_fade = 0.0")).unwrap();
+        let legacy_spec = Scene::load(&legacy).unwrap().zoom.take().expect("zoom");
+        assert_eq!(legacy_spec.edge_guard, 0.0, "octave_fade must still be read");
+
+        // Authored values survive a load/save/load round trip. The guard is
+        // written back out even when it matches the default, so a saved scene
+        // states what its band is doing rather than leaving it implied.
         let authored = dir.join("authored.toml");
         std::fs::write(
             &authored,
-            src("[zoom]\nmap = \"descent\"\nradius = 6.5\nlevels = 12.0\noctave_fade = 2.5"),
+            src("[zoom]\nmap = \"descent\"\nradius = 6.5\nlevels = 12.0\nedge_guard = 2.5"),
         )
         .unwrap();
         let scene = Scene::load(&authored).unwrap();
         let spec = scene.zoom.as_ref().expect("zoom");
-        assert_eq!(spec.octave_fade, 2.5);
+        assert_eq!(spec.edge_guard, 2.5);
         assert_eq!(spec.radius, 6.5);
 
         let out = dir.join("saved.toml");
         scene.save(&out).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("octave_fade"), "{text}");
+        assert!(text.contains("edge_guard"), "{text}");
         let again = Scene::load(&out).unwrap();
         assert_eq!(again.zoom.as_ref().unwrap(), spec);
+
+        // Saving *over an existing file* is the comment-preserving merge, a
+        // different path from the one above — and it used to skip [zoom]
+        // entirely, so editing the band in the app and pressing Ctrl+S threw
+        // the edits away silently. It also has to migrate the old key rather
+        // than leave a file saying two things at once.
+        let mut edited = Scene::load(&legacy).unwrap();
+        let z = edited.zoom.as_mut().unwrap();
+        z.radius = 6.0;
+        z.edge_guard = 2.0;
+        edited.save(&legacy).unwrap();
+        let text = std::fs::read_to_string(&legacy).unwrap();
+        assert!(!text.contains("octave_fade"), "the old key must not survive a save: {text}");
+        let reloaded = Scene::load(&legacy).unwrap().zoom.take().expect("zoom");
+        assert_eq!(reloaded.radius, 6.0, "a band edit must survive Ctrl+S over the file");
+        assert_eq!(reloaded.edge_guard, 2.0);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2574,6 +2744,72 @@ color = [0.3, 0.5, 0.8]
     }
 
     #[test]
+    fn a_route_says_what_a_winding_cannot_and_is_checked_against_its_keys() {
+        let src = r#"
+[meta]
+name = "Route"
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 3.0
+yaw = 0.0
+pitch = 0.0
+
+# two full turns of pitch, ending where it began
+[[camera.path]]
+route = [12.566371, 0.0, 0.0]
+
+[[camera.path]]
+
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+color = [1.0, 0.2, 0.2]
+"#;
+        let dir = std::env::temp_dir().join("fracturize_route_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("route.toml");
+        std::fs::write(&path, src).unwrap();
+
+        let scene = Scene::load(&path).unwrap();
+        let p = scene.camera_path.as_ref().expect("path parsed");
+        let crate::path::Route::Exact(t) = p.route(0) else {
+            panic!("a stated route must load as an exact one, not {:?}", p.route(0));
+        };
+        assert!((t.magnitude() - 4.0 * std::f32::consts::PI).abs() < 1e-3, "{:?}", t);
+        assert!(t.as_rotation_vector().x > 0.0, "about X, as written");
+
+        // It has to survive a save over its own file: silently dropping it
+        // would straighten the shot on the next Ctrl+S.
+        scene.save(&path).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("route = ["), "{}", out);
+        let reloaded = Scene::load(&path).unwrap();
+        assert_eq!(reloaded.camera_path.as_ref().unwrap().routes, p.routes);
+
+        // A hand-written 6.28 for a full turn is a route someone means: it
+        // misses by a fifth of a degree, and loads.
+        let near = dir.join("near.toml");
+        std::fs::write(&near, src.replace("12.566371", "6.28")).unwrap();
+        assert!(Scene::load(&near).is_ok(), "a rounded full turn must still load");
+
+        // One that lands somewhere else entirely is refused, naming the key
+        // and the miss. This is the property `turns` had for free — a stored
+        // displacement can contradict its endpoints — bought back at the door.
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, src.replace("12.566371, 0.0, 0.0", "12.566371, 0.0, 3.0")).unwrap();
+        match Scene::load(&bad) {
+            Err(e) => {
+                assert!(e.contains("key 1"), "{}", e);
+                assert!(e.contains("misses by"), "{}", e);
+            }
+            Ok(_) => panic!("a route that misses the key it runs to should not load"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn camera_path_roundtrip() {
         let src = r#"
 [meta]
@@ -2645,7 +2881,7 @@ color = [1.0, 0.2, 0.2]
             assert!((a.focus - b.focus).length() < 1e-3);
         }
         // Routes survive too, or a corkscrew quietly unwinds on save.
-        assert_eq!(p.windings, q.windings, "windings must round-trip");
+        assert_eq!(p.routes, q.routes, "routes must round-trip");
 
         // Fresh save (new file) round-trips too
         let fresh_path = dir.join("fresh.toml");

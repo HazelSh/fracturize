@@ -345,7 +345,16 @@ fn base_setup(
     haze_enabled: bool,
     over: CameraOverride,
 ) -> (OrbitCamera, f32, Haze) {
-    let (point_size, haze) = base_render_params(view, scene, haze_enabled);
+    let (point_size, mut haze) = base_render_params(view, scene, haze_enabled);
+    // A band pinned in world units cannot survive a zoom wrap: the wrap
+    // rescales the camera and the picture together and leaves the band where
+    // it was, so the image drifts out of the haze across a period and snaps
+    // back at the seam. Under infinite zoom the pin is a bug by construction,
+    // and every legacy view carries one — say so and auto-range instead.
+    if haze.pinned.is_some() && scene.zoom.is_some() {
+        haze.pinned = None;
+        println!("haze band auto-ranged (a pinned band is not wrap-invariant under infinite zoom)");
+    }
     let camera = effective_camera(view.as_ref(), scene, over);
     if !over.is_empty() {
         // So a framing found by flags can be kept without transcription
@@ -673,6 +682,7 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let t_fill = Instant::now();
 
     let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
+    let zoom = scene_zoom(&scene)?;
 
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
@@ -707,7 +717,10 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
-        );
+        )
+        // One guard for the whole sheet, off the base framing, for the same
+        // reason as the haze band above: grid tiles only re-aim the camera.
+        .with_zoom_guard(zoom.as_ref(), base_camera.eye());
         renderer.upload_camera(&queue, &camera);
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
@@ -905,7 +918,11 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
-        );
+        )
+        // After the wrap too, and for the same reason: the guard is a ramp in
+        // multiples of the eye distance, so it has to be rebuilt from the
+        // camera that actually renders this frame.
+        .with_zoom_guard(zoom.as_ref(), cam.eye());
         renderer.upload_camera(&queue, &camera);
         let use_point_primitives = point_size * height as f32 / cam.distance <= 1.5;
         target.render_tile(
@@ -1014,12 +1031,21 @@ pub fn render_mutations(
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
     let (haze_near, haze_far) = haze.band(base_camera.distance);
-    let camera = CameraUniforms::new(
-        view_proj, height as f32, point_size, aspect, 1.0,
-        haze_near, haze_far, haze.transmittance, haze.saturation,
-        color_contrast, scene.background.to_array(),
-        transparent, scene.color_mode.packs_rgb(),
-    );
+    // One framing and one haze band for every tile; only the edge guard is
+    // per-variant, because mutating the transforms moves the zoom's fixed
+    // point and a guard aimed at the wrong centre would fade the wrong side
+    // of the picture. A variant whose zoom no longer resolves simply goes
+    // unguarded — the tile is a still, and the sheet is worth more than the
+    // one tile is.
+    let camera = |zoom: Option<&crate::renorm::Renorm>| {
+        CameraUniforms::new(
+            view_proj, height as f32, point_size, aspect, 1.0,
+            haze_near, haze_far, haze.transmittance, haze.saturation,
+            color_contrast, scene.background.to_array(),
+            transparent, scene.color_mode.packs_rgb(),
+        )
+        .with_zoom_guard(zoom, base_camera.eye())
+    };
 
     let target = TileTarget::new(&device, width, height, clear);
     let sheet_w = width * cols;
@@ -1038,7 +1064,7 @@ pub fn render_mutations(
             TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
     );
-        renderer.upload_camera(&queue, &camera);
+        renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
@@ -1148,12 +1174,17 @@ pub fn render_sweep(
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
     let (haze_near, haze_far) = haze.band(base_camera.distance);
-    let camera = CameraUniforms::new(
-        view_proj, height as f32, point_size, aspect, 1.0,
-        haze_near, haze_far, haze.transmittance, haze.saturation,
-        color_contrast, scene.background.to_array(),
-        transparent, scene.color_mode.packs_rgb(),
-    );
+    // Per-variant edge guard: a sweep may be sweeping a zoom parameter, or
+    // anything that moves the renormalizing map's fixed point.
+    let camera = |zoom: Option<&crate::renorm::Renorm>| {
+        CameraUniforms::new(
+            view_proj, height as f32, point_size, aspect, 1.0,
+            haze_near, haze_far, haze.transmittance, haze.saturation,
+            color_contrast, scene.background.to_array(),
+            transparent, scene.color_mode.packs_rgb(),
+        )
+        .with_zoom_guard(zoom, base_camera.eye())
+    };
 
     let target = TileTarget::new(&device, width, height, clear);
     let sheet_w = width * cols;
@@ -1174,7 +1205,7 @@ pub fn render_sweep(
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
         );
-        renderer.upload_camera(&queue, &camera);
+        renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);

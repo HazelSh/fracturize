@@ -26,6 +26,7 @@
 //! has always been degenerate. See [`crate::rot`].
 
 use glam::{Mat4, Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::rot::{Angle, Orientation, Turn, YawPitchRoll};
 
@@ -35,6 +36,36 @@ pub const Z_FAR: f32 = 100.0;
 
 /// Radians of orbit or roll per pixel of drag
 const DRAG_RATE: f32 = 0.006;
+
+/// Which axis a horizontal orbit drag turns about — the whole of the
+/// difference between the two ways a look control can feel.
+///
+/// Vertical drag is body-frame pitch either way, and so is roll; only the yaw
+/// axis is in question, and the choice is a real fork rather than a tuning
+/// knob. A turntable's feel is a function of where the camera points relative
+/// to its privileged axis, so it changes as you fly; a trackball has no
+/// privileged axis, so it can't.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OrbitStyle {
+    /// Yaw about the camera's **own** up. A drag has the same effect relative
+    /// to the screen from every framing there is — which is the point: you can
+    /// step off a path anywhere, or open any scene, and look around without
+    /// first working out what the camera had been doing.
+    ///
+    /// The price is that there is no horizon invariant: rotations about
+    /// different axes don't commute, so a closed loop of drags comes back
+    /// looking the same way but slightly rolled. That is a theorem about SO(3)
+    /// rather than a defect, and it is why the roll readout and the `level`
+    /// button exist. Nothing ever re-levels behind your back.
+    #[default]
+    Trackball,
+    /// Yaw about **world** up, keeping the horizon level however the camera is
+    /// rolled. The classic orbit, and right when a scene has a ground plane to
+    /// be level with — but its feel depends on elevation, and near the poles
+    /// world up is nearly the view axis, so the same drag reads as roll.
+    Turntable,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrbitCamera {
@@ -147,19 +178,27 @@ impl OrbitCamera {
     /// Mouse drag orbit: dx/dy in pixels. Grab-the-scene convention: drag
     /// right spins the scene rightward, drag up tilts its top toward you.
     ///
-    /// Yaw turns about **world** up, so the horizon stays put however the
-    /// camera is rolled. Pitch turns about the camera's **own** right, so it
+    /// Pitch turns about the camera's **own** right whatever the style, so it
     /// keeps meaning "tilt what I'm looking at" at every framing — including
-    /// straight up, where a world-space pitch axis doesn't exist.
+    /// straight up, where a world-space pitch axis doesn't exist. Yaw turns
+    /// about the axis [`OrbitStyle`] names, and that is the only difference
+    /// between the two.
+    ///
+    /// Under [`OrbitStyle::Trackball`] both turns are body-frame, so they
+    /// compose on the right and the drag applies *the same rotation* to every
+    /// starting framing. History-independence isn't approximated here, it's
+    /// structural — there is no state for the feel to be a function of.
     ///
     /// Nothing is clamped. Drag far enough and you go over the pole and come
     /// out inverted, which is the point: those framings were unreachable
     /// before, and some shots need them.
-    pub fn orbit(&mut self, dx: f32, dy: f32) {
-        self.orientation = self
-            .orientation
-            .then_world(Turn::about(Vec3::Y, -dx * DRAG_RATE))
-            .then_body(Turn::about(Vec3::X, dy * DRAG_RATE));
+    pub fn orbit(&mut self, dx: f32, dy: f32, style: OrbitStyle) {
+        let yaw = Turn::about(Vec3::Y, -dx * DRAG_RATE);
+        let turned = match style {
+            OrbitStyle::Trackball => self.orientation.then_body(yaw),
+            OrbitStyle::Turntable => self.orientation.then_world(yaw),
+        };
+        self.orientation = turned.then_body(Turn::about(Vec3::X, dy * DRAG_RATE));
     }
 
     /// How many pixels one world unit spans at depth `distance` from the eye.
@@ -378,9 +417,9 @@ mod tests {
     fn orbiting_at_zero_roll_is_the_old_angle_arithmetic() {
         // The old orbit() was `yaw -= dx*rate; pitch -= dy*rate`. At roll 0
         // that has to survive exactly, or every existing scene's turntable
-        // moves.
+        // moves. It is the turntable that promises this, and now says so.
         let mut c = cam(0.4, 0.2, 0.0, 3.0, Vec3::ZERO);
-        c.orbit(30.0, -20.0);
+        c.orbit(30.0, -20.0, OrbitStyle::Turntable);
         let got = c.chart();
         assert!((got.yaw.radians() - (0.4 - 30.0 * DRAG_RATE)).abs() < 1e-5, "{:?}", got);
         assert!((got.pitch.radians() - (0.2 + 20.0 * DRAG_RATE)).abs() < 1e-5, "{:?}", got);
@@ -388,31 +427,147 @@ mod tests {
     }
 
     #[test]
+    fn a_trackball_drag_feels_the_same_from_every_framing() {
+        // The design goal, written as an assertion: "looking around should
+        // feel the same no matter what's been going on" is exactly the claim
+        // that the turn a drag applies, *measured in the camera's own frame*,
+        // doesn't depend on the framing it started from.
+        let (dx, dy) = (23.0, -11.0);
+        let reference = {
+            let mut c = cam(0.0, 0.0, 0.0, 3.0, Vec3::ZERO);
+            let before = c.orientation;
+            c.orbit(dx, dy, OrbitStyle::Trackball);
+            before.shortest_turn_to(c.orientation).as_rotation_vector()
+        };
+
+        let (mut worst_trackball, mut worst_turntable) = (0.0f32, 0.0f32);
+        for i in 0..12 {
+            let f = i as f32;
+            // A dozen framings scattered over SO(3), several of them past the
+            // pole and upside down — the states the old controls behaved
+            // differently in.
+            let start = Orientation::from_axis_angle(
+                Vec3::new(f.sin(), (2.0 * f).cos(), (0.7 * f + 1.0).sin()).normalize(),
+                0.3 + 0.5 * f,
+            );
+            for (style, worst) in [
+                (OrbitStyle::Trackball, &mut worst_trackball),
+                (OrbitStyle::Turntable, &mut worst_turntable),
+            ] {
+                let mut c = OrbitCamera { orientation: start, distance: 3.0, focus: Vec3::ZERO };
+                c.orbit(dx, dy, style);
+                let got = start.shortest_turn_to(c.orientation).as_rotation_vector();
+                *worst = worst.max((got - reference).length());
+            }
+        }
+
+        assert!(
+            worst_trackball < 1e-6,
+            "a trackball drag must be the same turn everywhere; worst framing was off by {} rad",
+            worst_trackball
+        );
+        // And the assertion above has teeth: this is the property the
+        // turntable cannot have, and the reason the default changed.
+        assert!(
+            worst_turntable > 0.05,
+            "the turntable is supposed to be framing-dependent — if it isn't, \
+             the test above is passing vacuously"
+        );
+    }
+
+    #[test]
+    fn a_trackball_drag_is_undone_by_dragging_back() {
+        // Out and back along one axis returns you exactly where you were, from
+        // any framing at all. Only along one axis at a time: turns about
+        // different axes don't commute, and the roll a round trip leaves
+        // behind is the acknowledged price of screen-relative controls, not a
+        // bug to be tuned away.
+        use std::f32::consts::FRAC_PI_2;
+        for &(yaw, pitch, roll) in &[
+            (0.0, 0.0, 0.0),
+            (0.9, FRAC_PI_2, 0.0),   // straight up
+            (-1.2, -FRAC_PI_2, 0.8), // straight down, and rolled
+            (2.0, 3.0, -1.5),        // over the pole, inverted
+        ] {
+            let start = cam(yaw, pitch, roll, 3.0, Vec3::ZERO);
+            for &(dx, dy) in &[(40.0, 0.0), (0.0, 40.0), (-140.0, 0.0)] {
+                let mut c = start;
+                c.orbit(dx, dy, OrbitStyle::Trackball);
+                c.orbit(-dx, -dy, OrbitStyle::Trackball);
+                assert!(
+                    c.orientation.angle_to(start.orientation) < 1e-5,
+                    "y{} p{} r{} drag ({}, {}) did not undo: off by {} rad",
+                    yaw,
+                    pitch,
+                    roll,
+                    dx,
+                    dy,
+                    c.orientation.angle_to(start.orientation)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_styles_are_the_same_drag_when_level() {
+        // They differ only in the yaw axis, and looking level with no roll the
+        // camera's own up *is* world up. So changing the preference moves
+        // nothing and costs nothing for anyone flying level — the difference
+        // only appears once you leave the horizontal, which is where the
+        // turntable's feel starts depending on history.
+        let mut a = cam(0.4, 0.0, 0.0, 3.0, Vec3::ZERO);
+        let mut b = a;
+        a.orbit(30.0, -20.0, OrbitStyle::Trackball);
+        b.orbit(30.0, -20.0, OrbitStyle::Turntable);
+        assert!(
+            a.orientation.angle_to(b.orientation) < 1e-6,
+            "level, the two styles must agree exactly: {:?} vs {:?}",
+            a.chart(),
+            b.chart()
+        );
+
+        // Off the horizontal they must not agree, or the preference is a lie.
+        let mut a = cam(0.4, 0.9, 0.0, 3.0, Vec3::ZERO);
+        let mut b = a;
+        a.orbit(30.0, 0.0, OrbitStyle::Trackball);
+        b.orbit(30.0, 0.0, OrbitStyle::Turntable);
+        assert!(a.orientation.angle_to(b.orientation) > 0.01);
+    }
+
+    #[test]
     fn you_can_orbit_over_the_pole() {
         // Gimbal lock #1: pitch used to clamp at ±87.7°, so this framing was
         // unreachable and so was any path through it. Drag a long way up and
         // the camera must keep going, smoothly, and come out the other side.
-        let mut c = cam(0.0, 0.0, 0.0, 3.0, Vec3::ZERO);
-        let step = -20.0; // drag up
-        let mut prev = c.forward();
-        let mut crossed = false;
-        for _ in 0..60 {
-            c.orbit(0.0, step);
-            let f = c.forward();
-            // No snap, ever: 20px of drag is a small, bounded rotation.
-            assert!(
-                f.dot(prev) > 0.95,
-                "the view jumped: dot {} — that is a gimbal snap",
-                f.dot(prev)
-            );
-            assert!(f.is_finite() && c.up().is_finite(), "basis went non-finite");
-            assert!((c.up().length() - 1.0).abs() < 1e-4, "basis stopped being unit");
-            if c.eye().y < -1.0 {
-                crossed = true;
+        // Pitch is body-frame under either style, so both must manage it.
+        for style in [OrbitStyle::Trackball, OrbitStyle::Turntable] {
+            let mut c = cam(0.0, 0.0, 0.0, 3.0, Vec3::ZERO);
+            let step = -20.0; // drag up
+            let mut prev = c.forward();
+            let mut crossed = false;
+            for _ in 0..60 {
+                c.orbit(0.0, step, style);
+                let f = c.forward();
+                // No snap, ever: 20px of drag is a small, bounded rotation.
+                assert!(
+                    f.dot(prev) > 0.95,
+                    "{:?}: the view jumped: dot {} — that is a gimbal snap",
+                    style,
+                    f.dot(prev)
+                );
+                assert!(f.is_finite() && c.up().is_finite(), "basis went non-finite");
+                assert!((c.up().length() - 1.0).abs() < 1e-4, "basis stopped being unit");
+                if c.eye().y < -1.0 {
+                    crossed = true;
+                }
+                prev = f;
             }
-            prev = f;
+            assert!(
+                crossed,
+                "{:?}: 60 steps of 20px should have gone over the top and down the far side",
+                style
+            );
         }
-        assert!(crossed, "60 steps of 20px should have gone over the top and down the far side");
     }
 
     #[test]

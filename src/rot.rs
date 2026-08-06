@@ -46,6 +46,16 @@
 //! `Turn`s: an integer cannot disagree with the endpoints it connects, and a
 //! stored `Turn` could.
 //!
+//! That argument has one hole, and it is exactly where `Δq` is the identity:
+//! between *equal* orientations the set above is `{ n̂·2πk }` for **every** n̂,
+//! so the axis is free and no integer can name it. [`turn_to`] has nothing to
+//! go on there and falls back to world Y. A route in place about any other
+//! axis has to be stored as the displacement it is, and pay the price the
+//! integer avoided — see [`crate::path::Route::Exact`], which is checked
+//! against its endpoints as it loads.
+//!
+//! [`turn_to`]: Orientation::turn_to
+//!
 //! # Charts
 //!
 //! A chart is a set of angle coordinates naming an orientation. Charts are

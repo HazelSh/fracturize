@@ -38,8 +38,13 @@ struct CameraUniforms {
     transparent: f32,
     // 1 when point colour is packed RGB rather than a colormap index
     color_rgb_mode: f32,
+    // Infinite-zoom edge guard; see guard_weight() below and renorm.rs.
+    guard_x: f32,
+    guard_y: f32,
+    guard_z: f32,
+    guard_ln_near: f32,
+    guard_inv_ln_width: f32,
     _pad0: f32,
-    _pad1: f32,
 }
 
 struct SplatParams {
@@ -111,6 +116,29 @@ fn haze_weight(depth: f32) -> f32 {
     return mix(1.0, camera.haze_transmittance, haze_at(depth));
 }
 
+/// The share that survives the infinite-zoom edge guard: 1 everywhere until
+/// the band's outer octave, then smoothly to 0 before its edge. 1 always when
+/// the scene has no zoom (or asked for a hard edge), which is the zero width.
+///
+/// The ramp is taken in **log radius**, and against a near plane that already
+/// carries this frame's eye distance (`ln_near = ln(rho_start * d)`, filled in
+/// by `CameraUniforms::with_zoom_guard`). Both of those are load-bearing:
+/// dividing by the eye distance is what makes this survive a zoom wrap
+/// unchanged — the wrap scales the point's radius and the eye's by the same
+/// factor — and taking the ramp in log is what makes material leave the
+/// picture at a constant rate per octave of zoom rather than in a rush at one
+/// end. See `renorm::DEFAULT_EDGE_GUARD` for why the alternative (fading the
+/// point deal instead) cannot work.
+fn guard_weight(pos: vec3<f32>) -> f32 {
+    if camera.guard_inv_ln_width == 0.0 {
+        return 1.0;
+    }
+    let centre = vec3<f32>(camera.guard_x, camera.guard_y, camera.guard_z);
+    let r = length(pos - centre);
+    let t = (log(max(r, 1e-20)) - camera.guard_ln_near) * camera.guard_inv_ln_width;
+    return 1.0 - smoothstep(0.0, 1.0, t);
+}
+
 struct SplatOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -171,8 +199,9 @@ fn vs_splat(
     out.color = haze_color(lookup_color(point.color_idx), depth);
     out.offset = offset;
     // Total kernel energy is 1: peak scales inversely with splat area, then
-    // the haze takes its share of it.
-    out.weight = haze_weight(depth) * KERNEL_NORM / (radius_px * radius_px);
+    // the haze and the zoom's edge guard take their shares of it.
+    out.weight = haze_weight(depth) * guard_weight(point.position)
+        * KERNEL_NORM / (radius_px * radius_px);
     return out;
 }
 
@@ -196,7 +225,7 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     out.clip_position = vec4<f32>(clip.xy / clip.w, 0.0, 1.0);
     out.color = haze_color(lookup_color(point.color_idx), depth);
     out.offset = vec2<f32>(0.0);
-    out.weight = haze_weight(depth);
+    out.weight = haze_weight(depth) * guard_weight(point.position);
     return out;
 }
 

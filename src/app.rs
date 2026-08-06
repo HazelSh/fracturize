@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Vec3};
 use winit::window::Window;
 
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, OrbitStyle};
 use crate::gpu::lines::LineVertex;
 use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, OverlayTargets, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::history::{EditSnapshot, History};
@@ -140,9 +140,16 @@ fn path_fingerprint(path: &CameraPath) -> u64 {
     mix(path.ease.map_or(2, |e| e as u32));
     mix(path.seconds.unwrap_or(f32::NAN).to_bits());
     // Routes are part of the shape: two paths through the same keys but
-    // different windings draw different polylines.
-    for w in &path.windings {
-        mix(*w as u32);
+    // different routes draw different polylines.
+    for r in &path.routes {
+        match r {
+            crate::path::Route::Turns(w) => mix(*w as u32),
+            crate::path::Route::Exact(t) => {
+                for v in t.as_rotation_vector().to_array() {
+                    mix(v.to_bits());
+                }
+            }
+        }
     }
     for k in &path.keys {
         let q = k.orientation.as_quat();
@@ -1034,7 +1041,7 @@ impl App {
         path.keys.push(key);
         // A new key means a new segment; give it the short way round until
         // someone says otherwise.
-        path.fit_windings();
+        path.fit_routes();
         log::info!(
             "Camera path keypoint {} added ({}; Ctrl+S saves it with the scene)",
             path.keys.len(),
@@ -1759,6 +1766,23 @@ impl App {
         self.prefs.save();
     }
 
+    /// Which axis orbit drags yaw about (persisted across sessions)
+    pub fn orbit_style(&self) -> OrbitStyle {
+        self.prefs.orbit_style
+    }
+
+    /// Choose the orbit geometry. A control preference, not scene data: it
+    /// changes how the next drag is interpreted and leaves the framing, the
+    /// camera path and the scene exactly where they are.
+    pub fn set_orbit_style(&mut self, style: OrbitStyle) {
+        if self.prefs.orbit_style == style {
+            return;
+        }
+        self.prefs.orbit_style = style;
+        log::info!("Orbit style: {:?}", style);
+        self.prefs.save();
+    }
+
     /// `suppress_hover`: true when the pointer is over an egui area and no
     /// drag is active — gizmo hover-picking is skipped so egui panels don't
     /// fight the 3D gizmo highlight/cursor-icon underneath them. Active
@@ -1781,7 +1805,7 @@ impl App {
             }
             Drag::Orbit => {
                 let dy = if self.prefs.invert_pitch { -dy } else { dy };
-                self.camera.orbit(dx, dy);
+                self.camera.orbit(dx, dy, self.prefs.orbit_style);
                 self.invalidate_default_path();
             }
             Drag::Pan => {
@@ -3225,9 +3249,28 @@ impl App {
 
     /// Haze band in world units: the pinned one, or auto-ranged off the
     /// current camera distance so it tracks the framing.
+    ///
+    /// **A pin is ignored under infinite zoom**, and that is a correctness
+    /// requirement rather than a convenience. A band pinned in world units
+    /// does not scale with the wrap, so the image drifts out of the haze
+    /// across a period and snaps back at the seam — measured offline on
+    /// `wellspiral` as a 12% brightening undone by an 11% drop in one frame
+    /// (`offline::Haze`). Every legacy view counts as pinned (`apply_view`),
+    /// so this is reachable by loading an old view over a zoom scene, which is
+    /// how it went unnoticed: the offline renderer was fixed and the window
+    /// was not.
     pub fn haze_range(&self) -> (f32, f32) {
-        self.haze_band
-            .unwrap_or_else(|| crate::haze::auto_band(self.camera.distance))
+        match self.haze_band {
+            Some(band) if self.zoom().is_none() => band,
+            _ => crate::haze::auto_band(self.camera.distance),
+        }
+    }
+
+    /// Whether a hand-pinned haze band is being overridden by the auto range
+    /// because the scene zooms. The panel says so rather than leaving two
+    /// sliders that appear to do nothing.
+    pub fn haze_band_overridden(&self) -> bool {
+        self.haze_band.is_some() && self.zoom().is_some()
     }
 
     /// `(brightness, saturation)` survival at the far plane, from the amount.
@@ -3704,7 +3747,8 @@ impl App {
             // A screenshot is a file with an alpha channel worth filling in.
             self.transparent_render,
             self.scene.color_mode.packs_rgb(),
-        );
+        )
+        .with_zoom_guard(self.zoom(), self.camera.eye());
 
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("screenshot_encoder"),
@@ -3974,7 +4018,10 @@ impl App {
             // through, so the live pass is always opaque.
             false,
             self.scene.color_mode.packs_rgb(),
-        );
+        )
+        // Every frame, from this frame's eye: that is what makes the zoom's
+        // edge guard track the camera instead of the world.
+        .with_zoom_guard(self.zoom(), self.camera.eye());
         self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
         if self.show_traces {
             self.line_renderer.upload_camera(&self.gpu.queue, &camera);

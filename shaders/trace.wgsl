@@ -17,9 +17,16 @@ struct CameraUniforms {
     bg_b: f32,
     // 1 when this pass writes an image with an alpha channel to keep.
     transparent: f32,
+    // Tail of `CameraUniforms` in gpu/buffers.rs: the colour mode and the
+    // infinite-zoom edge guard, none of which this pass reads. Every pass
+    // shares one buffer, so the struct still has to be the same size.
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+    _pad5: f32,
+    _pad6: f32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;

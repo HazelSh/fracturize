@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::camera::OrbitStyle;
+
 /// Which of the Phase 2 `egui::Window` panels are open. Toggled from the top
 /// toolbar or a window's own close button (the two are the same bool, so
 /// they can never go out of sync); persisted the moment either changes.
@@ -31,6 +33,14 @@ pub struct Prefs {
     /// Flightsim-style: drag down to tilt the scene's top toward you
     #[serde(default)]
     pub invert_pitch: bool,
+    /// Which axis a horizontal orbit drag yaws about. Defaults to
+    /// [`OrbitStyle::Trackball`] — screen-relative, so the controls feel the
+    /// same wherever the camera has been; `turntable` restores the world-Y
+    /// orbit for anyone who wants the horizon held level instead.
+    ///
+    /// [`OrbitStyle::Trackball`]: crate::camera::OrbitStyle::Trackball
+    #[serde(default)]
+    pub orbit_style: OrbitStyle,
     /// Open/closed state of the Phase 2 panel windows
     #[serde(default)]
     pub panels: PanelPrefs,
@@ -62,6 +72,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             invert_pitch: false,
+            orbit_style: OrbitStyle::default(),
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
             author: None,
@@ -101,5 +112,29 @@ impl Prefs {
             }
             Err(e) => log::warn!("Failed to serialize prefs: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prefs_file_written_before_the_orbit_style_still_loads() {
+        // [`Prefs::load`] falls back to `Default` on *any* parse error, so a
+        // field that can't cope with an older file doesn't merely lose its own
+        // value — it silently resets every other preference the person has.
+        let old = "invert_pitch = true\nmutate_strength = 2.5\n";
+        let p: Prefs = toml::from_str(old).expect("an older prefs file must still parse");
+        assert!(p.invert_pitch, "the settings that were there must survive");
+        assert_eq!(p.orbit_style, OrbitStyle::Trackball, "and the new one takes its default");
+    }
+
+    #[test]
+    fn the_orbit_style_round_trips_under_the_name_it_is_written_by() {
+        let p = Prefs { orbit_style: OrbitStyle::Turntable, ..Default::default() };
+        let s = toml::to_string(&p).expect("prefs must serialize");
+        assert!(s.contains(r#"orbit_style = "turntable""#), "{}", s);
+        assert_eq!(toml::from_str::<Prefs>(&s).unwrap().orbit_style, OrbitStyle::Turntable);
     }
 }

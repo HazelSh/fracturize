@@ -266,6 +266,22 @@ The Keybinds window (H) is clickable: each row triggers its first-listed
 binding, shift+click the second. `I` persists to
 `~/.config/fracturize/prefs.toml` (user preferences, not scene data).
 
+**Orbit style** (Camera window, `orbit_style` in prefs) picks what a
+horizontal drag yaws about, and is the other preference of this kind.
+`trackball` (the default) yaws about the camera's *own* up: body-frame turns
+compose on the right, so a drag applies the same rotation from every framing
+and the controls feel identical however the camera got there — which is the
+point, since these scenes have no horizon to orient by and every zoom wrap
+twists the framing. The price is stated rather than papered over: rotations
+about different axes don't commute, so circling drags accumulate roll (the
+roll readout shows it, `level` clears it, and nothing ever re-levels behind
+your back). `turntable` restores the old world-Y yaw, which holds the horizon
+level at the cost of the feel depending on where you're pointing — near the
+poles world up is nearly the view axis, so the same drag reads as roll. The
+two coincide exactly when level. Camera *paths* are unaffected either way: a
+path is a shot, not a feel, and the default full orbit still flies world-Y
+circles.
+
 Every keybind above has a mouse equivalent in the panels (see "Human
 Interface"), and both go through the same `App` methods — neither is a
 reimplementation of the other, so they cannot drift.
@@ -585,6 +601,16 @@ path_ease = false         # smoothstep time; default: once and pingpong ease,
 # so a hand-edited yaw can never contradict a `turns` beside it. Whatever the
 # route says, the keys themselves are always hit exactly.
 #
+# A key may instead carry `route = [x, y, z]` — the segment's journey as a
+# rotation vector, winning over `turns` where both are given. This is for the
+# routes an integer cannot name, and only those: between two *equal* framings
+# no axis is implied, so "pitch three full turns and come back" is unsayable
+# as a winding (it collapses to a yaw loop). The catch of storing a
+# displacement is that it can contradict its keys, so it is checked as the
+# scene loads — `exp(route)` must land on the next key within half a degree,
+# or the load fails naming the key and the miss. No UI writes one; it is a
+# file-format door.
+#
 # A key may use `rotvec = [x, y, z]` instead of yaw/pitch/roll, on the same
 # terms as [camera] above: exact, no poles, and what gets written for a
 # keypoint framing the three angles can't name.
@@ -620,7 +646,7 @@ roll = 0.4                # ...and tilted
 map = "whorl"             # a transform name, or its index as a string
 radius = 4.8              # outer radius of the band, in camera distances
 levels = 15               # octaves rendered below it
-octave_fade = 0.0         # octaves of fade on the band's outer edge (0 = hard)
+edge_guard = 1.0          # octaves the picture's outer edge fades over (0 = hard)
 octave_falloff = 0.0      # point-budget falloff per octave (power of the scale)
 
 [[transform]]
@@ -945,7 +971,7 @@ has a centre; this one's is the fixed point of the map you picked.
 map = "descent"        # transform name, or its index as a string ("0")
 radius = 4.8           # outer radius of the band, in camera distances
 levels = 15            # octaves rendered below `radius`
-octave_fade = 0.0      # octaves of fade on the band's outer edge (0 = hard cut)
+edge_guard = 1.0       # octaves the picture's outer edge fades over (0 = hard cut)
 octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
 ```
 
@@ -974,64 +1000,60 @@ octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
   brightness at `radius = 3.0` and 3.31% at `radius = 4.8`. What headroom
   actually buys is margin for a scene framed differently from how it was
   authored, and margin for haze to do its job. If your band's edge is visible,
-  the fixes are haze and `octave_fade`, not radius.
-- **`octave_fade` softens the outer edge, and is off unless you ask.** The
-  outermost octaves get a reduced share of the point budget — ramping from a
-  sixteenth at the edge up to full over this many octaves — so the band trails
-  off instead of stopping. Two things about it are worth knowing before
-  reaching for it, both measured rather than argued:
+  the fixes are haze and `edge_guard`, not radius.
+- **`edge_guard` fades the outer edge to nothing, and is on by default.**
+  Material more than `radius` eye-distances from the fixed point is weighted to
+  zero at render time, ramping down over this many octaves — so the picture
+  stops before the band's edge can, and there is nothing at the edge to lose.
+  Leave it alone unless you are measuring; the interesting part is *why* it is
+  a render-time weight rather than a fade on the band itself.
 
-  **It cannot make the wrap's brightness step smaller, only wider.** Octave
-  `k`'s share after a wrap is octave `k−1`'s share before it, so summed over
-  the band the change telescopes to exactly one octave's worth for *any*
-  monotone ramp, hard cut included. On `scenes/octave-edge-test.toml` the wrap
-  costs 3.40% of frame brightness with a hard edge and 3.44% with a 2.3-octave
-  fade. What it buys is where that change lands: worst pixel 0.399 → 0.298,
-  and the difference image goes from one solid slab of structure to faint
-  texture over the whole frame. That is the difference between "a branch
-  blinked out" and "the picture dimmed slightly" — worth having on a scene
-  that has the problem, and worth nothing on one that doesn't.
+  **A fade baked into the band cannot work, and this used to be one.** The old
+  `octave_fade` dealt the outer shells fewer points, ramping to a sixteenth at
+  the rim. A wrap is an exact similarity, and it is invisible exactly where the
+  point density is scale-invariant — i.e. flat. Anywhere density varies with
+  radius, *the whole difference arrives at the wrap instant*. So a static fade
+  spreads the change over **screen area** while leaving all of it in **one
+  frame**, which is the opposite of what is wanted. Measured live on
+  `octave-edge-visual`, the wrap spike went 35× the median frame step with a
+  hard edge and 10× with three octaves of fade — and 10× was that design's
+  floor, not a residual bug. `octave_fade` in an old scene still loads, and
+  now sets this.
 
-  **Most scenes don't have the problem.** `wellspiral` and `pythagoras-zoomy`
-  wrap at 0.9999 and 1.0000 with a hard edge; their outermost octave isn't in
-  the picture. Turning on three octaves of fade costs them a 4–6% step at each
-  wrap that wasn't there before (`pythagoras-zoomy` picks up a 3.0% mid-loop
-  pop against 0.13%). Hence off by default. Reach for it — 3.0 is the value
-  that measured best — when the bulk of the attractor sits far enough from the
-  fixed point to fill the band's outer octaves, and check with the two-render
-  diagnostic below rather than guessing.
+  **The guard is measured against the camera, which is what fixes it.** The
+  weight is a smoothstep in `ln(|pos − p| / d)`, where `d` is this frame's
+  eye-to-fixed-point distance. That ratio is exactly invariant under the wrap
+  — the wrap scales both — so the wrap step is *zero by construction*, at
+  every haze amount. And zoom progress is linear in `ln d`, so material crosses
+  the ramp at a constant rate per octave of zoom: it leaves the picture at a
+  steady pace instead of at a moment. It is the last stretch of haze, made
+  mandatory and taken to zero, in ratio space — which is why a scene at
+  `haze = 1.0` never had this problem.
 
-  **Measure it live; the offline renderer will lie to you.** The natural
-  end-to-end check — render the zoom loop and look for a step at the seam —
-  measures nothing at all. `--render out.mp4` wraps the camera every frame and
-  a `path_zoom_loop` covers exactly one period, so the seam comes out at 1.04×
-  an ordinary frame step whatever the radius and whatever the fade, *even at a
-  radius that makes `--info` print BAND TOO SHORT*. Screen-record the window
-  instead. On `scenes/octave-edge-visual.toml` that shows the wrap as a spike
-  every 2.5s at 35× the median frame step, going to 10× with the fade on —
-  42× smaller in absolute terms, and no longer periodic.
+  **Width, and why 1 octave.** The ramp ends at `radius` and starts an octave
+  in, so at the default 4.8 it runs `[2.4, 4.8] × d` — and 2.4 is `MIN_RADIUS`
+  almost exactly, so the ramp sits entirely in the part of the field full haze
+  would have hidden anyway. At weaker haze it costs a *constant* dimming of the
+  far field, which is invisible in motion because nothing about it changes.
+  Asking for more than the band has room for is clamped (`--info` prints the
+  resolved span, and says when the ramp reaches into the view).
 
-  **It needs the edge at or beyond `MIN_RADIUS` to work.** Pulling the edge
-  into the frustum to make the artifact easier to see also removes the
-  full-density core the taper ramps up to meet, so the taper swings the whole
-  frame instead of a rim of it. Same scene at `radius = 1.4`: the fade takes
-  the spike from 61× to 86×. It fixes an edge, not a band that is mostly edge.
-- **`octave_falloff` acts on the opposite end of the band from `octave_fade`,**
+  **`edge_guard = 0` restores the hard edge.** That is a measuring tool —
+  `scenes/octave-edge-visual.toml` ships that way to demonstrate the artifact —
+  and not a look.
+- **`octave_falloff` acts on the opposite end of the band from `edge_guard`,**
   and they are easy to reach for interchangeably. Octave 0 is the outermost
   shell and octave `k` gets share `qᵏ`, so the falloff thins the *innermost*
   octaves — the small ones around the fixed point, which is the middle of the
   picture. On `octave-edge-test`, a falloff of 2 moves 40% of the material
-  within 12% of the frame radius of centre and 25% at the rim; the fade does
-  the reverse, 2% at centre and 27% at the rim. Neither is backwards.
+  within 12% of the frame radius of centre and 25% at the rim. The guard only
+  ever touches the rim.
 
-  They compose. The share of octave `k` is `qᵏ` inside the fade and `q^F·g^(F−k)`
-  across it, so the falloff envelope is untouched below the fade and the fade
-  ramps up to meet it. (The taper is anchored to the envelope's value *at* `F`
-  rather than multiplied through it — multiplying gives `g^F·(q/g)ᵏ`, which
-  falls instead of rising once `q < g`, and a steep falloff would invert the
-  taper and make the outermost shell the brightest.) These used to be mutually
-  exclusive with the falloff winning *silently*, which meant reaching for the
-  falloff turned the fade off under you and made the fade look broken.
+  They cannot interfere: the falloff deals points and the guard weights pixels,
+  so nothing in the deal knows the guard exists. That separation is forced,
+  not tidy — the point buffer is circular and turns over at 1/800th per frame,
+  so a deal that depended on the camera would mix thirteen seconds of stale
+  camera positions into every frame.
 - **Leave `octave_falloff` at 0 for anything that will be flown.** A wrap moves
   the octave filling the screen along by one, so if neighbouring octaves hold
   different numbers of points, the density on screen jumps every period.
@@ -1040,7 +1062,7 @@ octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
   because it does even out density in a *still*, which never wraps.
 - `levels` is how far in the band extends, **in octaves** — not in zoom
   periods, which are however big the chosen map happens to be (0.07 octaves for
-  a 0.95 spiral, 3.3 for a 0.1 collapse). `octave_fade` is in octaves for the
+  a 0.95 spiral, 3.3 for a 0.1 collapse). `edge_guard` is in octaves for the
   same reason. The CLI prints both. Raise `levels` alongside `radius`: the band
   is `[R·2⁻ˡᵉᵛᵉˡˢ, R]`, so every doubling of `R` costs an octave at the inner
   end, and the default 15 is about ten visible octaves plus the outward margin.
@@ -1054,7 +1076,7 @@ which toggles, tells you the period and fixed point on hover, and greys out with
 the reason when that map can't be a scale symmetry. The status bar reads
 `zoom +N`.
 
-The band itself is in the **Render window → infinite zoom**: `edge fade` at the
+The band itself is in the **Render window → infinite zoom**: `edge guard` at the
 top, with `radius`, `levels` and `octave falloff` under *band size*. All four
 are undoable and are what Ctrl+S writes into `[zoom]`. It sits next to haze
 deliberately — haze is the other half of whether the band's edge is visible —
@@ -1068,24 +1090,26 @@ From the CLI, on any scene, without editing it:
 # make an existing scene scale-invariant and look at it
 fracturize --scene scenes/sierpinski.toml --zoom 0
 
-# tune the band; --zoom-levels / --zoom-radius / --zoom-fade / --zoom-falloff
+# tune the band; --zoom-levels / --zoom-radius / --zoom-guard / --zoom-falloff
 # all need --zoom
 fracturize --scene scenes/lsys_kelp.toml --zoom trunk --zoom-levels 16 \
   --render /tmp/t.png --effort low --width 640 --height 400
 
-# what the outer edge is actually doing: render the band, then render it with
-# the outermost octave gone (same inner edge, one octave further in). The
-# difference is exactly what a wrap drops, and scenes/octave-edge-test.toml is
-# built to make it as visible as it gets.
-fracturize --scene scenes/octave-edge-test.toml --splat --zoom halve \
-  --zoom-radius 3.0 --zoom-levels 14 --zoom-fade 0 --render /tmp/full.png
-fracturize --scene scenes/octave-edge-test.toml --splat --zoom halve \
-  --zoom-radius 1.5 --zoom-levels 14 --zoom-fade 0 --render /tmp/cut.png
+# is the wrap seamless? Step the camera down through two zoom periods and
+# compare consecutive frames. `--distance` is folded back into the canonical
+# period, so the frames either side of a wrap are ordinary renders — no
+# animation, nothing to interpolate. tools/zoom_seam.py does the sweep and the
+# arithmetic; the number to read is the wrap step as a multiple of an ordinary
+# frame step. scenes/octave-edge-visual.toml ships with the guard off, to
+# show the artifact: 11.9x as it stands, 0.0x once the guard is on.
+python3 tools/zoom_seam.py scenes/octave-edge-visual.toml
+python3 tools/zoom_seam.py scenes/octave-edge-visual.toml --guard 1
 
 # ...and the version you can just watch. scenes/octave-edge-visual.toml opens
-# zooming with the fade off; the wrap is a visible blink every 2.5s. Drag
-# "edge fade" up in the Render window and it goes away. Note that rendering
-# this scene to a file will NOT show the artifact — see octave_fade above.
+# zooming with the guard off; the wrap is a visible blink every 2.5s. Drag
+# "edge guard" up in the Render window and it goes away. Rendering this scene
+# as an *animation* will not show it — a path_zoom_loop covers exactly one
+# period and wraps every frame, so the seam always measures as one frame step.
 fracturize --scene scenes/octave-edge-visual.toml
 
 # a map that can't be a scale symmetry says why and exits, rather than
@@ -1334,7 +1358,7 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
 
 - `--set <path>=<value>` (repeatable, `-S`) overrides any scene value without
   editing the file — the general form of `--palette`/`--zoom`. Dotted, section
-  required: `meta.haze=0.3`, `zoom.octave_fade=3`,
+  required: `meta.haze=0.3`, `zoom.edge_guard=1.5`,
   `transform.<name-or-index>.weight=0.5`,
   `transform.facet-1.variations.absfold=0.15`, `transform.0.translation.y=1.25`
   (arrays index by x/y/z or 0/1/2, or take a whole `[a,b,c]`). Applied to the
