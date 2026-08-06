@@ -367,6 +367,7 @@ pub enum HelpAction {
     PathKey,
     NewScene,
     Quit,
+    FrameSelected,
 }
 
 /// Which point renderer draws the fractal. Points is the classic opaque
@@ -1064,6 +1065,44 @@ impl App {
         target.level();
         self.glide_camera_to(target);
         self.invalidate_default_path();
+    }
+
+    /// Put the camera on the selected transform's fixed point (Home).
+    ///
+    /// Every 3D tool has "frame selected" — Blender's numpad-`.`, everyone
+    /// else's Home — and this app had nothing. "Frame all" is ill-defined for an
+    /// object with no largest feature, but *this* is exactly defined: an affine
+    /// contraction has one point it doesn't move, `(I − A)p = b`, and that point
+    /// is the centre of everything the transform generates. It is also the most
+    /// useful place to be at depth, where the rest of the attractor is
+    /// elsewhere and you cannot see it to navigate by.
+    ///
+    /// Moves the focus and leaves the distance alone: this answers "take me to
+    /// it", not "and how close".
+    pub fn frame_selected_transform(&mut self) {
+        let Some(idx) = self.selected_transform else {
+            log::warn!("Nothing selected — click a transform's gizmo or a row in the Transforms window");
+            return;
+        };
+        let Some(spec) = self.scene.transforms.get(idx) else { return };
+        let m = spec.matrix;
+        let a = glam::Mat3::from_cols(
+            m.x_axis.truncate(),
+            m.y_axis.truncate(),
+            m.z_axis.truncate(),
+        );
+        let b = m.w_axis.truncate();
+        let p = (glam::Mat3::IDENTITY - a).inverse().mul_vec3(b);
+        if !p.is_finite() {
+            // A map with an eigenvalue at 1 — a pure translation, say — has no
+            // finite fixed point. Say so rather than flying the camera to NaN.
+            log::warn!("T{} has no finite fixed point (its linear part fixes a direction)", idx);
+            return;
+        }
+        log::info!("Framing T{}'s fixed point ({:.3}, {:.3}, {:.3})", idx, p.x, p.y, p.z);
+        let target = OrbitCamera { focus: p, ..self.camera };
+        self.glide_camera_to(target);
+        self.stop_camera_motion();
     }
 
     /// Move the camera to `target` over [`CAMERA_GLIDE`] rather than teleporting.
@@ -3810,6 +3849,39 @@ impl App {
     /// (acts on the selection) and the Transforms window's eye toggle (acts
     /// on whichever row was clicked) — the plan requires these to behave
     /// identically, including the guard below.
+    /// Turn everything except `idx` off — or, if it is already the only one on,
+    /// turn everything back on.
+    ///
+    /// The toggle-back is what makes solo usable rather than a trap: the
+    /// alternative is remembering by hand which of forty transforms were off
+    /// before you soloed. One undo step either way.
+    pub fn solo_transform(&mut self, idx: usize) {
+        if idx >= self.transform_enabled.len() {
+            return;
+        }
+        let already_solo = self
+            .transform_enabled
+            .iter()
+            .enumerate()
+            .all(|(i, &on)| on == (i == idx));
+        let before = self.edit_snapshot();
+        if already_solo {
+            self.transform_enabled.fill(true);
+            log::info!("Solo off — all transforms enabled");
+        } else {
+            for (i, on) in self.transform_enabled.iter_mut().enumerate() {
+                *on = i == idx;
+            }
+            log::info!("Solo T{}", idx);
+        }
+        self.sync_transforms_to_gpu();
+        self.commit_edit(
+            if already_solo { "Un-solo".to_string() } else { format!("Solo T{}", idx) },
+            None,
+            before,
+        );
+    }
+
     pub fn toggle_transform_enabled(&mut self, idx: usize) {
         if idx >= self.transform_enabled.len() { return }
 
@@ -4353,6 +4425,7 @@ impl App {
             HelpAction::Browse => self.toggle_browser(),
             HelpAction::NewScene => self.new_blank_scene(),
             HelpAction::Quit => self.request_quit(),
+            HelpAction::FrameSelected => self.frame_selected_transform(),
             HelpAction::Traces => self.toggle_traces(shift),
             HelpAction::InvertPitch => self.toggle_invert_pitch(),
             HelpAction::RenderMode => self.toggle_render_mode(),

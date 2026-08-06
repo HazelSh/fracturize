@@ -18,6 +18,7 @@ use winit::window::Window;
 
 use crate::prefs::PanelPrefs;
 
+pub mod axis_widget;
 pub mod browser;
 pub mod camera_panel;
 pub mod confirm;
@@ -61,6 +62,9 @@ pub struct UiState {
     /// Set for one frame by the inspector's Rename button, asking the pane's
     /// own Name field to take the caret (see `transforms::draw_identity`).
     pub focus_name_field: bool,
+    /// Filter text for the Transforms rail. Session state, not a preference:
+    /// it's a way of looking at *this* list right now.
+    pub transform_filter: String,
     /// A transform's context menu, opened by right-clicking its *gizmo* in the
     /// viewport: the transform index, and where to draw the menu (filled in on
     /// the first frame from egui's pointer position, then held so the menu
@@ -114,6 +118,7 @@ impl UiState {
             trs_cache: None,
             renaming_transform: None,
             focus_name_field: false,
+            transform_filter: String::new(),
             transform_menu: None,
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,
@@ -330,6 +335,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     labels::draw(&ctx, app);
     step("labels", t, &mut timings);
+    let t = std::time::Instant::now();
+    axis_widget::draw(&ctx, app);
+    step("axis_widget", t, &mut timings);
     let t = std::time::Instant::now();
     draw_transform_menu(&ctx, app);
     step("transform_menu", t, &mut timings);

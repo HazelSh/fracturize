@@ -1049,6 +1049,11 @@ impl ApplicationHandler for AppWrapper {
                             app.delete_selected_transform();
                             return;
                         }
+                        PhysicalKey::Code(KeyCode::Home) => {
+                            // "Frame selected", on the key everyone binds it to.
+                            app.frame_selected_transform();
+                            return;
+                        }
                         PhysicalKey::Code(KeyCode::F1) => {
                             // The universal "what are the keys" key, alongside
                             // this app's own H.

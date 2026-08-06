@@ -428,11 +428,14 @@ fn draw_zoom_map_picker(ui: &mut egui::Ui, app: &mut App) {
             for i in range {
                 let zoom = super::transforms::zoom_action(app, i);
                 let label = super::transforms::transform_label(app, i);
+                // Framed when selected — a *frameless* `Button::selected`
+                // doesn't paint its selected fill, so the row that actually is
+                // the scene's zoom map looked exactly like the rows that
+                // aren't. Which is the whole thing this picker is for.
+                let is_current = current == Some(i);
                 let resp = ui.add_enabled(
                     zoom.enabled,
-                    egui::Button::new(label)
-                        .selected(current == Some(i))
-                        .frame(false),
+                    egui::Button::new(label).selected(is_current).frame(is_current),
                 );
                 let resp = hinted(resp, &mut app.ui_state, zoom.tooltip, zoom.hint);
                 if resp.clicked() && current != Some(i) {

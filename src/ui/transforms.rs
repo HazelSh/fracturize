@@ -113,9 +113,77 @@ fn row_data(app: &App, i: usize) -> RowData {
     }
 }
 
-fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
+/// Which transforms the rail should show, given the filter box.
+///
+/// Matches the name *or* the `T<i>` index label, case-insensitively, so both
+/// "spine" and "12" find something. An empty filter is every transform, and
+/// costs one `is_empty` check — the fast path for the overwhelmingly common
+/// case of a scene with four maps.
+fn filtered_indices(app: &App) -> Vec<usize> {
     let n = app.scene.transforms.len();
+    let needle = app.ui_state.transform_filter.trim().to_lowercase();
+    if needle.is_empty() {
+        return (0..n).collect();
+    }
+    (0..n)
+        .filter(|&i| {
+            let name = app
+                .scene
+                .transform_names
+                .get(i)
+                .and_then(|n| n.as_deref())
+                .unwrap_or("");
+            name.to_lowercase().contains(&needle) || format!("t{}", i).contains(&needle)
+        })
+        .collect()
+}
+
+fn draw_filter(ui: &mut egui::Ui, app: &mut App) {
+    // Only worth the row once there are enough tabs that finding one is a
+    // problem. Below that it is a control that solves nothing, taking space
+    // from the list it would filter.
+    if app.scene.transforms.len() < FILTER_THRESHOLD {
+        app.ui_state.transform_filter.clear();
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let mut text = app.ui_state.transform_filter.clone();
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .desired_width(RAIL_WIDTH - 34.0)
+                .hint_text("filter"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Show only transforms whose name or T-number contains this",
+            "type: filter the transform list",
+        );
+        if resp.changed() {
+            app.ui_state.transform_filter = text;
+        }
+        if !app.ui_state.transform_filter.is_empty() {
+            let resp = ui.add(egui::Button::new(icons::X).small().frame(false));
+            let resp = hinted(resp, &mut app.ui_state, "Clear the filter", "click: clear the filter");
+            if resp.clicked() {
+                app.ui_state.transform_filter.clear();
+            }
+        }
+    });
+}
+
+/// How many transforms it takes before the rail grows a filter box.
+const FILTER_THRESHOLD: usize = 12;
+
+fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
     let selected = app.selected_transform();
+    // The rail is virtualized because L-system scenes reach tens of thousands
+    // of transforms — but scrolling ten thousand tabs to find one is not a
+    // workflow, and virtualization only pays off once there's a way to *not*
+    // scroll. One line of filter is that way.
+    let visible = filtered_indices(app);
+    let n = visible.len();
     // Weights are shown as bars relative to the largest, so "which transform
     // dominates the chaos game" stays readable at a glance even though the
     // editable field lives over in the detail pane.
@@ -132,6 +200,7 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
             .inner_margin(egui::Margin::symmetric(0, 4))
             .show(ui, |ui| {
                 ui.set_width(RAIL_WIDTH);
+                draw_filter(ui, app);
                 // Virtualized: L-system scenes reach tens of thousands of
                 // transforms, and laying every tab out per frame would cost
                 // more than the whole rest of the UI.
@@ -140,11 +209,20 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
                     .max_height(320.0)
                     .auto_shrink([false, true])
                     .show_rows(ui, TAB_HEIGHT, n, |ui, range| {
-                        for i in range {
+                        for slot in range {
+                            let i = visible[slot];
                             let row = row_data(app, i);
                             draw_tab(ui, app, i, row, selected == Some(i), max_weight);
                         }
                     });
+                if n == 0 {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Nothing matches that filter.")
+                            .small()
+                            .weak(),
+                    );
+                }
 
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
@@ -261,14 +339,23 @@ fn draw_tab(
                         eye_resp,
                         &mut app.ui_state,
                         if row.enabled {
-                            "Disable this transform (Enter)"
+                            "Disable this transform (Enter)\n\nAlt+click to solo it — \
+                             everything else off, and alt+click again to bring them back."
                         } else {
-                            "Enable this transform (Enter)"
+                            "Enable this transform (Enter)\n\nAlt+click to solo it."
                         },
-                        "click: toggle enabled",
+                        "click: toggle enabled · alt+click: solo",
                     );
                     if eye_resp.clicked() {
-                        app.toggle_transform_enabled(i);
+                        // Alt+click on a visibility control means *solo* in
+                        // Photoshop, Blender and every layer-ish list since —
+                        // and "show me only this transform's contribution" is a
+                        // real question to ask of an IFS, not a borrowed idiom.
+                        if ui.input(|inp| inp.modifiers.alt) {
+                            app.solo_transform(i);
+                        } else {
+                            app.toggle_transform_enabled(i);
+                        }
                     }
                 });
             });
@@ -329,6 +416,49 @@ fn draw_tab(
     );
     if tab_resp.clicked() {
         app.select_transform(Some(i));
+    }
+
+    // The weight bar, as a control rather than a readout.
+    //
+    // Registered *after* the tab, so egui hands it the pointer inside its own
+    // strip — later registration wins. That puts the most-adjusted
+    // per-transform value under the pointer that is already there to select the
+    // row, which is the whole argument for it.
+    //
+    // Multiplicative, like the scroll gesture and the , / . keys, rather than
+    // an absolute position-to-weight mapping. An absolute mapping would be a
+    // feedback loop for whichever transform is currently the largest: the bar
+    // is drawn relative to the maximum, so dragging the maximum wider changes
+    // the scale it is measured against and the bar never moves.
+    let mut bar_rect = tab_resp.rect;
+    bar_rect.min.y = bar_rect.max.y - 8.0;
+    bar_rect.min.x += 8.0;
+    bar_rect.max.x -= 8.0;
+    let bar_resp = ui.interact(
+        bar_rect,
+        ui.id().with(("weight_bar", i)),
+        egui::Sense::drag(),
+    );
+    if bar_resp.hovered() || bar_resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    let bar_resp = hinted(
+        bar_resp,
+        &mut app.ui_state,
+        format!(
+            "Chaos-game weight: {}. Drag sideways to change it.",
+            super::num::fixed(row.weight, 2)
+        ),
+        "drag: adjust this transform's weight",
+    );
+    if bar_resp.dragged() {
+        let dx = bar_resp.drag_delta().x;
+        if dx != 0.0 {
+            // ~5x across the width of the rail — enough range to be useful in
+            // one gesture, gentle enough to land on a value.
+            let next = row.weight * 1.015f32.powf(dx);
+            app.set_transform_weight(i, next);
+        }
     }
     // Double-click to rename: Blender's outliner, every file manager, every
     // editor's tab bar. Free here, since the name is drawn on this very row —
