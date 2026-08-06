@@ -19,6 +19,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
 
+            draw_file_menu(ui, app);
+            ui.separator();
+
+            // Ordered by task, not by module: what am I working on, then how am
+            // I looking at it, then help. Gizmos sits with Transforms because
+            // it's a *view of the same object*, not a peer of the panel
+            // toggles; Keybinds is pushed to the right end, where help lives in
+            // every toolbar ever made.
             let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
             hinted(
                 resp,
@@ -27,37 +35,12 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Transforms window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, (icons::FLASK, "Explore"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Explore — mutate, undo, strength",
-                "toggle the Explore window",
-            );
-
-            let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, (icons::VIDEO_CAMERA, "Camera"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Camera — framing, saved views, paths, render output",
-                "toggle the Camera window",
-            );
-
-            let resp = ui.toggle_value(&mut app.ui_state.panels.render_open, (icons::SLIDERS, "Render"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Render — renderer, point size + count, color, haze",
-                "toggle the Render window",
-            );
-
-            ui.separator();
-
-            // Not a window toggle, but it belongs with them: it's the same kind
-            // of thing — "show me this layer of the interface or don't" — and
-            // it's the one such toggle with no home in a panel, since every
-            // panel it might live in is a thing you'd have to open to reach it.
-            let resp = ui.selectable_label(app.show_gizmos, (icons::CUBE, "Edit"));
+            // Not a window toggle, but the same kind of thing: "show me this
+            // layer of the interface or don't". It was labelled "Edit", which
+            // next to a row of window toggles reads as an Edit *menu*, and to
+            // anyone arriving from Blender reads as Edit *Mode* — a large
+            // concept that doesn't exist here. It shows gizmos. Call it that.
+            let resp = ui.selectable_label(app.show_gizmos, (icons::CUBE, "Gizmos"));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
@@ -68,33 +51,187 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 app.toggle_gizmos();
             }
 
-            let resp = ui.selectable_label(app.show_help, (icons::KEYBOARD, "Keybind Help"));
-            let resp = hinted(resp, &mut app.ui_state, "Keybind reference (H)", "toggle the keybind help panel");
-            if resp.clicked() {
-                app.toggle_help();
-            }
+            ui.separator();
 
-            let resp = ui.selectable_label(app.show_browser, (icons::FOLDER_OPEN, "Scene Browser"));
-            let resp = hinted(resp, &mut app.ui_state, "Scene browser (B)", "toggle the scene browser");
-            if resp.clicked() {
-                app.toggle_browser();
-            }
+            let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, (icons::FLASK, "Explore"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Explore — mutate, undo, strength",
+                "toggle the Explore window",
+            );
 
+            ui.separator();
+
+            let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, (icons::VIDEO_CAMERA, "Camera"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Camera — framing, saved views, the camera path",
+                "toggle the Camera window",
+            );
+
+            let resp = ui.toggle_value(&mut app.ui_state.panels.render_open, (icons::SLIDERS, "Render"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Render — renderer, point size + count, color, haze, infinite zoom",
+                "toggle the Render window",
+            );
+
+            ui.separator();
+            draw_undo_redo(ui, app);
             ui.separator();
             draw_quick_controls(ui, app);
 
-            // Scene identity, right-aligned — this used to be the HUD's
-            // first line, which sat underneath this very panel. It's also the
-            // editor for those two fields: the readout is the obvious place to
-            // change what it reads, and there was nowhere else for the author
-            // to live that wasn't a settings page for two strings.
+            // Right-aligned, and therefore built right-to-left: help at the far
+            // end, then the scene identity beside it.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
+                let resp = ui.selectable_label(app.show_help, (icons::KEYBOARD, "Help"));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Every keybind, in a clickable list — the rows run their binding (H or F1)",
+                    "toggle the keybind reference",
+                );
+                if resp.clicked() {
+                    app.toggle_help();
+                }
+                ui.separator();
                 draw_scene_identity(ui, app);
             });
         });
         ui.add_space(2.0);
     });
+}
+
+/// The File menu.
+///
+/// A menu, and the only one — not the first entry of a File/Edit/View/Help bar.
+/// The scene is a **document**, and the whole value of that abstraction is that
+/// people can port intuition from every file-editing program they have used;
+/// but intuition needs furniture to attach to, and this is the furniture that
+/// says so. What it deliberately isn't is a menu *bar*: Edit and View would be
+/// near-empty duplicates of the toolbar toggles and the Explore window, and a
+/// menu bar that is mostly empty teaches people that menus here aren't worth
+/// opening.
+///
+/// File operations are numerous, conventional and infrequent — exactly the
+/// trade a menu is right for. Undo and redo are the opposite trade, so they get
+/// visible buttons instead (`draw_undo_redo`).
+///
+/// These four used to live in a row at the bottom of the *Camera* window, where
+/// three of them had nothing to do with the camera. They ended up there because
+/// Camera was the window with a bottom panel free, which is an implementation
+/// reason rather than a task one.
+fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
+    let resp = ui.button((icons::LIST, "File"));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "New, open, save, and what leaves the app",
+        "click: the File menu",
+    );
+
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(210.0);
+
+        if menu_item(ui, app, "New", "Ctrl+N", "Start over on an empty canvas. An edit like any other — one Ctrl+Z brings back what was on screen.") {
+            app.new_blank_scene();
+        }
+        if menu_item(
+            ui,
+            app,
+            &format!("{} Open…", icons::FOLDER_OPEN),
+            "Ctrl+O",
+            "Browse scenes/ and load one. Asks first if this scene has unsaved edits.",
+        ) {
+            app.toggle_browser();
+        }
+        if menu_item(ui, app, "Save", "Ctrl+S", "Write the scene — transforms, colours, camera framing, path — back to its TOML file.") {
+            app.save_scene();
+        }
+        if menu_item(ui, app, "Save as…", "Ctrl+Shift+S", "Fork the scene: write it under a new name and keep working on the copy, leaving the original as it was.") {
+            super::save_as::open(app);
+        }
+
+        ui.separator();
+
+        if menu_item(ui, app, "Screenshot", "S", "Capture the viewport as it is, to screenshots/.") {
+            app.request_screenshot();
+        }
+        if menu_item(ui, app, "Render job…", "P", "Set up a batch render — still or animation, its own quality settings — with a cost estimate before you agree to it, progress, and a way to stop it.") {
+            super::render_job::open(app);
+        }
+
+        ui.separator();
+
+        if menu_item(ui, app, "Quit", "Ctrl+Q", "Leave. Asks first if this scene has unsaved edits.") {
+            app.request_quit();
+        }
+    });
+}
+
+/// One File-menu row: label on the left, its accelerator greyed on the right.
+fn menu_item(ui: &mut egui::Ui, app: &mut App, label: &str, key: &str, tip: &str) -> bool {
+    let resp = ui
+        .horizontal(|ui| {
+            let resp = ui.button(label);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(key).weak().small());
+            });
+            resp
+        })
+        .inner;
+    let resp = hinted(resp, &mut app.ui_state, tip, "click: run this command");
+    if resp.clicked() {
+        ui.close();
+        true
+    } else {
+        false
+    }
+}
+
+/// Undo and redo, as visible buttons.
+///
+/// Undo is the one control people reach for with the mouse *even when they know
+/// the shortcut*, because it gets used at exactly the moment confidence is low
+/// and something has just gone wrong. A creative tool with no undo button in its
+/// toolbar is unusual. Disabled rather than hidden when there's nothing to
+/// undo, with the tooltip saying so — the house convention.
+fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
+    let (undo_n, redo_n) = (app.history.undo_len(), app.history.redo_len());
+    let next_undo = app.history.undo_display().next().map(str::to_string);
+    let next_redo = app.history.redo_display().last().map(str::to_string);
+
+    let resp = ui.add_enabled(undo_n > 0, egui::Button::new("Undo"));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        match &next_undo {
+            Some(l) => format!("Undo “{}” (Ctrl+Z)", l),
+            None => "Nothing to undo yet — edits appear here as you make them".to_string(),
+        },
+        "click: undo the last edit",
+    );
+    if resp.clicked() {
+        app.undo();
+    }
+
+    let resp = ui.add_enabled(redo_n > 0, egui::Button::new("Redo"));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        match &next_redo {
+            Some(l) => format!("Redo “{}” (Ctrl+Shift+Z or Ctrl+Y)", l),
+            None => "Nothing to redo — undo something first".to_string(),
+        },
+        "click: redo the last undone edit",
+    );
+    if resp.clicked() {
+        app.redo();
+    }
 }
 
 /// The scene's name and author: a readout that opens an editor for itself.

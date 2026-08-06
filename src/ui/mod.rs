@@ -178,14 +178,21 @@ impl WindowKey {
     /// isn't, which is a genuinely nasty thing to debug.
     ///
     /// The Camera window is the one that has to say so: it stacks a framing
-    /// block, saved views, a scrolling keypoint list, the transport and loop
-    /// rows, and the output buttons, and its own furniture wants ~290px before
-    /// the list gets a single pixel. The width is the widest fixed row (the
-    /// four output buttons), which merely clips rather than colliding — so it
-    /// is a legibility floor, where the height is a correctness one.
+    /// block, saved views, a scrolling keypoint list, and the transport and
+    /// loop rows, and its own furniture wants most of this before the list gets
+    /// a single pixel.
+    ///
+    /// It used to want ~290px, and needing that much fixed furniture was a bug
+    /// report about information architecture wearing a layout comment's
+    /// clothes — a window that can't fit its own chrome is a window doing too
+    /// much. Two of the five things it was doing have moved out since (the file
+    /// operations to the toolbar's File menu, the input preferences to
+    /// Controls), so the floor comes down with them. The width is the widest
+    /// fixed row, which merely clips rather than colliding — a legibility
+    /// floor, where the height is a correctness one.
     fn min_size(self) -> egui::Vec2 {
         match self {
-            Self::Camera => egui::vec2(390.0, 310.0),
+            Self::Camera => egui::vec2(360.0, 240.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -264,6 +271,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     app.ui_state.status_hint = None;
     let ctx = ui.ctx().clone();
 
+    // The panel-scale preference (Controls window). Set only on change: it
+    // invalidates every cached galley, so writing it per frame would re-lay-out
+    // the whole UI sixty times a second for nothing.
+    if (ctx.zoom_factor() - app.ui_scale()).abs() > f32::EPSILON {
+        ctx.set_zoom_factor(app.ui_scale());
+    }
+
     // Env lookup once, not per frame.
     static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let profile = *PROFILE.get_or_init(|| std::env::var_os("FRACTURIZE_UI_PROFILE").is_some());
@@ -327,6 +341,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
 
     // Persist panel open/closed state the instant it changes (toolbar
     // toggle or a window's close button) — same pattern as invert_pitch.
+    //
+    // Keybinds and Scenes keep their live state on `App` rather than in
+    // `panels` — one has a directory scan behind it, and both are reachable
+    // from keys as well as the toolbar — so they're folded in here. The point
+    // is that all six windows now behave alike from the outside.
+    app.ui_state.panels.help_open = app.show_help;
+    app.ui_state.panels.browser_open = app.show_browser;
     app.panel_prefs_changed(app.ui_state.panels);
 }
 

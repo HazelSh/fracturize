@@ -12,6 +12,7 @@
 
 use crate::app::{App, HelpAction};
 
+use super::camera_panel::draw_input_prefs;
 use super::hints::hinted;
 
 /// One row: key label, description, and what clicking it does (`None` =
@@ -123,9 +124,37 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    super::window(ctx, app, super::WindowKey::Keybinds, "Keybinds")
+    super::window(ctx, app, super::WindowKey::Keybinds, "Controls")
         .open(&mut open)
         .show(ctx, |ui| {
+            // The preferences that say how the *input* is read, rather than
+            // what it does — they belong with the keys, not with the camera
+            // they used to sit above. It also gives the one window a stranger
+            // is most likely to open first something to be besides a table.
+            draw_input_prefs(ui, app);
+
+            ui.horizontal(|ui| {
+                let mut scale = app.ui_scale();
+                let resp = ui.add(
+                    egui::Slider::new(&mut scale, 0.7..=2.0)
+                        .fixed_decimals(2)
+                        .text("panel scale"),
+                );
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Size of every panel, over and above the display's own scale factor. \
+                     Saved to prefs.\n\n\
+                     The viewport is unaffected — this is the chrome, not the picture.",
+                    "drag: resize the panels",
+                );
+                if resp.changed() {
+                    app.set_ui_scale(scale);
+                }
+            });
+
+            ui.separator();
+
             ui.label(
                 egui::RichText::new("Rows with a key binding are clickable — shift+click runs the second variant.")
                     .small()

@@ -22,9 +22,22 @@ pub struct PanelPrefs {
     pub camera_open: bool,
     #[serde(default)]
     pub render_open: bool,
+    /// The Keybinds window. Lives here with the rest since the UI review: it
+    /// was the one window that explains the whole app, and the only one whose
+    /// open state evaporated at exit — so a person who found it, used it and
+    /// left it open came back to a toolbar of seven unexplained icons.
+    #[serde(default)]
+    pub help_open: bool,
+    /// The scene browser. Same reasoning.
+    #[serde(default)]
+    pub browser_open: bool,
 }
 
 fn default_mutate_strength() -> f32 {
+    1.0
+}
+
+fn default_ui_scale() -> f32 {
     1.0
 }
 
@@ -47,6 +60,12 @@ pub struct Prefs {
     /// Strength multiplier for U's random mutation (Explore window slider)
     #[serde(default = "default_mutate_strength")]
     pub mutate_strength: f32,
+    /// Multiplier on every panel's size, over and above the window's own scale
+    /// factor. egui takes the display's scale factor already; this is the
+    /// separate, expected setting for "the panels are too small on this
+    /// monitor" — which on a 4K display is a real complaint and had no answer.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
     /// Who to credit on scenes made in-app. Scene files carry their own
     /// author; this is only the default for one that doesn't have one yet (a
     /// blank canvas, a random flame), so a person doesn't have to type their
@@ -75,6 +94,7 @@ impl Default for Prefs {
             orbit_style: OrbitStyle::default(),
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
+            ui_scale: default_ui_scale(),
             author: None,
             point_count: None,
             window_geometry: BTreeMap::new(),

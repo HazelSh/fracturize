@@ -393,6 +393,36 @@ pub enum FrameOutcome {
     Reconfigure,
 }
 
+/// How long a discrete camera move takes. Roughly Blender's default, and about
+/// the shortest interval that still reads as motion rather than a cut.
+const CAMERA_GLIDE: Duration = Duration::from_millis(200);
+
+/// A camera glide in flight: where it left, where it's going, and when it
+/// started. See [`App::glide_camera_to`].
+struct CameraGlide {
+    from: OrbitCamera,
+    to: OrbitCamera,
+    started: Instant,
+}
+
+/// Interpolate a framing.
+///
+/// Distance is interpolated *geometrically*, not linearly: distance is a zoom,
+/// zoom is multiplicative, and a linear ramp from 100 to 1 spends nine tenths
+/// of its time already arrived. Orientation goes the short way round as one
+/// turn about one axis, which is what the eye reads as a single movement rather
+/// than a yaw followed by a pitch.
+fn lerp_camera(a: &OrbitCamera, b: &OrbitCamera, s: f32) -> OrbitCamera {
+    let turn = a.orientation.shortest_turn_to(b.orientation);
+    OrbitCamera {
+        orientation: a
+            .orientation
+            .then_body(crate::rot::Turn::from_rotation_vector(turn.as_rotation_vector() * s)),
+        distance: a.distance * (b.distance / a.distance).powf(s),
+        focus: a.focus.lerp(b.focus, s),
+    }
+}
+
 /// How far the pointer must travel, in physical pixels, before a button-down
 /// becomes a drag rather than a click. Three to four pixels is what every other
 /// drag-capable surface uses, and it is enough to absorb the twitch a hand
@@ -472,6 +502,8 @@ pub struct App {
     fine_anchor: (f32, f32),
     fine_from: (f32, f32),
     fine_active: bool,
+    /// A discrete camera move in flight (see `glide_camera_to`).
+    camera_glide: Option<CameraGlide>,
     /// Gizmo part under the cursor (when not dragging)
     hovered: Option<crate::pick::GizmoHit>,
     pub shift_held: bool,
@@ -775,6 +807,8 @@ impl App {
 
         let prefs = crate::prefs::Prefs::load();
         let ui_state = UiState::from_prefs(&prefs);
+        // Read before `prefs` is moved into the struct below.
+        let (help_open, browser_open) = (prefs.panels.help_open, prefs.panels.browser_open);
 
         let camera = scene.camera();
 
@@ -800,13 +834,15 @@ impl App {
             fine_anchor: (0.0, 0.0),
             fine_from: (0.0, 0.0),
             fine_active: false,
+            camera_glide: None,
             hovered: None,
             shift_held: false,
             ctrl_held: false,
             alt_held: false,
             show_gizmos: true,
-            // Env override lets automated captures verify the help overlay
-            show_help: std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
+            // Persisted like the other five panels; the env override lets
+            // automated captures verify the help overlay regardless.
+            show_help: help_open || std::env::var("FRACTURIZE_SHOW_HELP").is_ok(),
             haze_amount,
             haze_band: None,
             transparent_render: false,
@@ -850,6 +886,8 @@ impl App {
             transform_enabled: vec![true; num_transforms],
             selected_variation: 0,
             matrix_generation: 0,
+            // Reopened below once the app exists — the browser has a directory
+            // scan behind it, so it can't just be a bool set here.
             show_browser: false,
             browser_files: Vec::new(),
             browser_selected: 0,
@@ -866,6 +904,13 @@ impl App {
             pending_screenshot: false,
         };
         app.refresh_zoom();
+
+        // The browser is a bool with a directory scan behind it, so restoring
+        // it means actually opening it — and if `scenes/` has since gone away,
+        // `toggle_browser` declines and the toolbar reads honestly.
+        if browser_open {
+            app.toggle_browser();
+        }
 
         // Apply a saved view, if given. Pause the orbit so the loaded
         // framing holds exactly (press O to resume).
@@ -889,7 +934,7 @@ impl App {
     /// `--splat`/`--exposure` have already had their say.
     pub fn apply_view(&mut self, v: &View, with_renderer: bool) {
         // Fold any legacy eye offset into the on-sphere camera
-        self.camera = OrbitCamera::from_legacy(
+        let target = OrbitCamera::from_legacy(
             Vec3::from(v.focus),
             Vec3::from(v.offset),
             v.distance,
@@ -897,6 +942,10 @@ impl App {
             v.pitch,
             v.roll,
         );
+        // The framing glides; everything else the view carries lands at once.
+        // Point size and haze aren't *places*, so easing them would only make
+        // the view look like it arrived twice.
+        self.glide_camera_to(target);
         self.point_size = v.point_size;
         // Views written before haze became one control carry only the four raw
         // shader values; recover an equivalent amount from them and treat
@@ -1007,7 +1056,59 @@ impl App {
     /// A no-op looking straight up or down, where every roll is level and the
     /// request has no answer — which is a framing you can now reach.
     pub fn level_camera(&mut self) {
-        self.camera.level();
+        let mut target = self.camera;
+        target.level();
+        self.glide_camera_to(target);
+        self.invalidate_default_path();
+    }
+
+    /// Move the camera to `target` over [`CAMERA_GLIDE`] rather than teleporting.
+    ///
+    /// Loading a saved view and pressing `level` both used to cut, and a cut
+    /// gives you no idea *where* you went — a 3D scene has no landmarks except
+    /// the ones you were just looking at, so an instant reframe reads as a
+    /// different scene rather than a different angle. Blender, Fusion and
+    /// everything after them smooth view changes over roughly this long by
+    /// default, and it is the single most-noticed "this feels expensive"
+    /// detail in a 3D application. Cheap to add; large return.
+    ///
+    /// Only for *discrete* framing changes. Drags and scrolls are continuous
+    /// and already track the hand, so smoothing them would just add lag —
+    /// and any of them cancels a glide in flight (see `cancel_camera_glide`).
+    pub fn glide_camera_to(&mut self, target: OrbitCamera) {
+        // Already there: no glide, or a 200ms pause where nothing happens.
+        if target.distance == self.camera.distance
+            && target.focus == self.camera.focus
+            && self.camera.orientation.angle_to(target.orientation) < 1e-6
+        {
+            self.camera = target;
+            return;
+        }
+        self.camera_glide = Some(CameraGlide {
+            from: self.camera,
+            to: target,
+            started: Instant::now(),
+        });
+    }
+
+    /// Drop any glide in flight, leaving the camera exactly where it is. Called
+    /// by every gesture that takes the camera by hand: a glide fighting a drag
+    /// for the same framing is the worst of both.
+    pub fn cancel_camera_glide(&mut self) {
+        self.camera_glide = None;
+    }
+
+    fn advance_camera_glide(&mut self) {
+        let Some(glide) = &self.camera_glide else { return };
+        let s = (glide.started.elapsed().as_secs_f32() / CAMERA_GLIDE.as_secs_f32()).min(1.0);
+        // Smoothstep: eased at both ends, so it neither jerks off the mark nor
+        // slams into it.
+        let e = s * s * (3.0 - 2.0 * s);
+        self.camera = lerp_camera(&glide.from, &glide.to, e);
+        if s >= 1.0 {
+            self.camera = glide.to;
+            self.camera_glide = None;
+        }
         self.invalidate_default_path();
     }
 
@@ -1864,6 +1965,7 @@ impl App {
             );
             return;
         }
+        self.cancel_camera_glide();
         self.camera.zoom(steps);
         self.invalidate_default_path();
     }
@@ -1876,6 +1978,22 @@ impl App {
             if self.prefs.invert_pitch { "inverted" } else { "normal" }
         );
         self.prefs.save();
+    }
+
+    /// Panel scale multiplier (persisted across sessions).
+    pub fn ui_scale(&self) -> f32 {
+        self.prefs.ui_scale
+    }
+
+    /// Set the panel scale. Deferred-write like the window geometry: this is a
+    /// slider, so it changes sixty times a second while being dragged.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(0.6, 3.0);
+        if self.prefs.ui_scale == scale {
+            return;
+        }
+        self.prefs.ui_scale = scale;
+        self.prefs_dirty_since = Some(std::time::Instant::now());
     }
 
     /// Which axis orbit drags yaw about (persisted across sessions)
@@ -2063,6 +2181,8 @@ impl App {
         use winit::event::MouseButton;
         self.drag_origin = self.cursor;
         self.drag_moved = false;
+        // Taking the camera by hand beats any glide still in flight.
+        self.cancel_camera_glide();
         // Fine-drag starts from wherever this gesture starts, at whatever the
         // modifier is right now.
         self.fine_anchor = self.cursor;
@@ -3887,6 +4007,8 @@ impl App {
         self.refresh_indicators();
         self.refresh_path_lines();
         self.poll_job();
+
+        self.advance_camera_glide();
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;

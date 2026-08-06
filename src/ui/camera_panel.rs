@@ -35,16 +35,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Camera, "Camera")
         .open(&mut open)
         .show(ctx, |ui| {
-            // The output row is pinned to the bottom so the keypoint list in
-            // the middle gets every point of slack when the window is dragged
-            // taller. Without this the window is content-sized and resizing it
-            // just adds empty space under a 110pt list you still have to
-            // scroll — which is the one thing here that's ever long.
-            egui::Panel::bottom("fracturize_camera_output")
-                .show(ui, |ui| {
-                    ui.add_space(4.0);
-                    draw_output(ui, app);
-                });
+            // The framing block and views are pinned to the top so the keypoint
+            // list below gets every point of slack when the window is dragged
+            // taller — that list is the one thing here that's ever long.
             egui::Panel::top("fracturize_camera_framing")
                 .show(ui, |ui| {
                     draw_framing(ui, app);
@@ -59,7 +52,15 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.camera_open = open;
 }
 
-fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
+/// The two input preferences that used to head this window: orbit style and
+/// invert pitch.
+///
+/// They live in the Controls window (`ui::shortcuts`) now, on scope grounds.
+/// Neither moves the camera — they change how the *next drag is interpreted*,
+/// which is a preference about the person's hands rather than state of the
+/// artwork, and `App::set_orbit_style` says as much in its own doc. Drawn from
+/// there so the radio's tooltips stay in one place.
+pub fn draw_input_prefs(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.label("Orbit");
         let style = app.orbit_style();
@@ -104,6 +105,9 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             app.toggle_invert_pitch();
         }
     });
+}
+
+fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
 
     ui.horizontal(|ui| {
         let mut distance = app.camera.distance;
@@ -565,52 +569,9 @@ fn draw_loop(
 }
 
 
-fn draw_output(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal(|ui| {
-        let resp = ui.button("Render job…");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Set up a batch render: still or animation, its own quality settings, \
-             with estimates, progress and a way to stop it",
-            "click: open the render job dialog",
-        );
-        if resp.clicked() {
-            super::render_job::open(app);
-        }
-
-        let resp = ui.button("Screenshot");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Capture the viewport to screenshots/ (S)",
-            "click: save a screenshot",
-        );
-        if resp.clicked() {
-            app.request_screenshot();
-        }
-
-        let resp = ui.button("Save scene");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Write the scene — transforms, colors, camera framing, path — back to its TOML (Ctrl+S)",
-            "click: save the scene file",
-        );
-        if resp.clicked() {
-            app.save_scene();
-        }
-
-        let resp = ui.button("Save as…");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Fork the scene: write it under a new name and keep working on that copy, \
-             leaving the original as it was (Ctrl+Shift+S)",
-            "click: save the scene under a new name",
-        );
-        if resp.clicked() {
-            super::save_as::open(app);
-        }
-    });
-}
+// The four output buttons — Render job… / Screenshot / Save scene / Save as… —
+// used to live here, in a row pinned to the bottom of this window. Three of the
+// four had nothing to do with the camera; they were here because Camera was the
+// window with a bottom panel free, which is an implementation reason and not a
+// task one. They're in the toolbar's File menu now (`ui::toolbar`), where a
+// person arriving from any other program will look for them first.
