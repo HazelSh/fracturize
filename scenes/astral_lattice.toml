@@ -1,0 +1,121 @@
+# Astral Lattice — a 3D cosmic sanctuary of nested shells and light
+#
+# Created by Gemini 3.6 Flash (2026-08-07).
+#
+# Designed according to CRAFT.md principles:
+# - Similarity dimension d ≈ 2.10: perfectly balanced between filigree detail
+#   and structured 3D shell surfaces.
+# - Genuinely 3D variations: native `bulb` for nested pearl shells, `bubble` +
+#   `sinusoidal` for a soft volumetric halo, and a subtle `absfold` dose (0.16)
+#   for crystalline facet seasoning without flattening depth.
+# - Out-of-plane rotations kept tight (8° to 15°) to preserve structural coherence.
+# - Barnsley-style spine (1.6% share) to anchor the central axis.
+# Authored for --splat log-density accumulation and high contrast.
+#
+#   fracturize --scene scenes/astral_lattice.toml --splat --exposure 1.45
+
+[meta]
+name = "Astral Lattice"
+author = "Gemini 3.6 Flash"
+point_size = 0.0020
+point_count = 8_000_000
+color_speed = 0.45
+color_falloff = 0.65
+color_contrast = 1.35
+haze = 0.42
+exposure = 1.45
+background = [0.008, 0.006, 0.015]
+
+[camera]
+distance = 3.2
+yaw = 0.45
+pitch = 1.05
+focus = [0.0, 0.0, 0.0]
+
+path_loop = "zoom"
+path_zoom_periods = 1
+path_seconds = 16.0
+
+[[camera.path]]
+yaw = 0.45
+pitch = 1.05
+distance = 3.2
+focus = [0.0, 0.0, 0.0]
+
+[palette]
+interpolate = "oklab"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#050410" },
+  { at = 0.15, color = "#1a103c" },
+  { at = 0.35, color = "#144fb0" },
+  { at = 0.52, color = "#26a4b5" },
+  { at = 0.70, color = "#e6a535" },
+  { at = 0.85, color = "#fff5df" },
+  { at = 0.94, color = "#4d193d" },
+]
+
+# Scale symmetry map: contracting 3D spiral
+[[transform]]
+name = "core_spin"
+translation = [0.0, 0.0, 0.0]
+scale = 0.62
+rotation = [8.0, 45.0, 5.0]
+color = [0.12, 0.35, 0.85]
+color_value = 0.35
+color_speed = 0.42
+weight = 4.5
+
+# Native 3D bulb variation: nested pearl shells with radial mandala geometry
+[[transform]]
+name = "bulb_sanctuary"
+translation = [0.35, 0.15, -0.20]
+scale = 0.52
+rotation = [12.0, 0.0, 15.0]
+color = [0.15, 0.75, 0.80]
+color_value = 0.52
+color_speed = 0.48
+weight = 3.0
+variations = { bulb = 0.85, linear = 0.15 }
+
+# Crystalline facets: subtle absfold dose (0.16) for crystal geometry
+[[transform]]
+name = "crystalline_facet"
+translation = [-0.40, -0.25, 0.30]
+scale = 0.48
+rotation = [-10.0, 120.0, -8.0]
+color = [0.92, 0.68, 0.22]
+color_value = 0.70
+color_speed = 0.50
+weight = 2.5
+variations = { absfold = 0.16, linear = 0.84 }
+
+# Volumetric halo ring: soft bubble + sinusoidal blend
+[[transform]]
+name = "halo_ring"
+translation = [0.10, -0.45, -0.15]
+scale = 0.44
+rotation = [15.0, -60.0, 10.0]
+color = [0.98, 0.92, 0.75]
+color_value = 0.85
+color_speed = 0.55
+weight = 1.8
+variations = { bubble = 0.40, sinusoidal = 0.30, linear = 0.30 }
+
+# Axis spine: degenerate fern-style map for structural anchor
+[[transform]]
+name = "spine_filament"
+translation = [0.0, 0.20, 0.0]
+scale = [0.05, 0.65, 0.05]
+rotation = [0.0, 0.0, 0.0]
+color = [0.40, 0.15, 0.40]
+color_value = 0.94
+color_speed = 0.70
+weight = 0.2
+variations = { linear = 1.0 }
+
+[zoom]
+map = "core_spin"
+radius = 5.5
+levels = 14.0
+

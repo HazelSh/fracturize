@@ -1,0 +1,104 @@
+# Pyre — burning tongues of incandescent gas combusting upwards
+#
+# The chaos game climbs: every transform carries a positive-Y translation and
+# a shrinking scale, so the point cloud drifts upward through the gamut as it
+# iterates, like flame licking off a bed of coals. `julia` supplies the
+# branching tongues (its random half-angle flip forks each flame into two),
+# `horseshoe` folds them back on themselves for turbulence, `swirl` and
+# `spiral` comb the folds into curling tendrils, and `bent` + `sinusoidal`
+# add the gnarled, guttering edges of a real flame front. Color runs from
+# deep ember red at the base through orange and yellow to a white-hot tip.
+#
+# Contributed by Claude Sonnet 5
+
+[meta]
+name = "Pyre (Sonnet 5)"
+author = "Claude Sonnet 5"
+point_size = 0.0022
+point_count = 4_000_000
+color_speed = 0.55
+color_mode = "mix"
+background = [0.02, 0.005, 0.0]
+
+[camera]
+distance = 2.9
+focus = [0.15, 0.5, 0.0]
+pitch = 0.18
+
+# Bed of coals: the wide, slow base of the flame. Low weight relative to the
+# risers so most iterations quickly escape upward instead of pooling here.
+[[transform]]
+name = "coals"
+translation = [0.0, -0.55, 0.0]
+scale = 0.62
+rotation = [0.0, 15.0, 0.0]
+color = [0.7, 0.08, 0.02]
+weight = 1.0
+variations = { horseshoe = 0.35, bent = 0.25, linear = 0.4 }
+
+# Main riser: strong upward translation, gentle rotation about the vertical
+# axis to suggest the flame's slow twist as it climbs.
+[[transform]]
+name = "riser"
+translation = [0.05, 0.45, 0.0]
+scale = 0.6
+rotation = [5.0, 30.0, 0.0]
+color = [0.95, 0.35, 0.05]
+weight = 2.2
+variations = { swirl = 0.3, sinusoidal = 0.25, linear = 0.45 }
+
+# Branching tongue: julia's half-angle fork splits the flame into forking
+# licks, biased upward and outward to the right.
+[[transform]]
+name = "tongue_right"
+translation = [0.22, 0.45, 0.08]
+scale = 0.5
+rotation = [-8.0, -10.0, 12.0]
+color = [1.0, 0.55, 0.05]
+weight = 1.6
+variations = { julia = 0.4, spiral = 0.15, linear = 0.45 }
+
+# Branching tongue: mirror of the above, forking left, keeps the flame
+# symmetric-ish without being identical (different rotation/curl mix).
+[[transform]]
+name = "tongue_left"
+translation = [-0.22, 0.47, -0.05]
+scale = 0.5
+rotation = [6.0, 12.0, -10.0]
+color = [1.0, 0.45, 0.05]
+weight = 1.6
+variations = { julia = 0.35, horseshoe = 0.2, linear = 0.45 }
+
+# Curling tendril: spiral wraps a thin filament of flame off the main body,
+# like a lick of fire peeling away and guttering out.
+[[transform]]
+name = "tendril"
+translation = [0.1, 0.62, 0.15]
+scale = 0.42
+rotation = [10.0, -25.0, 5.0]
+color = [1.0, 0.75, 0.15]
+weight = 0.9
+variations = { spiral = 0.45, swirl = 0.25, linear = 0.3 }
+
+# White-hot core: small, fast-shrinking, sits high in the flame where
+# temperature (and brightness) peaks. Low weight keeps it a bright point
+# rather than a blown-out region.
+[[transform]]
+name = "core"
+translation = [0.0, 0.7, 0.0]
+scale = 0.32
+rotation = [0.0, 40.0, 0.0]
+color = [1.0, 0.97, 0.8]
+weight = 0.6
+variations = { bubble = 0.3, linear = 0.7 }
+
+# Guttering wisp: bent + sinusoidal give a ragged, irregular edge as the
+# flame thins out and disperses at its highest reach.
+[[transform]]
+name = "wisp"
+translation = [-0.1, 0.65, -0.12]
+scale = 0.4
+rotation = [-6.0, -35.0, 8.0]
+color = [0.9, 0.55, 0.35]
+weight = 0.8
+variations = { bent = 0.35, sinusoidal = 0.3, linear = 0.35 }

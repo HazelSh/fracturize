@@ -1,0 +1,84 @@
+# Blaze (Haiku 4.5) — fiery plasma with burning tongues rising
+#
+# Incandescent gas combustion rendered as an IFS flame. Upward translations
+# create the rising motion; swirl and spiral variations curl smoke tendrils;
+# horseshoe folds create complex flame sheets; julia adds branching hot cores.
+# Colors transition from deep red through orange, yellow, to white-hot centers.
+#
+# Contributed by Claude Haiku 4.5
+
+[meta]
+name = "Blaze (Haiku 4.5)"
+author = "Claude Haiku 4.5"
+point_size = 0.0018
+point_count = 5_000_000
+color_speed = 0.5
+color_mode = "mix"
+
+[camera]
+distance = 2.8
+offset = [0.0, 0.3, 0.0]
+pitch = 0.25
+
+[[transform]]
+name = "core_combustion"
+translation = [0.0, 0.4, 0.0]
+scale = 0.65
+rotation = [0.0, 0.0, 0.0]
+color = [1.0, 0.15, 0.0]
+weight = 2.0
+variations = { swirl = 0.5, linear = 0.5 }
+
+[[transform]]
+name = "spiral_updraft"
+translation = [0.15, 0.55, 0.08]
+scale = 0.58
+rotation = [0.0, 25.0, 5.0]
+color = [1.0, 0.45, 0.05]
+weight = 1.8
+variations = { spiral = 0.4, linear = 0.6 }
+
+[[transform]]
+name = "fold_twist"
+translation = [-0.12, 0.48, -0.06]
+scale = 0.62
+rotation = [10.0, -35.0, 8.0]
+color = [0.95, 0.6, 0.1]
+weight = 1.5
+variations = { horseshoe = 0.6, sinusoidal = 0.4 }
+
+[[transform]]
+name = "hot_branches"
+translation = [0.05, 0.52, 0.0]
+scale = 0.54
+rotation = [0.0, 15.0, 0.0]
+color = [1.0, 0.8, 0.2]
+weight = 1.3
+variations = { julia = 0.5, linear = 0.5 }
+
+[[transform]]
+name = "curl_wisps"
+translation = [-0.18, 0.35, 0.12]
+scale = 0.68
+rotation = [5.0, -50.0, -12.0]
+color = [1.0, 0.5, 0.0]
+weight = 1.1
+variations = { swirl = 0.7, linear = 0.3 }
+
+[[transform]]
+name = "incandescent_core"
+translation = [0.08, 0.58, -0.04]
+scale = 0.51
+rotation = [0.0, 45.0, 0.0]
+color = [1.0, 0.95, 0.6]
+weight = 1.4
+variations = { fisheye = 0.4, linear = 0.6 }
+
+[[transform]]
+name = "ember_dance"
+translation = [-0.06, 0.42, 0.05]
+scale = 0.60
+rotation = [-8.0, 20.0, 15.0]
+color = [0.95, 0.35, 0.05]
+weight = 1.2
+variations = { bent = 0.3, swirl = 0.7 }

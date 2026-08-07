@@ -1,0 +1,123 @@
+# Inferno — tongues of incandescent plasma combusting upward
+#
+# A fractal flame that earns its name. The design stacks rising transforms
+# with positive Y translations and Y-axis rotations, so the attractor climbs
+# and twists. Swirl and spiral give the curling turbulence of hot gas;
+# sinusoidal at low dose folds gnarled detail into the flame tongues; julia
+# branches them into forks that split and rejoin.
+#
+# The palette runs from black coals through deep red, orange, and yellow
+# to white-hot cores. color_mode = "mix" blends transforms smoothly so
+# flames grade from root to tip rather than banding.
+#
+# Contributed by Claude Opus 5
+
+[meta]
+name = "Inferno (Opus 5)"
+author = "Claude Opus 5"
+point_size = 0.0015
+point_count = 6_000_000
+color_speed = 0.35
+color_mode = "mix"
+haze = 0.4
+background = [0.02, 0.01, 0.01]
+
+[camera]
+distance = 3.2
+pitch = 0.25
+offset = [0.0, 0.3, 0.0]
+
+# The hearth: a hot core that anchors the base of the fire. Slight contraction
+# keeps density high at the root. Bent variation adds asymmetric folding.
+[[transform]]
+name = "hearth"
+translation = [0.0, -0.25, 0.0]
+scale = 0.55
+rotation = [0.0, 15.0, 0.0]
+color = [1.0, 0.15, 0.05]
+weight = 2.0
+variations = { bent = 0.3, linear = 0.7 }
+
+# Rising column: the main upward thrust. Swirl twists the column as it rises,
+# giving the corkscrew motion of convecting gas.
+[[transform]]
+name = "updraft"
+translation = [0.0, 0.35, 0.0]
+scale = 0.75
+rotation = [0.0, 28.0, 5.0]
+color = [1.0, 0.45, 0.08]
+weight = 2.5
+variations = { swirl = 0.35, linear = 0.65 }
+
+# Tongue fork: julia's z^2 + c branches single flames into forking tongues
+# that split, curl back, and rejoin. Offset left and tilted.
+[[transform]]
+name = "tongue-left"
+translation = [-0.3, 0.25, 0.1]
+scale = 0.52
+rotation = [8.0, -35.0, 12.0]
+color = [1.0, 0.65, 0.15]
+weight = 1.8
+variations = { julia = 0.4, linear = 0.6 }
+
+# Mirror tongue on the right, different phase. Together they give the fire
+# bilateral structure without perfect symmetry.
+[[transform]]
+name = "tongue-right"
+translation = [0.28, 0.28, -0.08]
+scale = 0.50
+rotation = [-6.0, 40.0, -10.0]
+color = [1.0, 0.72, 0.22]
+weight = 1.6
+variations = { julia = 0.35, spiral = 0.25, linear = 0.4 }
+
+# Wisp: a fast-rising tendril that escapes the main column. Spiral combs
+# it into a curling smoke-trail. High Y translation, tight scale.
+[[transform]]
+name = "wisp"
+translation = [0.12, 0.48, 0.05]
+scale = 0.45
+rotation = [0.0, 55.0, 0.0]
+color = [1.0, 0.85, 0.45]
+weight = 1.2
+variations = { spiral = 0.45, linear = 0.55 }
+
+# Gnarl: sinusoidal folding at low dose wrinkles the flame surface,
+# adding the turbulent texture of real combustion.
+[[transform]]
+name = "gnarl"
+translation = [0.0, 0.18, 0.0]
+scale = 0.62
+rotation = [12.0, 22.0, -8.0]
+color = [1.0, 0.55, 0.12]
+weight = 1.4
+variations = { sinusoidal = 0.28, horseshoe = 0.22, linear = 0.5 }
+
+# White-hot core: a bright attractor near the base that pulls density
+# toward the hottest part of the fire. Small, central, high luminance.
+[[transform]]
+name = "core"
+translation = [0.0, 0.0, 0.0]
+scale = 0.30
+rotation = [0.0, 8.0, 0.0]
+color = [1.0, 0.95, 0.75]
+weight = 0.8
+variations = { fisheye = 0.25, linear = 0.75 }
+
+# --- Notes on missing features for realistic fire ---
+#
+# 1. Turbulence/noise: Real flames have stochastic turbulence at multiple
+#    scales. A Perlin or simplex noise variation would let flames flicker
+#    and waver without requiring many transforms.
+#
+# 2. Directional bias: Fire rises because hot gas is buoyant. A "gravity"
+#    or "wind" parameter that biases point motion in a direction would
+#    make vertical structure easier to achieve.
+#
+# 3. Temperature-mapped color: Real fire color correlates with temperature.
+#    A variation that maps point age or density to a blackbody curve would
+#    give physically-motivated coloring without manual palette work.
+#
+# 4. Volumetric density falloff: Fire is brightest at the core and fades
+#    at edges. A radial density or alpha falloff from the attractor's
+#    center would help sell the incandescent-gas look.

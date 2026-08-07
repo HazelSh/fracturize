@@ -1,0 +1,131 @@
+# Furnace — 3D fiery plasma, tongues of incandescent gas combusting upwards
+#
+# The fire structure emerges from layered dynamics: a broad hearth base anchors
+# the flame, rising pillars carry the main combustion, and curling tendrils at
+# the edges show where turbulence shears the hot gas into wisps. Julia branching
+# creates the forked tongue structures, while horseshoe folds add the complex
+# curling-back that real flames exhibit as they cool and collapse.
+#
+# Colour progression runs from deep ember red at the base through orange
+# combustion to white-hot cores, with the occasional blue flicker where the
+# hottest gas ionizes.
+#
+# Claude Opus 4.5, 2026-08-07.
+
+[meta]
+name = "Furnace (Opus 4.5)"
+author = "Claude Opus 4.5"
+point_size = 0.0015
+point_count = 6_000_000
+color_mode = "mix"
+color_speed = 0.6
+haze = 0.4
+background = [0.02, 0.01, 0.01]
+
+[camera]
+distance = 4.2
+pitch = 0.25
+offset = [0.0, 0.4, 0.0]
+
+# Hot-to-cool fire gradient: white core through yellow-orange to deep ember
+[palette]
+interpolate = "oklab"
+cyclic = false
+stops = [
+  { at = 0.00, color = "#1a0800" },
+  { at = 0.18, color = "#4d1500" },
+  { at = 0.35, color = "#b33000" },
+  { at = 0.52, color = "#e85a00" },
+  { at = 0.68, color = "#ff9922" },
+  { at = 0.82, color = "#ffcc66" },
+  { at = 0.94, color = "#fff4dd" },
+]
+
+# The hearth: ember bed at the base, glowing coals that anchor the fire.
+# Low weight, slow rotation, deep red. Fisheye bunches points toward center.
+[[transform]]
+name = "hearth"
+translation = [0.0, -0.5, 0.0]
+scale = 0.55
+rotation = [0.0, 8.0, 0.0]
+color = [0.85, 0.12, 0.04]
+weight = 1.2
+variations = { fisheye = 0.4, linear = 0.6 }
+
+# Main combustion column: the rising plume of hot gas.
+# Positive Y translation + slight rotation creates the upward drift.
+# Swirl adds the characteristic flame curl.
+[[transform]]
+name = "plume"
+translation = [0.0, 0.35, 0.0]
+scale = 0.78
+rotation = [0.0, 22.0, 3.0]
+color = [1.0, 0.55, 0.08]
+weight = 3.5
+variations = { swirl = 0.35, linear = 0.65 }
+
+# Inner core: the hottest part, rising faster and tighter.
+# White-hot colour, stronger upward motion, spiral for structure.
+[[transform]]
+name = "core"
+translation = [0.05, 0.42, 0.0]
+scale = 0.72
+rotation = [0.0, 30.0, 0.0]
+color = [1.0, 0.92, 0.75]
+weight = 2.8
+variations = { spiral = 0.3, linear = 0.7 }
+
+# Tongue-left: flame tongue branching off to one side.
+# Julia creates the forking structure that real flames show.
+[[transform]]
+name = "tongue-left"
+translation = [-0.32, 0.28, 0.1]
+scale = 0.58
+rotation = [5.0, -35.0, 12.0]
+color = [1.0, 0.68, 0.15]
+weight = 1.8
+variations = { julia = 0.45, linear = 0.55 }
+
+# Tongue-right: symmetric partner, slight asymmetry in rotation for realism.
+[[transform]]
+name = "tongue-right"
+translation = [0.35, 0.25, -0.08]
+scale = 0.56
+rotation = [-3.0, 40.0, -10.0]
+color = [1.0, 0.72, 0.22]
+weight = 1.6
+variations = { julia = 0.42, linear = 0.58 }
+
+# Curl-back: where cooling gas folds back on itself.
+# Horseshoe doubles angles, creating the complex curling sheets.
+[[transform]]
+name = "curl"
+translation = [0.18, 0.55, 0.22]
+scale = 0.52
+rotation = [15.0, 65.0, 8.0]
+color = [0.95, 0.45, 0.12]
+weight = 1.4
+variations = { horseshoe = 0.5, linear = 0.5 }
+
+# Wisp: tendrils of hot gas shearing off at the edges.
+# Sinusoidal with scale >1 creates the gnarled, folding texture.
+# Lower weight so it's accent, not dominant.
+[[transform]]
+name = "wisp"
+translation = [-0.25, 0.6, -0.15]
+scale = 0.48
+rotation = [-8.0, -50.0, 15.0]
+color = [0.88, 0.35, 0.08]
+weight = 0.9
+variations = { sinusoidal = 0.4, linear = 0.6 }
+
+# Blue flicker: rare ionization flash in the hottest zones.
+# Very low weight so it appears as occasional sparks, not a constant presence.
+[[transform]]
+name = "ionize"
+translation = [0.0, 0.7, 0.0]
+scale = 0.35
+rotation = [0.0, 45.0, 0.0]
+color = [0.4, 0.6, 1.0]
+weight = 0.25
+variations = { bent = 0.6, linear = 0.4 }
