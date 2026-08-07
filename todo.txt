@@ -1,5 +1,5 @@
 ---- needs to go faster! I want 100m points in realtime!
- -- "motherfucking realtime motherfucking raytracing"
+ -- "fucking 2026 fucking realtime fucking raytracing"
   - limits currently: points need data needs vram, very limiting esp. on laptop.
    - fill points, accumulate points, run both in parellel, discard old points?
     - fizz inside the frame. fine with enough points? or deliberatly don't fizz some    
@@ -81,9 +81,167 @@
  -- hand when mouseover gizmos, etc. 
  
 
+---- todo notes from phone/simplenote:
+
+Add bg env render
+Think hdri files
+
+Export to blender...?
+Solve for covering volume, or pointcloud format? 
+
+Ask for papers to implement? 
+
+Ask for scenes & transforms to enable
+ -- lotus blooms 
+ -- Julia
+
+Symmetries
+ -- in the format 
+ -- in the UI
+
+In general, plan to make the "interesting space" of fractals easier to find
+ -- algorithmic mutation filtering?
+
+Flame importer!
+
+Fan transform type
+
+Eidoverse integration? 
+ -- after regular VR?
+
+Attractor based coloring? Color on path metrics?
+
+ Render with normals
+
+Integrate live audio reaction, visualizer. 
+ -- make standalone program that runs one scene on audio? 
+
+Timeline based fractal morphing
+
+"Frenet-Serret Frame Smoothing:" for camera splines?
+
+Reorbit to cursor? 
+
+
+
+
+
+---- no more comment-filled scene files; surface the transform and scene notes in UI, make an explicit part of scene format
+ -- that save/load was dropping them should have been a Clue! they're user state
+
+
+---- GUI review
+
+-- camera-path is wrong for infinite-zoom scenes -- it shows it looping back, not forward
+ - probably needs to show partial, fade it out with dashed line...?
+
+-- transforms list weirdness
+ - add/dup need to be at top, also need other right-click controls, disable/delete
+ - list not using full height?
+ - odd extra spacing
+
+-- mouse should fade-out after 2s not moving while over scene/bg (but not while over UI element)
+
+-- points count needs to go by OOMs / exp/log scaling, not linear in Ms of points.
+
+-- 
+
+
+---- performance issue with points mode once points close-enough to render as big points?
+ -- sudden drop-off once points are over 1px
+  - ...remove this and just do 1px points at all distances? breaks sense of 'closeness'
+
+---- new render mode.
+ -- points: can't see any deep structure
+ -- splats: no sense of front/back, lose track of space. 
+
+---- new render mode. try for normals, lighting, AO, etc. then, emission as a color modifier
+
+---- confirm camera parameters. what's our FoV? Usually like 95 vFoV or so
+ -- is this also not-helping with 'losing track of space' / spatial inversion perception-illusion?
+
+---- cap framerate to VSYNC ?
+
+---- scene: astral_lattice, splats, exposure high. then: almost-all useful range on the haze band above 0.98?
+ -- remap control differently? log range?
+
+---- (non-infinite scene) export to mesh with marching-cubes algo?
+ -- or export raw pointclouds to .vdb files?
+
+---- HDR export to EXR files? test with tonemapping?
+
+---- new transform: fan3d
+ -- 'fan' -- spatial breaks, compresses space into rays with emptyness between.
+  - totally doable in native 3d. 
+
+---- with dimensionality/lacunarity analysis, map 'reasonable' regions to bands on sliders!
+ -- use to solve control-mapping for meaningful authorship
+
+---- much more configurable random variation.
+ -- need to configure number of transforms, color strategy ratio, allowed variations, variations per transform
+  - configure as average+SD gaussian? or min/max linear? or let user pick!
+ -- random batch, minipreview windows, scrollable list. 
+ -- good symmetry controls in random gen!
+
+---- layered scenes! just smoosh them! render one scene over top of another. 
+
+
+---- look into differentiable flames
+
+---- selected transform's gizmo should draw on top of fractal
+
+
+---- gizmo updates
+ -- handles at endpoints, by-default scale that dimension independantly. 
+ -- end-handles, take modifier to shear on orthogonal plane. X handle drag -> scale X, shift+drag shear X on YZ
+ -- rotate transform as-though endpoint on a ball? (arcball) XY camera-plane motion rotates
+ -- rotate transform by rolling around camera-direction axis through the transform origin
+ -- constant-determinant operations?
+ -- indicate negative-scale / reflection-through-origin -- up/down triangle for transform-origin handle?
+ -- option to shear preserving-basis-vector length / normalize the shear?
+
+---- highlight points according to that transforms influence on them?
+ -- show: immediate influence, ancestral influence, weighted contribution, related spatial regions, 
+
+
+---- Xaos map
+ -- transforms currently go: select one, then select another.
+  - Xaos: select one, then that one has a probability-distribution over which ones to select next.
+   - could do simple: graph, self-preference, self-dispreference, prefer X, only [this set], etc.
+   - general form, though, is a per-transform weight, per transform. O(n^2) in details-to-author. 
+
+
+---- plugins for:
+ -- colorings, procedural algo to define them
+ -- transform variations
+ -- generators other than blank and random
+ -- scenewarp
+ -- renderers/visualizers
+ -- camera ops
+ -- inputs (audio, camera, image, etc)
+ -- do plugins with WASM?
+
+---- json for --info on the CLI
+
+---- .flam3 importer!
+ -- partial? not going to be 100% compat
+
+---- color mode: velocity. more the flame moves, longer the chaos traces go, more colormotion
+
+---- turbulance/noise variations?
 
 ---- naming 
 🕮⊞◌⃘⁂
+not Fracturize.
+fucking hate that card
+annoying
+wrecks gameplans
+'supposed' to go neutral
+they get float, you get a fractal
+but actually
+they get to wreck your gameplan
+and pay ~nothing to have it in a water deck, or to use it
 
+"Lacunarity Guide"
 
 
