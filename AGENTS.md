@@ -1155,8 +1155,41 @@ Two consequences do all the work:
   of the band, `Renorm::wrap` applies `A⁻¹` to eye, focus and up together. The
   camera is back at the outer edge looking at a pixel-identical picture. Nothing
   gets small, no precision is spent, and the point buffer is never regenerated —
-  **the wrap is the level-of-detail system.** The status bar's zoom counter is
-  the only thing that moves.
+  **the wrap is the level-of-detail system.**
+- **The points are carried through the wrap with the camera.** The line above is
+  exact for the *set* and not for a **sample** of it. Moving the camera by `A⁻¹`
+  and leaving the buffer alone sends every dot on screen to a different pixel:
+  the distribution is unchanged, so no light moves and mean frame brightness
+  does not budge, but the whole dot field is resampled in one frame. On a dense
+  scene that is invisible; on a sparse one, where individual points are
+  resolvable, it reads as a twitch you can see and cannot name. `rewrap` in
+  `points/chaos.wgsl` carries the buffer by the same `A⁻¹`, because
+  `screen(A⁻¹x, A⁻¹C) == screen(x, C)`, and re-folds only what falls off the
+  band's outer end — the octave `edge_guard` has already taken to nothing. What
+  it costs is the octave assignment rotating by one, and `m` is written as a
+  single power so it stays inside one band's worth however far the wrap jumped.
+  Carrying camera *and* points with no re-fold would just be the wrap undone,
+  and the precision would go with it. Measured by `tools/zoom_twitch.py`: on
+  `astral_lattice` the seam went from 1.85× an ordinary frame step to 0.99×,
+  and on `wellspiral` from 1.52× to 1.00×.
+
+  It costs 0.93ms on an 8M buffer, once per period, and is at the memory floor
+  (one streaming read and write of every point). Do not try to spread it:
+  moving a point ahead of the wrap does not spare it, because what has to be
+  preserved is its screen position measured from wherever it sits *at the wrap
+  instant*, so an early move twitches twice and leaves the wrap's own twitch
+  untouched. Doing the carry at draw time instead is exact and simple — it is
+  only ever two matrices split at one radius — and measures 0.85ms **per
+  frame** against 0.93ms per period. All three dead ends, with numbers, are in
+  `NOTES-infinite-zoom.md`; the short version is that the pass does not show up
+  in frame times on the reference desktop at all.
+
+  Every renderer that flies a wrapping camera has to do this — the window
+  (`App::wrap_zoom`), animation and stills (`effective_camera_folded`) — and all
+  three carry by the **change** in fold depth, never by what `Renorm::wrap`
+  returns. Along a path that return is the absolute depth of an unwrapped
+  spline sample, so using it directly carries the buffer nine periods a frame.
+  Same trap as the zoom readout's, one layer down.
 
 The honest limit: the zoom is infinite *toward `p`*. Fly off sideways and you
 leave the band and get the ordinary bounded attractor. Every self-similar zoom
@@ -1312,6 +1345,20 @@ fracturize --scene scenes/lsys_kelp.toml --zoom trunk --zoom-levels 16 \
 # show the artifact: 11.9x as it stands, 0.0x once the guard is on.
 python3 tools/zoom_seam.py scenes/octave-edge-visual.toml
 python3 tools/zoom_seam.py scenes/octave-edge-visual.toml --guard 1
+
+# ...and the other half of that question, which brightness cannot answer.
+# tools/zoom_twitch.py reads per-pixel difference instead, walks the loop with
+# --path-t (which names a frame of the *flight*, twist and all, where stepping
+# --distance would not), finds the wrap by watching the folded distance step
+# up, and reports the seam against two references: an ordinary frame of motion,
+# and one camera rendered from two independent fills of the point buffer. That
+# second one is the floor a resample costs, and a seam sitting on it is the
+# dots being replaced rather than anything moving.
+python3 tools/zoom_twitch.py scenes/astral_lattice.toml --splat
+
+# any frame of the flight, as a still. Useful on its own for looking at where
+# a loop actually goes, and it is what makes a run of stills a run of frames.
+fracturize --scene scenes/astral_lattice.toml --path-t 0.35 --render /tmp/t.png
 
 # ...and the version you can just watch. scenes/octave-edge-visual.toml opens
 # zooming with the guard off; the wrap is a visible blink every 2.5s. Drag

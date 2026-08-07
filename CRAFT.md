@@ -2,8 +2,9 @@
 
 `AGENTS.md` says what Fracturize *is*. This says what it's like to *make things with*.
 
-It's for the agent who has been handed the keys and wants to make something good in
-the next twenty minutes, and it's a place to write down what you find. Everything
+It's for the agent who has been handed the keys and wants to make something good
+without reading the engine first, and it's a place to write down what you find.
+Everything
 with a number attached was measured in this repo — if you measure something that
 contradicts it, change it and say so. Sections marked **[lore]** are inherited from
 the Apophysis / flam3 / DeviantArt era and have been re-tested here where possible;
@@ -180,6 +181,20 @@ ribbons. Exceeding it also raises a `notes` line, so you no longer have to
 compare the two numbers yourself. Size point_size against *your* structure,
 never by copying another scene.
 
+### 2.5 Background color: design it with intent, not by relying on defaults
+
+The background color (`background = [r, g, b]` in `[meta]`, linear RGB floats) is
+the canvas on which the emissive point cloud and atmospheric haze sit. The default
+in Fracturize is a subtle dark-blue expanse (`[0.010, 0.008, 0.016]`), but it should be
+chosen with intent for each scene:
+
+- **Color with intent.** A tailored background tint matching or contrasting with your
+  palette's shadow stops (e.g. deep celestial indigo, mineral slate, dark teal, or warm
+  sepia-charcoal) grounds atmospheric haze and gives the entire piece tonal unity.
+- **Background interacts directly with haze.** Atmospheric haze (`haze`) blends distant
+  points toward the background color. Designing background color with your palette in
+  mind turns haze into an organic depth cue rather than a generic backdrop.
+
 ---
 
 ## 3. Doses — measured
@@ -275,6 +290,60 @@ scale 1.1–1.2 with small rotations gives the classic gnarl swirls.
 
 ---
 
+### 3.6 Symmetry plus one — the defect is the picture **[claim — dose not yet measured]**
+
+Rotational symmetry is the cheapest way off the fuzz wall. Fuzz is what you get when
+the maps' rotations don't close — compose enough incoherent rotations and you are
+doing a random walk on SO(3), the measure comes out smooth, and no exposure setting
+will find structure that isn't there. Constrain the rotations to a finite group and
+the attractor is legible by construction. Every mandala in `scenes/` works for this
+reason.
+
+But it walks you straight at the *other* wall, and the mechanism is worth
+understanding because it is not obvious:
+
+> **A symmetry orbit distributes measure evenly by construction.** All `|G|` copies
+> of a map are the same map with a rotation in front, so they carry the same
+> contraction and — unless you go out of your way — the same weight. §2.1 says
+> flat measure is precisely what splat cannot recover.
+
+`menger` is the worked example. It is not merely a dense scene: it is a **group
+orbit** — 20 sub-cubes of a 3×3×3 cube under the octahedral group — and
+`scenes/menger.toml` contains no `weight` line anywhere, so all 20 maps are equal by
+default. Equal by construction, in fact; that is what an orbit *is*.
+
+Be precise about what fails there, because **it is not the authoring**. `menger` is
+a faithful transcription of a classic object and it earns its place: it is the
+repo's clearest demonstration that an IFS can make a near-solid body at all. What it
+runs into is a renderer that currently has no cue to show that body with (§4.2).
+The lesson for *your* symmetric scene is narrower and entirely actionable: an orbit
+hands you flat measure, and flat measure is the one thing splat cannot rescue.
+
+So the rule of thumb, which is the same shape as Barnsley's stem in §3.2 and
+probably the same insight:
+
+> **Symmetry gets you a form. One map outside the group gets you a picture.**
+
+The defect is what puts density variance back on a support that the group made
+uniform — a spine, a seed at the centre, a single off-axis map that the group then
+propagates. Without it you have wallpaper: never fuzz, never interesting.
+
+**The dose is unmeasured, and do not assume it is a whisper.** §3.2's stem wants
+1–2%; the one data point here points much higher. `rose_window` is three petals at
+120° about Y (weight 1.5 each) plus an on-axis core at weight 1.0 — **18% of the
+walk** — and it is one of the better-looking scenes in the repo. My guess is that
+the two cases differ because the stem is a *degenerate* map (it collapses the plane
+to a line, so a little goes a long way) while a core is an ordinary contraction, but
+that is a guess.
+
+**The experiment — one scene and one sweep sheet:** build a clean `C5` or `C6` ring
+(five or six maps at equal weight, identical but for the rotation), then sweep a
+single extra off-axis map's weight from 0.5% to 30% of the walk. Record where it
+stops reading as wallpaper and where it starts eating the symmetry. Put the number
+here and delete this paragraph.
+
+---
+
 ## 4. What being native-3D actually changes
 
 ### 4.1 Only 9 of the 20 variations are three-dimensional
@@ -326,7 +395,27 @@ This has a hard aesthetic consequence, visible right across `scenes/`:
 — a solid cube — reads as a grey rectangle with noise on it. There is no lighting
 to tell you it's a cube, so it isn't one. (`menger` is the genuinely hopeless case:
 uniform measure, nothing for splat to recover. Most over-dense scenes are *not*
-like this — check with splat first, see §2.1.) This is also why the library palettes are
+like this — check with splat first, see §2.1.)
+
+Worth being exact about *whose* failure that is, because "hopeless" overstates it.
+`menger` is a faithful transcription of the classic sponge and the scene is not the
+problem; three cues are missing at once. There is no density gradient for splat to
+resolve, no lighting to model the solid, and — as it stands — no colour structure
+either, so the thing the sponge is actually *about*, holes within holes within
+holes, never arrives. Keep the scene: it is the repo's clearest evidence that an IFS
+can build a near-solid body, which is a real and non-obvious fact about the medium.
+
+**The one of those three that might be cheap — untested, go and try it.** `menger`
+gives each of its 20 sub-cubes a distinct `color`, and under `color_mode = "mix"`
+(`[meta]`, see `src/scene.rs`) the walker carries an RGB EMA over the transforms it
+actually took rather than a scalar index. On this scene that EMA is a record of
+*which sub-cube path* a point descended, which is exactly the recursive structure
+the geometry has and the render doesn't show. It may do nothing. It is one render to
+find out, and if it works it is a colour answer to a problem §2.1 frames as a
+density one. (I did not check whether `--set` can carry a string value; if it can't,
+copy the scene and edit `[meta]` — do not edit `scenes/menger.toml` in place.)
+
+This is also why the library palettes are
 required to put their luminance *somewhere* and to rise and fall exactly once: a
 gradient at one brightness renders flat however pretty its hues are, because the
 gradient is doing the job a light would do in any other renderer.
@@ -516,7 +605,22 @@ recorded dead end is worth as much as a recipe.
   `color_falloff` and render monochrome (§2.3). `boxfold` inside ±1 is a no-op
   (§3.4). Infinite-zoom stills are textures, because distance is wrapped (§4.3).
   Scenes: `rimefall.toml`, `blossom.toml`.
+- **2026-08-07, Opus 5. Open, not measured.** §3.6: a symmetry orbit flattens the
+  measure by construction, which is the §2.1 failure mode arrived at from a new
+  direction — `menger` is a 20-map octahedral orbit with no `weight` line in the
+  file. Claim: one map outside the group is what makes a symmetric scene readable.
+  The dose is the open question; `rose_window`'s core is 18% of the walk and works,
+  against §3.2's 1–2% for a degenerate map. Sweep it and write the number down.
+  Also open, from the same conversation: `menger` under `color_mode = "mix"` (§4.2).
+  Its 20 sub-cubes carry distinct colours, so the RGB EMA should encode which
+  sub-cube path a point took — a colour route into structure that §2.1 treats as
+  purely a density problem. Untested. One render settles it.
 - **2026-08-04.** Dimension describes the *support*; splat renders the *density*.
   A high-`d` scene with lumpy measure recovers under splat (the d = 3.42 case goes
   from flat silhouette to layered shells); one with uniform measure, like `menger`,
   does not. §2.1.
+- **2026-08-07, Gemini 3.6 Flash.** Background color design with intent (§2.5). Avoid
+  defaulting to generic black (`[0, 0, 0]`); choosing a tailored linear RGB tint
+  (`background = [r, g, b]`) grounds atmospheric haze, harmonizes with palette
+  shadows, and establishes overall tonal depth.
+
