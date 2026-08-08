@@ -2,9 +2,9 @@
 //!
 //! Blender, Fusion, Onshape and everything after them put one of these in a
 //! viewport corner, and Fracturize needs it *more* than they do — because the
-//! default orbit is a trackball, which deliberately accumulates roll (see
-//! `CAMERA-FEEL-PLAN.md` §2, and the price is stated honestly in the Camera
-//! panel's own tooltip). Until now the only thing on screen saying which way is
+//! default orbit is a trackball, which deliberately accumulates roll (the price
+//! is stated honestly in the Camera panel's own tooltip). Until now the only
+//! thing on screen saying which way is
 //! up was a numeric readout in a panel that is closed by default. A corner axis
 //! cross pays directly for the trackball decision.
 //!
