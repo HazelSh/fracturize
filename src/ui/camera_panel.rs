@@ -19,6 +19,7 @@ use crate::app::App;
 use crate::camera::OrbitStyle;
 
 use super::hints::hinted;
+use super::icons;
 use super::num;
 
 /// Character budget for the `yaw · pitch · focus` readout.
@@ -167,7 +168,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             app.set_camera_roll(roll_deg.to_radians());
         }
 
-        let resp = ui.add_enabled(!app.camera.is_level(), egui::Button::new("level"));
+        let resp = ui.add_enabled(!app.camera.is_level(), egui::Button::new((icons::TARGET, "level")));
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -198,7 +199,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
 fn draw_views(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Saved views").strong());
-        let resp = ui.button("Save current");
+        let resp = ui.button((icons::SAVE, "Save current"));
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -298,7 +299,7 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let resp = ui.add_enabled(authored, egui::Button::new("Reset"));
+            let resp = ui.add_enabled(authored, egui::Button::new((icons::RESET, "Reset")));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
@@ -411,7 +412,7 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
     let zoom = app.zoom().map(|z| (z.map, z.log_scale / std::f32::consts::LN_2));
 
     ui.horizontal(|ui| {
-        let resp = ui.button(if moving { "Stop" } else { "Play" });
+        let resp = ui.button(if moving { (icons::PAUSE, "Stop") } else { (icons::PLAY, "Play") });
         let resp = hinted(
             resp,
             &mut app.ui_state,

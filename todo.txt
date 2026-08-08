@@ -68,18 +68,50 @@
 
 ---- UI restructure.
  -- WIP: adding text labels to icons
-  - need to also add icons to text buttons!
+  - [DONE] need to also add icons to text buttons!
+   - File menu (New/Save/Save as/Screenshot/Render job/Quit), undo+redo, camera panel
+     (level, save current, reset, play/stop), explore (mutate/undo/redo), save-as modal,
+     unsaved-changes modal. new codepoints added to icons.rs: SAVE TRASH QUIT CAMERA STACK
+     UNDO REDO RESET TARGET SHUFFLE -- each verified by rendering Phosphor.ttf's cmap to a
+     contact sheet and looking at the glyph, not guessed.
+   - left text-only on purpose: readouts (scene identity, point count), "+ Add key" (icon
+     would double the literal "+"), checkboxes and segmented radios, and scene/view name
+     rows (domain objects -- the icons.rs convention says glyphs go on actions, not things).
+   - still needs it, in files another agent held: ui/render_job.rs "Aborting…" and the
+     danger_button labels ("Cancel" / "Abort render") at :715.
  -- break out save, save as, etc into scene browser, rename to files/open?
  -- break out renderer to toplayer option, "render" to something else -- 'view' / 'display'? etc
  -- no hidden bits in render -- color dropdown thing with palette octaves, collapsable infzoom bits
- --
 
----- cursor for mouse actions!
+---- trying to select transforms in the transforms window fiddly and annoying
+ -- click&drag for transform-weight bar under transform *way* too big on the contact are
+  - & doesn't show on-hover what clicks will select the transform vs what will put you in drag-the-weight mode
+   - possibly just delete the feature? 
+
+---- [DONE ALREADY? verify] cursor for mouse actions!
  -- click -> trackball motion of scene, mid-click -> drag scene, rightclick -> roll scene
   - & scroll -> zoom scene. all need to activate cursor icon as-appropriate!
    - may need to look hard for trackball-motion icon...
- -- hand when mouseover gizmos, etc. 
- 
+ -- hand when mouseover gizmos, etc.
+ -- this reads as already shipped at HEAD, not by this pass: app.rs sets ZoomIn/ZoomOut on
+    scroll (debounced through a signed accumulator so a stray step doesn't flip it), Grab on
+    gizmo hover, Grabbing on orbit/gizmo drag, Move on pan, EwResize on roll. winit has no
+    trackball cursor, and set_drag_cursor says so in a comment. left in the file to verify.
+
+---- [SKIPPED - needs your call] "color value" needs to be high by default! 0.5 means
+     effectively no color when adding color
+ -- deliberately not changed, because the stated mechanism doesn't hold: color_value is a
+    *position* in the 256-entry colormap and 0.5 is mid-palette, not an absence of colour.
+    nothing special-cases 0.5 in chaos.wgsl or trace.rs. global color_speed = 0.5 is a
+    working EMA rate and CRAFT recommends 0.5-0.7, so that's not it either.
+ -- but the symptom is real, and there IS a bug that produces it. add_transform (app.rs:3197)
+    hardcodes color_value: 0.5, while in `transforms` colour mode a transform's own ring slot
+    is k/N (palette/mod.rs:158). so a fresh transform's walkers ease toward whatever OTHER
+    transform sits at ring position 0.5 -- never its own swatch. N=2 is the one case where
+    0.5 is coincidentally right, which is why the blank scene looks fine.
+ -- didn't fix it unasked: the ring-position drift next door is a deliberately-kept defect
+    (CRAFT), so making add_transform use (N-1)/N is a design call, not an obvious fix.
+    which did you mean -- this, or the inspector's "color value" slider?
 
 ---- todo notes from phone/simplenote:
 
@@ -122,8 +154,30 @@ Timeline based fractal morphing
 
 Reorbit to cursor? 
 
+Transform variant: hourglass
 
+Open directory to batch viewer
 
+Keyboard -- tab for edit mode, space to play/pause animation
+ -- [HALF DONE] tab added as a second binding for gizmos/edit mode (G still works), synced
+    into shortcuts.rs and the AGENTS.md table.
+  - watch this one in use. tab isn't a free key: egui claims every tab keystroke for focus
+    nav, and with nothing focused it hands focus to the first widget it lays out -- which
+    would have gated off G/O/Z/S until you next clicked. so main.rs now withholds tab from
+    egui when nothing is focused, and forwards it normally when something is (text fields,
+    focused buttons) so egui's own tab-nav still works. reasoned from egui's source, not
+    click-tested.
+ -- [DONE] space now toggles camera play/pause, same as O/Z. the reset keybind is gone, per
+    your call that re-seeding isn't a useful action now the renderers are stable.
+  - App::reset itself stays -- it has four live internal callers (re-seeds after gizmo drags,
+    weight/colour edits, transform enable/disable). only the keybind went.
+  - re-seed is now mouse-only: the Controls-window row survives with its key column reading
+    "(click)". say the word if you'd rather it disappear from the UI entirely -- that's
+    removing HelpAction::Reset, its app.rs arm, and the row.
+  - space needed no egui suppression block, unlike tab: egui only turns space into a click
+    when a widget already has focus, which is exactly what the existing gate tests.
+
+Do default-orbit as camera yaw? orient to 
 
 
 ---- no more comment-filled scene files; surface the transform and scene notes in UI, make an explicit part of scene format
@@ -142,9 +196,13 @@ Reorbit to cursor?
 
 -- mouse should fade-out after 2s not moving while over scene/bg (but not while over UI element)
 
--- points count needs to go by OOMs / exp/log scaling, not linear in Ms of points.
+-- [DONE-ish] points count needs to go by OOMs / exp/log scaling, not linear in Ms of points.
+ - both sliders were *already* logarithmic (since their first commit). the real bug behind
+   the symptom: custom_formatter with no custom_parser -- egui prefills the type-in box with
+   "500k"/"1.5M" then parses with bare f64::from_str, so typing an exact value silently did
+   nothing. added a matching parser, shared k/M formatting between panel and render-job.
 
--- 
+-- [DONE] put edit mode / view mode toggle into common controls
 
 
 ---- performance issue with points mode once points close-enough to render as big points?
@@ -153,7 +211,9 @@ Reorbit to cursor?
 
 ---- new render mode.
  -- points: can't see any deep structure
- -- splats: no sense of front/back, lose track of space. 
+ -- splats: no sense of front/back, lose track of space.
+ -- solution: ...some kind of depth-aware color mixing with partial transparency?
+  - or aware of existing color...? ask LLM to brainstorm, plan first
 
 ---- new render mode. try for normals, lighting, AO, etc. then, emission as a color modifier
 
@@ -162,8 +222,15 @@ Reorbit to cursor?
 
 ---- cap framerate to VSYNC ?
 
----- scene: astral_lattice, splats, exposure high. then: almost-all useful range on the haze band above 0.98?
+---- [DONE] scene: astral_lattice, splats, exposure high. then: almost-all useful range on the haze band above 0.98?
  -- remap control differently? log range?
+ -- cause: haze.rs keeps `amount` linear in what survives (correct, its tests assert it), but
+    the log-density tonemap swallows a transmittance cut while density*exposure stays >> 1.
+    so the *control* is warped, not the data: slider drags pos, amount = 1-(1-pos)^3. stored
+    value, setter and file format untouched. 0.98 now sits at 73% of travel, was 98%.
+ -- knock-on to check: F/Shift+F still step amount by a flat +-0.1, so a keypress near the
+    top now moves the handle much further than it used to (0.9->1.0 is 54%->100%). may want
+    the step scaled by (1-amount).
 
 ---- (non-infinite scene) export to mesh with marching-cubes algo?
  -- or export raw pointclouds to .vdb files?
@@ -199,6 +266,18 @@ Reorbit to cursor?
  -- constant-determinant operations?
  -- indicate negative-scale / reflection-through-origin -- up/down triangle for transform-origin handle?
  -- option to shear preserving-basis-vector length / normalize the shear?
+ -- easier selection of gizmos in a deep dennse fractal -- overlay-highlight label names, center points, axes?
+ -- better right-click menu
+
+---- [DONE] no animation/fades in UI elements! file menu, right-click-on-transform menu.
+ -- write up a UI guideline / aesethetic guide, & include *zero* animation as a rule
+ -- killed app-wide in EguiLayer::new: Style::animation_time = 0.0 kills menu/popup/tooltip
+    fade-in, collapsing headers, panels, scrollbar fade; scroll_animation = none() kills
+    smoothed scroll-to. Rule + four existing conventions written up in AGENTS.md
+    ("The chrome doesn't move").
+ -- two knowingly left: egui hardcodes mouse-wheel notch smoothing with no Style knob (it's
+    input smoothing, not chrome); and ProgressBar::animate at ui/render_job.rs:657 still
+    pulses for indeterminate progress -- folded into the render-job UI item below.
 
 ---- highlight points according to that transforms influence on them?
  -- show: immediate influence, ancestral influence, weighted contribution, related spatial regions, 
@@ -228,7 +307,132 @@ Reorbit to cursor?
 
 ---- color mode: velocity. more the flame moves, longer the chaos traces go, more colormotion
 
----- turbulance/noise variations?
+---- turbulance/noise transform variations?
+
+slight delay on the pointcount ramp-up after editing?
+ -- consider continually dragging the size of a transform
+
+---- [DONE] bug: dimension-lock is dimensonality only, should not highlight lacunarity
+ -- status bar now colours only `d NN (class)`; Λ stays weak whatever the lock is doing
+ -- follow-ups from your review: restored a deliberate 6px gap between the d and Λ readouts
+    (6 not 10 -- this file uses 10 between top-level clusters, 6 between readouts inside one).
+ -- the lock glyph was NOT going through the phosphor flow: it was literal emoji, "🔒"/"🔓"
+    at a hardcoded .size(12.0), so it rendered in whatever emoji font the system supplied at
+    a size matching nothing else in the bar. now icons::LOCK / icons::LOCK_OPEN (U+E308 /
+    U+E30A, plain padlock pair, picked over the keyhole and laminated variants for legibility
+    at bar size) rendered like the bar's other icon-only buttons.
+
+---- [DONE] toggle "edit mode" to "view mode" on-click?
+ -- & move into realtime controls between pointcount and pause
+ -- now sits between the point-count button and Play/Pause; label + icon name the
+    current mode (CUBE "Edit Mode" / EYE "View Mode"), tooltip says what a click does
+ -- width jitter fixed (your note): "Edit Mode"/"View Mode" aren't equal width in a
+    proportional face, so toggling shoved Play/Pause sideways. all three buttons in that row
+    are now pinned to a derived width via new num::icon_button_width / text_button_width
+    (egui's Button::min_size, measuring real galleys -- no magic pixel numbers, no monospace).
+  - Play/Pause had the same defect ("Play" vs "Pause"), and so did the point-count button
+    ("999k pts" vs "1.5M pts"), which sits left of the toggle and so moved the whole row.
+    both fixed with the same helpers; point-count's bound comes from the shared label
+    formatter and the real per-machine device ceiling, so it can't drift.
+  - tests assert the computed widths are identical across states rather than just measuring
+    them once.
+
+---- [HALF DONE] changing infinite zoom didn't mark file as dirty, nor does changing render type
+ -- is render type even saving into files? it should
+ -- zoom: fixed. set_zoom_map (the enable toggle + which transform is the map, from the
+    Render panel and both Transforms context-menu items) bypassed history entirely. now
+    routes through commit_edit, so it marks dirty and undoes. the band sliders
+    (radius/levels/edge_guard/octave_falloff, via set_zoom_spec) were already correct.
+ -- render type: answered -- it is NOT scene data. no `renderer` field exists on Scene or
+    SceneMeta at all; it saves only to views/*.toml via View::renderer. so not marking dirty
+    is currently *correct* -- Ctrl+S genuinely doesn't write it.
+  - STILL OPEN, your call: promote it to scene data? follow how `exposure` was promoted --
+    add renderer: Option<String> to SceneMeta (mirroring color_mode's set_str/meta.remove
+    write-back), thread through Scene::load/save, then have set_render_mode +
+    toggle_render_mode write it and commit_edit. left undone: needs scene.rs, which the
+    symmetry work is mid-edit in.
+
+---- [DONE, GUI half] render job UI needs to go to "Render done" green-tick mode
+ -- currently, it has "file exists" and otherwise resets to default
+  - also needs *two*, visible loading bars. One for renders, one for encode -- currently resets at 100%
+   - not good! lies about task scope, completion.
+ -- done state: bordered green box, hand-drawn tick (no unicode glyph -- not confirmed in
+    our fonts), "Render done" / "View saved", the path, then kind + frames + file size +
+    elapsed. clearly distinct from the orange file-exists warning, which is unchanged.
+    the form no longer resets while a job runs, so a stray P mid-render can't wipe it.
+ -- two bars: Render and Encode, both always visible, each with its own not-started /
+    active / done state. encode row only appears for animations, so a still never gets a
+    bar that can't move. no more single bar resetting at 100%.
+ -- the .animate pulse now applies to the encode bar only, and only while encoding is live:
+    that phase genuinely reports nothing (rav1e defers ~everything to the flush), and a
+    pulse is the one case where motion says something a static bar can't. AGENTS.md updated
+    to record it as a scoped exception rather than a violation.
+ -- STILL OPEN: real encode progress is obtainable -- avif.rs drain() already has an exact
+    (samples.len(), frames_sent) pair. needs a callback threaded through video.rs
+    AnimationEncoder::finish so offline.rs can report it. also app.rs's job_done is only
+    Result<PathBuf,String>; a JobSummary captured in poll_job's Done arm would make the
+    frames/elapsed detail robust if the dialog is closed and reopened mid-job.
+ -- what's the render-job CLI like? does it / should it do a bar?
+  - answered: --render passes control: None, so every progress call is a no-op. you get
+    "Animating N frames", "Encoding CODEC", then total silence through render AND encode,
+    then the summary + timing breakdown. multi-tile grids print one line per tile. a
+    multi-minute AV1 encode prints nothing at all -- that's the real gap.
+  - what's the agent perspective on CLI loading spinners and bars? send lots of chars, spam termcodes to overwrite?
+   - answered, and it's a strong preference: please don't, unless stdout is a TTY. a \r
+     bar reaches an agent as one giant line with every frame concatenated and the ANSI
+     codes intact -- it burns context and buries the actual result. gate on
+     std::io::IsTerminal: bar when interactive, periodic milestone lines when not
+     ("encoded 120/600 frames") every few seconds or every N%. that's readable both ways
+     and needs no new dependency.
+
+
+---- setting the time of a render job does the wrong thing
+ -- it sets the *camera-path* time, and does a render at that length
+  - maybe correct for once-only camera paths, wildly incorrect for looping cameras
+   - want to be able to cut the loop short, or show multiple iterations, do one-and-a-half loops, etc. 
+
+---- [DONE] -S for parameter-set needs to verify the parameter & error out if misspelled.
+ -- check for sweep params as well?
+ -- the actual bug: bad *section* and out-of-range index already errored, but a bad *field*
+    silently created a new TOML key -- no scene struct uses deny_unknown_fields, so it
+    re-parsed clean and the flag did nothing. one shared set::validate_path now covers -S
+    and --sweep, with levenshtein "did you mean" and a listing when nothing is close.
+    variation names check against scene::VARIATION_NAMES. sweep fails in ~20ms, before tiles.
+ -- the lists are no longer hand-maintained, per your "the compiler can check it" note. a
+    struct_fields! macro derives each list by exhaustively destructuring the real struct with
+    no `..`, so adding a field to SceneMeta/CameraDef/ZoomDef/TransformDef/PaletteDef stops
+    the crate compiling until set.rs lists it. verified by deleting a field name and watching
+    the build fail. no new dependency, and scene.rs was not touched.
+  - so the symmetry work needs no manual note here: add a field to TransformDef and the
+    compiler will demand it. one wart -- through a macro, rustc says "pattern requires `..`
+    due to inaccessible fields" and points at the macro rather than naming the field.
+    rust-analyzer names it properly in-editor.
+  - residual gap, deliberately left and commented: serde ALIASES aren't struct fields, so
+    exhaustiveness can't see them. `iters` and `fog` live in a hand-kept META_FIELD_ALIASES.
+    a forgotten alias now fails safe though -- it rejects a legacy key loudly rather than
+    silently swallowing a typo.
+
+---- delete "identity" section in transforms window, make transform name at top of window  click-to-edit
+ -- dropdown or in place?
+
+---- full undo should mark file undirty
+
+---- needs an AI button! "LLM edit"
+ -- gives: freeform text field, goes to configured local LLM or agent, asks for scene change or ideas.
+
+---- grouping on explore window
+ -- mutate over strength
+ -- undo/redo grouped with history
+
+---- width-controlled buttons with icons (play/pause, view/edit mode) should hard-left align the icon
+ -- actually just left-align the whole textbox, icon and text?
+
+---- dimension-lock icon is now 1px different between open/close
+
+---- render job needs to go to %00.00 at least -- people will do hours-long renders.
+
+---- spots in bg on mp4 renders?
+ -- check on .avif as well?
 
 ---- naming 
 🕮⊞◌⃘⁂

@@ -5,9 +5,10 @@ notes    2
          render  point_size 0.0120 is over the 0.0045 crisp bound at 1080p
          colour  the gradient is flat (swing 0.02) — renders unshaded
 
-shape    centre  (-0.010, -0.010,  0.000)
-         spread  ( 0.575,  0.575,  0.000)
-         radius     1.344   occupancy      0.8%
+shape    centre     (-0.010, -0.010,  0.000)
+         spread     ( 0.575,  0.575,  0.000)
+         radius        1.344   occupancy      0.8%
+         dimension      1.00   (dust)   compactness   0.50   lacunarity   68.5
          to fill the frame   -S camera.distance=3.23
          for crisp points    -S meta.point_size=0.0045
          the scene sets      distance 3.000, point_size 0.0120

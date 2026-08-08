@@ -19,6 +19,73 @@ use super::hints::hinted;
 /// informational, e.g. mouse gestures that have no keyboard equivalent).
 type Row = (&'static str, &'static str, Option<HelpAction>);
 
+/// The release name, baked in from the repo's `version.txt` at compile time so
+/// there's exactly one place to bump it and no file to find at runtime.
+/// Trailing newline included, hence the `trim` at every use.
+const VERSION: &str = include_str!("../../version.txt");
+
+/// Side of the reserved logo square, in points.
+const LOGO_SIDE: f32 = 44.0;
+
+/// The logo we don't have yet: a faint outlined square holding its place.
+/// Outlined rather than left blank because an empty gap in a header reads as a
+/// layout bug. When there's an asset, replace the paint with an `egui::Image`
+/// of the same size and the rest of the row keeps its geometry.
+fn logo_slot(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(LOGO_SIDE, LOGO_SIDE), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    ui.painter().rect_stroke(
+        rect,
+        6.0,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Name, version, repo, and the two things a stranger most needs warning
+/// about. This is the window someone opens first, so the "what am I even
+/// running" answer lives at the top of it.
+fn draw_about(ui: &mut egui::Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        logo_slot(ui);
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Fracturize").heading());
+                ui.label(egui::RichText::new(VERSION.trim()).small().weak());
+            });
+            ui.label(egui::RichText::new("3D IFS fractal renderer").small().weak());
+            // `CARGO_PKG_REPOSITORY` rather than a literal: the URL is
+            // metadata about the crate, and Cargo.toml is where the rest of it
+            // lives. egui-winit's link handling opens this in a real browser.
+            let resp = ui.hyperlink_to(
+                egui::RichText::new(env!("CARGO_PKG_REPOSITORY")).small(),
+                env!("CARGO_PKG_REPOSITORY"),
+            );
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Source, scenes, and issues. Opens in your browser.",
+                "click: open the repository in a browser",
+            );
+        });
+    });
+
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Pre-release: the scene format, the GUI and CLI, the renderer and the \
+             math itself can all change without notice, so scenes and old renders \
+             may not survive an update. Roughly 95% vibecoded, mostly by Claudes, \
+             with minimal human involvement in the code.",
+        )
+        .small()
+        .weak(),
+    );
+}
+
 /// Every binding, grouped by the task it belongs to. Order within a section
 /// is roughly "most reached-for first". Keep this in sync with the keyboard
 /// dispatch in `main.rs::window_event` and the tables in AGENTS.md.
@@ -33,7 +100,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("Up / Down", "zoom in / out (steps the selection when one is made)", Some(HelpAction::Zoom)),
             ("Home", "put the camera on the selected transform's fixed point", Some(HelpAction::FrameSelected)),
             ("axis cross", "click a ball, bottom right, to look down that axis", None),
-            ("O / Z", "play / stop the camera flying its path", Some(HelpAction::CameraMotion)),
+            ("O / Z / Space", "play / stop the camera flying its path", Some(HelpAction::CameraMotion)),
             ("I", "invert mouse pitch (saved to prefs)", Some(HelpAction::InvertPitch)),
             ("V", "save current view to views/", Some(HelpAction::SaveView)),
         ],
@@ -86,7 +153,11 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
             ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
             ("F / Shift+F", "more / less atmospheric haze (depth cue)", Some(HelpAction::HazeIntensity)),
-            ("Space", "re-seed points (reset)", Some(HelpAction::Reset)),
+            // No key bound any more — Space now plays/stops the camera path
+            // (Camera section, above). Left clickable here: re-seeding points
+            // is rarely needed now that the renderers are more stable, but
+            // still occasionally useful, and this row is its only way in.
+            ("(click)", "re-seed points (reset)", Some(HelpAction::Reset)),
         ],
     ),
     (
@@ -114,7 +185,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Overlays",
         &[
             ("H / ? / F1", "toggle this window", Some(HelpAction::ToggleHelp)),
-            ("G", "toggle transform gizmos + labels", Some(HelpAction::ToggleGizmos)),
+            ("G / Tab", "toggle transform gizmos + labels", Some(HelpAction::ToggleGizmos)),
             ("Esc", "cancel: close a menu, a dialog, the browser, or the selection", None),
         ],
     ),
@@ -129,6 +200,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Keybinds, "Controls")
         .open(&mut open)
         .show(ctx, |ui| {
+            draw_about(ui, app);
+            ui.separator();
+
             // These three are settings, and they now look like enough of a
             // settings dialog to want saying so. Left here rather than given a
             // window of their own: three controls don't fill one, and this is

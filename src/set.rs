@@ -77,18 +77,14 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
         .split_once('=')
         .ok_or_else(|| format!("--set '{spec}': expected <path>=<value>"))?;
     let path = path.trim();
+    validate_path(path).map_err(|e| format!("--set {e}"))?;
     let value = parse_value(raw.trim());
     let to = shown(&value);
     let record = |from: Option<String>| Applied { path: path.to_string(), from, to: to.clone() };
 
+    // validate_path already confirmed segs.len() >= 2 and that section is one
+    // of the five recognised ones, so the splits below can't fail.
     let segs: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
-    if segs.len() < 2 {
-        return Err(format!(
-            "--set '{spec}': path needs a section, e.g. meta.haze, camera.distance, \
-             zoom.radius, palette.rotate, transform.<name-or-index>.weight"
-        ));
-    }
-
     let section = segs[0];
     let rest = &segs[1..];
 
@@ -96,12 +92,6 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
         return set_in_transform(doc, rest, value, path).map(record);
     }
 
-    if !matches!(section, "meta" | "camera" | "zoom" | "palette") {
-        return Err(format!(
-            "--set '{path}': unknown section '{section}' (expected meta, camera, \
-             zoom, palette or transform)"
-        ));
-    }
     let table = doc
         .get_mut(section)
         .and_then(Item::as_table_mut)
@@ -109,6 +99,237 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
             format!("--set '{path}': this scene has no [{section}] table to set into")
         })?;
     set_path(&mut TableRef::Table(table), rest, value, path).map(record)
+}
+
+/// Derive a struct's real field list, and *prove* it's the real one.
+///
+/// The `$ty { $($field),+ }` pattern below carries no `..`, and Rust's struct
+/// patterns are exhaustive: that pattern fails to compile unless every field
+/// of `$ty` is named in it. So the moment `scene.rs` or `palette/spec.rs`
+/// gains a field on one of these structs and this macro's invocation isn't
+/// updated to match, `cargo check` fails right here — "pattern does not
+/// mention field `whatever`" — instead of the new field silently becoming a
+/// `--set`/`--sweep` path nothing validates. That failure mode is exactly
+/// what `validate_path` exists to close off in the first place; this closes
+/// it one level up, with the compiler as the checker instead of a human
+/// re-reading `scene.rs` on every change.
+///
+/// The generated function is never called — it exists purely to make the
+/// compiler type-check the pattern — hence `#[allow(dead_code,
+/// unused_variables)]` on it.
+///
+/// What this cannot see: `#[serde(alias = "...")]`. An alias is a second
+/// TOML key accepted for an *existing* field, not a field of its own, so it
+/// never appears in a destructuring pattern and there is nothing here for
+/// the compiler to check it against. Where a struct has one (only
+/// `SceneMeta` does, today), its derived list is unioned with a
+/// hand-maintained alias list at the call site — see `META_FIELD_ALIASES`
+/// below. That union is the one part of this mechanism that can still
+/// silently drift; forgetting to update it only makes a legal old-style key
+/// report as unknown, which is a far smaller failure than the one this file
+/// guards against (a bad key being silently accepted).
+macro_rules! struct_fields {
+    ($assert_fn:ident, $ty:path, $($field:ident),+ $(,)?) => {{
+        #[allow(dead_code, unused_variables)]
+        fn $assert_fn(v: $ty) {
+            let $ty { $($field),+ } = v;
+        }
+        const FIELDS: &[&str] = &[$(stringify!($field)),+];
+        FIELDS
+    }};
+}
+
+/// The section and field names a scene file actually understands. None of
+/// `scene.rs`'s TOML structs use `deny_unknown_fields` — an unrecognised key
+/// is not a parse error anywhere else in the program, so a misspelled
+/// `--set`/`--sweep` path (`meta.wieght`, `camera.distanc`) would otherwise
+/// add a key nothing reads and silently do nothing. This list is what turns
+/// that into a hard error.
+///
+/// Each list below is derived from its struct by `struct_fields!` rather
+/// than copied out by hand, so it cannot go stale: an added field either
+/// gets listed here or the crate stops compiling. Variation names get the
+/// same treatment a different way: `scene::VARIATION_NAMES` already *is* the
+/// closed vocabulary `parse_variations` enforces at load time, so there is
+/// nothing to derive — it's used directly.
+const META_FIELDS: &[&str] = struct_fields!(
+    _assert_scene_meta_exhaustive,
+    crate::scene::SceneMeta,
+    name,
+    author,
+    point_size,
+    points_per_frame,
+    decay,
+    color_speed,
+    color_falloff,
+    color_contrast,
+    color_mode,
+    background,
+    haze,
+    exposure,
+    point_count,
+);
+/// `#[serde(alias = ...)]` names on `SceneMeta`: real, accepted `[meta]` keys
+/// that have no field of their own (`iters` for `points_per_frame`, `fog`
+/// for `haze`), so `struct_fields!` cannot derive them — see the comment on
+/// the macro above. Hand-maintained; when adding a field to `SceneMeta`,
+/// check whether it comes with an alias, and if so add it here too.
+const META_FIELD_ALIASES: &[&str] = &["iters", "fog"];
+const CAMERA_FIELDS: &[&str] = struct_fields!(
+    _assert_camera_def_exhaustive,
+    crate::scene::CameraDef,
+    focus,
+    offset,
+    distance,
+    yaw,
+    pitch,
+    roll,
+    rotvec,
+    path_loop,
+    path_zoom_periods,
+    path_seconds,
+    path_ease,
+    path_closed,
+    path_zoom_loop,
+    path,
+);
+const ZOOM_FIELDS: &[&str] = struct_fields!(
+    _assert_zoom_def_exhaustive,
+    crate::scene::ZoomDef,
+    map,
+    radius,
+    levels,
+    octave_falloff,
+    edge_guard,
+    octave_fade,
+);
+const PALETTE_FIELDS: &[&str] = struct_fields!(
+    _assert_palette_def_exhaustive,
+    crate::palette::spec::PaletteDef,
+    name,
+    enabled,
+    cyclic,
+    interpolate,
+    rotate,
+    reverse,
+    stops,
+    cosine,
+    entries,
+);
+const TRANSFORM_FIELDS: &[&str] = struct_fields!(
+    _assert_transform_def_exhaustive,
+    crate::scene::TransformDef,
+    name,
+    translation,
+    scale,
+    rotation,
+    rotvec,
+    color,
+    weight,
+    color_value,
+    color_speed,
+    variations,
+    post_translation,
+    post_scale,
+    post_rotation,
+);
+
+/// Check that `path` names a real, settable parameter — independent of any
+/// particular scene file, so `--sweep` can call this before a scene is even
+/// chosen. What still needs the document (does this transform exist, is a
+/// key already present) stays in `apply_one`/`set_in_transform`; this only
+/// rules out the case that's never legitimate: a section, field, or
+/// variation name that isn't a parameter at all.
+pub fn validate_path(path: &str) -> Result<(), String> {
+    let segs: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if segs.len() < 2 {
+        return Err(format!(
+            "'{path}': path needs a section, e.g. meta.haze, camera.distance, \
+             zoom.radius, palette.rotate, transform.<name-or-index>.weight"
+        ));
+    }
+    let section = segs[0];
+    if section == "transform" {
+        if segs.len() < 3 {
+            return Err(format!(
+                "'{path}': expected a field after the transform, e.g. transform.{}.weight",
+                segs[1]
+            ));
+        }
+        check_field("transform field", &[TRANSFORM_FIELDS], segs[2], path)?;
+        if segs[2] == "variations" {
+            if let Some(&name) = segs.get(3) {
+                let variation_names: &[&str] = &crate::scene::VARIATION_NAMES;
+                check_field("variation", &[variation_names], name, path)?;
+            }
+        }
+        return Ok(());
+    }
+    // A slice of lists rather than one flat list: only `meta` needs a second
+    // source (its serde aliases, which `struct_fields!` cannot derive — see
+    // `META_FIELD_ALIASES`), but every section is checked the same way so
+    // that fact doesn't leak into the rest of this function.
+    let known: &[&[&str]] = match section {
+        "meta" => &[META_FIELDS, META_FIELD_ALIASES],
+        "camera" => &[CAMERA_FIELDS],
+        "zoom" => &[ZOOM_FIELDS],
+        "palette" => &[PALETTE_FIELDS],
+        _ => {
+            return Err(format!(
+                "'{path}': unknown section '{section}' (expected meta, camera, \
+                 zoom, palette or transform)"
+            ))
+        }
+    };
+    check_field(&format!("{section} field"), known, segs[1], path)
+}
+
+fn check_field(kind: &str, known: &[&[&str]], key: &str, path: &str) -> Result<(), String> {
+    if known.iter().any(|list| list.contains(&key)) {
+        return Ok(());
+    }
+    let all: Vec<&str> = known.iter().flat_map(|list| list.iter().copied()).collect();
+    match closest(key, &all) {
+        Some(guess) => {
+            Err(format!("'{path}': '{key}' is not a known {kind} (did you mean '{guess}'?)"))
+        }
+        None => Err(format!(
+            "'{path}': '{key}' is not a known {kind}. Valid: {}",
+            all.join(", ")
+        )),
+    }
+}
+
+/// The closest of `candidates` to `word`, if it's close enough to be worth
+/// guessing — within an edit distance of 2, which catches a transposition or
+/// a couple of typos (`wieght` -> `weight`) without matching two names that
+/// just happen to share a few letters.
+fn closest<'a>(word: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .map(|&c| (c, edit_distance(word, c)))
+        .min_by_key(|&(_, d)| d)
+        .filter(|&(_, d)| d <= 2)
+        .map(|(c, _)| c)
+}
+
+/// Levenshtein distance. Field and variation names are short (well under 20
+/// characters), so the plain O(n*m) table is cheap enough to run on every
+/// `--set`/`--sweep` path with no need to memoize.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut prev = row[0];
+        row[0] = i;
+        for j in 1..=b.len() {
+            let tmp = row[j];
+            row[j] = if a[i - 1] == b[j - 1] { prev } else { 1 + prev.min(row[j]).min(row[j - 1]) };
+            prev = tmp;
+        }
+    }
+    row[b.len()]
 }
 
 /// Resolve `transform.<name-or-index>.<rest>` against the `[[transform]]` array.
@@ -443,6 +664,71 @@ variations = { swirl = 0.35, linear = 0.65 }
     #[test]
     fn a_bad_axis_index_is_an_error() {
         assert!(err("transform.a.translation.w=1.0").contains("not an index"));
+    }
+
+    // --- misspelled fields, which used to be a silent no-op: the value was
+    // written under the wrong key and nothing downstream ever read it ---
+
+    #[test]
+    fn a_misspelled_meta_field_is_an_error_with_a_suggestion() {
+        let e = err("meta.exposre=1.0");
+        assert!(e.contains("'exposre' is not a known meta field"), "{e}");
+        assert!(e.contains("did you mean 'exposure'"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelled_camera_field_is_an_error() {
+        let e = err("camera.distanc=5.0");
+        assert!(e.contains("'distanc' is not a known camera field"), "{e}");
+        assert!(e.contains("did you mean 'distance'"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelled_transform_field_is_an_error() {
+        let e = err("transform.a.wieght=0.5");
+        assert!(e.contains("'wieght' is not a known transform field"), "{e}");
+        assert!(e.contains("did you mean 'weight'"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelled_variation_name_is_an_error() {
+        let e = err("transform.a.variations.swril=0.5");
+        assert!(e.contains("'swril' is not a known variation"), "{e}");
+        assert!(e.contains("did you mean 'swirl'"), "{e}");
+    }
+
+    #[test]
+    fn a_field_with_no_close_match_lists_the_valid_ones() {
+        let e = err("meta.xyzzy=0.5");
+        assert!(e.contains("Valid: name, author"), "{e}");
+    }
+
+    /// `struct_fields!` itself, exercised on a throwaway fixture rather than
+    /// one of the real scene structs: the derived list is exactly the field
+    /// names given, in order. The half of the mechanism this can't cover —
+    /// that an *unlisted* field fails the build — was verified by hand (see
+    /// the task report); it can't be a passing `#[test]`, because the whole
+    /// point is that it doesn't compile.
+    #[test]
+    fn struct_fields_derives_the_real_field_list() {
+        struct Fixture {
+            pub a: i32,
+            pub b: i32,
+            pub c: i32,
+        }
+        const FIXTURE_FIELDS: &[&str] =
+            struct_fields!(_assert_fixture_exhaustive, Fixture, a, b, c);
+        assert_eq!(FIXTURE_FIELDS, &["a", "b", "c"]);
+    }
+
+    /// The distinction this file has to get right: `point_count` is a real
+    /// `[meta]` field that this particular scene just doesn't set. That is
+    /// legitimate — the whole point of `--set` is to add such a key — and
+    /// must keep working even though the section-level check below now
+    /// rejects field names that were never real.
+    #[test]
+    fn a_real_field_absent_from_this_scene_can_still_be_set() {
+        assert!(set(&["meta.point_count=500"]).contains("point_count = 500"));
     }
 
     #[test]

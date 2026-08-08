@@ -266,6 +266,17 @@ pub struct CameraOverride {
     pub rotvec: Option<Vec3>,
     pub distance: Option<f32>,
     pub focus: Option<Vec3>,
+    /// Fly the scene's camera path to `t` in 0..1 and render *that* framing.
+    ///
+    /// Replaces the whole camera rather than one field of it, so it is applied
+    /// in [`effective_camera_folded`](crate::offline::effective_camera_folded),
+    /// the only place that has the path to sample; the fields above then adjust
+    /// what it lands on. Exists because a camera on a zoom loop is not
+    /// reachable by naming a distance: the descent twists as it scales, so
+    /// stepping the distance alone walks off the path a little more every
+    /// step, and the frames either side of a seam are exactly what anything
+    /// measuring the seam needs to compare.
+    pub path_t: Option<f32>,
 }
 
 impl CameraOverride {

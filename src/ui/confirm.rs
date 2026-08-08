@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::app::App;
 
 use super::hints::hinted;
+use super::icons;
 
 /// How long the control spends counting down before the confirm is available.
 ///
@@ -232,8 +233,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     // Say what the button does, not just what it throws away — the two acts
     // are one click here, and "Discard" alone doesn't say you're also leaving.
     let discard_label = match &pending {
-        Pending::Quit => "Discard & quit",
-        Pending::Load(_) => "Discard & open",
+        Pending::Quit => format!("{} Discard & quit", icons::TRASH),
+        Pending::Load(_) => format!("{} Discard & open", icons::TRASH),
     };
     let scene = app.scene.name.clone();
 
@@ -268,7 +269,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         ui.add_space(10.0);
 
         ui.horizontal(|ui| {
-            let resp = ui.button("Save");
+            let resp = ui.button((icons::SAVE, "Save"));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
@@ -300,7 +301,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 resolve = Some(Resolution::Discard);
             }
 
-            let resp = ui.button("Cancel");
+            let resp = ui.button((icons::X, "Cancel"));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,

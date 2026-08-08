@@ -47,3 +47,47 @@ pub const PAUSE: &str = "\u{E39E}";
 /// are roughly alphabetical but not reliably so, and `cube`'s neighbours in the
 /// obvious place turned out to be `circle`.
 pub const CUBE: &str = "\u{E1DA}";
+
+// -- Added for the "text buttons need icons too" pass. Every codepoint below
+// was located by rendering the vendored font's whole PUA range (E000-EE83, via
+// `fontTools.ttLib.TTFont.getBestCmap`) to contact sheets with Pillow and
+// reading the glyph off the page — not guessed and not carried over from
+// egui-phosphor's source, which doesn't build against this egui version (see
+// the module doc above). Existing constants above were trusted as already
+// verified by whoever added them.
+
+/// Save (scene, view) — Phosphor `floppy-disk`
+pub const SAVE: &str = "\u{E248}";
+/// Discard — Phosphor `trash`
+pub const TRASH: &str = "\u{E4A6}";
+/// Quit the app — Phosphor `power`
+pub const QUIT: &str = "\u{E3DA}";
+/// Screenshot. Deliberately not `VIDEO_CAMERA`: that icon means "the Camera
+/// window" elsewhere in this UI, and a screenshot isn't that — Phosphor
+/// `camera`, the plain stills camera.
+pub const CAMERA: &str = "\u{E10E}";
+/// Render job… (batch render dialog) — Phosphor `stack`, distinct from
+/// `SLIDERS` (the Render *window*, a different thing you open).
+pub const STACK: &str = "\u{E466}";
+/// Undo — Phosphor `arrow-u-up-left`, the hooked "undo" arrow
+pub const UNDO: &str = "\u{E018}";
+/// Redo — Phosphor `arrow-u-up-right`, mirror of `UNDO`
+pub const REDO: &str = "\u{E01A}";
+/// Reset to a default (camera path "Reset") — Phosphor `arrow-counter-clockwise`,
+/// a full-circle revert, deliberately different from `UNDO`/`REDO`: this isn't
+/// undoing an edit, it's throwing the path away and going back to the default.
+pub const RESET: &str = "\u{E038}";
+/// Level the camera — Phosphor `crosshair-simple`, read as "centre this back up"
+pub const TARGET: &str = "\u{E1D6}";
+/// Mutate the scene — Phosphor `shuffle`, distinct from `DICE` (a fresh random
+/// flame from nothing; this perturbs the one already on screen)
+pub const SHUFFLE: &str = "\u{E424}";
+/// Dimension-lock toggle: locked — Phosphor `lock`. Verified the same way as
+/// the block above (contact sheet over the vendored font's PUA range,
+/// rendered with Pillow and read off the page): the lock family sits at
+/// E2FA–E30A, several closed/open pairs deep (`lock-simple`, `lock-key`,
+/// `lock-laminated`, plain `lock`); this is the plain undecorated pair, the
+/// most legible at status-bar size.
+pub const LOCK: &str = "\u{E308}";
+/// Dimension-lock toggle: unlocked — Phosphor `lock-open`, mirror of `LOCK`.
+pub const LOCK_OPEN: &str = "\u{E30A}";

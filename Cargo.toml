@@ -2,6 +2,9 @@
 name = "fracturize"
 version = "0.1.0"
 edition = "2024"
+# Shown in the about block of the Controls window (src/ui/shortcuts.rs) via
+# CARGO_PKG_REPOSITORY. Matches the `origin` remote.
+repository = "https://github.com/HazelSh/fracturize"
 
 [dependencies]
 # Windowing and rendering

@@ -23,6 +23,15 @@ different points. That per-pixel noise is ~40x the signal here and swamps a
 difference image. It cancels in the mean, which is what the wrap actually
 moves — the picture dimming as an octave leaves.
 
+That 40x is not noise, and calling it noise here was wrong for about as long
+as this file has existed. It is the whole dot field being resampled in one
+frame, which is invisible on a dense scene and a visible twitch on a sparse
+one, and it is what `tools/zoom_twitch.py` measures and `rewrap` in
+`points/chaos.wgsl` fixes. This tool is still the right one for its own
+question — does a wrap move *light* — and mean brightness is still the right
+channel for that. Use both: brightness catches an edge or a density step,
+per-pixel catches a resample, and neither can see the other.
+
 Why not an animation render: `--render out.mp4` on a `path_zoom_loop` covers
 exactly one period and wraps the camera every frame, so the seam always comes
 out as one ordinary frame step whatever the band is doing. That check reports

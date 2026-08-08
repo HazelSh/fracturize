@@ -7,9 +7,10 @@ notes    3
          render  point_size 0.0018 is over the 0.0011 crisp bound at 1080p
          zoom    edge-guard ramp reaches into the view; raise zoom.radius
 
-shape    centre  ( 0.021,  0.023,  0.021)
-         spread  ( 0.016,  0.048,  0.033)
-         radius     0.061   occupancy      1.8%
+shape    centre     ( 0.021,  0.023,  0.021)
+         spread     ( 0.016,  0.048,  0.033)
+         radius        0.061   occupancy      1.8%
+         dimension      1.20   (dust)   compactness   0.54   lacunarity   92.2
          to fill the frame   -S camera.distance=0.80
          for crisp points    -S meta.point_size=0.0011
          the scene sets      distance 3.400, point_size 0.0018

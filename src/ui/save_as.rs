@@ -13,6 +13,7 @@
 use crate::app::App;
 
 use super::hints::hinted;
+use super::icons;
 
 /// Open state and in-progress filename. Lives on `UiState` so the text
 /// survives the frame loop; `None` means the dialog is closed.
@@ -190,7 +191,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.separator();
             ui.horizontal(|ui| {
                 let can_save = valid && (!exists || app.ui_state.save_as.allow_overwrite);
-                let resp = ui.add_enabled(can_save, egui::Button::new("Save"));
+                let resp = ui.add_enabled(can_save, egui::Button::new((icons::SAVE, "Save")));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
@@ -219,7 +220,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     app.ui_state.save_as.focus_field = true;
                 }
 
-                let resp = ui.button("Cancel");
+                let resp = ui.button((icons::X, "Cancel"));
                 let resp = hinted(resp, &mut app.ui_state, "Leave the scene where it is", "click: cancel");
                 if resp.clicked() {
                     close = true;

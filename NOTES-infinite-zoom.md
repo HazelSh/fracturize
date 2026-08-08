@@ -268,6 +268,149 @@ is `screen(S(x), S(C)) == screen(x, C)` — the transformed point goes with the
 transformed camera. Writing it down here in the hope of not doing it a third
 time.
 
+## The floor wasn't a floor
+
+*Added 2026-08-07, after Hazel watched `astral_lattice` loop and said something
+jumped at the seam without being able to say what.*
+
+Two sections up I measured a zoom loop's last-frame-to-first-frame step at
+1.12× the median adjacent step and wrote: **"The excess is the irreducible
+difference between two point samples of the same structure... There is no seam
+to find."** The first half is a correct description of what the number is. The
+second half does not follow from it, and I want to be precise about the gap,
+because I made the same move twice: `tools/zoom_seam.py` opens by explaining
+that per-pixel noise across a wrap is ~40× the signal and must be averaged out
+to see anything. Both times I identified the resample, and both times I filed
+it as the instrument's problem rather than the picture's.
+
+It is the picture's. A wrap leaves `S∞` alone and moves the camera by `A⁻¹`.
+That is exact for the *set* and not for a **sample** of it: the dots do not
+move, so every one of them lands on a different pixel. Nothing enters, nothing
+leaves, no light moves — mean frame brightness is flat across the seam, which
+is why the brightness instrument passes — and the entire dot field is
+nonetheless replaced in a single frame. Whether you can see that is a question
+about the scene, not about the wrap. On a dense attractor the dots are not
+individually resolvable and there is nothing to notice. On a sparse one they
+are, and it reads as a twitch: no direction, no edge, no region switching off,
+just everything being very slightly *different* for one frame. Hazel's
+description was "hard to pin down even for me", and that is exactly the
+signature of a change with no direction in it.
+
+The fix is one line of algebra and about forty of shader. `screen(A⁻¹x, A⁻¹C)
+== screen(x, C)`, so carry the point buffer by the same `A⁻¹` the camera took
+and every dot keeps its pixel. What that cannot do alone is stay bounded —
+carrying camera *and* points is the wrap undone, and the precision it exists to
+save goes with it. So the deal is re-folded: a point carried off the outer end
+of the band comes back at the inner end, which costs the octave assignment
+rotating by one and moves only the outermost octave — the one `edge_guard` has
+already taken to nothing. `rewrap` in `points/chaos.wgsl`. Written as a single
+power rather than a shift plus a correction, which bounds it inside one band's
+worth however far the wrap jumped:
+
+```
+m = idx − ((idx − turns) mod n)
+```
+
+Measured with `tools/zoom_twitch.py`, which is `zoom_seam.py` with the
+averaging taken out and two references added — an ordinary frame of motion, and
+one camera drawn from two independent fills of the buffer, which is what a pure
+resample costs:
+
+```
+                 seam   ordinary   floor    before → after
+astral_lattice   4.22 → 2.26   2.29   4.20     1.85× → 0.99× ordinary
+wellspiral      15.10 → 9.91   9.96  13.83     1.52× → 1.00× ordinary
+```
+
+Before the carry, both seams sat on the resample floor to within a few percent
+— which is the diagnosis stated as a number, and is why I trust it: the seam
+did not merely resemble a resample, it cost exactly one.
+
+Three things I'd want a future me to take from this rather than the fix.
+
+**"Every difference is signal" and "this difference is noise" cannot both be
+true of the same instrument.** `zoom_seam.py` says the first in its docstring
+and does the second in its code. The moment a tool has to discard a channel to
+see its signal, the discarded channel is a hypothesis, not a nuisance — and
+it should be measured, not averaged. The 40× was sitting in that file for
+months with its size written down.
+
+**The seam lands on the loop boundary for a structural reason, and I'd have
+found it faster by asking why.** `band` is the scene's authored camera
+distance, and a one-key zoom loop puts its only key at exactly that distance.
+So the fold fires on the first frame after `t` rolls over, on every scene
+authored the ordinary way — `astral_lattice`, `wellspiral` and `rimefall` all
+report the wrap at frame 1. It is not a coincidence that the twitch is where
+the loop closes; it is the same number twice.
+
+**A still renderer that folds the camera has to carry the buffer too.** Not for
+the still, where it is invisible — it permutes which point sits on which octave
+of a band that is unchanged either way — but because two stills either side of
+a fold are otherwise not two frames of one flight, and anything measuring a
+seam is comparing exactly those. `--path-t` exists so a frame of a flight can
+be named at all (the descent twists as it scales, so stepping `--distance`
+walks off the path), and `effective_camera_folded` is why a run of them is a
+run of frames.
+
+## Three ways not to spread the carry
+
+*Added 2026-08-07. Hazel asked whether the carry pass could be done ahead of
+time — "keeping some points in the new coords, some in the old, update with the
+fizz, then swap them, double-buffer style". It is the right instinct and I
+talked myself into agreeing before I checked it. Writing down what the check
+said, because two of these are attractive enough to be proposed again.*
+
+The pass costs **0.93 ms on an 8M buffer** (0.242 ms at 2M — linear, and at the
+memory floor: 256 MB of streaming read and write). Writing 12 bytes instead of
+the full 16-byte point measured 0.934 against 0.925, i.e. nothing; it is the
+same cache line. So the only lever is *when* it happens, not how fast it is.
+
+**Doing it at draw time instead.** This one nearly worked, and the fact behind
+it is worth keeping even though the design isn't: the per-point carry looks
+per-octave but collapses to **two similarities split at one radius**. With
+`t = turns mod n` the power is `t` for every octave at or inside `t` and `t − n`
+for the rest, two values however deep the zoom has gone. So the renderer could
+do the whole carry with a `length`, a compare and a `mat3` — on a point it is
+already reading, with no extra memory traffic and no buffer write at all.
+Measured: **0.85 ms per frame**, against 0.93 ms per *period*. About 960× the
+total work for a flat profile. Branchless `select` was slightly worse (0.365 s
+vs 0.350 s over 48 frames), so it is the arithmetic, not divergence. Reverted.
+
+**Migrating early, uncompensated — the "hide it in the fizz" one.** This is the
+one I agreed to before checking, and it does not work at all. The requirement
+is not "the point ends up in the right place"; it is that a point's screen
+position is unchanged *across the wrap frame boundary*, and that is measured
+from wherever the point is **at the wrap instant**. Move it early and you have
+moved the goalposts with it: at the wrap it still needs another `A⁻¹`. So a
+pre-migrated point twitches when it migrates *and* again at the wrap, the
+wrap's own twitch is undiminished, and the scheme is strictly worse than doing
+nothing. Three lines of numeric check would have caught it:
+
+```
+carried at the wrap:            screen before [0.174, 0.087]  after [0.174, 0.087]
+pre-migrated, not carried:      screen before [0.425, 0.172]  after [0.174, 0.087]
+```
+
+**Migrating early, compensated.** Fixes the above — the renderer undoes the
+early move for display until the swap — but the compensation is the draw-time
+carry above, charged on whatever fraction has already moved. That fraction
+grows to the whole buffer, so the cost *peaks at the full 0.85 ms* just before
+the swap, which is what it was trying to avoid. Short windows don't help: the
+peak is set by the split reaching 100%, not by how long it takes to get there.
+A genuine second buffer does avoid it — that is what "double-buffer" properly
+means here — at the price of doubling the largest allocation in the renderer
+(128 MB at 8M points), on the one thing this renderer is actually short of.
+
+And then the measurement that should have come first. On the reference desktop
+the pass is **not detectable in frame times at all**: 129 wraps, vsynced at
+120 Hz, 3.9% of wrap frames missed a refresh against 2.7% of ordinary ones —
+and the same comparison with the pass taking its own `queue.submit` instead of
+riding the frame's encoder gave 3.1% against 2.6%, i.e. the two are the same
+and both are the ambient rate. Ordinary frames on this renderer have a p95 of
+11.5 ms against an 8.3 ms refresh; 0.93 ms is well inside that. **A cost you
+cannot measure is not a cost you can optimise**, and I went three designs deep
+before checking whether the thing I was removing showed up anywhere.
+
 ## Where I'd go next
 
 **Zoom toward a point that isn't the fixed point.** The fixed points of `f`

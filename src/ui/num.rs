@@ -143,6 +143,66 @@ pub fn drag(
     )
 }
 
+/// Width in points of `text` laid out (but not painted or allocated) at
+/// `font` — the measuring half of [`icon_button_width`] and
+/// [`text_button_width`], split out so the two don't compute it two
+/// different ways.
+fn galley_width(ui: &egui::Ui, font: &egui::FontId, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_string(), font.clone(), egui::Color32::PLACEHOLDER)
+        .size()
+        .x
+}
+
+/// Width, in points, of the widest of several `(icon, text)` toolbar-button
+/// captions, at the current button text style plus the usual frame padding —
+/// pass straight to `Button::min_size` (`egui::vec2(width, 0.0)`) so a toggle
+/// whose caption changes length between states — Edit Mode/View Mode,
+/// Play/Pause — doesn't shove whatever sits to its right sideways when it
+/// flips. Same defect as an unstable numeric cell, just with words instead of
+/// digits.
+///
+/// Deliberately not [`mono_width`]: these are icon+word pairs set in the
+/// toolbar's proportional face, where a fixed per-character advance doesn't
+/// hold, and switching a single toggle to monospace would look out of place
+/// beside its neighbours. So this measures the actual candidate strings —
+/// icon glyph, the layout's icon-to-text gap, then the text galley — the same
+/// three pieces `AtomLayout` lays out when the button is actually drawn,
+/// rather than assuming anything about their widths.
+pub fn icon_button_width(ui: &egui::Ui, candidates: &[(&str, &str)]) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let gap = ui.spacing().icon_spacing;
+    let widest = candidates
+        .iter()
+        .map(|(icon, text)| {
+            let icon_w = icon
+                .chars()
+                .next()
+                .map_or(0.0, |c| ui.ctx().fonts_mut(|f| f.glyph_width(&font, c)));
+            icon_w + gap + galley_width(ui, &font, text)
+        })
+        .fold(0.0_f32, f32::max);
+    widest + 2.0 * ui.spacing().button_padding.x
+}
+
+/// [`icon_button_width`]'s icon-less sibling, for a button whose caption
+/// comes out of a formatter rather than a couple of fixed strings — the
+/// point-count readout, which prints anywhere from `"100k pts"` up to
+/// whatever `"{max:.1}M pts"` comes out to on this machine's VRAM.
+///
+/// `candidates` should be the *actual* boundary strings the formatter can
+/// produce — e.g. the largest value each of its branches can print — not a
+/// guess at a wide-looking string. A candidate list built from a fixed
+/// literal instead of the formatter's own bounds will silently stop being
+/// the true widest case the moment either changes, which is exactly the kind
+/// of drift this module exists to rule out.
+pub fn text_button_width(ui: &egui::Ui, candidates: &[&str]) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let widest =
+        candidates.iter().map(|text| galley_width(ui, &font, text)).fold(0.0_f32, f32::max);
+    widest + 2.0 * ui.spacing().button_padding.x
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +254,80 @@ mod tests {
         // The widget clips it. Truncating here would silently show "12.3" for
         // 12345.6, which is worse than a clipped gauge.
         assert_eq!(cell(12345.6, 1, 4), "12345.6");
+    }
+
+    #[test]
+    fn icon_button_width_is_the_same_for_both_toggle_states() {
+        // Real fonts (Phosphor included), not egui's empty test fonts, so the
+        // numbers reflect what actually ships — this is the toolbar's
+        // Edit Mode/View Mode toggle and Play/Pause transport button.
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let mode_candidates = [
+                (super::super::icons::CUBE, "Edit Mode"),
+                (super::super::icons::EYE, "View Mode"),
+            ];
+            let mode_width = icon_button_width(ui, &mode_candidates);
+            // Every candidate individually, fed back through as a lone
+            // "both states" slice, must fit inside the shared width — that's
+            // the property that keeps the button from moving.
+            for candidate in mode_candidates {
+                assert!(icon_button_width(ui, &[candidate]) <= mode_width);
+            }
+            println!("Edit Mode/View Mode shared width: {mode_width}");
+
+            let play_candidates =
+                [(super::super::icons::PLAY, "Play"), (super::super::icons::PAUSE, "Pause")];
+            let play_width = icon_button_width(ui, &play_candidates);
+            for candidate in play_candidates {
+                assert!(icon_button_width(ui, &[candidate]) <= play_width);
+            }
+            println!("Play/Pause shared width: {play_width}");
+
+            // The two toggles' widths aren't expected to match each other,
+            // just to each be internally state-independent, and to be
+            // plausible (a two-glyph icon+word button in a normal UI font is
+            // on the order of tens of points, not near zero).
+            assert!(mode_width > 20.0, "mode_width = {mode_width}");
+            assert!(play_width > 20.0, "play_width = {play_width}");
+        });
+    }
+
+    #[test]
+    fn point_count_width_covers_every_representative_count() {
+        use super::super::toolbar::{POINT_COUNT_K_M_BOUNDARY, point_count_label};
+
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            // A stand-in device ceiling: tests can't depend on the GPU they
+            // happen to run on, but this exercises the same k/M crossing and
+            // multi-digit M magnitudes a real `max_point_capacity()` would.
+            let max_capacity = 50_000_000u32;
+            let width = text_button_width(
+                ui,
+                &[
+                    &point_count_label(POINT_COUNT_K_M_BOUNDARY - 1),
+                    &point_count_label(max_capacity),
+                ],
+            );
+            println!("point-count button width (50M ceiling): {width}");
+
+            // A spread across both formats and their digit-count boundaries:
+            // the slider's floor, the k/M crossing (including 999_999, where
+            // `{:.0}` rounds a k-value up an extra digit to "1000k"), and
+            // several M magnitudes up to the simulated ceiling.
+            for capacity in
+                [100_000, 999_000, 999_999, 1_000_000, 9_900_000, max_capacity]
+            {
+                let label = point_count_label(capacity);
+                let label_width = text_button_width(ui, &[&label]);
+                assert!(
+                    label_width <= width,
+                    "{label:?} ({label_width}) exceeds the computed bound ({width})"
+                );
+            }
+        });
     }
 }

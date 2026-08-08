@@ -10,6 +10,7 @@
 //! exploration buffer can coexist.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::app::App;
 use crate::render_job::{
@@ -17,6 +18,11 @@ use crate::render_job::{
 };
 
 use super::hints::hinted;
+
+/// The app's established "this is healthy/good" green — the p99 sparkline in
+/// `ui::status_bar` uses the same value for a frametime under budget. Reused
+/// here rather than invented fresh, so "done" reads the same everywhere.
+const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(90, 220, 120);
 
 /// Size presets, plus the custom escape hatch.
 /// Output sizes, smallest first.
@@ -33,6 +39,27 @@ const SIZE_PRESETS: [(&str, u32, u32); 6] = [
     ("1440p", 2560, 1440),
     ("4K", 3840, 2160),
 ];
+
+/// A frozen record of what a job was asked to do, captured the instant
+/// "Start" is clicked — not read live off the form later, because the form
+/// is the *next* job's setup the moment this one is running: `draw_form`'s
+/// fields stay editable under a finished job's summary so the next render can
+/// be queued up without closing the dialog, and a live read would let that
+/// editing relabel a job already in flight or already done.
+///
+/// This is what lets the completed-job panel say something a bare
+/// `Result<PathBuf, String>` (the only thing `App::job_done` carries — see
+/// the report) can't: what kind of job it was, how many frames, how long it
+/// took. `settled_secs` is filled in exactly once, the first frame this
+/// dialog observes the job is no longer running — frozen there, so the
+/// figure doesn't read as a live counter for as long as the dialog happens to
+/// stay open afterward.
+#[derive(Clone)]
+pub struct StartedJob {
+    pub kind: JobKind,
+    pub clicked_at: Instant,
+    pub settled_secs: Option<f32>,
+}
 
 /// The dialog's in-progress form. Kept whole rather than derived from
 /// `JobParams` so switching modes doesn't lose the other mode's settings.
@@ -55,6 +82,9 @@ pub struct RenderJobForm {
     /// Which animation file to write. Only read when `mode` is `Animation`,
     /// but kept across a switch to Still and back so the choice sticks.
     pub format: crate::video::Format,
+    /// A snapshot of the job launched from this form, if `Start` has been
+    /// clicked and the launch wasn't rejected. See `StartedJob`.
+    pub started: Option<StartedJob>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,6 +115,7 @@ impl Default for RenderJobForm {
             seconds: 8.0,
             quality: 60,
             format: crate::video::Format::Avif,
+            started: None,
         }
     }
 }
@@ -121,6 +152,15 @@ impl RenderJobForm {
 /// Open the dialog, seeding it from what's on screen so the obvious job — "the
 /// thing I'm looking at, but properly" — takes one more click.
 pub fn open(app: &mut App) {
+    // A job in flight: don't reseed. The form isn't on screen right now
+    // (`draw_running` reads the job handle, not the form) and a full reset
+    // here would wipe `started` — the snapshot the completed-job panel needs
+    // — out from under a render that hasn't finished yet, if P gets pressed
+    // again while it's running (a plausible reflex, not just a corner case).
+    if app.job().is_some() {
+        app.ui_state.render_job.open = true;
+        return;
+    }
     let mut form = RenderJobForm {
         open: true,
         splat: app.render_mode == crate::app::RenderMode::Splat,
@@ -199,18 +239,35 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
         ui.separator();
     }
 
+    // Freeze "how long did that take" the first frame this dialog sees the
+    // job is no longer running, rather than recomputing it every frame the
+    // dialog happens to stay open afterward — a live counter past the finish
+    // line would read as the job still going. `draw_form` (this function) is
+    // only ever called once `App::job` is already `None` — see `draw`'s
+    // dispatch above — so reaching here at all is the signal.
+    if let Some(started) = app.ui_state.render_job.started.as_mut() {
+        if started.settled_secs.is_none() {
+            started.settled_secs = Some(started.clicked_at.elapsed().as_secs_f32());
+        }
+    }
+
     if let Some(err) = app.job_error() {
         let err = err.to_string();
         ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
-    } else if let Some(done) = app.job_done() {
-        let (text, color) = match done {
-            Ok(p) => (format!("Wrote {}", p.display()), ui.visuals().weak_text_color()),
+    } else if let Some(done) = app.job_done().cloned() {
+        match done {
+            Ok(path) => draw_done_panel(ui, app, &path),
             Err(e) if e == crate::render_job::CANCELLED => {
-                ("Cancelled — nothing was written.".to_string(), ui.visuals().weak_text_color())
+                ui.label(
+                    egui::RichText::new("Cancelled — nothing was written.")
+                        .color(ui.visuals().weak_text_color())
+                        .small(),
+                );
             }
-            Err(e) => (e.clone(), ui.visuals().error_fg_color),
-        };
-        ui.label(egui::RichText::new(text).color(color).small());
+            Err(e) => {
+                ui.label(egui::RichText::new(e).color(ui.visuals().error_fg_color).small());
+            }
+        }
     }
 
     ui.horizontal(|ui| {
@@ -228,6 +285,15 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
             "click: start the render job",
         );
         if resp.clicked() {
+            // Only snapshot a launch that will actually run — the same check
+            // `start_job` makes internally — so a rejected click (over the
+            // GPU's buffer limit, say) doesn't leave a phantom `started` for
+            // a job that never existed.
+            let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
+            if params.rejection(limit).is_none() {
+                app.ui_state.render_job.started =
+                    Some(StartedJob { kind: params.kind, clicked_at: Instant::now(), settled_secs: None });
+            }
             app.start_job(params);
         }
 
@@ -411,7 +477,13 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
     let resp = ui.add(
         egui::Slider::new(&mut millions, 0.5..=max_m)
             .logarithmic(true)
-            .custom_formatter(|v, _| format!("{:.1}M", v))
+            // Shared with the interactive point-count slider (render_panel.rs)
+            // so a count reads the same k/M units in both dialogs, and so
+            // typing an exact value actually parses back — a formatter with
+            // no matching parser leaves egui trying to `f64::from_str` its
+            // own "1.5M" on Enter, which fails silently.
+            .custom_formatter(|v, _| super::render_panel::format_points(v))
+            .custom_parser(super::render_panel::parse_points)
             .text("points"),
     );
     let resp = hinted(
@@ -621,9 +693,154 @@ fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
     Some((mid * 0.6, mid * 1.4))
 }
 
+/// The completed-this-session state: a green check, "Render done", and
+/// whatever this dialog still genuinely knows about the job that wrote
+/// `path`. Deliberately distinct from the plain warning `draw_filename`
+/// shows when the chosen output path merely happens to exist on disk — that
+/// warning is a fact about the filesystem and is unchanged by this; this
+/// panel is a fact about what this session just did, and only appears when
+/// that's true.
+fn draw_done_panel(ui: &mut egui::Ui, app: &mut App, path: &std::path::Path) {
+    let started = app.ui_state.render_job.started.clone();
+    let is_view = matches!(started.as_ref().map(|s| s.kind), Some(JobKind::ViewDescriptor));
+    let heading = if is_view { "View saved" } else { "Render done" };
+
+    egui::Frame::NONE
+        .fill(DONE_GREEN.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(1.0, DONE_GREEN.gamma_multiply(0.6)))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                check_mark(ui, DONE_GREEN);
+                ui.label(egui::RichText::new(heading).color(DONE_GREEN).strong());
+            });
+            ui.label(egui::RichText::new(format!("Wrote {}", path.display())).small());
+
+            // Everything past here is a bonus, shown only when it's actually
+            // known — see `StartedJob`'s doc for why frame count and elapsed
+            // time aren't always available (the form can be reseeded between
+            // a job starting and its summary being read), and the report for
+            // what it would take to make them unconditional.
+            let mut details = Vec::new();
+            if let Some(s) = &started {
+                if !is_view {
+                    details.push(s.kind.label().to_string());
+                    let frames = s.kind.frames();
+                    if frames > 1 {
+                        details.push(format!("{} frames", frames));
+                    }
+                }
+                if let Some(secs) = s.settled_secs {
+                    details.push(format!("took {}", format_duration(secs)));
+                }
+            }
+            if let Ok(meta) = std::fs::metadata(path) {
+                details.push(human_bytes(meta.len()));
+            }
+            if !details.is_empty() {
+                ui.label(egui::RichText::new(details.join(" · ")).small().weak());
+            }
+        });
+}
+
+/// A small checkmark, drawn rather than typed: this app's "drawn, not typed"
+/// rule (see `ui::radio`'s ring-and-dot marks and AGENTS.md) exists because
+/// the obvious Unicode glyphs (✓ U+2713, ✔ U+2714) aren't confirmed present
+/// in any font this app ships or falls back to, and would risk tofu.
+fn check_mark(ui: &mut egui::Ui, color: egui::Color32) {
+    let size = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let stroke = egui::Stroke::new(2.0, color);
+    let p0 = egui::pos2(rect.left() + rect.width() * 0.15, rect.top() + rect.height() * 0.55);
+    let p1 = egui::pos2(rect.left() + rect.width() * 0.42, rect.bottom() - rect.height() * 0.15);
+    let p2 = egui::pos2(rect.right() - rect.width() * 0.12, rect.top() + rect.height() * 0.2);
+    ui.painter().line_segment([p0, p1], stroke);
+    ui.painter().line_segment([p1, p2], stroke);
+}
+
+/// Which of the two named progress bars (if either) a job's current phase
+/// name belongs to.
+///
+/// Coupled to the literal phase strings `src/offline.rs` passes to
+/// `JobControl::phase` — `"setting up"`, `"filling points"`, `"rendering"` /
+/// `"rendering frames"`, `"saving"` / `"encoding"` — because there is no
+/// shared enum between that file (owned elsewhere as this is written) and
+/// this dialog. An unrecognised phase (including the handle's initial
+/// `"starting"`) falls back to `Setup`, which just reads both bars as
+/// not-started rather than misdrawing.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    Setup,
+    Render,
+    Encode,
+}
+
+fn stage_of(phase: &str) -> Stage {
+    match phase {
+        "rendering" | "rendering frames" => Stage::Render,
+        "encoding" | "saving" => Stage::Encode,
+        _ => Stage::Setup,
+    }
+}
+
+enum BarState {
+    NotStarted,
+    Active(Option<f32>),
+    Done,
+}
+
+fn bar_state(current: Stage, bar: Stage, fraction: Option<f32>) -> BarState {
+    match current.cmp(&bar) {
+        std::cmp::Ordering::Less => BarState::NotStarted,
+        std::cmp::Ordering::Equal => BarState::Active(fraction),
+        std::cmp::Ordering::Greater => BarState::Done,
+    }
+}
+
+/// One labelled bar in the two-phase progress display.
+///
+/// `allow_pulse` governs the one deliberate exception to this app's
+/// zero-animation rule (see AGENTS.md): a bar whose phase genuinely never
+/// reports a total pulses instead of sitting dead at 0%, because motion is
+/// the only way to say "working, extent unknown" that a static bar can't.
+/// Every other state here — not-started, a real fraction, done — is static.
+fn progress_row(ui: &mut egui::Ui, label: &str, state: BarState, allow_pulse: bool) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [60.0, ui.spacing().interact_size.y],
+            egui::Label::new(egui::RichText::new(label).small()),
+        );
+        let (fraction, text, animate, fill) = match state {
+            BarState::NotStarted => (0.0, "not started".to_string(), false, None),
+            BarState::Active(Some(f)) => {
+                (f, format!("{:>3}%", (f * 100.0).round() as i32), false, None)
+            }
+            // No fraction while active means the underlying phase hasn't
+            // reported one — either it's the genuinely-unknown-extent case
+            // (encoding) or a brief gap right as a phase starts, before its
+            // first progress report arrives. Only the former pulses.
+            BarState::Active(None) if allow_pulse => (0.0, "working…".to_string(), true, None),
+            BarState::Active(None) => (0.0, "  0%".to_string(), false, None),
+            BarState::Done => (1.0, "done".to_string(), false, Some(DONE_GREEN)),
+        };
+        let mut bar = egui::ProgressBar::new(fraction)
+            .desired_width(ui.available_width())
+            .text(text)
+            .animate(animate);
+        if let Some(c) = fill {
+            bar = bar.fill(c);
+        }
+        ui.add(bar);
+    });
+}
+
 fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // Read what the display needs before taking `&mut` for the buttons.
-    let (phase, fraction, elapsed, remaining, paused, cancelling, cancel_arm, log, out) = {
+    let (phase, fraction, elapsed, remaining, paused, cancelling, cancel_arm, log, out, kind) = {
         let job = app.job().expect("caller checked");
         (
             job.phase,
@@ -635,6 +852,7 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             job.cancel_arm,
             job.log.clone(),
             job.params.out_path.clone(),
+            job.params.kind,
         )
     };
 
@@ -648,14 +866,22 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 
-    // Explicit available width, not `f32::INFINITY`: a `TextEdit` clamps an
-    // infinite desired width to what's there, but `ProgressBar` takes it
-    // literally and the auto-sized window it's in ends up with a degenerate
-    // rect that never gets drawn at all.
-    let bar = egui::ProgressBar::new(fraction.unwrap_or(0.0))
-        .desired_width(ui.available_width())
-        .animate(fraction.is_none() && !paused);
-    ui.add(bar);
+    // Two named bars, both visible for the whole job, so a person watching
+    // can always tell which of the two genuinely slow phases it's in and how
+    // far that one has got — a single bar that hits 100% and restarts for the
+    // next phase reads as either finished or lying, and used to be exactly
+    // that. `progress_row`'s `ProgressBar` gets an explicit available width,
+    // not `f32::INFINITY`: a `TextEdit` clamps an infinite desired width to
+    // what's there, but `ProgressBar` takes it literally and the auto-sized
+    // window it's in ends up with a degenerate rect that never gets drawn.
+    let stage = stage_of(phase);
+    progress_row(ui, "Render", bar_state(stage, Stage::Render, fraction), false);
+    // A still has no encode phase — the PNG write is fast and never reports
+    // progress at all, so a bar for it could never move (see the report for
+    // why animation's encode bar can't either, today).
+    if matches!(kind, JobKind::Animation { .. }) {
+        progress_row(ui, "Encode", bar_state(stage, Stage::Encode, fraction), !paused);
+    }
 
     ui.label(
         egui::RichText::new(match remaining {

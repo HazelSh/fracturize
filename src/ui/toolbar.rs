@@ -11,6 +11,7 @@ use crate::app::App;
 
 use super::hints::hinted;
 use super::icons;
+use super::num;
 use super::render_panel;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
@@ -20,28 +21,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             ui.add_space(4.0);
 
             draw_file_menu(ui, app);
-            ui.separator();
-
-            // Gizmos leads the toggle group. It isn't a window-opener — it
-            // turns a layer of the interface on and off, in the viewport — so
-            // it sits at the near end of the toggles rather than inside the
-            // run of panel buttons, where it read as one of them.
-            //
-            // It was labelled "Edit", which next to a row of window toggles
-            // reads as an Edit *menu*, and to anyone arriving from Blender as
-            // Edit *Mode* — a large concept that doesn't exist here. It shows
-            // gizmos. Call it that.
-            let resp = ui.selectable_label(app.show_gizmos, (icons::CUBE, "Gizmos"));
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                "Show transform gizmos + name labels (G)",
-                "toggle the transform gizmos",
-            );
-            if resp.clicked() {
-                app.toggle_gizmos();
-            }
-
             ui.separator();
 
             // Then the windows, ordered by task rather than by module: what am
@@ -83,6 +62,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
             ui.separator();
             draw_undo_redo(ui, app);
+
             ui.separator();
             draw_quick_controls(ui, app);
 
@@ -142,7 +122,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
         // a slab of empty space.
         ui.set_min_width(168.0);
 
-        if menu_item(ui, app, "New", "Ctrl+N", "Start over on an empty canvas. An edit like any other — one Ctrl+Z brings back what was on screen.") {
+        if menu_item(ui, app, &format!("{} New", icons::FILE), "Ctrl+N", "Start over on an empty canvas. An edit like any other — one Ctrl+Z brings back what was on screen.") {
             app.new_blank_scene();
         }
         if menu_item(
@@ -154,25 +134,25 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
         ) {
             app.toggle_browser();
         }
-        if menu_item(ui, app, "Save", "Ctrl+S", "Write the scene — transforms, colours, camera framing, path — back to its TOML file.") {
+        if menu_item(ui, app, &format!("{} Save", icons::SAVE), "Ctrl+S", "Write the scene — transforms, colours, camera framing, path — back to its TOML file.") {
             app.save_scene();
         }
-        if menu_item(ui, app, "Save as…", "Ctrl+Shift+S", "Fork the scene: write it under a new name and keep working on the copy, leaving the original as it was.") {
+        if menu_item(ui, app, &format!("{} Save as…", icons::SAVE), "Ctrl+Shift+S", "Fork the scene: write it under a new name and keep working on the copy, leaving the original as it was.") {
             super::save_as::open(app);
         }
 
         ui.separator();
 
-        if menu_item(ui, app, "Screenshot", "S", "Capture the viewport as it is, to screenshots/.") {
+        if menu_item(ui, app, &format!("{} Screenshot", icons::CAMERA), "S", "Capture the viewport as it is, to screenshots/.") {
             app.request_screenshot();
         }
-        if menu_item(ui, app, "Render job…", "P", "Set up a batch render — still or animation, its own quality settings — with a cost estimate before you agree to it, progress, and a way to stop it.") {
+        if menu_item(ui, app, &format!("{} Render job…", icons::STACK), "P", "Set up a batch render — still or animation, its own quality settings — with a cost estimate before you agree to it, progress, and a way to stop it.") {
             super::render_job::open(app);
         }
 
         ui.separator();
 
-        if menu_item(ui, app, "Quit", "Ctrl+Q", "Leave. Asks first if this scene has unsaved edits.") {
+        if menu_item(ui, app, &format!("{} Quit", icons::QUIT), "Ctrl+Q", "Leave. Asks first if this scene has unsaved edits.") {
             app.request_quit();
         }
     });
@@ -213,7 +193,7 @@ fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
     let next_undo = app.history.undo_display().next().map(str::to_string);
     let next_redo = app.history.redo_display().last().map(str::to_string);
 
-    let resp = ui.add_enabled(undo_n > 0, egui::Button::new("Undo"));
+    let resp = ui.add_enabled(undo_n > 0, egui::Button::new((icons::UNDO, "Undo")));
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -227,7 +207,7 @@ fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
         app.undo();
     }
 
-    let resp = ui.add_enabled(redo_n > 0, egui::Button::new("Redo"));
+    let resp = ui.add_enabled(redo_n > 0, egui::Button::new((icons::REDO, "Redo")));
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -308,21 +288,57 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
         });
 }
 
-/// Renderer mode, point count and camera transport — the three settings that
-/// get changed most often mid-exploration.
+/// Below this many points the toolbar readout prints "k", at or above it
+/// "M" — the single source of truth for that boundary, shared by
+/// `point_count_label` and the width bound computed from it, so the two can
+/// never quietly disagree about where the format switches.
+///
+/// `pub(super)` (not `pub`) so `num.rs`'s width test can drive this exact
+/// formatter with boundary values, rather than a hand-copied string that
+/// could drift from what this function actually prints.
+pub(super) const POINT_COUNT_K_M_BOUNDARY: u32 = 1_000_000;
+
+/// The toolbar's point-count readout, e.g. `"420k pts"` or `"1.5M pts"`.
+///
+/// Its own function (rather than inlined at the one call site) so the width
+/// bound in `draw_quick_controls` can ask it for boundary strings — the
+/// actual widest output this formatter can produce, not a separately
+/// maintained guess that would drift the moment this function changes.
+pub(super) fn point_count_label(capacity: u32) -> String {
+    if capacity < POINT_COUNT_K_M_BOUNDARY {
+        format!("{:.0}k pts", capacity as f32 / 1e3)
+    } else {
+        format!("{:.1}M pts", capacity as f32 / 1e6)
+    }
+}
+
+/// Renderer mode, point count, edit/view mode and camera transport — the
+/// four settings that get changed most often mid-exploration.
 fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     render_panel::render_mode(ui, app);
 
     // A readout, not a slider: the toolbar has no room for a log slider wide
     // enough to be draggable, and a cramped one would be worse than none. The
     // popup gets the real widget.
+    //
+    // Its width is pinned too — the label alternates between "NNNk pts" and
+    // "NN.NM pts" as the count changes, and this button sits immediately
+    // left of Edit/View Mode and Play/Pause, so an unpinned width here would
+    // still shift both of them every time the count crosses the k/M
+    // boundary or gains a digit. The bound comes from `point_count_label`
+    // itself, evaluated at the two ends that can actually print the widest
+    // string: just under the k/M boundary, and this device's real capacity
+    // ceiling — never a guessed string.
     let capacity = app.pending_point_capacity().unwrap_or(app.point_capacity());
-    let label = if capacity < 1_000_000 {
-        format!("{:.0}k pts", capacity as f32 / 1e3)
-    } else {
-        format!("{:.1}M pts", capacity as f32 / 1e6)
-    };
-    let resp = ui.button(label);
+    let label = point_count_label(capacity);
+    let point_count_width = num::text_button_width(
+        ui,
+        &[
+            &point_count_label(POINT_COUNT_K_M_BOUNDARY - 1),
+            &point_count_label(app.max_point_capacity()),
+        ],
+    );
+    let resp = ui.add(egui::Button::new(label).min_size(egui::vec2(point_count_width, 0.0)));
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -336,8 +352,44 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         .width(280.0)
         .show(|ui| render_panel::point_count(ui, app));
 
+    // Label names the state you're *in*, not the action a click performs —
+    // the pressed/unpressed `selectable_label` styling already carries the
+    // state, so the text is reinforcement rather than the only signal.
+    //
+    // Fixed to the wider of its two captions (`num::icon_button_width`) so
+    // toggling it — which changes both the icon and the word — doesn't shift
+    // the Play/Pause button beside it.
+    let mode_width =
+        num::icon_button_width(ui, &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")]);
+    let resp = ui.add(
+        egui::Button::selectable(
+            app.show_gizmos,
+            if app.show_gizmos { (icons::CUBE, "Edit Mode") } else { (icons::EYE, "View Mode") },
+        )
+        .min_size(egui::vec2(mode_width, 0.0)),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if app.show_gizmos {
+            "Transform gizmos + name labels are showing (G) — click to switch to view mode"
+        } else {
+            "Transform gizmos + name labels are hidden (G) — click to switch to edit mode"
+        },
+        if app.show_gizmos { "click: switch to view mode" } else { "click: switch to edit mode" },
+    );
+    if resp.clicked() {
+        app.toggle_gizmos();
+    }
+
+    // Same defect, same fix: "Play" and "Pause" aren't the same width either,
+    // so this button used to shift whatever sat to its right when clicked.
     let moving = app.camera_moving();
-    let resp = ui.button(if moving { (icons::PAUSE, "Pause") } else { (icons::PLAY, "Play") });
+    let play_width = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
+    let resp = ui.add(
+        egui::Button::new(if moving { (icons::PAUSE, "Pause") } else { (icons::PLAY, "Play") })
+            .min_size(egui::vec2(play_width, 0.0)),
+    );
     let resp = hinted(
         resp,
         &mut app.ui_state,

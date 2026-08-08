@@ -67,7 +67,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             );
 
             ui.horizontal(|ui| {
-                let resp = ui.button("Mutate");
+                let resp = ui.button(format!("{}  Mutate", super::icons::SHUFFLE));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
@@ -78,7 +78,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     app.mutate_scene();
                 }
 
-                let resp = ui.add_enabled(app.history.undo_len() > 0, egui::Button::new("Undo"));
+                let resp = ui.add_enabled(app.history.undo_len() > 0, egui::Button::new(format!("{}  Undo", super::icons::UNDO)));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
@@ -89,7 +89,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     app.undo();
                 }
 
-                let resp = ui.add_enabled(app.history.redo_len() > 0, egui::Button::new("Redo"));
+                let resp = ui.add_enabled(app.history.redo_len() > 0, egui::Button::new(format!("{}  Redo", super::icons::REDO)));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,

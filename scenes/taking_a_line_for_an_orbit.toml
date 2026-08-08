@@ -1,0 +1,44 @@
+[meta]
+name = "Taking A Line For An Orbit"
+author = ""
+point_size = 0.0015
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.5
+color_falloff = 0.0
+color_contrast = 1.0
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [-0.2416, -0.0909, 0.0696]
+distance = 2.225
+yaw = -3.0052
+pitch = -0.0058
+roll = 1.0308
+
+[[transform]]
+translation = [0.5, 0.5, 0.0]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.9, 0.5, 0.25]
+weight = 1.0
+color_value = 0.0
+
+[[transform]]
+translation = [-0.5, -0.5, 0.0]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.25, 0.6, 0.9]
+weight = 1.0
+color_value = 0.72
+
+[[transform]]
+translation = [0.195, 0.2167, 0.438]
+scale = 0.5
+rotation = [0.0, 0.0, 0.0]
+color = [0.5804, 0.0, 0.0]
+weight = 0.32
+color_value = 1.0
+variations = { diamond = 0.35, julia = -0.9 }

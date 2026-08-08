@@ -1,0 +1,116 @@
+# Fold Lantern -- the post-affine slot, and what it is for.
+#
+# A transform is applied in three stages:
+#
+#     pre-affine  ->  variations  ->  post-affine
+#     (translation/scale/rotation)   (post_translation/post_scale/post_rotation)
+#
+# With only linear variations the post-affine slot buys nothing: two affines in
+# a row are just one affine, and you could have folded it into the first. It
+# earns its place the moment a *nonlinear* variation sits between them, because
+# then the two orders are different maps. `boxfold` folds space at the +/-1
+# planes, and folding-then-rotating is not rotating-then-folding.
+#
+# That asymmetry is the whole scene. Each petal below is:
+#
+#     scale UP by 1.95   ->   boxfold   ->   rotate, scale DOWN by 0.30, move
+#
+# The scale-up is what pushes the walker past +/-1 so the fold has something to
+# bite on (inside +/-1 boxfold is the identity -- CRAFT 3.4). The rotate-and-
+# shrink afterwards is the half that needs this slot. Net contraction is
+# 1.95 * 0.30 = 0.585 per petal, which is what sets the dimension: `--info`
+# reads it off both matrices at once, not just the first.
+#
+# The three petals are one motif under a C3 rotation group, composed AFTER the
+# fold -- {g . f : g in C3} for g = Ry(0/120/240 deg). That is the construction
+# in AUTHORING-BRAINSTORM 3.1, hand-built: the attractor it makes is exactly
+# C3-symmetric, and a native [[symmetry]] block would express these three
+# blocks as one motif plus a group name.
+#
+# ---- authoring notes, measured while making this -------------------------
+#
+# * The pre-affine scale is the interesting dial, not the post-affine one. It
+#   sets how hard the fold bites, and it walks the whole corridor: at 1.4 the
+#   scene is dust (d 1.27), at 1.95 it is lace (d 2.05), by 2.45 it is fuzz
+#   (d 3.57) and by 2.8 it is a featureless ball (d 6.30). Sweep it first:
+#     --sweep 'transform.petal-1.scale+transform.petal-2.scale+transform.petal-3.scale=1.4:2.8'
+#
+# * A pure group orbit flattens the measure, exactly as CRAFT 3.6 warns. With
+#   only the three petals this scene measures lacunarity 6.0 -- all three share
+#   a contraction and a weight, so there is no density variance for them to
+#   make. `core` is the deliberate defect: no fold, its own contraction, its
+#   own weight, belonging to no group element.
+#
+# * The defect dose is worth knowing and is not what 3.6 guessed. `d` cannot
+#   see it at all -- dimension depends only on contractions, so it reads 2.32
+#   whether `core` takes 5% of the walk or 67%. Lacunarity is the number that
+#   moves: 5.9 at 5%, 7.6 at 25%, 19.2 at 50%, 49.1 at 67%. But high is not
+#   better -- past about 40% the orbit is starved and the form visibly thins
+#   out, so lacunarity has a ceiling as well as a floor. 25% is where this one
+#   looks fullest.
+
+[meta]
+name = "Fold Lantern"
+author = "Claude Opus 5 (Claude Code)"
+point_size = 0.0020
+point_count = 8_000_000
+background = [0.020, 0.024, 0.045]
+color_falloff = 1.6
+color_contrast = 1.15
+
+# C3 orbit 1/3 -- g = Ry(0 deg), applied after the fold.
+[[transform]]
+name = "petal-1"
+translation = [0.0, 0.0, 0.0]
+scale = 1.95
+color = [1.000, 0.620, 0.260]
+weight = 1.0
+variations = { boxfold = 1.0 }
+post_scale = 0.30
+post_rotation = [18.0000, 28.0000, 0.0000]
+post_translation = [0.30000, 0.10000, 0.00000]
+
+# C3 orbit 2/3 -- g = Ry(120 deg), applied after the fold.
+[[transform]]
+name = "petal-2"
+translation = [0.0, 0.0, 0.0]
+scale = 1.95
+color = [0.980, 0.860, 0.520]
+weight = 1.0
+variations = { boxfold = 1.0 }
+post_scale = 0.30
+post_rotation = [-162.0000, 32.0000, 180.0000]
+post_translation = [-0.15000, 0.10000, -0.25981]
+
+# C3 orbit 3/3 -- g = Ry(240 deg), applied after the fold.
+[[transform]]
+name = "petal-3"
+translation = [0.0, 0.0, 0.0]
+scale = 1.95
+color = [0.360, 0.720, 1.000]
+weight = 1.0
+variations = { boxfold = 1.0 }
+post_scale = 0.30
+post_rotation = [-162.0000, -88.0000, 180.0000]
+post_translation = [-0.15000, 0.10000, 0.25981]
+
+# The defect. Outside the group, and the only map here with no post-affine
+# part at all -- an ordinary contraction, which is the point. 25% of the walk.
+[[transform]]
+name = "core"
+translation = [0.0, 0.16, 0.0]
+scale = 0.42
+rotation = [0.0, 18.0, 0.0]
+color = [0.850, 0.350, 0.550]
+weight = 1.0
+
+[camera]
+# The attractor is a disc lying in XZ (y-spread is a fifth of the other two),
+# so it wants to be looked down on -- pitch 45 deg is what a scene that sets
+# only `distance` gets by default, and it is the right angle here. Focus sits
+# on the measured centre, not the origin: `--info` reports centre y = 0.24.
+distance = 1.28
+yaw = -1.5708
+pitch = 0.7854
+focus = [0.0, 0.24, 0.04]
+

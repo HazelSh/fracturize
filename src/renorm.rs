@@ -726,6 +726,53 @@ impl Renorm {
         levels
     }
 
+    /// How many octaves the band holds. The deal in `octave_offset` puts a
+    /// point in one of these, so this is what the rewrap counts modulo.
+    pub fn octaves(&self) -> f32 {
+        self.periods.ceil().max(1.0)
+    }
+
+    /// The power of `f⁻¹` that carries a point sitting in octave `octave`
+    /// through `turns` zoom periods and lands it back inside the band.
+    ///
+    /// **The reference implementation of the `m` in `rewrap()` in
+    /// `points/chaos.wgsl`**; the shader is the copy that runs and this is the
+    /// copy the tests can assert about, so they must agree arithmetic for
+    /// arithmetic. Octave 0 is the outermost shell, at radius `radius`.
+    ///
+    /// It returns `turns` for every point except those that fall off an end of
+    /// the band, which is the whole point: those keep their pixel across a
+    /// wrap exactly, and only the outermost octave — the one `edge_guard` has
+    /// already taken to nothing — is re-dealt.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn rewrap_power(&self, octave: f32, turns: i32) -> f32 {
+        let n = self.octaves();
+        let shifted = octave - turns as f32;
+        octave - (shifted - n * (shifted / n).floor())
+    }
+
+    /// The frame the world axes have been carried into after `turns` wraps:
+    /// `rot⁻ᵗᵘʳⁿˢ`, in closed form.
+    ///
+    /// [`wrap`](Self::wrap) leaves the picture alone and moves the camera, and
+    /// the part of that nobody has to think about until something is drawn in
+    /// world axes is that it *turns* the camera — by `rot` per level, about an
+    /// axis that is only the vertical for a map that happens to spin about the
+    /// vertical. So a world direction holds still on screen across a wrap only
+    /// if it is carried by the same rotation the camera was, and this is that
+    /// rotation. The scale half needs no counterpart: a direction has none.
+    ///
+    /// Closed form for the same reason [`loop_similarity`](Self::loop_similarity)
+    /// is, and with the same trap avoided — [`twist`](Self::twist) is an
+    /// unbounded displacement, so twenty periods of a 45° map is 900° and not
+    /// 180° the other way.
+    pub fn carried_frame(&self, turns: i32) -> Orientation {
+        if turns == 0 {
+            return Orientation::IDENTITY;
+        }
+        (self.twist * -(turns as f32)).exp()
+    }
+
     /// Whether the band reaches far enough out that its edge stays outside the
     /// picture across a wrap. See [`MIN_RADIUS`].
     pub fn band_covers_the_view(&self) -> bool {
@@ -843,6 +890,18 @@ mod tests {
         )
     }
 
+    /// The same, with a band deep enough to have octaves to rotate between.
+    /// `renorm`'s one level rounds up to two, which every permutation is.
+    fn deep_renorm(scale: f32, twist: f32) -> Renorm {
+        Renorm::from_affine(
+            spiral_map(scale, twist),
+            1.0,
+            &ZoomSpec { map: 0, radius: 1.0, levels: 6.0, ..ZoomSpec::default() },
+            1.0,
+        )
+        .unwrap()
+    }
+
     fn renorm(scale: f32, twist: f32) -> Renorm {
         Renorm::from_affine(
             spiral_map(scale, twist),
@@ -920,6 +979,107 @@ mod tests {
                 b
             );
         }
+    }
+
+    #[test]
+    fn a_wrap_carries_every_octave_but_the_outermost_untouched() {
+        // The claim `rewrap` rests on: a wrap moves the camera by A⁻¹, and if
+        // the points move by A⁻¹ too then every dot keeps its pixel. That has
+        // to be *exactly* the power the rewrap applies, or the fix is a
+        // different resample rather than none.
+        let r = deep_renorm(0.6, 40.0);
+        let n = r.octaves();
+        assert!(n >= 3.0, "want a band with room in it, got {n}");
+
+        for octave in 1..n as i32 {
+            assert_eq!(
+                r.rewrap_power(octave as f32, 1),
+                1.0,
+                "octave {octave} should ride the wrap out untouched"
+            );
+        }
+        // The outermost is the one with nowhere further out to go, so it comes
+        // back at the innermost — where the edge guard has already faded it to
+        // nothing on the way past.
+        assert_eq!(r.rewrap_power(0.0, 1), -(n - 1.0));
+    }
+
+    #[test]
+    fn rewrapping_permutes_the_octaves_and_undoes_itself() {
+        // Two properties that together say the band cannot drift: the deal is
+        // still a deal after a wrap (nothing doubles up, nothing empties), and
+        // scrubbing back and forth across the threshold — which a mouse wheel
+        // does readily — returns every point exactly where it started.
+        let r = deep_renorm(0.6, 40.0);
+        let n = r.octaves() as i32;
+        for turns in [-5, -1, 1, 2, 7] {
+            let landed: Vec<i32> = (0..n)
+                .map(|o| o - r.rewrap_power(o as f32, turns) as i32)
+                .collect();
+            let mut sorted = landed.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                (0..n).collect::<Vec<_>>(),
+                "carrying by {turns} must land one octave on each, got {landed:?}"
+            );
+            for o in 0..n {
+                let there = o - r.rewrap_power(o as f32, turns) as i32;
+                let back = there - r.rewrap_power(there as f32, -turns) as i32;
+                assert_eq!(back, o, "carrying by {turns} and back lost octave {o}");
+            }
+        }
+    }
+
+    #[test]
+    fn wrapping_the_camera_does_not_move_the_carried_axes() {
+        // The axis cross's version of the seamlessness claim. A wrap turns the
+        // camera, so world axes drawn against it swing by the map's rotation
+        // on the frame the camera folds — a visible snap once a period on any
+        // scene that spirals in rather than descending straight. Carrying them
+        // by `carried_frame` has to cancel that exactly.
+        let r = renorm(0.6, 40.0);
+        let mut cam = OrbitCamera::from_chart(0.7, 0.35, 0.3, 1.0, r.fixed_point);
+        // Start inside the band, so each step down is exactly one wrap.
+        cam.distance = r.band * 0.8;
+
+        // What the widget draws: each world axis in camera space.
+        let screen = |cam: &OrbitCamera, frame: Orientation| {
+            let to_cam = cam.orientation.inverse();
+            [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X, -Vec3::Y, -Vec3::Z]
+                .map(|w| to_cam.rotate(frame.rotate(w)))
+        };
+
+        let mut turns = 0;
+        let before = screen(&cam, r.carried_frame(turns));
+        // Three periods, so the closed-form power is exercised rather than
+        // just the single step.
+        for period in 1..=3 {
+            cam.distance *= r.scale;
+            turns += r.wrap(&mut cam);
+            assert_eq!(turns, period, "one period of zoom wraps exactly once");
+            let after = screen(&cam, r.carried_frame(turns));
+            for (b, a) in before.iter().zip(after.iter()) {
+                assert!(
+                    b.distance(*a) < 1e-4,
+                    "axis moved {:.4} across wrap {}: {:?} -> {:?}",
+                    b.distance(*a),
+                    period,
+                    b,
+                    a
+                );
+            }
+        }
+
+        // And the carry is doing real work — without it the cross swings by
+        // the map's 40°, which is what the snap looks like.
+        let uncarried = screen(&cam, Orientation::IDENTITY);
+        let moved = before
+            .iter()
+            .zip(uncarried.iter())
+            .map(|(b, a)| b.distance(*a))
+            .fold(0.0f32, f32::max);
+        assert!(moved > 0.5, "uncarried axes should visibly swing, moved {moved:.3}");
     }
 
     #[test]

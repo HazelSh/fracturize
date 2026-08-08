@@ -39,7 +39,19 @@ const AXES: [(&str, Vec3, egui::Color32); 3] = [
 ];
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
+    // It is a gizmo — a handle drawn over the picture that you grab to move
+    // the camera — so it goes away with the rest of them. Somewhere to look
+    // at the fractal with nothing on top of it is the whole point of the
+    // toggle, and one cross left in the corner spoils that.
+    if !app.show_gizmos {
+        return;
+    }
+
     let mut go: Option<Vec3> = None;
+    // The zoom carries the world with it; see `App::zoom_frame`. Identity
+    // unless this scene has an infinite zoom and the camera has folded.
+    let frame = app.zoom_frame();
+    let carried = frame != crate::rot::Orientation::IDENTITY;
 
     egui::Area::new(egui::Id::new("fracturize_axis_widget"))
         .anchor(egui::Align2::RIGHT_BOTTOM, MARGIN)
@@ -59,7 +71,13 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             let mut balls: Vec<(egui::Pos2, f32, &str, egui::Color32, Vec3, bool)> = Vec::new();
             for (name, axis, color) in AXES {
                 for positive in [true, false] {
-                    let world = if positive { axis } else { -axis };
+                    // Carried, so that both what is drawn and where a click
+                    // flies to are the same direction. Clicking a ball has
+                    // always meant "look down the way this one points"; under
+                    // a zoom the way it points is the carried axis, and
+                    // sending the camera to the uncarried one would fly it off
+                    // the ball you clicked.
+                    let world = frame.rotate(if positive { axis } else { -axis });
                     let d = to_cam.rotate(world);
                     // Screen y grows downward, camera y grows up.
                     let at = centre + egui::vec2(d.x, -d.y) * RADIUS;
@@ -133,11 +151,20 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     }
                 }
             }
+            let hint = if carried {
+                "Which way the world is pointing. Click a ball to look down that \
+                 axis — solid is the positive end, hollow the negative.\n\nThe \
+                 zoom carries it: each period turns the camera by the map's \
+                 rotation, so the cross keeps turning with the descent instead \
+                 of snapping back at the seam."
+            } else {
+                "Which way the world is pointing. Click a ball to look down that \
+                 axis — solid is the positive end, hollow the negative."
+            };
             super::hints::hinted(
                 resp,
                 &mut app.ui_state,
-                "Which way the world is pointing. Click a ball to look down that \
-                 axis — solid is the positive end, hollow the negative.",
+                hint,
                 "click an axis: look down it",
             );
         });

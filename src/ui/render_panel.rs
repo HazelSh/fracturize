@@ -139,6 +139,37 @@ fn draw_point_size(ui: &mut egui::Ui, app: &mut App) {
     // Preference heading at the foot of the panel now.
 }
 
+/// Readable point-count label, shared with `render_job.rs`'s per-job slider
+/// so a count never reads differently depending on which dialog it's in.
+/// Sub-million counts show in k: at the bottom of a logarithmic 0.1..=max_m
+/// range, `{:.2}M` would print "0.10M" — one visible digit, on the very part
+/// of the range a log slider exists to give room to.
+pub fn format_points(millions: f64) -> String {
+    if millions < 1.0 {
+        format!("{:.0}k", millions * 1000.0)
+    } else {
+        format!("{:.2}M", millions)
+    }
+}
+
+/// Inverse of `format_points`, so typing an exact value actually works. A
+/// `Slider::custom_formatter` with no matching `custom_parser` is a trap:
+/// egui prefills the type-in box with the formatted string ("50k", "1.23M"),
+/// but on Enter it falls back to a plain `f64::from_str` on whatever's in the
+/// box — which chokes on the very suffix it just printed, so the edit is
+/// silently dropped. A bare number with no suffix is still millions, matching
+/// what typing did here before there was a formatter at all.
+pub fn parse_points(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if let Some(k) = text.strip_suffix(['k', 'K']) {
+        k.trim().parse::<f64>().ok().map(|v| v / 1000.0)
+    } else if let Some(m) = text.strip_suffix(['m', 'M']) {
+        m.trim().parse::<f64>().ok()
+    } else {
+        text.parse::<f64>().ok()
+    }
+}
+
 /// The point-count slider, shared by this panel and the toolbar's quick
 /// control. Deliberately one widget rather than two: the rate limiting,
 /// in-flight display and prefs persistence all hang off it, and two copies
@@ -166,13 +197,8 @@ pub fn point_count(ui: &mut egui::Ui, app: &mut App) {
     let resp = ui.add(
         egui::Slider::new(&mut millions, 0.1..=max_m)
             .logarithmic(true)
-            .custom_formatter(|v, _| {
-                if v < 1.0 {
-                    format!("{:.0}k", v * 1000.0)
-                } else {
-                    format!("{:.2}M", v)
-                }
-            })
+            .custom_formatter(|v, _| format_points(v))
+            .custom_parser(parse_points)
             .text("points"),
     );
     let resp = hinted(
@@ -254,15 +280,46 @@ fn draw_color(ui: &mut egui::Ui, app: &mut App) {
     super::gradient::draw(ui, app);
 }
 
+/// The haze slider drags a *position*, cubed against the stored `amount` —
+/// see `haze_pos_from_amount` below for why.
+fn haze_pos_from_amount(amount: f32) -> f32 {
+    1.0 - (1.0 - amount).max(0.0).cbrt()
+}
+
+/// Inverse of `haze_pos_from_amount`.
+fn haze_amount_from_pos(pos: f32) -> f32 {
+    let remaining = (1.0 - pos).max(0.0);
+    1.0 - remaining * remaining * remaining
+}
+
 /// One slider, and a disclosure for the band it normally works out itself.
 /// The four raw shader knobs this replaced are documented in `src/haze.rs`,
 /// along with why exposing them was the mistake — and why this is called haze
 /// rather than fog now that it thins distant material instead of darkening it.
+///
+/// The drag itself is warped, the stored value isn't. `haze.rs` deliberately
+/// keeps `amount` linear in what survives (its own tests say so), and that's
+/// right for the shader math — but it's wrong for this slider's *feel* on a
+/// dense splat scene: the log-density tonemap swallows a transmittance cut
+/// that still leaves density well above 1, so nothing visibly changes until
+/// `amount` is within a couple of percent of 1.0 (reported against
+/// `astral_lattice`, splats, exposure high — the last 2% of the old linear
+/// slider was carrying the whole visible range). Cubing the *position* the
+/// slider drags — not `amount` itself — spreads that stretch out: amount
+/// 0.98 now sits at ~73% of the travel instead of 98%, while both ends stay
+/// exact (0 and 1 are still 0 and 1) and the readout, the typed value, and
+/// the scene/view file all keep meaning plain `amount`, unchanged.
 fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
-    let mut amount = app.haze_amount;
+    let mut pos = haze_pos_from_amount(app.haze_amount);
     let resp = ui.add(
-        egui::Slider::new(&mut amount, 0.0..=1.0)
-            .fixed_decimals(2)
+        egui::Slider::new(&mut pos, 0.0..=1.0)
+            .custom_formatter(|p, _| format!("{:.2}", haze_amount_from_pos(p as f32)))
+            .custom_parser(|s| {
+                s.trim()
+                    .parse::<f64>()
+                    .ok()
+                    .map(|a| haze_pos_from_amount(a as f32) as f64)
+            })
             .text("haze"),
     );
     let resp = hinted(
@@ -270,11 +327,13 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
         &mut app.ui_state,
         "Aerial perspective: distant material thins toward the background and \
          loses colour, so you can read which arm is in front. The band it fades \
-         across follows the camera distance automatically (F / Shift+F)",
+         across follows the camera distance automatically (F / Shift+F). The \
+         drag is weighted toward the top of its travel, where dense splat \
+         scenes keep all the visible change.",
         "drag: adjust haze",
     );
     if resp.changed() {
-        app.set_haze_amount(amount);
+        app.set_haze_amount(haze_amount_from_pos(pos));
     }
 
     ui.collapsing("haze band", |ui| {

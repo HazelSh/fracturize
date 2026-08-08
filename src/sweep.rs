@@ -9,7 +9,7 @@
 //!
 //!     --sweep transform.facet-1.variations.absfold=0.05:0.55   # range
 //!     --sweep palette.name=ember,abyss,peacock                 # explicit list
-//!     --sweep t.a.weight+t.b.weight=0.5:2.0                    # in lockstep
+//!     --sweep transform.a.weight+transform.b.weight=0.5:2.0    # in lockstep
 //!
 //! A list is checked for first, so a value containing `,` is never read as a
 //! range. Values are emitted verbatim into `--set` strings and parsed by
@@ -71,6 +71,12 @@ pub fn parse_axis(spec: &str, steps: usize) -> Result<Axis, String> {
         .collect();
     if paths.is_empty() {
         return Err(format!("--sweep '{spec}': empty path"));
+    }
+    // Same paths `--set` takes, and the same failure mode: a typo'd section
+    // or field name silently adds a key nothing reads. Share the check
+    // rather than re-deriving the field lists here.
+    for p in &paths {
+        crate::set::validate_path(p).map_err(|e| format!("--sweep '{spec}': {e}"))?;
     }
     if rest.is_empty() {
         return Err(format!("--sweep '{spec}': no values"));
@@ -210,12 +216,12 @@ mod tests {
 
     #[test]
     fn a_range_is_inclusive_at_both_ends() {
-        assert_eq!(vals("a.b=0:1", 5), ["0", "0.25", "0.5", "0.75", "1"]);
+        assert_eq!(vals("meta.haze=0:1", 5), ["0", "0.25", "0.5", "0.75", "1"]);
     }
 
     #[test]
     fn range_endpoints_are_exact_not_float_noise() {
-        let v = vals("t.v.absfold=0.05:0.55", 4);
+        let v = vals("transform.a.variations.absfold=0.05:0.55", 4);
         assert_eq!(v.first().unwrap(), "0.05");
         assert_eq!(v.last().unwrap(), "0.55");
         // and nothing in between is a 17-digit mess
@@ -224,12 +230,12 @@ mod tests {
 
     #[test]
     fn a_descending_range_works() {
-        assert_eq!(vals("a.b=1:0", 3), ["1", "0.5", "0"]);
+        assert_eq!(vals("meta.haze=1:0", 3), ["1", "0.5", "0"]);
     }
 
     #[test]
     fn one_step_takes_the_start() {
-        assert_eq!(vals("a.b=0.2:0.9", 1), ["0.2"]);
+        assert_eq!(vals("meta.haze=0.2:0.9", 1), ["0.2"]);
     }
 
     #[test]
@@ -240,12 +246,12 @@ mod tests {
     #[test]
     fn a_list_wins_over_the_range_form() {
         // contains a comma, so it is a list even though it also has a colon
-        assert_eq!(vals("a.b=x:y,z", 5), ["x:y", "z"]);
+        assert_eq!(vals("meta.haze=x:y,z", 5), ["x:y", "z"]);
     }
 
     #[test]
     fn list_entries_are_trimmed() {
-        assert_eq!(vals("a.b= ember , abyss ", 5), ["ember", "abyss"]);
+        assert_eq!(vals("meta.haze= ember , abyss ", 5), ["ember", "abyss"]);
     }
 
     #[test]
@@ -302,66 +308,81 @@ mod tests {
 
     #[test]
     fn a_non_numeric_range_is_an_error() {
-        assert!(parse_axis("a.b=lo:hi", 5).unwrap_err().contains("not a number"));
+        assert!(parse_axis("meta.haze=lo:hi", 5).unwrap_err().contains("not a number"));
+    }
+
+    // A misspelled section or field is the same silent-typo failure mode
+    // `--set` guards against, and shares its check (`set::validate_path`)
+    // rather than re-deriving it.
+    #[test]
+    fn a_misspelled_field_is_an_error() {
+        let e = parse_axis("meta.wieght=0:1", 5).unwrap_err();
+        assert!(e.contains("'wieght' is not a known meta field"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelled_field_in_a_lockstep_path_is_an_error() {
+        let e = parse_axis("transform.a.weight+transform.b.wieght=1:2", 5).unwrap_err();
+        assert!(e.contains("'wieght' is not a known transform field"), "{e}");
     }
 
     #[test]
     fn a_one_element_list_is_an_error() {
-        assert!(parse_axis("a.b=x,", 5).unwrap_err().contains("at least two"));
+        assert!(parse_axis("meta.haze=x,", 5).unwrap_err().contains("at least two"));
     }
 
     #[test]
     fn no_values_is_an_error() {
-        assert!(parse_axis("a.b=", 5).unwrap_err().contains("no values"));
+        assert!(parse_axis("meta.haze=", 5).unwrap_err().contains("no values"));
     }
 
     #[test]
     fn three_axes_are_refused() {
-        let a = parse_axis("a.b=0:1", 2).unwrap();
+        let a = parse_axis("meta.haze=0:1", 2).unwrap();
         let e = tiles(&[a.clone(), a.clone(), a]).unwrap_err();
         assert!(e.contains("at most two"), "{e}");
     }
 
     #[test]
     fn zero_steps_is_an_error() {
-        assert!(parse_axis("a.b=0:1", 0).unwrap_err().contains("at least 1"));
+        assert!(parse_axis("meta.haze=0:1", 0).unwrap_err().contains("at least 1"));
     }
 
     #[test]
     fn several_paths_move_in_lockstep() {
-        let a = parse_axis("t.a.variations.absfold+t.b.variations.absfold=0:1", 2).unwrap();
+        let a = parse_axis("transform.a.variations.absfold+transform.b.variations.absfold=0:1", 2).unwrap();
         assert_eq!(a.paths.len(), 2);
         let (t, cols, rows) = tiles(&[a]).unwrap();
         assert_eq!((cols, rows), (2, 1));
         // one tile sets both paths to the same value
         assert_eq!(
             t[1].sets,
-            ["t.a.variations.absfold=1", "t.b.variations.absfold=1"]
+            ["transform.a.variations.absfold=1", "transform.b.variations.absfold=1"]
         );
     }
 
     #[test]
     fn a_lockstep_axis_labels_with_the_shared_leaf() {
-        let a = parse_axis("t.a.variations.absfold+t.b.variations.absfold=0:1", 2).unwrap();
+        let a = parse_axis("transform.a.variations.absfold+transform.b.variations.absfold=0:1", 2).unwrap();
         let (t, _, _) = tiles(&[a]).unwrap();
         assert_eq!(t[0].label, "absfold=0");
     }
 
     #[test]
     fn lockstep_paths_are_trimmed() {
-        let a = parse_axis("  t.a.weight + t.b.weight = 1,2", 5).unwrap();
-        assert_eq!(a.paths, ["t.a.weight", "t.b.weight"]);
+        let a = parse_axis("  transform.a.weight + transform.b.weight = 1,2", 5).unwrap();
+        assert_eq!(a.paths, ["transform.a.weight", "transform.b.weight"]);
     }
 
     #[test]
     fn lockstep_composes_with_a_second_axis() {
-        let a = parse_axis("t.a.weight+t.b.weight=1:2", 2).unwrap();
+        let a = parse_axis("transform.a.weight+transform.b.weight=1:2", 2).unwrap();
         let b = parse_axis("meta.haze=0:1", 2).unwrap();
         let (t, cols, rows) = tiles(&[a, b]).unwrap();
         assert_eq!((cols, rows), (2, 2));
         // three overrides per tile: two lockstep paths plus the second axis
         assert_eq!(t[0].sets.len(), 3);
-        assert!(t[0].description.starts_with("--set t.a.weight=1 --set t.b.weight=1"));
+        assert!(t[0].description.starts_with("--set transform.a.weight=1 --set transform.b.weight=1"));
     }
 
     #[test]
@@ -369,7 +390,7 @@ mod tests {
         // a repeating decimal gets enough digits to be right, and no more
         // 0.216666... needs 5 places to stay inside the tolerance; 0.383333...
         // clears it at 4. Each value gets exactly what it needs.
-        let v = vals("a.b=0.05:0.55", 4);
+        let v = vals("meta.haze=0.05:0.55", 4);
         assert_eq!(v, ["0.05", "0.21667", "0.3833", "0.55"]);
     }
 
@@ -384,12 +405,12 @@ mod tests {
 
     #[test]
     fn round_numbers_stay_round() {
-        assert_eq!(vals("a.b=0:10", 3), ["0", "5", "10"]);
-        assert_eq!(vals("a.b=1:2", 2), ["1", "2"]);
+        assert_eq!(vals("meta.haze=0:10", 3), ["0", "5", "10"]);
+        assert_eq!(vals("meta.haze=1:2", 2), ["1", "2"]);
     }
 
     #[test]
     fn negative_values_survive() {
-        assert_eq!(vals("a.b=-1:1", 3), ["-1", "0", "1"]);
+        assert_eq!(vals("meta.haze=-1:1", 3), ["-1", "0", "1"]);
     }
 }

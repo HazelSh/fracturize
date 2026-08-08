@@ -316,6 +316,24 @@ impl Haze {
 /// would be drawn — `--info` prints through this, which is the only reason it
 /// can be trusted about a scene it was handed a view for.
 pub fn effective_camera(view: Option<&View>, scene: &Scene, over: CameraOverride) -> OrbitCamera {
+    effective_camera_folded(view, scene, over).0
+}
+
+/// The same, and how many zoom periods the fold moved it by.
+///
+/// The count is what carries the *point buffer* to the same place — see
+/// `PointCompute::rewrap`. Without it a run of stills stepping along a flight
+/// is not a run of frames: the fold lands two neighbouring stills a whole
+/// period apart in the world, and each one draws the structure from a fresh
+/// deal of octaves, so consecutive frames differ by a full resample of the dot
+/// field rather than by the motion between them. Carrying the buffer by the
+/// same count is what makes `--path-t 0.0` and `--path-t 0.002` two frames of
+/// one flight rather than two independent pictures of one object.
+pub fn effective_camera_folded(
+    view: Option<&View>,
+    scene: &Scene,
+    over: CameraOverride,
+) -> (OrbitCamera, i32) {
     let mut camera = match view {
         Some(v) => OrbitCamera::from_legacy(
             Vec3::from(v.focus),
@@ -327,15 +345,25 @@ pub fn effective_camera(view: Option<&View>, scene: &Scene, over: CameraOverride
         ),
         None => scene.camera(),
     };
+    // The path, if one was asked for, before the field overrides: `--path-t`
+    // says where the flight is and `--distance` and friends then adjust that
+    // framing, which is the order anyone typing both would expect. The default
+    // is built from the framing so far, so a scene with no authored path still
+    // answers — with a point on its full orbit.
+    if let Some(t) = over.path_t {
+        let default = CameraPath::full_orbit(&camera);
+        camera = crate::path::resolve(scene.camera_path.as_ref(), &default).sample(t);
+    }
     // Flags last: they are the most specific thing anyone said.
     over.apply(&mut camera);
     // Under infinite zoom the framing is only defined up to a zoom period, so
     // put it in the canonical one before anything derives from it. A framing
     // that came from a view file is already there and this is a no-op.
+    let mut folded = 0;
     if let Ok(Some(zoom)) = scene_zoom(scene) {
-        zoom.wrap(&mut camera);
+        folded = zoom.wrap(&mut camera);
     }
-    camera
+    (camera, folded)
 }
 
 /// Base camera and render params from a view file, or scene defaults
@@ -344,7 +372,7 @@ fn base_setup(
     scene: &Scene,
     haze_enabled: bool,
     over: CameraOverride,
-) -> (OrbitCamera, f32, Haze) {
+) -> (OrbitCamera, f32, Haze, i32) {
     let (point_size, mut haze) = base_render_params(view, scene, haze_enabled);
     // A band pinned in world units cannot survive a zoom wrap: the wrap
     // rescales the camera and the picture together and leaves the band where
@@ -355,12 +383,12 @@ fn base_setup(
         haze.pinned = None;
         println!("haze band auto-ranged (a pinned band is not wrap-invariant under infinite zoom)");
     }
-    let camera = effective_camera(view.as_ref(), scene, over);
+    let (camera, folded) = effective_camera_folded(view.as_ref(), scene, over);
     if !over.is_empty() {
         // So a framing found by flags can be kept without transcription
         println!("{}", CameraOverride::describe(&camera));
     }
-    (camera, point_size, haze)
+    (camera, point_size, haze, folded)
 }
 
 /// Point size and haze from a view file, or the scene's own. The framing that
@@ -681,8 +709,13 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     );
     let t_fill = Instant::now();
 
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
+    let (base_camera, point_size, haze, folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let zoom = scene_zoom(&scene)?;
+    // The fold moved the camera; the points go with it. On one still this is
+    // invisible — it permutes which point sits on which octave of a band that
+    // is unchanged either way — and it is what makes a *run* of stills along a
+    // flight comparable frame to frame. See `effective_camera_folded`.
+    compute.rewrap(&device, &queue, folded);
 
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
@@ -845,7 +878,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     );
     let t_fill = Instant::now();
 
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
+    let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let zoom = scene_zoom(&scene)?;
     // A view overrides the base framing but the scene still owns the path.
     // `path::resolve` is the same rule the app flies (see `App::camera_path`),
@@ -883,6 +916,8 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         c.phase("rendering frames");
         c.log(format!("{} frames at {} fps, {:.1}s", frames, anim.fps, seconds));
     }
+    // Fold depth the point buffer has been carried to; see the wrap below.
+    let mut carried: Option<i32> = None;
     for i in 0..frames {
         // Third cancel point, and the one that matters most: an animation is
         // minutes of work and every frame is a natural place to stop.
@@ -905,7 +940,16 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         // camera never leaves f32's comfortable range and the zoom is seamless
         // for as long as the path asks for.
         if let Some(z) = &zoom {
-            z.wrap(&mut cam);
+            let depth = z.wrap(&mut cam);
+            // And the points come with it, so the frame a wrap lands on is not
+            // redrawn from a different set of them — the twitch `tools/
+            // zoom_twitch.py` measures. What `wrap` returns here is the
+            // absolute depth of an unwrapped spline sample rather than a step,
+            // so carry the buffer by the *change* in it. The first frame has
+            // nothing to be a change from and sets the reference.
+            let step = depth - carried.unwrap_or(depth);
+            compute.rewrap(&device, &queue, step);
+            carried = Some(depth);
         }
         // After the wrap, so the band is derived from the camera that actually
         // renders this frame. That is what closes a zoom loop: the wrapped
@@ -1026,7 +1070,7 @@ pub fn render_mutations(
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
+    let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
@@ -1169,7 +1213,7 @@ pub fn render_sweep(
 
     // One framing and one haze band for the whole sheet: a contact sheet is
     // read tile against tile, so only the swept parameter may differ.
-    let (base_camera, point_size, haze) = base_setup(&view, &scene, haze_enabled, camera_over);
+    let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
     let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;

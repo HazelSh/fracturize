@@ -111,6 +111,11 @@ pub struct UiState {
     /// control points end up stacked on the cursor. So the id says only "a
     /// drag is in progress"; this says what it is dragging.
     pub palette_drag: Option<usize>,
+    /// Dimension lock mode: when on, editing one transform's scale preserves
+    /// the attractor's similarity dimension d by adjusting all other scales.
+    /// The brainstorm calls this "the sleeper feature" — it converts the most
+    /// common destructive edit into a safe one.
+    pub dimension_lock: bool,
 }
 
 impl UiState {
@@ -131,6 +136,7 @@ impl UiState {
             palette_stop: None,
             palette_drag: None,
             discard_arm: confirm::Arm::default(),
+            dimension_lock: false,
         }
     }
 }
@@ -520,6 +526,44 @@ impl EguiLayer {
         // it, drag a DragValue to change it). Set once, not per frame:
         // `all_styles_mut` clones the shared `Style` behind an `Arc`.
         ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
+
+        // Zero animation, ever — the house rule (AGENTS.md, "Human
+        // Interface"). This is a realtime renderer: the fractal is the thing
+        // that moves, and chrome that eases, fades or coasts competes with it
+        // for attention and reads as the UI lagging behind the click that
+        // just happened. Two fields cover it:
+        //
+        // - `animation_time` is the one knob egui checks everywhere it would
+        //   otherwise interpolate: window/tooltip/menu fade-in (`Area`'s
+        //   `fade_in`, which every popup and menu is built on), collapsing
+        //   headers and side panels expanding, and scrollbar fade/hover
+        //   growth (all of these call `animate_bool`/`animate_bool_responsive`,
+        //   which read this field — see egui 0.35's `context.rs`). At 0.0,
+        //   `AnimationManager::animate_value` divides the elapsed time by a
+        //   zero duration, gets a non-finite result, and snaps straight to
+        //   the target instead — confirmed against
+        //   `egui-0.35.0/src/animation_manager.rs`.
+        // - `scroll_animation` is a separate field: the smooth glide used by
+        //   `scroll_to_me`/`scroll_to_rect`/`scroll_to_cursor` (e.g. the
+        //   Scenes browser snapping the selected row into view) is driven by
+        //   its own `ScrollAnimation { points_per_second, duration }`, not by
+        //   `animation_time`. `ScrollAnimation::none()` sets
+        //   `points_per_second = f32::INFINITY` and a zero-length duration
+        //   range, so the jump is immediate.
+        //
+        // What this does *not* reach, because egui 0.35 gives no style knob
+        // for it: a mouse wheel's discrete notches are smoothed over several
+        // frames by `WheelState::after_events` (an `exponential_smooth_factor`
+        // low-pass, `src/input_state/wheel_state.rs`) before egui ever sees
+        // them — that's hardcoded, not read from `Style`. It only touches
+        // wheel-scrolled lists (Scenes, Keybinds), not menus, panels or
+        // widget colours, and it exists to stop one loud notch on a Logitech
+        // mouse from being read as fourteen — so it's left alone rather than
+        // patched around.
+        ctx.all_styles_mut(|s| {
+            s.animation_time = 0.0;
+            s.scroll_animation = egui::style::ScrollAnimation::none();
+        });
         let viewport_id = egui::ViewportId::ROOT;
         let state = egui_winit::State::new(
             ctx.clone(),

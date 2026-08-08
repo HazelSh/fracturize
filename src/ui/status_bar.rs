@@ -4,8 +4,10 @@
 //! already in `app.ui_state.status_hint` by the time we read it.
 
 use crate::app::App;
+use crate::scene::similarity_dimension;
 
 use super::hints::HINT_VIEWPORT;
+use super::icons;
 use super::num;
 
 const BAR_HEIGHT: f32 = 22.0;
@@ -24,6 +26,14 @@ const ZOOM_CHARS: usize = 8;
 const DRAWING_CHARS: usize = 17;
 /// Budget for `render <phase>: NNN% (paused)`.
 const JOB_CHARS: usize = 34;
+/// Gap between the `d ... (class)` and `Λ ...` readouts — same width as the
+/// sparkline-to-FPS-text gap below, since both are two sub-readouts inside
+/// one cluster rather than a boundary between clusters (those use 10.0).
+const DIM_LACUNARITY_GAP: f32 = 6.0;
+/// Shared colour for the dimension-lock toggle and the `d` readout it
+/// governs — both tint to this and both go `.weak()` together, so the lock
+/// and the number it locks visibly belong to each other.
+const DIMENSION_LOCK_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 200, 255);
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     // Resolve the left-hand hint per the plan's three-tier precedence:
@@ -169,22 +179,126 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                          (compositor, driver, another GPU client), not the UI.",
                     );
 
-                    // Which variation slot E / - / = are pointed at. The one
-                    // piece of the retired HUD with no home in a panel: the
-                    // Transforms inspector bolds the targeted row, but that
-                    // panel is often closed while the keys are still live.
-                    if let Some(idx) = app.selected_transform() {
-                        let slot = app.selected_variation();
-                        let weight = app.scene.transforms[idx].variations[slot];
-                        ui.add_space(10.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "[E] {} {:+.2}",
-                                crate::scene::VARIATION_NAMES[slot],
-                                weight
-                            ))
-                            .weak(),
-                        );
+                    // Similarity dimension + lacunarity: the two numbers that
+                    // describe what kind of structure the attractor has. Dimension
+                    // is cheap (computed every frame); lacunarity is cached and
+                    // updates once per second.
+                    ui.add_space(10.0);
+
+                    // Dimension lock toggle — clickable, with visual feedback.
+                    // Phosphor glyph via the icon system (icons.rs), not a
+                    // literal emoji: emoji renders through whatever font the
+                    // host system happens to supply, at whatever size, which
+                    // is why the locked glyph used to be unreadable.
+                    //
+                    // This one sets its own size instead of inheriting the
+                    // bar's usual small-icon size like its neighbours do:
+                    // LOCK and LOCK_OPEN are a two-state toggle whose glyphs
+                    // differ only by a single pixel of shackle-gap at the
+                    // inherited size, so geometry alone can't carry the
+                    // state at rest — it needs both this size bump and the
+                    // colour cue below. Don't "tidy" the size back off; that
+                    // is exactly how it became unreadable last time.
+                    //
+                    // 16px is the largest size that fits without growing the
+                    // bar: BAR_HEIGHT (22) minus the status panel's default
+                    // frame margin (2px top + 2px bottom, from
+                    // egui::Frame::side_top_panel) leaves an 18px content
+                    // budget — the same budget the sparkline (16px tall) and
+                    // every text readout in this row already live inside.
+                    // Measured against egui's actual font/layout system
+                    // (Phosphor is a fallback font here, so row height is
+                    // still set by the primary proportional font's larger
+                    // ascent+descent, not Phosphor's own metrics): a FontId
+                    // size of 18 — this glyph's ideal legibility size — paints
+                    // ~21px tall, 3px over budget. Size 16 paints exactly
+                    // 18px at 1x UI scale (18.0–18.7px across the 1.0–2.0x
+                    // range `ui_scale` allows), the largest size that still
+                    // matches everyone else's budget.
+                    const LOCK_ICON_SIZE: f32 = 16.0;
+                    let lock_on = app.ui_state.dimension_lock;
+                    let lock_icon = if lock_on { icons::LOCK } else { icons::LOCK_OPEN };
+                    let lock_rich = egui::RichText::new(lock_icon).size(LOCK_ICON_SIZE);
+                    let lock_rich = if lock_on {
+                        lock_rich.color(DIMENSION_LOCK_COLOR)
+                    } else {
+                        lock_rich.weak()
+                    };
+                    if ui
+                        .add(egui::Button::new(lock_rich).small().frame(false))
+                        .on_hover_text(if lock_on {
+                            "Dimension lock ON — editing one scale adjusts all others to hold d fixed.\n\
+                             Click to unlock."
+                        } else {
+                            "Dimension lock OFF — scales are independent.\n\
+                             Click to lock: editing one scale will adjust all others to preserve d."
+                        })
+                        .clicked()
+                    {
+                        app.ui_state.dimension_lock = !lock_on;
+                    }
+
+                    if let Some(d) = similarity_dimension(&app.scene.transforms) {
+                        let class = match d {
+                            d if d < 1.7 => "dust",
+                            d if d < 2.1 => "lace",
+                            d if d < 2.6 => "shell",
+                            d if d < 3.0 => "solid",
+                            _ => "overfull",
+                        };
+                        let lambda_str = app
+                            .lacunarity()
+                            .map(|l| format!("Λ {:.1}", l))
+                            .unwrap_or_default();
+                        // Only `d` takes the lock's highlight — the lock holds
+                        // similarity dimension fixed and does nothing to
+                        // lacunarity, so colouring Λ blue too would claim a
+                        // guarantee this control doesn't make. Two labels
+                        // rather than one string, with a fixed add_space
+                        // between them: constant regardless of the values, so
+                        // it can't add to the bar's jitter (see the fps
+                        // cluster comment above and `num.rs`).
+                        let dim_text = format!("d {:.2} ({})", d, class);
+                        let dim_rich = if lock_on {
+                            egui::RichText::new(dim_text).color(DIMENSION_LOCK_COLOR)
+                        } else {
+                            egui::RichText::new(dim_text).weak()
+                        };
+                        let resp = ui
+                            .horizontal(|ui| {
+                                // Zero out the default item spacing so the
+                                // only gap between the two labels is the
+                                // explicit add_space below — otherwise egui's
+                                // own inter-widget spacing would stack with
+                                // it and the gap would no longer match the
+                                // rest of the bar's groupings.
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label(dim_rich);
+                                ui.add_space(DIM_LACUNARITY_GAP);
+                                ui.label(egui::RichText::new(lambda_str).weak());
+                            })
+                            .response;
+                        resp.on_hover_text(
+                                "Similarity dimension (d) and lacunarity (Λ).\n\n\
+                                 Dimension predicts visual density:\n\
+                                 • dust (<1.7): sparse, may disappear at low point counts\n\
+                                 • lace (1.7–2.1): intricate surface structure\n\
+                                 • shell (2.1–2.6): volumetric but hollow\n\
+                                 • solid (2.6–3.0): fills space\n\
+                                 • overfull (>3.0): overlapping copies, uniform measure\n\n\
+                                 Lacunarity is how much clumpier than a random scatter\n\
+                                 the measure is, averaged over four scales:\n\
+                                 • Λ ≈ 1: no gaps to read — a smooth, structureless measure\n\
+                                 • Λ ≈ 2: menger, flat by construction\n\
+                                 • Λ ≈ 10: wellspiral — structure at every scale\n\
+                                 • Λ > 40: glasshouse, blossom\n\n\
+                                 The pair is what locates you: low d with high Λ is lace,\n\
+                                 high d with Λ near 1 is the mush wall — it fills space\n\
+                                 and has nothing in it.",
+                            );
+                    } else {
+                        ui.label(egui::RichText::new("d n/a").weak())
+                            .on_hover_text("No valid contracting transforms — dimension undefined.");
                     }
                 });
             });
