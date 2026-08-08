@@ -1,0 +1,88 @@
+# Reliquary — an icosahedral case with something kept inside it.
+#
+# Sixty copies of one small facet, and a core that is not in the group. The
+# case is the symmetry; the relic is the defect. CRAFT §3.6 says it that way
+# round on purpose — a group orbit distributes measure evenly by construction,
+# so a wholly symmetric scene is wallpaper, and the one map outside the group
+# is what puts the variance back.
+#
+# The whole thing is two transforms. `facet` is a motif of the icosahedral
+# group, so the attractor is made of 60 copies of it; `relic` sits on the
+# centre in no group at all. There is no hand-authored icosahedral scene
+# anywhere in scenes/ because sixty consistent rotation matrices is not
+# something a person types — that is the point of the [[symmetry]] block.
+#
+# RENDER IT WITH SPLAT (`R` in the app, `--splat` from the CLI). This is a
+# diffuse volumetric scene and the points renderer saturates it into a pastel
+# blob at any useful density, exactly as CRAFT §2.1 warns; the log-density
+# tonemap is what keeps the threads apart.
+
+[meta]
+name = "Reliquary"
+author = "Claude Opus 5"
+point_size = 0.0016
+color_speed = 0.42
+color_falloff = 0.7
+# 1.0, not a stretch: the orbit colouring already spreads the walk across the
+# whole ring, so `--info`'s "only part of the ramp is reached" note fires on
+# anything above it and the picture really does lose saturation.
+color_contrast = 1.0
+haze = 0.28
+exposure = 1.0
+background = [0.012, 0.014, 0.028]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 4.3
+yaw = 0.55
+pitch = 0.42
+
+# Stained glass, because the colour has to come from somewhere and there are
+# only two maps to get it from. The orbit colouring below spreads the walk
+# across this whole ring rather than parking it on two stops.
+[palette]
+interpolate = "oklab"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#2a0f3d" },
+  { at = 0.18, color = "#8e2f5a" },
+  { at = 0.36, color = "#e0913c" },
+  { at = 0.52, color = "#fff0c9" },
+  { at = 0.68, color = "#4fc2c4" },
+  { at = 0.84, color = "#1f4796" },
+]
+
+# Six lines, and the map set is 60 wide.
+[[symmetry]]
+group = "Icosa"
+applies_to = ["facet"]
+# Offsets the colour index by which group element was drawn. Because the
+# element is redrawn every iteration this does NOT paint 60 solid petals —
+# it reads as an interference pattern through the whole form, warm and cool
+# threads crossing in the same node. That is the honest description of what
+# a live group does to colour, and on this scene it is the look.
+color = "orbit"
+
+[[transform]]
+name = "facet"
+translation = [0.0, 0.62, 1.0]
+# Per-axis, so a copy is a strut and not a bead: sixty struts weave a case,
+# sixty beads are a handful of gravel on a sphere. It is also what keeps the
+# dimension honest — the determinant is 0.005, so the contraction is 0.17,
+# and 60 maps at 0.17 is a shell rather than a solid (CRAFT §2.1).
+scale = [0.11, 0.42, 0.11]
+rotation = [14.0, 0.0, -9.0]
+color = [1.0, 0.66, 0.30]
+weight = 1.0
+
+# The defect. On the axis of nothing, in the group of nothing — an ordinary
+# contraction at the centre that the sixty copies then carry outward. Its
+# share of the walk is what CRAFT §3.6's rose_window data point suggests
+# (18%), not the 1-2% a degenerate stem wants.
+[[transform]]
+name = "relic"
+translation = [0.0, 0.0, 0.0]
+scale = 0.52
+rotation = [0.0, 31.0, 0.0]
+color = [0.42, 0.72, 1.0]
+weight = 0.22

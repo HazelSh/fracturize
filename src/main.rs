@@ -17,6 +17,7 @@ mod pick;
 mod scene;
 mod set;
 mod sweep;
+mod symmetry;
 mod glyphs;
 mod randomize;
 mod renorm;
@@ -189,6 +190,18 @@ struct Args {
         help_heading = "Camera",
     )]
     rotvec: Option<Vec3>,
+
+    /// Render the frame the camera path reaches at `t` in 0..1 [no]
+    ///
+    /// The framing the animation would have at that point of its flight,
+    /// as a still. Under infinite zoom this is the only way to name a frame
+    /// of the flight: the descent twists while it scales, so walking
+    /// `--distance` down leaves the path a little further behind every step.
+    /// A scene with no authored path is flown around its full orbit, the same
+    /// one `--render out.mp4` uses. The other camera flags adjust whatever
+    /// this lands on.
+    #[arg(long, value_name = "0-1", help_heading = "Camera")]
+    path_t: Option<f32>,
 
     /// Camera look-at point, in world units [--view, else the scene]
     // allow_hyphen_values, or a focus with a negative coordinate — which is
@@ -365,8 +378,8 @@ struct Args {
     /// Sheet varying one scene value, repeatable up to twice [no sheet]
     ///
     /// Takes a --set path and either a range or a list. Join paths with `+`
-    /// to move them in lockstep (`t.a.weight+t.b.weight=0.5:2`), which is what
-    /// you want when several maps must stay equal.
+    /// to move them in lockstep (`transform.a.weight+transform.b.weight=0.5:2`),
+    /// which is what you want when several maps must stay equal.
     /// `transform.facet-1.variations.absfold=0.05:0.55` walks --sweep-steps
     /// values between the ends; `palette.name=ember,abyss,peacock` uses the
     /// list verbatim (checked for first, so a value containing a comma is
@@ -472,6 +485,15 @@ struct Args {
     #[arg(long, help_heading = "Inspecting")]
     color: bool,
 
+    /// Analyze a rendered image and report statistics
+    ///
+    /// Reads a PNG file and reports: mean/max luminance, percentage of clipped
+    /// (white) and empty (black) pixels, and a color-index histogram. This
+    /// catches the monochrome-palette failure mode (a spike in the histogram)
+    /// that is invisible in the picture itself.
+    #[arg(long, value_name = "IMAGE", help_heading = "Inspecting")]
+    stats: Option<std::path::PathBuf>,
+
     // -------------------------------------------------------- Windowed mode
     /// Capture a screenshot and exit after --delay frames
     #[arg(long, help_heading = "Windowed mode")]
@@ -508,6 +530,7 @@ impl Args {
             distance: self.distance,
             roll: self.roll,
             focus: self.focus,
+            path_t: self.path_t,
         }
     }
 }
@@ -727,6 +750,154 @@ fn print_palette_library(color: bool) {
         "\nUse with --palette <name>. Apophysis .ugr / .gradient / .flame files\n\
          work too: --palette mygradients.ugr#twilight"
     );
+}
+
+/// Analyze a rendered image and print statistics about it.
+///
+/// Reports luminance distribution, clipping, and color-index histogram.
+/// The color histogram catches the monochrome-palette failure mode that is
+/// invisible in the picture itself (CRAFT §2.3's trap).
+fn print_image_stats(path: &std::path::Path) {
+    let img = match image::open(path) {
+        Ok(i) => i.to_rgba8(),
+        Err(e) => {
+            eprintln!("Failed to open '{}': {}", path.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let (w, h) = img.dimensions();
+    let total = (w * h) as f64;
+    if total == 0.0 {
+        eprintln!("Image has zero pixels");
+        std::process::exit(1);
+    }
+
+    println!("stats    {}", path.display());
+    println!("         {}x{} ({:.1}M pixels)", w, h, total / 1e6);
+
+    // Luminance analysis
+    let mut sum_lum = 0.0f64;
+    let mut max_lum = 0.0f32;
+    let mut clipped = 0u64; // R=G=B=255
+    let mut empty = 0u64; // R=G=B=0 and A>0 (black), or A=0 (transparent)
+
+    // Color histogram (quantized to 16 bins for readability)
+    let mut hue_hist = [0u64; 16];
+    let mut saturation_sum = 0.0f64;
+    let mut saturated_pixels = 0u64;
+
+    for pixel in img.pixels() {
+        let [r, g, b, a] = pixel.0;
+        let rf = r as f32 / 255.0;
+        let gf = g as f32 / 255.0;
+        let bf = b as f32 / 255.0;
+
+        // Relative luminance (sRGB)
+        let lum = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
+        sum_lum += lum as f64;
+        max_lum = max_lum.max(lum);
+
+        if r == 255 && g == 255 && b == 255 {
+            clipped += 1;
+        }
+        if (r == 0 && g == 0 && b == 0) || a == 0 {
+            empty += 1;
+        }
+
+        // Hue and saturation for color distribution
+        let max_c = rf.max(gf).max(bf);
+        let min_c = rf.min(gf).min(bf);
+        let delta = max_c - min_c;
+
+        if delta > 0.05 {
+            // Has some color
+            saturated_pixels += 1;
+            saturation_sum += (delta / max_c.max(0.001)) as f64;
+
+            let hue = if max_c == rf {
+                60.0 * (((gf - bf) / delta) % 6.0)
+            } else if max_c == gf {
+                60.0 * (((bf - rf) / delta) + 2.0)
+            } else {
+                60.0 * (((rf - gf) / delta) + 4.0)
+            };
+            let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+            let bin = ((hue / 360.0 * 16.0) as usize).min(15);
+            hue_hist[bin] += 1;
+        }
+    }
+
+    let mean_lum = sum_lum / total;
+    let clipped_pct = clipped as f64 / total * 100.0;
+    let empty_pct = empty as f64 / total * 100.0;
+
+    println!();
+    println!("lumin    mean {:.3}   max {:.3}", mean_lum, max_lum);
+    println!(
+        "         clipped {:>5.1}%   empty {:>5.1}%",
+        clipped_pct, empty_pct
+    );
+
+    if clipped_pct > 5.0 {
+        println!("         note: >5% clipped — consider lowering exposure");
+    }
+    if empty_pct > 80.0 {
+        println!("         note: >80% empty — attractor may be too small in frame");
+    }
+
+    // Color distribution
+    println!();
+    if saturated_pixels > 0 {
+        let mean_sat = saturation_sum / saturated_pixels as f64;
+        println!(
+            "color    mean saturation {:.2}   colored pixels {:>5.1}%",
+            mean_sat,
+            saturated_pixels as f64 / total * 100.0
+        );
+
+        // Find peaks in hue histogram
+        let max_bin = *hue_hist.iter().max().unwrap_or(&0);
+        if max_bin > 0 {
+            let threshold = max_bin / 4;
+            let peaks: Vec<usize> = hue_hist
+                .iter()
+                .enumerate()
+                .filter(|&(_, &c)| c > threshold)
+                .map(|(i, _)| i)
+                .collect();
+
+            if peaks.len() <= 2 && saturated_pixels as f64 / total > 0.1 {
+                println!(
+                    "         note: color concentrated in {} bin{} — may be monochrome trap",
+                    peaks.len(),
+                    if peaks.len() == 1 { "" } else { "s" }
+                );
+            }
+
+            // Print histogram as sparkline
+            let sparkline: String = hue_hist
+                .iter()
+                .map(|&c| {
+                    let level = (c as f64 / max_bin as f64 * 7.0) as usize;
+                    ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][level.min(7)]
+                })
+                .collect();
+            println!("         hue histogram: {}", sparkline);
+            // Tick letters sit under the bin their hue actually lands in:
+            // 16 bins of 22.5°, so red 0° -> 0, yellow 60° -> 2, green
+            // 120° -> 5, cyan 180° -> 8, blue 240° -> 10, magenta 300° -> 13.
+            let mut ticks = [b' '; 16];
+            for (hue_deg, letter) in
+                [(0, b'R'), (60, b'Y'), (120, b'G'), (180, b'C'), (240, b'B'), (300, b'M')]
+            {
+                ticks[hue_deg * 16 / 360] = letter;
+            }
+            println!("                        {}", String::from_utf8_lossy(&ticks).trim_end());
+        }
+    } else {
+        println!("color    no saturated pixels (grayscale or empty)");
+    }
 }
 
 /// The scene a run starts from: `--scene`, else `--blank`, `--random`, or the
@@ -990,8 +1161,32 @@ impl ApplicationHandler for AppWrapper {
             return;
         };
 
-        // egui must see every event first.
-        let resp = egui.state.on_window_event(&app.window, &event);
+        // egui must see every event first — with one deliberate exception.
+        // egui-winit's own doc comment on `EventResponse::consumed` says it
+        // straight out: "egui uses `tab` to move focus between elements, so
+        // this will always be `true` for tabs." Forwarding an unclaimed Tab
+        // is what *creates* the claim: when nothing is focused, egui's own
+        // focus-navigation (`memory/mod.rs`'s `FocusDirection::Next` branch)
+        // hands keyboard focus to the first widget that wants it, purely
+        // because a Tab keydown arrived — no click needed. That invented
+        // focus then makes `egui_wants_keyboard_input()` true and silently
+        // gates off every other keybind (G, O, Z, S, W, …) until something
+        // surrenders it. So for Tab specifically, the gate is read *before*
+        // forwarding — reading it after would only report the state that
+        // forwarding itself just produced. When something legitimately has
+        // focus already (typing in the scene name, Save-as, the palette
+        // editor, a focused button), Tab is forwarded exactly as before and
+        // egui's own focus navigation keeps working untouched.
+        let suppress_tab = matches!(
+            &event,
+            WindowEvent::KeyboardInput { event: key, .. }
+                if matches!(key.physical_key, PhysicalKey::Code(KeyCode::Tab))
+        ) && !(egui.ctx.egui_wants_keyboard_input() || egui.ctx.egui_is_using_pointer());
+        let resp = if suppress_tab {
+            Default::default()
+        } else {
+            egui.state.on_window_event(&app.window, &event)
+        };
 
         // Modifiers and cursor position always update app state, regardless
         // of whether egui consumed the event or a drag is in flight.
@@ -1126,14 +1321,33 @@ impl ApplicationHandler for AppWrapper {
                             app.toggle_help();
                             return;
                         }
+                        PhysicalKey::Code(KeyCode::Tab) => {
+                            // Second binding for G (below), on the key most
+                            // editors reach for to flip an "edit mode" on and
+                            // off. Sits behind the same wants-keyboard gate as
+                            // every other binding here, which is enough: egui
+                            // treats Tab as its own focus-navigation key, and
+                            // `egui_wants_keyboard_input` is true whenever any
+                            // widget — not just a text field — holds focus, so
+                            // a focused button or slider keeps Tab for itself.
+                            app.toggle_gizmos();
+                            return;
+                        }
                         _ => {}
                     }
 
                     // Handle letter keys by logical key (respects keyboard layout)
                     match &event.logical_key {
                         Key::Named(NamedKey::Space) => {
-                            app.reset();
-                            log::info!("Reset");
+                            // Same action as O and Z: start/stop the camera
+                            // flying its path. No suppression block needed
+                            // here the way Tab needed one above — egui only
+                            // turns Space into a click when a widget already
+                            // holds focus (`Context::interact`'s
+                            // `memory.has_focus(id)` check), which is exactly
+                            // what `egui_wants_keyboard_input()` tests, so the
+                            // existing gate above already covers it.
+                            app.toggle_camera_motion();
                         }
                         Key::Character(c) => match c.as_str() {
                             "s" | "S" => {
@@ -1423,10 +1637,12 @@ fn default_scene() -> Scene {
                 glam::Quat::IDENTITY,
                 translation,
             ),
+            post_affine: Mat4::IDENTITY,
             color_value,
             weight: 1.0,
             color_speed: 0.5,
             explicit_color_speed: None,
+            symmetry: None,
             variations: TransformSpec::linear_variations(),
         })
         .collect(),
@@ -1452,6 +1668,12 @@ fn main() {
     // --palettes: show the library and stop. No scene, no device.
     if args.palettes {
         print_palette_library(args.color);
+        return;
+    }
+
+    // --stats: analyze a rendered image and report metrics
+    if let Some(path) = &args.stats {
+        print_image_stats(path);
         return;
     }
 

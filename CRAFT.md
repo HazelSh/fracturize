@@ -600,6 +600,114 @@ is one notch behind it.
 Append findings here. Date them, say what you measured, keep the failures — a
 recorded dead end is worth as much as a recipe.
 
+- **2026-08-09, Opus 5. `repeat` — and the reason it is filed under symmetry
+  while not being one.** A repeat is `count` copies stepped by a similarity
+  (turn about an axis, slide along a vector, shrink), which covers a row, a
+  helix, a logarithmic spiral and a cone from four numbers. `scenes/fiddlehead`
+  is twenty copies at the golden angle: it renders as a conifer, and no group
+  in §6.4 can make one.
+
+  **The distinction that matters when authoring: a group flattens the measure,
+  a repeat does not.** §3.6's whole argument is that an orbit distributes
+  measure evenly *by construction* — every element of a rotation group is
+  orthogonal, so every copy shares the motif's contraction and weight, and you
+  must author a defect to get variance back. A repeat's k-th copy carries
+  `shrinkᵏ`. The variance is already in the structure. `fiddlehead` has a stem
+  but no defect, and `--info` correctly declines to ask for one.
+
+  **So the dimension sum changes shape again.** The `Σ|G|·sᵈ` fix in the entry
+  below assumes the copies are all the same size, which is exactly what a
+  repeat breaks: the sum is `Σₖ (s·shrinkᵏ)ᵈ`. Twenty copies tapering at 0.9
+  behave like ~4.8 full-size maps, not twenty, so a repeat tolerates a much
+  larger motif than a group of the same count — `fiddlehead` sits at `s = 0.476`
+  against `reliquary`'s 0.172. Getting this wrong is not a rounding error: with
+  the taper ignored the first draft's `d` is overstated by about a third.
+
+  **The failure I hit: the first draft was dust.** `scale = [0.34, 0.16, 0.34]`
+  under a 20-copy repeat measured `d = 1.50`, occupancy 9%, Λ 16.7 — a thin
+  scatter. The instinct carried over from `reliquary` ("many copies, so make
+  each one small") is backwards under a taper, because most of the copies are
+  already small. Solving `Σₖ (s·0.9ᵏ)ᵈ = 1` for `d = 2.2` gives `s ≈ 0.48`, and
+  `scale = [0.60, 0.30, 0.60]` landed `d = 2.18`, occupancy 18.8%.
+
+  **`shrink` is capped at 1 and the cap is not a limitation.** `Sᵏ ∘ f` has
+  linear part `S_linᵏ · f_lin`, so a growing step makes the far copies expansive
+  and the walk unbounded. A growing repeat of `N` copies from `m` is the same
+  picture as a shrinking one from `S^(N-1) m` — re-anchor rather than reach for
+  it.
+
+  **And the thing worth knowing before asking for more groups:** the finite
+  subgroups of SO(3) are `C_n`, `D_n`, `T`, `O`, `I`, full stop. That is a
+  classification, not the five somebody got around to implementing. The reason
+  `T`/`O`/`I` feel more three-dimensional than `C_n`/`D_n` is exact rather than
+  aesthetic — the cyclic and dihedral groups fix an axis, so they are plane
+  patterns extruded, while the polyhedral three fix no direction at all. New
+  vocabulary has to leave SO(3): reflections, translations (this entry), or
+  conformal maps.
+
+- **2026-08-08, Opus 5. Symmetry groups are native now** (`[[symmetry]]` in a
+  scene, `src/symmetry.rs`, §3.6's subject). Three things fell out that change
+  how you author against this section.
+
+  **The similarity dimension has to count the orbit, and nothing said so.**
+  `Σsᵢᵈ = 1` is a sum over the *effective* map set, so a motif under `G`
+  contributes `|G|` terms, not one: `Σ|Gᵢ|·sᵢᵈ = 1`. Before this was fixed a
+  single map under `C5` reported `d = 0` ("dust") — one contraction can never
+  sum to 1 — when the honest answer is `ln|G| / ln(1/s)` = 2.0. Anything in §2.1
+  applied to a symmetric scene needs the orbit counted or it is nonsense.
+
+  **The consequence for authoring is that `|G|` and `s` trade off hard, and the
+  arithmetic is worth doing before you render.** For one motif,
+  `d = ln|G| / ln(1/s)`, so the scale that keeps you in the corridor falls fast
+  as the group grows: for `d ≈ 2.2`, `C5` wants `s ≈ 0.33` and `I` wants
+  `s ≈ 0.16`. My first `reliquary` draft was `I` at `s = 0.36` and measured
+  `d = 4.08`, occupancy 54%, Λ 1.9 — a solid ball, and `--info` said so before
+  I looked at it. Sixty copies of anything is a lot of material.
+
+  **Per-axis scale is the way out.** Going to `scale = [0.11, 0.42, 0.11]` —
+  the same map as a strut rather than a bead — put the contraction at 0.172 by
+  determinant and landed `d = 2.45`, Λ 3.4. Sixty struts weave a case; sixty
+  beads are gravel on a sphere. The §3.2 trunk trick, doing a second job.
+
+  Unmeasured still: §3.6's defect dose. `reliquary` follows `rose_window`'s 18%
+  because that is the one data point, and it looks right, but one scene at one
+  value is not a measurement.
+
+- **2026-08-08, Opus 5. Measured, over all 44 scenes in `scenes/`.** Lacunarity
+  works, but only after being normalised — and the un-normalised version is a
+  trap worth knowing about.
+
+  Raw gliding-box `Λ = 1 + Var/Mean²` on a voxel ladder (4/8/16/32 per side)
+  **rose monotonically on every one of the 44 scenes.** There is no plateau to
+  find, so the shape of the raw curve separates nothing. The reason is that
+  scattering `N` points over `C` cells at random already scores `Λ ≈ 1 + C/N`
+  whatever the shape is; at 2000 sample points the n=32 rung has a floor of
+  17.4 that no scene can go below, and every scene sat just above it in
+  proportion to how empty its bounding cube was. A one-number summary of that
+  is a restatement of `occupancy`, which `--info` already prints.
+
+  Dividing each rung by that chance expectation fixes it. The number becomes an
+  *excess*: 1.0 = as clumped as a random scatter, higher = real gaps at that
+  scale. On the repo's scenes it orders them the way the eye does, and the
+  spread is wide enough to act on:
+
+  | | Λ | |
+  |---|---|---|
+  | `menger` | 1.6 | flat measure by construction — the §3.6 prediction, confirmed |
+  | `diamond`, `vortex` | 2.2–2.6 | regular, little to resolve |
+  | `sierpinski` | 4.1 | |
+  | `wellspiral` | 10.2 | the known-good target |
+  | `pearl` | 17.3 | |
+  | `glasshouse`, `blossom` | 40–47 | structure at every scale |
+
+  The cross-check that earns it a place: `menger` is the scene §3.6 fingers by
+  hand as a symmetry orbit with a flattened measure, and it is the *only* scene
+  the metric puts below 2.0. `--info` now raises a note at `d > 2.5 && Λ < 2.0`
+  — diagnosis, never refusal.
+
+  What is **not** shown: that Λ separates a fuzzball from a good scene. Every
+  scene here is one somebody kept. The Gemini-authored corpus §1.1 asks for is
+  still the sharper test and is still unrun.
 - **2026-08-04, Opus 5.** Similarity dimension predicts dust/shell/mush (§2.1).
   Out-of-plane tilt sweet spot is 5–12° (§3.1). Expanding maps break
   `color_falloff` and render monochrome (§2.3). `boxfold` inside ±1 is a no-op

@@ -224,7 +224,24 @@ impl<'a> Walker<'a> {
         let t = &self.transforms[idx];
 
         let affine = t.matrix.transform_point3(self.pos);
-        self.pos = apply_variations(&t.variations, affine, rng);
+        let varied = apply_variations(&t.variations, affine, rng);
+        self.pos = t.post_affine.transform_point3(varied);
+
+        // Then the symmetry group, drawn uniformly and composed on the outside
+        // of the whole map — the CPU half of the same step chaos.wgsl takes.
+        // It has to be here, not just on the GPU: `randomize.rs` gates rolls on
+        // these walkers and `App::drawn_points` sizes the buffer from their
+        // radius, so a CPU walk that skipped the group would measure a
+        // completely different attractor from the one on screen.
+        let mut target = t.color_value;
+        if let Some(sym) = t.symmetry.as_ref() {
+            let elements = sym.elements();
+            let pick = rng.gen_range(0..elements.len());
+            self.pos = elements[pick].transform_point3(self.pos);
+            if sym.color() == crate::symmetry::OrbitColor::Orbit {
+                target = (target + pick as f32 / elements.len() as f32).fract();
+            }
+        }
 
         // Re-seed diverged/NaN walkers, like the shader
         if !(self.pos.dot(self.pos) < 1e12) {
@@ -235,7 +252,7 @@ impl<'a> Walker<'a> {
             );
         }
 
-        self.color_val = self.color_val * (1.0 - t.color_speed) + t.color_value * t.color_speed;
+        self.color_val = self.color_val * (1.0 - t.color_speed) + target * t.color_speed;
         idx
     }
 }
@@ -373,6 +390,132 @@ fn occupancy(points: &[Vec3], center: Vec3, radius: f32) -> f32 {
     grid.iter().filter(|c| **c).count() as f32 / grid.len() as f32
 }
 
+/// Cells per side at each rung of the lacunarity ladder.
+pub const LACUNARITY_RESOLUTIONS: [usize; 4] = [4, 8, 16, 32];
+
+/// Lacunarity spectrum: how much *clumpier than chance* the measure is, at
+/// each of [`LACUNARITY_RESOLUTIONS`].
+///
+/// The textbook gliding-box lacunarity is `Λ = 1 + Var[mass]/Mean[mass]²`, and
+/// reporting that raw was measured to be a mistake (2026-08-08 — see CRAFT's
+/// discovery log). Scattering `N` points over `C` cells at random already
+/// gives `Λ ≈ 1 + C/N` whatever the shape is, so at the fine end of the ladder
+/// — where `C` overtakes `N` — the number is a readout of the sample budget,
+/// not of the attractor. Across all 44 scenes in `scenes/` the raw curve rose
+/// monotonically every time, and its summary tracked `occupancy`, which
+/// `--info` already prints.
+///
+/// So each rung is divided by that chance expectation, and what comes back is
+/// an *excess*:
+///
+/// ```text
+///   1.0   as clumped as a random scatter — a smooth, structureless measure
+///   > 1   clumped: gaps at this scale, which is what there is to look at
+///   < 1   more even than random — a filled, regular solid
+/// ```
+///
+/// This is what makes the two walls separable rather than a restatement of how
+/// much of the bounding cube is empty: `menger` lands near 1.5 (flat measure by
+/// construction, exactly as predicted), `wellspiral` near 9, `blossom` near 40.
+///
+/// `None` when no walker can be built or the sample is too sparse to divide by.
+pub fn lacunarity_spectrum(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Vec<f32>> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::from_seed([0x5d; 32]);
+    let mut walker = Walker::new(transforms, enabled, &mut rng)?;
+
+    for _ in 0..BURN_IN_STEPS {
+        walker.step(&mut rng);
+    }
+
+    let steps = 2000;
+    let mut points = Vec::with_capacity(steps);
+    let mut sum = Vec3::ZERO;
+    for _ in 0..steps {
+        walker.step(&mut rng);
+        let p = walker.pos;
+        if !p.is_finite() {
+            return None;
+        }
+        sum += p;
+        points.push(p);
+    }
+
+    if points.len() < 100 {
+        return None;
+    }
+
+    let mean = sum / points.len() as f32;
+    let mut radii: Vec<f32> = points.iter().map(|p| (*p - mean).length()).collect();
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let radius = radii[(radii.len() as f32 * 0.95) as usize % radii.len()];
+
+    if radius <= 0.0 {
+        return None;
+    }
+
+    let resolutions = LACUNARITY_RESOLUTIONS;
+    let mut spectrum = Vec::with_capacity(resolutions.len());
+
+    for &n in &resolutions {
+        let mut counts = vec![0u32; n * n * n];
+        let mut total = 0u32;
+
+        for p in &points {
+            let d = (*p - mean) / radius;
+            if d.abs().max_element() > 1.0 {
+                continue;
+            }
+            let idx = |v: f32| ((v * 0.5 + 0.5) * n as f32).clamp(0.0, n as f32 - 1.0) as usize;
+            counts[idx(d.x) * n * n + idx(d.y) * n + idx(d.z)] += 1;
+            total += 1;
+        }
+
+        if total < 10 {
+            return None;
+        }
+
+        let n_cells = (n * n * n) as f32;
+        let mean_mass = total as f32 / n_cells;
+        let var_mass: f32 = counts
+            .iter()
+            .map(|&c| {
+                let diff = c as f32 - mean_mass;
+                diff * diff
+            })
+            .sum::<f32>()
+            / n_cells;
+
+        let lambda = 1.0 + var_mass / (mean_mass * mean_mass).max(1e-9);
+
+        // What a uniform random scatter of the same `total` points over the
+        // same `n_cells` would score. Poisson has Var = Mean, so the whole
+        // expectation collapses to `1 + 1/mean_mass` — and dividing it out is
+        // what leaves a number about the attractor rather than about how many
+        // walkers we could afford.
+        let chance = 1.0 + (1.0 - mean_mass.min(1.0)) / mean_mass.max(1e-9);
+        spectrum.push(lambda / chance.max(1e-9));
+    }
+
+    Some(spectrum)
+}
+
+/// One number for the whole ladder: the geometric mean of
+/// [`lacunarity_spectrum`], so it keeps that function's units — 1.0 is a
+/// random scatter, higher is clumpier at more scales.
+///
+/// Geometric rather than arithmetic because the rungs span an order of
+/// magnitude and the question is "elevated across the ladder", not "how big
+/// does it get at its worst".
+pub fn lacunarity_summary(transforms: &[TransformSpec], enabled: &[bool]) -> Option<f32> {
+    let spectrum = lacunarity_spectrum(transforms, enabled)?;
+    if spectrum.is_empty() {
+        return None;
+    }
+    let log_sum: f32 = spectrum.iter().map(|&l| l.max(1e-9).ln()).sum();
+    Some((log_sum / spectrum.len() as f32).exp())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,13 +533,188 @@ mod tests {
         .iter()
         .map(|&t| TransformSpec {
             matrix: Mat4::from_scale_rotation_translation(Vec3::splat(0.5), Quat::IDENTITY, t),
+            post_affine: Mat4::IDENTITY,
             color_value: 0.5,
             weight: 1.0,
             color_speed: 0.5,
             explicit_color_speed: None,
+            symmetry: None,
             variations: TransformSpec::linear_variations(),
         })
         .collect()
+    }
+
+    /// One off-axis contracting map, optionally enrolled in a group.
+    fn one_map(symmetry: Option<crate::symmetry::Symmetry>) -> Vec<TransformSpec> {
+        vec![TransformSpec {
+            matrix: Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.5),
+                Quat::IDENTITY,
+                Vec3::new(0.7, 0.2, 0.0),
+            ),
+            post_affine: Mat4::IDENTITY,
+            color_value: 0.5,
+            weight: 1.0,
+            color_speed: 0.5,
+            explicit_color_speed: None,
+            symmetry,
+            variations: TransformSpec::linear_variations(),
+        }]
+    }
+
+    /// The claim the whole feature rests on: `{g ∘ f : g ∈ G}` has a
+    /// `G`-symmetric attractor. Checked on the measure rather than on the
+    /// matrices, because matrices multiplying correctly is what
+    /// `symmetry.rs`'s own tests already cover — what this has to catch is the
+    /// group being composed on the wrong side, or in the wrong place in the
+    /// step, either of which still produces a plausible-looking cloud.
+    ///
+    /// Under `C4` about Y, the x and z marginals of the attractor are equal and
+    /// the centroid sits on the axis. Both are properties a wrongly-composed
+    /// group breaks.
+    /// A repeat has to actually reach along its step. The control is the same
+    /// single map, whose attractor is one point; a repeat of eight copies down
+    /// +Y must stretch it into a column and drag the centroid up with it.
+    #[test]
+    fn a_repeat_stretches_the_attractor_along_its_step() {
+        let step = crate::symmetry::Repeat {
+            count: 8,
+            translate: Vec3::new(0.0, 0.35, 0.0),
+            turn: 0.0,
+            scale: 1.0,
+        };
+        let sym = crate::symmetry::Symmetry::new(
+            crate::symmetry::OrbitKind::Repeat(step),
+            Vec3::Y,
+            false,
+            crate::symmetry::OrbitColor::Shared,
+        )
+        .unwrap();
+
+        let plain = measure(&one_map(None), &[true]).expect("a single map converges");
+        let repeated = measure(&one_map(Some(sym)), &[true]).expect("and so does its chain");
+
+        assert!(
+            repeated.spread.y > 5.0 * plain.spread.y.max(1e-6),
+            "the chain should open the attractor along y: {:?} vs {:?}",
+            repeated.spread,
+            plain.spread
+        );
+        assert!(
+            repeated.center.y > plain.center.y + 0.3,
+            "and carry the centroid up the step: {} vs {}",
+            repeated.center.y,
+            plain.center.y
+        );
+        // The step is along y alone, so x is left as the control found it —
+        // this is what separates "walked the step" from "blew up".
+        assert!(
+            repeated.spread.x < 5.0 * plain.spread.x.max(1e-3) + 0.2,
+            "x should be largely untouched, got {:?}",
+            repeated.spread
+        );
+    }
+
+    #[test]
+    fn a_group_makes_the_attractor_symmetric_about_its_axis() {
+        let sym = crate::symmetry::Symmetry::new(
+            crate::symmetry::OrbitKind::Cyclic(4),
+            Vec3::Y,
+            false,
+            crate::symmetry::OrbitColor::Shared,
+        )
+        .unwrap();
+
+        let plain = measure(&one_map(None), &[true]).expect("a single map converges");
+        let symmetric = measure(&one_map(Some(sym)), &[true]).expect("so does its orbit");
+
+        // A single contracting map has one fixed point, and it is nowhere near
+        // the axis: this is the control, and it is what the group has to move.
+        assert!(
+            plain.center.x.abs() > 0.5,
+            "control: the unsymmetrized fixed point should be off-axis, got {:?}",
+            plain.center
+        );
+
+        assert!(
+            symmetric.center.x.abs() < 0.02 && symmetric.center.z.abs() < 0.02,
+            "a C4 attractor's centroid must sit on its own axis, got {:?}",
+            symmetric.center
+        );
+        assert!(
+            (symmetric.spread.x - symmetric.spread.z).abs() < 0.05 * symmetric.spread.x.max(1e-6),
+            "C4 about Y must spread x and z alike, got {:?}",
+            symmetric.spread
+        );
+        // And it is genuinely bigger than the point the control collapsed to.
+        assert!(
+            symmetric.radius > 10.0 * plain.radius,
+            "the orbit should open the attractor out: {} vs {}",
+            symmetric.radius,
+            plain.radius
+        );
+    }
+
+    /// The polyhedral groups have no axis, so the test is isotropy: an
+    /// icosahedral attractor is as wide one way as another.
+    #[test]
+    fn an_icosahedral_group_spreads_every_axis_alike() {
+        let sym = crate::symmetry::Symmetry::new(
+            crate::symmetry::OrbitKind::Icosahedral,
+            Vec3::Y,
+            false,
+            crate::symmetry::OrbitColor::Shared,
+        )
+        .unwrap();
+        let stats = measure(&one_map(Some(sym)), &[true]).expect("60 copies still converge");
+
+        assert!(stats.center.length() < 0.05, "centred, got {:?}", stats.center);
+        let (lo, hi) = (stats.spread.min_element(), stats.spread.max_element());
+        assert!(
+            hi - lo < 0.1 * hi,
+            "an icosahedral attractor should be near-isotropic, got {:?}",
+            stats.spread
+        );
+    }
+
+    /// The similarity dimension has to count the orbit.
+    ///
+    /// A group carries no contraction — its elements are orthogonal — but it
+    /// multiplies the *number* of maps, and `d` depends on both: `Σsᵢᵈ = 1`
+    /// becomes `|G|·sᵈ = 1` for one motif, so `d = ln|G| / ln(1/s)` in closed
+    /// form. Getting this wrong is not a rounding error; a symmetric scene
+    /// reads as `d = 0`, "dust", which is the opposite of what it is.
+    #[test]
+    fn the_dimension_counts_the_whole_orbit() {
+        for kind in [
+            crate::symmetry::OrbitKind::Cyclic(5),
+            crate::symmetry::OrbitKind::Dihedral(3),
+            crate::symmetry::OrbitKind::Icosahedral,
+        ] {
+            let sym = crate::symmetry::Symmetry::new(
+                kind,
+                Vec3::Y,
+                false,
+                crate::symmetry::OrbitColor::Shared,
+            )
+            .unwrap();
+            let order = sym.order() as f32;
+            let maps = one_map(Some(sym));
+            // `one_map` is a uniform half-scale, so s is exactly 0.5.
+            let s = maps[0].contraction();
+            let expected = order.ln() / (1.0 / s).ln();
+
+            let d = crate::scene::similarity_dimension(&maps).expect("it contracts");
+            assert!(
+                (d - expected).abs() < 1e-3,
+                "{:?}: d = {d:.4}, closed form says {expected:.4}",
+                kind
+            );
+        }
+
+        // And without a group the single map is still the degenerate case it
+        // always was — one contraction can never sum to 1.
+        assert_eq!(crate::scene::similarity_dimension(&one_map(None)), Some(0.0));
     }
 
     #[test]
@@ -450,3 +768,4 @@ mod tests {
         assert!((walker.pos - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-4);
     }
 }
+

@@ -232,10 +232,12 @@ fn random_transform(rng: &mut impl Rng) -> TransformSpec {
 
     TransformSpec {
         matrix: Mat4::from_scale_rotation_translation(scale, rotation, translation),
+        post_affine: Mat4::IDENTITY,
         color_value: 0.5,
         weight: rng.gen_range(0.5..2.0),
         color_speed: 0.5,
         explicit_color_speed: None,
+        symmetry: None,
         variations,
     }
 }

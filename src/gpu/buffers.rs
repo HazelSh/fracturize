@@ -131,7 +131,7 @@ pub struct VoxelCounter {
     pub _pad: [u32; 3],
 }
 
-/// GPU transform representation (176 bytes)
+/// GPU transform representation (256 bytes)
 ///
 /// Carries colour twice, because the two colour models want different things
 /// from it: `color_value` is a *position* in the 256-entry colormap (the
@@ -141,19 +141,36 @@ pub struct VoxelCounter {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuTransform {
-    pub matrix: [[f32; 4]; 4], // 64 bytes
-    pub color_value: f32,      // 4 bytes - colormap index (0.0-1.0)
-    pub weight: f32,           // 4 bytes
-    pub cumulative_weight: f32,// 4 bytes
-    pub color_speed: f32,      // 4 bytes - per-transform blending speed
+    pub matrix: [[f32; 4]; 4],       // 64 bytes - pre-affine (before variations)
+    pub post_affine: [[f32; 4]; 4],  // 64 bytes - post-affine (after variations)
+    pub color_value: f32,            // 4 bytes - colormap index (0.0-1.0)
+    pub weight: f32,                 // 4 bytes
+    pub cumulative_weight: f32,      // 4 bytes
+    pub color_speed: f32,            // 4 bytes - per-transform blending speed
     /// Variation blend weights (slot order matches chaos.wgsl / scene::VARIATION_NAMES)
     pub var_weights: [f32; crate::scene::NUM_VARIATIONS], // 80 bytes
     /// This transform's own colour, linear RGB (`ColorMode::Mix` only)
-    pub color_rgb: [f32; 3],   // 12 bytes
-    /// WGSL gives the preceding `vec3<f32>` an alignment of 16, so the struct
-    /// rounds up to 176 there. Rust's `repr(C)` would stop at 172 and every
-    /// transform after the first would read the wrong memory.
-    pub _pad: f32,             // 4 bytes
+    pub color_rgb: [f32; 3],         // 12 bytes
+    /// Where this transform's symmetry group starts in the group-element
+    /// buffer, and how many elements it has. `group_count == 0` is a transform
+    /// with no symmetry, and the walk skips the whole thing — so an ordinary
+    /// scene pays one comparison per iteration and nothing else.
+    ///
+    /// A slice rather than a group *id* because the alternative is a second
+    /// indirection buffer to resolve the id, and motifs sharing a group already
+    /// share a slice: three motifs under `I` point at the same 60 elements.
+    pub group_start: u32,            // 4 bytes
+    pub group_count: u32,            // 4 bytes
+    /// 1 when the colormap index should be offset by which group element was
+    /// drawn (`OrbitColor::Orbit`), 0 for the shared default. A float because
+    /// it is multiplied rather than branched on in the shader.
+    pub orbit_color: f32,            // 4 bytes
+    /// WGSL gives `color_rgb: vec3<f32>` an alignment of 16, so it lands at
+    /// offset 224 and the three scalars after it run 236..248; the struct then
+    /// rounds up to 256. Rust's `repr(C)` would stop at 248 and every transform
+    /// after the first would read the wrong memory.
+    pub _pad: [f32; 2],              // 8 bytes
+    // Total: 256 bytes (was 240, and 176 before the post-affine slot)
 }
 
 impl GpuTransform {
@@ -162,16 +179,26 @@ impl GpuTransform {
         cumulative_weight: f32,
         effective_weight: f32,
         color_rgb: glam::Vec3,
+        // Where this transform's group sits in the element buffer, from
+        // `points::compute::GroupTable`. `(0, 0)` for no symmetry.
+        group: (u32, u32),
     ) -> Self {
         Self {
             matrix: spec.matrix.to_cols_array_2d(),
+            post_affine: spec.post_affine.to_cols_array_2d(),
             color_value: spec.color_value,
             weight: effective_weight,
             cumulative_weight,
             color_speed: spec.color_speed,
             var_weights: spec.variations,
             color_rgb: color_rgb.to_array(),
-            _pad: 0.0,
+            group_start: group.0,
+            group_count: group.1,
+            orbit_color: match spec.symmetry.as_ref().map(|s| s.color()) {
+                Some(crate::symmetry::OrbitColor::Orbit) => 1.0,
+                _ => 0.0,
+            },
+            _pad: [0.0; 2],
         }
     }
 }
@@ -312,7 +339,7 @@ pub struct Point {
     pub color_idx: u32,
 }
 
-/// Compute parameters for the simple chaos game (176 bytes)
+/// Compute parameters for the simple chaos game (192 bytes)
 ///
 /// The `zoom_*` block is the infinite-zoom renormalization (see `renorm.rs`);
 /// it is all zeroes and `zoom_enabled = 0` for ordinary scenes. `mat3x3` is
@@ -338,8 +365,12 @@ pub struct PointComputeParams {
     pub zoom_similar: u32,
     /// Contraction ratio (the closed form needs it on its own, not as a log)
     pub zoom_scale: f32,
+    /// Periods to carry the whole buffer through, read only by the `rewrap`
+    /// entry point. Always 0 for the chaos pass: that one places new points
+    /// and must never move ones already placed.
+    pub zoom_rewrap: f32,
     /// std140 pads the scalar run out to the following vec4's alignment.
-    /// **Eleven scalars, so this is five words, not one** — get it wrong and
+    /// **Twelve scalars, so this is four words, not one** — get it wrong and
     /// the `vec4`s below land somewhere else and the zoom silently renders
     /// from garbage rather than failing to compile.
     ///
@@ -347,7 +378,7 @@ pub struct PointComputeParams {
     /// guarded at render time now (`CameraUniforms::guard_*`), because the
     /// deal cannot depend on the camera — this buffer is filled over ~800
     /// frames and would mix that many camera positions into one image.
-    pub _pad: [u32; 5],
+    pub _pad: [u32; 4],
     /// xyz = the map's fixed point, w = target radius
     pub zoom_fixed: [f32; 4],
     /// xyz = the rotation axis of `A`, w = its angle
@@ -391,11 +422,20 @@ mod tests {
     use super::*;
     #[test]
     fn test_gpu_transform_size() {
-        // 64 (matrix) + 16 (four scalars) + 80 (var_weights) = 160, then
-        // `color_rgb: vec3<f32>` takes 16 in WGSL (12 + alignment tail), so
-        // both sides land on 176. The explicit `_pad` is what keeps Rust's
-        // repr(C) from stopping at 172.
-        assert_eq!(std::mem::size_of::<GpuTransform>(), 176, "GpuTransform must be 176 bytes to match WGSL struct");
+        // 64 (matrix) + 64 (post_affine) + 16 (four scalars) + 80 (var_weights)
+        // = 224, then `color_rgb: vec3<f32>` at 224 (12 bytes, 16-aligned), then
+        // the group slice and orbit flag at 236/240/244. WGSL rounds the struct
+        // up to the largest member alignment, so both sides land on 256. The
+        // explicit `_pad` is what keeps Rust's repr(C) from stopping at 248.
+        assert_eq!(std::mem::size_of::<GpuTransform>(), 256, "GpuTransform must be 256 bytes to match WGSL struct");
+        // The group slice has to sit exactly where WGSL puts it, immediately
+        // after the vec3's 12 bytes and before its alignment tail. Getting this
+        // wrong is not a compile error in either language — it is a symmetry
+        // drawn from whatever happened to be at the offset.
+        assert_eq!(std::mem::offset_of!(GpuTransform, color_rgb), 224);
+        assert_eq!(std::mem::offset_of!(GpuTransform, group_start), 236);
+        assert_eq!(std::mem::offset_of!(GpuTransform, group_count), 240);
+        assert_eq!(std::mem::offset_of!(GpuTransform, orbit_color), 244);
     }
 
     #[test]

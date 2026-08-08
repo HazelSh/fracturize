@@ -288,10 +288,12 @@ mod tests {
             exposure: 1.0,
             transforms: vec![TransformSpec {
                 matrix: Mat4::IDENTITY,
+                post_affine: Mat4::IDENTITY,
                 color_value: 0.0,
                 weight,
                 color_speed: 0.5,
                 explicit_color_speed: None,
+                symmetry: None,
                 variations: TransformSpec::linear_variations(),
             }],
             transform_names: vec![None],

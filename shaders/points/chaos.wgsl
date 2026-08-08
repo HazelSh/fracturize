@@ -11,9 +11,10 @@ struct Point {
     color_idx: u32,
 }
 
-// Must match GpuTransform in buffers.rs (176 bytes)
+// Must match GpuTransform in buffers.rs (256 bytes)
 struct Transform {
-    matrix: mat4x4<f32>,
+    matrix: mat4x4<f32>,       // pre-affine (before variations)
+    post_affine: mat4x4<f32>,  // post-affine (after variations)
     color_value: f32,
     weight: f32,
     cumulative_weight: f32,
@@ -21,8 +22,15 @@ struct Transform {
     // Variation weights; slot order matches scene::VARIATION_NAMES
     var_weights: array<vec4<f32>, 5>,
     // This transform's own colour, linear RGB (ColorMode::Mix only). vec3 is
-    // 16-aligned, so it lands at offset 160 and the struct is 176.
+    // 16-aligned, so it lands at offset 224 and the three scalars after it run
+    // 236..248, putting the struct at 256.
     color_rgb: vec3<f32>,
+    // This transform's symmetry group: where it starts in `group_elements` and
+    // how many elements it has. Zero count = no symmetry.
+    group_start: u32,
+    group_count: u32,
+    // 1 when the colormap index is offset by the drawn group element.
+    orbit_color: f32,
 }
 
 // The walker carries colour two ways at once, and they cost the same because
@@ -66,7 +74,10 @@ struct ComputeParams {
     zoom_octave_q: f32,
     zoom_similar: u32,
     zoom_scale: f32,
-    // Eleven scalars, so five words of padding before the vec4s. The band's
+    // Periods to carry the buffer through, read only by `rewrap` (0 for the
+    // chaos pass, which must never move a point that is already placed).
+    zoom_rewrap: f32,
+    // Twelve scalars, so four words of padding before the vec4s. The band's
     // outer edge is faded at *render* time now (see guard_weight() in
     // points/splat.wgsl); it cannot be done here, because this buffer is
     // filled over ~800 frames and a camera-dependent deal would mix that many
@@ -75,7 +86,6 @@ struct ComputeParams {
     _pad1: u32,
     _pad2: u32,
     _pad3: u32,
-    _pad4: u32,
     zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
     zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
     zoom_a: mat3x3<f32>,
@@ -86,6 +96,10 @@ struct ComputeParams {
 @group(0) @binding(1) var<storage, read> transforms: array<Transform>;
 @group(0) @binding(2) var<storage, read_write> walker_states: array<WalkerState>;
 @group(0) @binding(3) var<uniform> params: ComputeParams;
+// Symmetry group elements: every distinct group in the scene, concatenated.
+// A transform's own run is `group_start .. group_start + group_count`, and
+// element 0 of any run is the identity. See src/symmetry.rs.
+@group(0) @binding(4) var<storage, read> group_elements: array<mat4x4<f32>>;
 
 const PI: f32 = 3.14159265358979;
 
@@ -350,8 +364,42 @@ fn rotate_axis(v: vec3<f32>, axis: vec3<f32>, ang: f32) -> vec3<f32> {
     return v * c + cross(axis, v) * sin(ang) + axis * dot(axis, v) * (1.0 - c);
 }
 
+// `f^-m` applied to an offset from the fixed point: m periods further out.
+//
+// A similarity has a closed-form power — s^-m with the rotation angle
+// multiplied by m — so gentle maps, which need hundreds of periods to cross
+// the band and are the ones that look best, cost the same as steep ones. Only
+// the anisotropic fallback iterates, and there the count is capped because
+// each step is a matrix multiply.
+fn carry(u_in: vec3<f32>, m: f32) -> vec3<f32> {
+    if params.zoom_similar != 0u {
+        // Bound m so s^-m alone can't overflow before it multiplies a tiny u.
+        //
+        // Floored, because `m` is a whole number of periods and the clamp has
+        // to leave it one. A fractional bound makes `m` fractional exactly at
+        // the extremes, and `A^m` for non-integer m is branch-dependent — the
+        // axis/angle pair stops being the same rotation as any of the map's
+        // honest powers. Integer powers can't see the branch; fractional ones
+        // are nothing but branch. Same class of bug as the zoom loop's twist.
+        let k_max = floor(69.0 / params.zoom_log_scale);
+        let k = clamp(m, -k_max, k_max);
+        let aa = params.zoom_axis_angle;
+        return pow(params.zoom_scale, -k) * rotate_axis(u_in, aa.xyz, -k * aa.w);
+    }
+
+    var u = u_in;
+    let k = i32(clamp(m, -48.0, 48.0));
+    for (var i = 0; i < k; i++) {
+        u = params.zoom_a_inv * u;
+    }
+    for (var i = 0; i > k; i--) {
+        u = params.zoom_a * u;
+    }
+    return u;
+}
+
 fn renormalize(pos: vec3<f32>, rng: ptr<function, vec4<u32>>) -> vec3<f32> {
-    var u = pos - params.zoom_fixed.xyz;
+    let u = pos - params.zoom_fixed.xyz;
     let r = length(u);
     // NaN-safe: an escaped walker falls through unchanged and is re-seeded
     if !(r > 1e-20) {
@@ -360,35 +408,63 @@ fn renormalize(pos: vec3<f32>, rng: ptr<function, vec4<u32>>) -> vec3<f32> {
 
     var m = round(log(params.zoom_fixed.w / r) / params.zoom_log_scale);
     m -= octave_offset(rng);
-    // A similarity has a closed-form power — s^-k with the rotation angle
-    // multiplied by k — so gentle maps, which need hundreds of periods to
-    // cross the band and are the ones that look best, cost the same as steep
-    // ones. Only the anisotropic fallback iterates, and there the count is
-    // capped because each step is a matrix multiply.
-    if params.zoom_similar != 0u {
-        // Bound k so s^-k alone can't overflow before it multiplies a tiny u.
-        //
-        // Floored, because `m` is a whole number of periods and the clamp has
-        // to leave it one. A fractional bound makes `k` fractional exactly at
-        // the extremes, and `A^k` for non-integer k is branch-dependent — the
-        // axis/angle pair stops being the same rotation as any of the map's
-        // honest powers. Integer powers can't see the branch; fractional ones
-        // are nothing but branch. Same class of bug as the zoom loop's twist.
-        let k_max = floor(69.0 / params.zoom_log_scale);
-        let k = clamp(m, -k_max, k_max);
-        let aa = params.zoom_axis_angle;
-        return params.zoom_fixed.xyz
-            + pow(params.zoom_scale, -k) * rotate_axis(u, aa.xyz, -k * aa.w);
-    }
+    return params.zoom_fixed.xyz + carry(u, m);
+}
 
-    let k = i32(clamp(m, -48.0, 48.0));
-    for (var i = 0; i < k; i++) {
-        u = params.zoom_a_inv * u;
+// Carry the whole buffer through `zoom_rewrap` periods, so that a camera wrap
+// moves the points with it.
+//
+// A wrap leaves the invariant set alone and moves the camera by A⁻¹. That is
+// exact for the *set* and not for a **sample** of it: the dots do not move, so
+// every one of them lands on a different pixel, and the picture is redrawn
+// from a completely different set of points in a single frame. Nothing enters,
+// nothing leaves, no light changes — mean frame brightness does not move at
+// all — but on a sparse scene, where the dots are individually resolvable, the
+// whole field is resampled at once and it reads as a twitch. `tools/
+// zoom_twitch.py` measures it, and measured it at exactly the cost of a fresh
+// fill of the point buffer: the seam was the resample and nothing else.
+//
+// Carrying the buffer by the same A⁻¹ cancels it exactly, because
+// `screen(A⁻¹x, A⁻¹C) == screen(x, C)`. Every point keeps its pixel.
+//
+// What that cannot do on its own is stay bounded — carrying camera *and*
+// points is just the wrap undone, and the precision it was invented to save
+// goes with it. So the deal is re-folded: the band holds `ceil(periods)`
+// octaves, and a point carried out past the outermost one comes back at the
+// innermost. Written as one power rather than a shift and a correction, which
+// bounds `m` inside one band's worth however far the wrap jumped:
+//
+//     idx = round(log(R/r) / log s⁻¹)      which octave a point is in
+//     m   = idx − ((idx − rewrap) mod n)   the power that lands it back
+//
+// So a wrap costs the octaves' assignment rotating by one, and only the points
+// that fall off the outer end move at all — the outermost octave, which is
+// the one the edge guard has already taken to nothing (see `guard_weight` in
+// points/splat.wgsl). Everything the picture is actually made of holds still.
+@compute @workgroup_size(256)
+fn rewrap(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if idx >= params.buffer_capacity || params.zoom_enabled == 0u {
+        return;
     }
-    for (var i = 0; i > k; i--) {
-        u = params.zoom_a * u;
+    let u = points[idx].position - params.zoom_fixed.xyz;
+    let r = length(u);
+    // Unwritten buffer sits on the fixed point; so does an escaped walker.
+    if !(r > 1e-20) {
+        return;
     }
-    return params.zoom_fixed.xyz + u;
+    let n = max(1.0, ceil(params.zoom_levels));
+    let octave = round(log(params.zoom_fixed.w / r) / params.zoom_log_scale);
+    let shifted = octave - params.zoom_rewrap;
+    let m = octave - (shifted - n * floor(shifted / n));
+    // Position only — a carry does not touch the colour word. Measured at
+    // 0.934 ms against 0.925 ms for writing the whole 16-byte point, i.e. no
+    // difference: the write lands in the same cache line either way. Kept
+    // because it says what the pass does, not because it is faster. The pass
+    // is at the memory floor already — one streaming read and write of every
+    // point, 256 MB at 8M points — so there is no version of it that is
+    // meaningfully cheaper.
+    points[idx].position = params.zoom_fixed.xyz + carry(u, m);
 }
 
 // Pack a linear RGB triple into 24 bits, 8 per channel.
@@ -426,9 +502,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let r = rand_float(&rng);
         let transform_idx = select_transform(r, params.num_transforms);
 
-        // Affine part, then weighted variation blend
+        // Pre-affine, then weighted variation blend, then post-affine
         let affine = (transforms[transform_idx].matrix * vec4<f32>(pos, 1.0)).xyz;
-        pos = apply_variations(transform_idx, affine, &rng);
+        let varied = apply_variations(transform_idx, affine, &rng);
+        pos = (transforms[transform_idx].post_affine * vec4<f32>(varied, 1.0)).xyz;
+
+        // Then the symmetry group, composed on the OUTSIDE of the whole map.
+        //
+        // For a finite group G and maps {f}, the IFS {g∘f : g∈G} has an
+        // attractor that is exactly G-symmetric, because hG = G for any h in G.
+        // Drawing g uniformly here is not an approximation of that map set: it
+        // *is* it. Picking f with weight w and then g uniformly samples the
+        // |G|·N maps {g∘f} with weights w/|G|, so a motif keeps the share it
+        // was written with and the chaos game converges exactly as before.
+        //
+        // The order matters and is the whole reason this sits after
+        // `post_affine` rather than being folded into it: g must apply after
+        // the variation blend, and a variation between two matrices cannot be
+        // commuted past either.
+        var group_pick = 0u;
+        let group_count = transforms[transform_idx].group_count;
+        if group_count > 0u {
+            // min() rather than a modulo: rand_float can return values that
+            // round up to exactly 1.0 in f32, and one walker in a few billion
+            // reading element `count` is a real out-of-bounds.
+            group_pick = min(u32(rand_float(&rng) * f32(group_count)), group_count - 1u);
+            let g = group_elements[transforms[transform_idx].group_start + group_pick];
+            pos = (g * vec4<f32>(pos, 1.0)).xyz;
+        }
 
         // Nonlinear variations can diverge or produce NaN; re-seed dead walkers
         // (NaN fails all comparisons, so check for "not in bounds")
@@ -445,7 +546,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // meant before in every mode — the accumulation stage is shared, and
         // only what it accumulates differs.
         let speed = transforms[transform_idx].color_speed;
-        color_val = color_val * (1.0 - speed) + transforms[transform_idx].color_value * speed;
+        // Under `color = "orbit"` the color_target index is offset by which group
+        // element was drawn, spreading the orbit around the colormap. Since g
+        // is redrawn every iteration this tracks the walker's *most recent*
+        // group element, not which copy a point ended up in — it reads as an
+        // interference pattern over the whole form rather than as |G| solid
+        // petals, which is why it is opt-in. See symmetry::OrbitColor.
+        var color_target = transforms[transform_idx].color_value;
+        if group_count > 0u {
+            color_target = fract(
+                color_target + transforms[transform_idx].orbit_color
+                    * f32(group_pick) / f32(group_count)
+            );
+        }
+        color_val = color_val * (1.0 - speed) + color_target * speed;
         color_rgb = mix(color_rgb, transforms[transform_idx].color_rgb, speed);
 
         // Calculate output index with circular wrapping

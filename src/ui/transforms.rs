@@ -748,16 +748,31 @@ pub struct TrsCache {
     /// Column-major, matching `Mat4::to_cols_array_2d` (`[col][row]`) — used
     /// for the non-TRS fallback grid.
     matrix_cols: [[f32; 4]; 4],
+    /// The same three fields for the post-affine slot — the matrix applied
+    /// *after* the variations. Cached alongside rather than in a second cache
+    /// because both are decompositions of the same transform and both have to
+    /// survive the same jitter guard.
+    post_position: [f32; 3],
+    post_rotation_deg: [f32; 3],
+    post_scale: [f32; 3],
+    post_uniform_scale_linked: bool,
+    /// Whether the post-affine slot is showing. Sticky once opened, like
+    /// `UiState::variation_rows`: a slot you have started editing must not
+    /// vanish when you drag it back through identity mid-gesture.
+    post_shown: bool,
     /// Set after drawing this frame's fields; read at the *start* of next
     /// frame to decide whether a generation bump should force a refresh.
     editing: bool,
 }
 
 impl TrsCache {
-    fn from_matrix(idx: usize, generation: u64, matrix: Mat4) -> Self {
+    fn from_matrix(idx: usize, generation: u64, matrix: Mat4, post: Mat4, post_shown: bool) -> Self {
         let fields = decompose_trs(matrix);
         let uniform_scale_linked = (fields.scale.x - fields.scale.y).abs() < 1e-4
             && (fields.scale.x - fields.scale.z).abs() < 1e-4;
+        let pf = decompose_trs(post);
+        let post_uniform_scale_linked = (pf.scale.x - pf.scale.y).abs() < 1e-4
+            && (pf.scale.x - pf.scale.z).abs() < 1e-4;
         Self {
             key: (idx, generation),
             position: fields.position.to_array(),
@@ -766,6 +781,11 @@ impl TrsCache {
             uniform_scale_linked,
             faithful: fields.faithful,
             matrix_cols: matrix.to_cols_array_2d(),
+            post_position: pf.position.to_array(),
+            post_rotation_deg: pf.rotation_deg.to_array(),
+            post_scale: pf.scale.to_array(),
+            post_uniform_scale_linked,
+            post_shown,
             editing: false,
         }
     }
@@ -846,7 +866,17 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     };
     if needs_refresh {
         let matrix = app.scene.transforms[idx].matrix;
-        app.ui_state.trs_cache = Some(TrsCache::from_matrix(idx, key.1, matrix));
+        let post = app.scene.transforms[idx].post_affine;
+        // A slot the scene already uses is always showing; one left at
+        // identity waits behind its button. Stickiness carries across the
+        // refresh so a mid-drag pass through identity can't close the block.
+        let shown = post != Mat4::IDENTITY
+            || app
+                .ui_state
+                .trs_cache
+                .as_ref()
+                .is_some_and(|c| c.key.0 == idx && c.post_shown);
+        app.ui_state.trs_cache = Some(TrsCache::from_matrix(idx, key.1, matrix, post, shown));
     }
 
     // Pull the cache out of `UiState` for the duration of the draw calls so
@@ -875,8 +905,19 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
         draw_matrix_grid(ui, app, idx, &mut cache, &mut editing);
     }
 
+    // After Shape, because that is the order the map runs in: Shape, then the
+    // variations under Behaviour, then this.
+    block_heading(ui, "Post-affine");
+    draw_post_affine(ui, app, idx, &mut cache, &mut editing);
+
     cache.editing = editing;
     app.ui_state.trs_cache = Some(cache);
+
+    // And after Post-affine, by the same rule: the group composes on the
+    // outside of the whole map, so it is the last thing that happens to a
+    // point and the last block that describes one.
+    block_heading(ui, "Symmetry");
+    draw_symmetry(ui, app, idx);
 
     block_heading(ui, "Behaviour");
     draw_weight(ui, app, idx);
@@ -930,6 +971,566 @@ fn drag_row(
         }
     });
     changed
+}
+
+/// Which *variety* of group, with the fold count edited separately.
+///
+/// `C5` and `C3` are one choice with a number beside it, not two choices: a
+/// picker with sixty cyclic segments in it would be unusable, and the fold
+/// count is a quantity you scrub, not a category you pick.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variety {
+    Cyclic,
+    Dihedral,
+    Tetrahedral,
+    Octahedral,
+    Icosahedral,
+    /// Not a group. Sits in the same picker because the choice the author is
+    /// making *is* one choice — what set of copies this map gets — and the
+    /// badge below says which of them are symmetries.
+    Repeat,
+}
+
+impl Variety {
+    fn of(kind: crate::symmetry::OrbitKind) -> Self {
+        use crate::symmetry::OrbitKind as G;
+        match kind {
+            G::Cyclic(_) => Variety::Cyclic,
+            G::Dihedral(_) => Variety::Dihedral,
+            G::Tetrahedral => Variety::Tetrahedral,
+            G::Octahedral => Variety::Octahedral,
+            G::Icosahedral => Variety::Icosahedral,
+            G::Repeat(_) => Variety::Repeat,
+        }
+    }
+
+    /// The kind this variety names, keeping `fold` where it means something so
+    /// switching `C5 → D5 → C5` doesn't quietly reset the fold count.
+    fn to_kind(self, fold: u32, step: crate::symmetry::Repeat) -> crate::symmetry::OrbitKind {
+        use crate::symmetry::OrbitKind as G;
+        match self {
+            Variety::Cyclic => G::Cyclic(fold.max(1)),
+            Variety::Dihedral => G::Dihedral(fold.max(2)),
+            Variety::Tetrahedral => G::Tetrahedral,
+            Variety::Octahedral => G::Octahedral,
+            Variety::Icosahedral => G::Icosahedral,
+            Variety::Repeat => G::Repeat(step),
+        }
+    }
+}
+
+/// The symmetry group this map is a motif of.
+///
+/// **Symmetry is a property of a transform here**, which is why it is a block
+/// in this pane rather than a window of its own. A scene file writes it as a
+/// `[[symmetry]]` block naming several motifs — that is how it reads best on a
+/// page — but the thing itself belongs to the map, and so enrolling a map,
+/// changing its group, and withdrawing it are all edits to one transform and
+/// nothing else.
+///
+/// Takes the same bargain as `draw_post_affine`: offered as a button when the
+/// map has no group, so the 44 scenes that don't use symmetry don't carry six
+/// permanent rows about it, while the affordance itself is never hidden.
+fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
+    use crate::symmetry::{OrbitColor, Symmetry};
+
+    let Some(spec) = app.scene.transforms.get(idx) else { return };
+
+    // Only the description is read, never the elements: they are a pure
+    // function of it, and copying 120 matrices out of the scene on every frame
+    // of every panel draw to show a label would be silly.
+    let Some((kind, axis, mirror, color)) = spec
+        .symmetry
+        .as_ref()
+        .map(|s| (s.kind(), s.axis(), s.mirror(), s.color()))
+    else {
+        let resp = ui.button("Add symmetry…");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Make this map a motif of a symmetry group — every copy of it under \
+             the group is added to the attractor",
+            "click: enrol this map in a symmetry group",
+        );
+        if resp.clicked() {
+            // C3 about Y: the smallest group with something to look at, and
+            // the one whose effect on the picture is unmistakable.
+            if let Ok(sym) = Symmetry::new(
+                crate::symmetry::OrbitKind::Cyclic(3),
+                glam::Vec3::Y,
+                false,
+                OrbitColor::Shared,
+            ) {
+                app.set_transform_symmetry(idx, Some(sym));
+            }
+        }
+        ui.label(
+            egui::RichText::new(
+                "One map under a group is |G| maps in the attractor — and stays \
+                 one row here, one entry in the file, and one thing to drag.",
+            )
+            .weak()
+            .small(),
+        );
+        return;
+    };
+
+    let order = kind.order() * if mirror { 2 } else { 1 };
+    let motifs = app
+        .scene
+        .transforms
+        .iter()
+        .filter(|t| {
+            t.symmetry
+                .as_ref()
+                .is_some_and(|s| (s.kind(), s.mirror()) == (kind, mirror) && s.axis() == axis)
+        })
+        .count();
+
+    // The badge: what this group is and what it costs, in one line. `maps` is
+    // the arithmetic that makes the feature worth having, so it is on screen
+    // rather than in a tooltip.
+    ui.label(
+        egui::RichText::new(format!(
+            "{} · {} copies · {} motif{} = {} maps{}",
+            if mirror { format!("{} + mirror", kind.label()) } else { kind.label() },
+            order,
+            motifs,
+            if motifs == 1 { "" } else { "s" },
+            motifs * order,
+            // Said on the badge and not only in a tooltip, because it is the
+            // one fact that changes what the picture will do: a group makes the
+            // attractor exactly invariant, a repeat only makes it repetitive.
+            if kind.is_group() { "" } else { " · repeats, not symmetric" },
+        ))
+        .strong()
+        .small(),
+    );
+
+    let fold = kind.fold().unwrap_or(5);
+    // Remembered the same way the fold count is, so flipping Repeat → Icosa →
+    // Repeat comes back to the step you built rather than to the default.
+    let step = kind.repeat().unwrap_or_default();
+    let mut rebuild: Option<Symmetry> = None;
+
+    // The group picker. A choose-1-of-n with no off state — withdrawing is a
+    // separate verb below, not a sixth segment — so it is a segmented radio,
+    // per the house rule.
+    if let Some(v) = super::radio::radio(&mut app.ui_state, "sym_kind", Variety::of(kind))
+        .option(
+            Variety::Cyclic,
+            "Cyc",
+            "Cyclic (C\u{2099}): n-fold rotation about one axis — the mandala",
+            "click: n-fold rotation about an axis",
+        )
+        .option(
+            Variety::Dihedral,
+            "Dih",
+            "Dihedral (D\u{2099}): n-fold rotation plus a half-turn flip, so the \
+             form has no top and bottom",
+            "click: n-fold rotation plus a flip",
+        )
+        .option(
+            Variety::Tetrahedral,
+            "Tetra",
+            "Tetrahedral (T): the 12 rotations of a tetrahedron",
+            "click: tetrahedral group (12 copies)",
+        )
+        .option(
+            Variety::Octahedral,
+            "Octa",
+            "Octahedral (O): the 24 rotations of a cube",
+            "click: octahedral group (24 copies)",
+        )
+        .option(
+            Variety::Icosahedral,
+            "Icosa",
+            "Icosahedral (I): the 60 rotations of an icosahedron — the largest \
+             finite rotation group there is",
+            "click: icosahedral group (60 copies)",
+        )
+        .option(
+            Variety::Repeat,
+            "Repeat",
+            "Repeat: n copies stepped by a turn, a slide and a shrink — a helix, \
+             a spiral, a row. The only one here that is not a group: it makes \
+             the attractor repetitive, not symmetric",
+            "click: n copies along a step",
+        )
+        .show(ui)
+    {
+        rebuild = Symmetry::new(v.to_kind(fold, step), axis, mirror, color).ok();
+    }
+
+    // The fold count, for the two groups that have one. Disabled rather than
+    // hidden under T/O/I, with the tooltip saying why: a control that vanishes
+    // can't tell you it exists.
+    ui.horizontal(|ui| {
+        ui.label("folds");
+        let mut n = fold as f32;
+        let resp = ui.add_enabled(
+            kind.fold().is_some(),
+            egui::DragValue::new(&mut n)
+                .speed(0.08)
+                .range(if matches!(kind, crate::symmetry::OrbitKind::Dihedral(_)) {
+                    2.0..=crate::symmetry::MAX_FOLD as f32
+                } else {
+                    1.0..=crate::symmetry::MAX_FOLD as f32
+                })
+                .fixed_decimals(0),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if kind.fold().is_some() {
+                "How many copies around the axis. Every copy is the same map, \
+                 so this costs nothing but arithmetic"
+            } else if kind.repeat().is_some() {
+                "A repeat sets its own count below — this is the fold count of \
+                 the cyclic and dihedral groups"
+            } else {
+                "The polyhedral groups have a fixed size — Tetra is 12, Octa is \
+                 24, Icosa is 60. Pick Cyc or Dih to choose a fold count"
+            },
+            "drag: how many copies around the axis",
+        );
+        if resp.changed() {
+            rebuild = Symmetry::new(
+                Variety::of(kind).to_kind(n.round() as u32, step),
+                axis,
+                mirror,
+                color,
+            )
+            .ok();
+        }
+
+        let mut m = mirror;
+        let resp = ui.checkbox(&mut m, "mirror");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Add the central inversion, doubling the group: every copy gains a \
+             twin through the origin. Changes no contraction, so it does not \
+             move the dimension",
+            "click: double the group with a central inversion",
+        );
+        if resp.changed() {
+            rebuild = Symmetry::new(kind, axis, m, color).ok();
+        }
+    });
+
+    // The axis, for C/D. This is the one row in the block with a gesture in the
+    // viewport to match it — the drawn axis and its spokes — so the numbers and
+    // the drawing say the same thing.
+    //
+    // Greyed under T/O/I rather than removed, like `folds` above: the
+    // polyhedral groups genuinely have no axis to aim, and a row that vanished
+    // would leave you wondering whether the control had moved or you had
+    // imagined it. The tooltip is where it says why.
+    {
+        let mut a = axis.to_array();
+        let mut changed = false;
+        let aimable = kind.uses_axis();
+        ui.horizontal(|ui| {
+            ui.label("axis ");
+            for (name, v) in ["x", "y", "z"].iter().zip(a.iter_mut()) {
+                let resp = ui.add_enabled_ui(aimable, |ui| {
+                    super::num::drag(
+                        ui,
+                        5,
+                        2,
+                        egui::DragValue::new(v).speed(0.01).prefix(format!("{}: ", name)),
+                    )
+                });
+                let resp = hinted(
+                    resp.inner,
+                    &mut app.ui_state,
+                    if aimable {
+                        "The axis the copies turn about. Drawn in the viewport \
+                         with one spoke per fold"
+                    } else {
+                        "The polyhedral groups have no single axis — their \
+                         symmetry axes come in threes, fours and fives at fixed \
+                         angles. The viewport draws the group's solid instead. \
+                         Pick Cyc or Dih to aim an axis"
+                    },
+                    "drag: aim the symmetry axis",
+                );
+                changed |= resp.changed();
+            }
+        });
+        if changed && aimable {
+            // A zero axis names no rotation, so it is simply not applied —
+            // dragging x through zero must not destroy the group on the way
+            // past.
+            rebuild = Symmetry::new(kind, glam::Vec3::from(a), mirror, color).ok().or(rebuild);
+        }
+    }
+
+    // The repeat's step. Only under Repeat — unlike `folds`, which is greyed
+    // rather than hidden because it belongs to a group you might switch back
+    // to, these five rows describe a thing the other five kinds simply do not
+    // have, and greying five rows is a wall rather than a hint.
+    if let Some(mut r) = kind.repeat() {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("copies");
+            let mut n = r.count as f32;
+            let resp = ui.add(
+                egui::DragValue::new(&mut n)
+                    .speed(0.1)
+                    .range(1.0..=crate::symmetry::MAX_REPEAT as f32)
+                    .fixed_decimals(0),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "How many copies, counting the motif itself. Each one is the \
+                 previous one stepped again",
+                "drag: how many copies",
+            );
+            if resp.changed() {
+                r.count = n.round().max(1.0) as u32;
+                changed = true;
+            }
+
+            ui.label("turn");
+            let resp = ui.add(egui::DragValue::new(&mut r.turn).speed(0.5).suffix("°"));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Degrees about the axis per copy. 137.5 is the golden angle — \
+                 the one that never lines a copy up with an earlier one",
+                "drag: degrees per copy",
+            );
+            changed |= resp.changed();
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("step");
+            for (label, v) in [
+                ("x", &mut r.translate.x),
+                ("y", &mut r.translate.y),
+                ("z", &mut r.translate.z),
+            ] {
+                let resp = ui.add(egui::DragValue::new(v).speed(0.005).prefix(label).fixed_decimals(3));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "How far each copy slides from the last. Along the axis this \
+                     is a helix; across it, a fan",
+                    "drag: slide per copy",
+                );
+                changed |= resp.changed();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("shrink");
+            let resp = ui.add(
+                egui::DragValue::new(&mut r.scale).speed(0.002).range(0.05..=1.0).fixed_decimals(3),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Size multiplier per copy. Capped at 1: a step that grows makes \
+                 the far copies expansive and the walk runs away. Start from the \
+                 far end instead",
+                "drag: size multiplier per copy",
+            );
+            changed |= resp.changed();
+        });
+
+        if changed {
+            rebuild = Symmetry::new(crate::symmetry::OrbitKind::Repeat(r), axis, mirror, color)
+                .ok()
+                .or(rebuild);
+        }
+    }
+
+    // The orbit's colour mode is not drawn here. It is a colour control, so it
+    // lives under Appearance beside the other two — see `draw_orbit_color`.
+
+    if let Some(sym) = rebuild {
+        app.set_transform_symmetry(idx, Some(sym));
+    }
+
+    ui.horizontal(|ui| {
+        // The defect, one click away and sitting right next to the group it is
+        // a defect in. A group orbit flattens the measure by construction —
+        // every copy shares a contraction and a weight — so a scene that is
+        // 100% symmetric is CRAFT §3.6's unrecoverable case. Breaking the
+        // symmetry a little is not an advanced option; it is the second thing
+        // you do, so it is the second button here.
+        let resp = ui.button("Add a map outside this group");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Add a plain transform with no symmetry. A wholly symmetric scene \
+             has a flat measure by construction — one map off the group is what \
+             gives it something to look at",
+            "click: add an unsymmetric map (the deliberate defect)",
+        );
+        if resp.clicked() {
+            app.add_transform(true);
+        }
+
+        let resp = ui.button("Withdraw");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Take this map out of its group. It stays exactly where it is; its \
+             copies stop being drawn",
+            "click: remove this map from its symmetry group",
+        );
+        if resp.clicked() {
+            app.set_transform_symmetry(idx, None);
+        }
+    });
+}
+
+/// The post-affine slot: the matrix applied *after* the variation blend.
+///
+/// Three rows that look exactly like Shape's, because they are the same three
+/// numbers doing the same job at the other end of the map — the whole point is
+/// that a person who can drive Shape can drive this without learning anything.
+///
+/// The block is shown when the slot is in use and offered as a button when it
+/// isn't. That is not the disclosure section the inspector's own comment warns
+/// against: the heading and the affordance are always on screen, so there is
+/// nothing hidden to fail to find. It is the `variation_rows` bargain — a
+/// slot appears when you ask for it and then stays put, rather than every map
+/// permanently carrying three rows that 43 of the repo's 44 scenes leave at
+/// identity.
+fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut TrsCache, editing: &mut bool) {
+    if !cache.post_shown {
+        let resp = ui.button("Add post-affine…");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Add a matrix applied after this map's variations (fold-then-rotate)",
+            "click: add a post-affine transform to this map",
+        );
+        if resp.clicked() {
+            cache.post_shown = true;
+        }
+        ui.label(
+            egui::RichText::new(
+                "Runs after the variations. Only changes anything when a \
+                 non-linear variation is in play — with pure linear it folds \
+                 into Shape. See scenes/fold_lantern.toml.",
+            )
+            .small()
+            .weak(),
+        );
+        return;
+    }
+
+    let mut changed = false;
+
+    changed |= drag_row(
+        ui,
+        app,
+        "Position",
+        &mut cache.post_position,
+        0.01,
+        3,
+        7,
+        "",
+        "Post-affine position, applied after the variations",
+        "drag: adjust post position · click: type exact value",
+        editing,
+    );
+
+    changed |= drag_row(
+        ui,
+        app,
+        "Rotation",
+        &mut cache.post_rotation_deg,
+        0.5,
+        1,
+        6,
+        "°",
+        "Post-affine rotation — rotating *after* a fold is what this slot is for",
+        "drag: adjust post rotation · click: type exact value",
+        editing,
+    );
+
+    let mut post_scale_axis: Option<usize> = None;
+    ui.horizontal(|ui| {
+        ui.label("Scale");
+        let resp = ui.checkbox(&mut cache.post_uniform_scale_linked, "linked");
+        hinted(
+            resp,
+            &mut app.ui_state,
+            "Lock per-axis post scale to change together",
+            "click: toggle uniform post-scale link",
+        );
+    });
+    ui.horizontal(|ui| {
+        for (axis, (label, v)) in
+            ["x", "y", "z"].iter().zip(cache.post_scale.iter_mut()).enumerate()
+        {
+            let resp = super::num::drag(
+                ui,
+                10,
+                3,
+                egui::DragValue::new(v)
+                    .speed(0.005)
+                    .prefix(format!("{}: ", label))
+                    .range(-1000.0..=1000.0),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Post-affine scale. This counts toward the map's contraction \
+                 just as Shape's does — the status bar's d moves with it.",
+                "drag: adjust post scale · click: type exact value",
+            );
+            if resp.changed() {
+                post_scale_axis = Some(axis);
+            }
+            *editing |= resp.dragged() || resp.has_focus();
+        }
+    });
+    if let Some(axis) = post_scale_axis {
+        if cache.post_uniform_scale_linked {
+            let v = cache.post_scale[axis];
+            cache.post_scale = [v, v, v];
+        }
+        changed = true;
+    }
+
+    let resp = ui.button("Clear post-affine");
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Reset this map's post-affine slot to the identity",
+        "click: clear the post-affine transform",
+    );
+    if resp.clicked() {
+        cache.post_position = [0.0; 3];
+        cache.post_rotation_deg = [0.0; 3];
+        cache.post_scale = [1.0; 3];
+        cache.post_shown = false;
+        app.set_transform_post_affine(idx, Mat4::IDENTITY, format!("Clear post-affine T{}", idx), None);
+        return;
+    }
+
+    if changed {
+        let post = crate::rot::Trs {
+            scale: Vec3::from(cache.post_scale),
+            rotation: crate::rot::Orientation::from_xyz_degrees(cache.post_rotation_deg),
+            translation: Vec3::from(cache.post_position),
+        }
+        .matrix();
+        app.set_transform_post_affine(
+            idx,
+            post,
+            format!("Post-affine T{}", idx),
+            Some(format!("insp:t{}:post", idx)),
+        );
+    }
 }
 
 fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut TrsCache, editing: &mut bool) {
@@ -1168,6 +1769,7 @@ fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     if app.scene.color_mode == crate::scene::ColorMode::Palette {
         ui.label("Color value");
         super::gradient::transform_color_value(ui, app, idx);
+        draw_orbit_color(ui, app, idx);
         return;
     }
 
@@ -1239,6 +1841,52 @@ fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             app.set_transform_explicit_color_speed(idx, Some(speed));
         }
     }
+
+    draw_orbit_color(ui, app, idx);
+}
+
+/// How the symmetry orbit is coloured.
+///
+/// It lives under Appearance rather than under Symmetry because it is a colour
+/// control — it changes nothing about the geometry, only which colormap index
+/// each copy lands on, so it belongs beside the other two colour rows and not
+/// beside the group picker. The group *is* its subject, though, so the row is
+/// only drawn when this transform has one; on a plain map there is no orbit to
+/// colour and the row would be a dead control.
+fn draw_orbit_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
+    let Some((kind, axis, mirror, color)) = app.scene.transforms[idx]
+        .symmetry
+        .as_ref()
+        .map(|s| (s.kind(), s.axis(), s.mirror(), s.color()))
+    else {
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("Orbit");
+        if let Some(c) = super::radio::radio(&mut app.ui_state, "sym_color", color)
+            .option(
+                crate::symmetry::OrbitColor::Shared,
+                "shared",
+                "Every copy takes the motif's own colour — the copies are the \
+                 same map, and this says so",
+                "click: one colour across the orbit",
+            )
+            .option(
+                crate::symmetry::OrbitColor::Orbit,
+                "orbit",
+                "Offset the colour index by which group element was drawn. The \
+                 element is redrawn every iteration, so this reads as an \
+                 interference pattern across the form, not as |G| solid petals",
+                "click: colour by the drawn group element",
+            )
+            .show(ui)
+        {
+            if let Ok(sym) = crate::symmetry::Symmetry::new(kind, axis, mirror, c) {
+                app.set_transform_symmetry(idx, Some(sym));
+            }
+        }
+    });
 }
 
 /// The egui id of the inspector's Name field, so the action row's Rename button

@@ -56,8 +56,15 @@ impl WalkerState {
 /// Writes points directly to a circular buffer
 pub struct PointCompute {
     pub pipeline: wgpu::ComputePipeline,
+    /// Carries the whole buffer through a camera wrap; see `rewrap` in
+    /// `shaders/points/chaos.wgsl`. Same module, same bind group, same
+    /// layout — only the entry point differs.
+    pub rewrap_pipeline: wgpu::ComputePipeline,
     pub bind_group: wgpu::BindGroup,
     pub transform_buffer: wgpu::Buffer,
+    /// Symmetry group elements, all groups concatenated. Fixed capacity
+    /// ([`MAX_GROUP_ELEMENTS`]), so a group change is a write, not a rebuild.
+    pub group_buffer: wgpu::Buffer,
     pub walker_states_buffer: wgpu::Buffer,
     pub params_buffer: wgpu::Buffer,
     pub point_buffer: wgpu::Buffer,
@@ -82,6 +89,83 @@ pub struct PointCompute {
 /// `colors` separately, and a redraw can land between the two.
 fn transform_color(colors: &[glam::Vec3], i: usize) -> glam::Vec3 {
     colors.get(i).copied().unwrap_or(glam::Vec3::ONE)
+}
+
+/// Slots in the symmetry group-element buffer.
+///
+/// Fixed capacity, allocated once, deliberately. The alternative — sizing the
+/// buffer to the scene — makes every symmetry edit a bind-group rebuild, and
+/// changing `C5` to `I` is an edit you make *by dragging a picker*, so it has to
+/// be as cheap as moving a slider. At 64 bytes an element the whole table is
+/// 32 KB, which is nothing next to a point buffer measured in hundreds of
+/// megabytes, and it holds the largest group this can name (`I` with a mirror,
+/// 120) four times over.
+pub const MAX_GROUP_ELEMENTS: usize = 512;
+
+/// Every distinct symmetry group in a scene, laid end to end, with each
+/// transform's slice into it.
+///
+/// Distinct is the operative word: three motifs enrolled in one icosahedral
+/// group share one 60-element run, so the table is sized by how many *different*
+/// groups a scene uses, not by how many maps carry one.
+pub struct GroupTable {
+    /// The elements, concatenated. Never longer than [`MAX_GROUP_ELEMENTS`].
+    pub elements: Vec<[[f32; 4]; 4]>,
+    /// `(start, count)` per transform, parallel to the transform list.
+    /// `(0, 0)` for a transform with no symmetry.
+    pub slices: Vec<(u32, u32)>,
+}
+
+impl GroupTable {
+    /// Collect the groups a transform list carries.
+    pub fn build(transforms: &[TransformSpec]) -> Self {
+        let mut elements: Vec<[[f32; 4]; 4]> = Vec::new();
+        let mut slices = Vec::with_capacity(transforms.len());
+        // Small and linear: a scene has a handful of distinct groups at most,
+        // and comparing two `Symmetry`s is four field comparisons (the elements
+        // are a pure function of them, so they never have to be walked).
+        let mut seen: Vec<(&crate::symmetry::Symmetry, (u32, u32))> = Vec::new();
+
+        for t in transforms {
+            let Some(sym) = t.symmetry.as_ref() else {
+                slices.push((0, 0));
+                continue;
+            };
+            if let Some((_, slice)) = seen.iter().find(|(s, _)| *s == sym) {
+                slices.push(*slice);
+                continue;
+            }
+            if elements.len() + sym.order() > MAX_GROUP_ELEMENTS {
+                // Unreachable through the loader, which rejects a scene whose
+                // groups don't fit; a live edit that somehow got here renders
+                // that motif unsymmetrized rather than overrunning the buffer.
+                log::warn!(
+                    "symmetry group {} does not fit in the {}-element table; \
+                     rendering this motif without it",
+                    sym.label(),
+                    MAX_GROUP_ELEMENTS
+                );
+                slices.push((0, 0));
+                continue;
+            }
+            let slice = (elements.len() as u32, sym.order() as u32);
+            elements.extend(sym.elements().iter().map(|m| m.to_cols_array_2d()));
+            seen.push((sym, slice));
+            slices.push(slice);
+        }
+
+        Self { elements, slices }
+    }
+
+    /// The buffer contents: the table padded out to the fixed capacity.
+    /// Element 0 of an unused run is never read (`group_count` is 0), so the
+    /// padding's value doesn't matter — but it must be *written*, or the first
+    /// upload leaves the tail uninitialized.
+    fn padded(&self) -> Vec<[[f32; 4]; 4]> {
+        let mut all = self.elements.clone();
+        all.resize(MAX_GROUP_ELEMENTS, glam::Mat4::IDENTITY.to_cols_array_2d());
+        all
+    }
 }
 
 impl PointCompute {
@@ -118,6 +202,7 @@ impl PointCompute {
         });
 
         // Prepare transform data with cumulative weights
+        let groups = GroupTable::build(transforms);
         let total_weight: f32 = transforms.iter().map(|t| t.weight).sum();
         let mut cumulative = 0.0;
         let gpu_transforms: Vec<GpuTransform> = transforms
@@ -125,13 +210,27 @@ impl PointCompute {
             .enumerate()
             .map(|(i, t)| {
                 cumulative += t.weight / total_weight;
-                GpuTransform::new(t, cumulative, t.weight, transform_color(colors, i))
+                GpuTransform::new(
+                    t,
+                    cumulative,
+                    t.weight,
+                    transform_color(colors, i),
+                    groups.slices.get(i).copied().unwrap_or((0, 0)),
+                )
             })
             .collect();
 
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("transform_buffer"),
             contents: bytemuck::cast_slice(&gpu_transforms),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // The symmetry groups. Fixed capacity so that changing a group is a
+        // buffer write rather than a pipeline rebuild — see MAX_GROUP_ELEMENTS.
+        let group_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("symmetry_group_buffer"),
+            contents: bytemuck::cast_slice(&groups.padded()),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -217,6 +316,17 @@ impl PointCompute {
                     },
                     count: None,
                 },
+                // Symmetry group elements
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -231,6 +341,15 @@ impl PointCompute {
             layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let rewrap_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("point_rewrap_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("rewrap"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -257,13 +376,19 @@ impl PointCompute {
                     binding: 3,
                     resource: params_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: group_buffer.as_entire_binding(),
+                },
             ],
         });
 
         Self {
             pipeline,
+            rewrap_pipeline,
             bind_group,
             transform_buffer,
+            group_buffer,
             walker_states_buffer,
             params_buffer,
             point_buffer,
@@ -333,6 +458,61 @@ impl PointCompute {
         self.valid_point_count()
     }
 
+    /// Carry the whole point buffer through `levels` zoom periods, so the
+    /// points move with a camera that just wrapped and every dot keeps its
+    /// pixel. See `rewrap` in `shaders/points/chaos.wgsl` for why.
+    ///
+    /// Submits on its own rather than joining the frame's encoder: a wrap
+    /// happens once a period — every several seconds, at the frame rates this
+    /// is watched at — and the alternative is threading a pending flag through
+    /// the update/render split for something that costs one pass over the
+    /// buffer. It must land *before* the frame's chaos dispatch, which writes
+    /// fresh points into the band this pass is re-folding, and queue order
+    /// gives that for free.
+    ///
+    /// A no-op without a zoom, or when nothing wrapped.
+    pub fn rewrap(&self, device: &wgpu::Device, queue: &wgpu::Queue, levels: i32) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("point_rewrap_encoder"),
+        });
+        self.rewrap_in(queue, &mut encoder, levels);
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// The same, recorded into a caller's encoder. The window uses this: the
+    /// pass belongs to the frame that wrapped, and a submit of its own would
+    /// put a queue flush in the middle of it.
+    pub fn rewrap_in(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        levels: i32,
+    ) {
+        if levels == 0 || self.zoom.is_none() {
+            return;
+        }
+        let params = PointComputeParams {
+            num_transforms: self.num_transforms,
+            num_walkers: self.num_walkers,
+            buffer_capacity: self.buffer_capacity,
+            ..PointComputeParams::zeroed()
+        }
+        .with_zoom(self.zoom.as_ref());
+        queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::bytes_of(&PointComputeParams { zoom_rewrap: levels as f32, ..params }),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("point_rewrap_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.rewrap_pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(self.buffer_capacity.div_ceil(WORKGROUP_SIZE), 1, 1);
+    }
+
     /// Dispatch the compute shader
     pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -344,7 +524,11 @@ impl PointCompute {
         compute_pass.dispatch_workgroups(self.num_workgroups, 1, 1);
     }
 
-    /// Reupload transform weights with some transforms disabled
+    /// Reupload transform weights with some transforms disabled.
+    ///
+    /// Also re-uploads the symmetry groups, because a live edit can change one
+    /// (the panel's group picker) and there is no cheaper place to notice: the
+    /// table is 32 KB and this already runs only on edits, never per frame.
     pub fn update_weights(
         &self,
         queue: &wgpu::Queue,
@@ -352,6 +536,7 @@ impl PointCompute {
         colors: &[glam::Vec3],
         enabled: &[bool],
     ) {
+        let groups = GroupTable::build(transforms);
         let total_weight: f32 = transforms
             .iter()
             .zip(enabled.iter())
@@ -368,11 +553,18 @@ impl PointCompute {
                 if total_weight > 0.0 {
                     cumulative += effective_weight / total_weight;
                 }
-                GpuTransform::new(t, cumulative, effective_weight, transform_color(colors, i))
+                GpuTransform::new(
+                    t,
+                    cumulative,
+                    effective_weight,
+                    transform_color(colors, i),
+                    groups.slices.get(i).copied().unwrap_or((0, 0)),
+                )
             })
             .collect();
 
         queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&gpu_transforms));
+        queue.write_buffer(&self.group_buffer, 0, bytemuck::cast_slice(&groups.padded()));
     }
 
     /// Re-upload the colormap after live color edits. Existing points keep

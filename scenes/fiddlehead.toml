@@ -1,0 +1,78 @@
+# Fiddlehead — one frond, twenty times, turned by the golden angle.
+#
+# This is the `repeat` block rather than a symmetry group, and the difference
+# is the whole point of the scene. A group makes the attractor *exactly*
+# invariant: apply any element and you get the same set back. A repeat is the
+# truncated progression S⁰…S¹⁹ — it is not closed, so the attractor is not
+# invariant under S. It repeats. It is not symmetric.
+#
+# What that buys is the thing the five groups cannot do: copies that are not
+# all the same size. Every element of a rotation group is orthogonal, so an
+# orbit shares one contraction and one weight, and CRAFT §3.6's flat-measure
+# problem follows by construction. A repeat's k-th copy carries `shrink^k`, so
+# the variance is in the structure already — which is why this scene has no
+# authored defect and `--info` does not ask for one.
+#
+# 137.5° is the golden angle. It is the one turn that never lines a copy up
+# with an earlier one, so twenty copies give twenty distinct headings instead
+# of a few overlapping fans.
+
+[meta]
+name = "Fiddlehead"
+author = "Claude Opus 5"
+point_size = 0.0018
+color_speed = 0.4
+color_falloff = 0.62
+color_contrast = 1.0
+haze = 0.22
+exposure = 1.0
+background = [0.016, 0.020, 0.018]
+
+[camera]
+focus = [0.0, 0.70, 0.0]
+distance = 2.35
+yaw = 0.7
+pitch = 0.25
+
+[palette]
+interpolate = "oklab"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#123522" },
+  { at = 0.22, color = "#2f7d4f" },
+  { at = 0.44, color = "#9fd45c" },
+  { at = 0.62, color = "#f2e6a8" },
+  { at = 0.80, color = "#c98a3c" },
+]
+
+# The spiral. `turn` about `axis` and `step` along it make a helix; `shrink`
+# tapers it into a cone. Twenty copies from one authored map.
+[[symmetry]]
+repeat = 20
+axis = [0.0, 1.0, 0.0]
+step = [0.0, 0.135, 0.0]
+turn = 137.5
+shrink = 0.9
+applies_to = ["frond"]
+# The colour index follows which copy was last drawn, so the taper reads as a
+# gradient up the spiral rather than as one flat green.
+color = "orbit"
+
+[[transform]]
+name = "frond"
+translation = [0.62, 0.0, 0.0]
+scale = [0.60, 0.30, 0.60]
+rotation = [0.0, 0.0, 22.0]
+color = [0.55, 0.85, 0.35]
+weight = 1.0
+
+# Not a defect — the taper already supplies the variance a group orbit would
+# have flattened. This is the stem: it holds the middle so the spiral has
+# something to wind around instead of an empty axis.
+[[transform]]
+name = "stem"
+translation = [0.0, 0.16, 0.0]
+scale = [0.14, 0.62, 0.14]
+rotation = [0.0, 12.0, 0.0]
+color = [0.90, 0.72, 0.35]
+weight = 0.3

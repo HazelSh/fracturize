@@ -103,7 +103,10 @@ impl ChaosCompute {
                 // The density renderer is the inactive experimental path and
                 // has no mixed-RGB mode; white keeps its shader's arithmetic
                 // unchanged.
-                GpuTransform::new(t, cumulative, t.weight, glam::Vec3::ONE)
+                // `(0, 0)`: this renderer has no group-element buffer bound, so
+                // it draws the plain attractor. Symmetry is a points-renderer
+                // feature; see the note on `Transform` in density/chaos.wgsl.
+                GpuTransform::new(t, cumulative, t.weight, glam::Vec3::ONE, (0, 0))
             })
             .collect();
 

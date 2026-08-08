@@ -464,6 +464,40 @@ pub struct App {
     /// same at every level, so this is the only thing that says how deep in
     /// they are. Positive = inward.
     pub zoom_level: i32,
+    /// The same count, but *monotone*: it keeps climbing across a zoom loop's
+    /// seam instead of returning to zero with the playhead.
+    ///
+    /// [`zoom_level`](Self::zoom_level) can't serve. A looping path resamples
+    /// an unwrapped spline every frame, so what `Renorm::wrap` hands back is
+    /// the absolute depth of *this* sample and the counter is reset rather
+    /// than added to (see [`App::update`]) — which is right for a readout that
+    /// says how deep you are within one pass, and wrong for anything that has
+    /// to stay continuous while the pass rolls over.
+    ///
+    /// The one thing that has to is [`zoom_frame`](Self::zoom_frame): a wrap
+    /// turns the camera by the map's rotation, so anything drawn in world axes
+    /// spins by that much in one frame unless it is carried along.
+    pub zoom_turns: i32,
+    /// Whole loops of a zoom-looping path completed since the scene loaded,
+    /// in periods. The base [`zoom_turns`](Self::zoom_turns) counts up from
+    /// while a path is flying.
+    zoom_turns_base: i32,
+    /// The turn the *point buffer* has been carried to. Chases
+    /// [`zoom_turns`](Self::zoom_turns); the difference is what the next
+    /// `PointCompute::rewrap` has to apply.
+    zoom_turns_drawn: i32,
+    /// Periods the buffer still owes the camera, waiting for the frame's own
+    /// encoder. `wrap_zoom` runs in `update`, which has no encoder, so the
+    /// pass used to take a submit of its own.
+    ///
+    /// Recorded into the frame instead because that is where it belongs — it
+    /// is that frame's work, and it has to land before the chaos dispatch
+    /// either way. Not because it is faster: over 129 wraps it measured no
+    /// different (3.9% of wrap frames missed a 120Hz vsync against 2.7% of
+    /// ordinary ones, and the same reading the other way round), and the
+    /// 0.93ms the pass costs is well under this renderer's ordinary frame
+    /// jitter.
+    pending_rewrap: i32,
     /// Why infinite zoom is off, when the scene asked for it and it couldn't
     /// be built. Shown in the status bar rather than swallowed.
     pub zoom_error: Option<String>,
@@ -586,6 +620,13 @@ pub struct App {
     /// when, so re-measuring is rate-limited during a drag.
     attractor_key: u64,
     attractor_measured_at: Instant,
+
+    /// Cached lacunarity summary — computed on a slower cadence since it's
+    /// more expensive than dimension (which is O(N) while this is O(N * steps)).
+    /// Updated once per second or when the scene changes.
+    lacunarity: Option<f32>,
+    lacunarity_key: u64,
+    lacunarity_measured_at: Instant,
 
     /// The running render job, if any (see `start_job`). One at a time.
     job: Option<JobHandle>,
@@ -877,6 +918,10 @@ impl App {
             color_contrast: scene.color_contrast,
             fps_tracker: FpsTracker::new(),
             zoom_level: 0,
+            zoom_turns: 0,
+            zoom_turns_base: 0,
+            zoom_turns_drawn: 0,
+            pending_rewrap: 0,
             zoom_error: None,
             point_compute,
             point_renderer,
@@ -893,6 +938,9 @@ impl App {
             // frame always measures.
             attractor_key: 0,
             attractor_measured_at: Instant::now(),
+            lacunarity: None,
+            lacunarity_key: 0,
+            lacunarity_measured_at: Instant::now(),
             job: None,
             job_done: None,
             job_error: None,
@@ -2545,10 +2593,21 @@ impl App {
                 // IFS aesthetics live on clean rotational symmetry, and a
                 // fifteenth of a degree off exact is visible as a smear in the
                 // attractor. Ctrl is taken by uniform scale, so Alt it is.
+                //
+                // When the map is a motif of a symmetry group, the *group's*
+                // own step is the clean increment — 72° under C5 — so the
+                // constant becomes a lookup. A group is a statement about which
+                // rotations are exact in this scene, and this is the control
+                // that was already trying to guess that.
                 if self.alt_held {
                     const SNAP: f32 = std::f32::consts::FRAC_PI_2 / 6.0; // 15°
+                    let snap = self
+                        .selected_transform
+                        .and_then(|i| self.scene.transforms.get(i))
+                        .and_then(|t| t.symmetry.as_ref())
+                        .map_or(SNAP, |s| s.kind().snap_degrees().to_radians());
                     delta = crate::rot::Turn1D::from_radians(
-                        (delta.radians() / SNAP).round() * SNAP,
+                        (delta.radians() / snap).round() * snap,
                     );
                 }
                 let rot = Mat4::from_quat(
@@ -2573,6 +2632,12 @@ impl App {
                 m
             }
         };
+
+        // Hold `d` across a scale drag. Only Scale can change a contraction,
+        // so the other modes never pay for the check.
+        if matches!(mode, GizmoDragMode::Scale { .. }) {
+            self.hold_dimension_through(transform, new_matrix);
+        }
 
         self.scene.transforms[transform].matrix = new_matrix;
         self.bump_matrix_generation();
@@ -2982,12 +3047,33 @@ impl App {
             return;
         }
         self.indicator_key = key;
-        let verts = match key {
+        let mut verts = match key {
             Some((i, _)) if i < self.scene.transforms.len() => {
                 crate::indicators::build(self.scene.transforms[i].matrix)
             }
             _ => Vec::new(),
         };
+
+        // The selected map's symmetry, drawn into the scene: its axis and fold
+        // count, or the polyhedral group's cage. Sized to the attractor rather
+        // than to the map, because the group acts on the whole form.
+        //
+        // Only for the selected transform, and only alongside its own
+        // indicators — drawing every group in the scene at once would be a
+        // thicket, which is the same reason `build` is selection-scoped.
+        let mut ghosts: Vec<Mat4> = Vec::new();
+        if let Some((i, _)) = key {
+            if let Some(spec) = self.scene.transforms.get(i) {
+                if let Some(sym) = spec.symmetry.as_ref() {
+                    let radius = self.attractor.map_or(1.0, |a| a.radius).max(0.05);
+                    verts.extend(crate::indicators::build_symmetry(sym, radius));
+                    // Element 0 is the identity, and that copy is already drawn
+                    // solid as the selected transform's own gizmo.
+                    ghosts = sym.orbit(spec.matrix).skip(1).collect();
+                }
+            }
+        }
+        self.gizmo_renderer.set_ghosts(&self.gpu.queue, &ghosts);
         self.indicator_renderer.set_lines(&self.gpu.device, &verts);
     }
 
@@ -3139,11 +3225,18 @@ impl App {
                         glam::Quat::IDENTITY,
                         Vec3::new(0.3, 0.3, 0.0),
                     ),
+                    post_affine: Mat4::IDENTITY,
                     color_value: 0.5,
                     weight: 1.0,
                     color_speed: self.scene.color_speed,
                     explicit_color_speed: None,
                     variations: TransformSpec::linear_variations(),
+                    // A fresh map joins no group. Duplicating one does inherit
+                    // its symmetry, because that comes from cloning the spec —
+                    // which is the behaviour you want either way round: "add"
+                    // is how you build the deliberate defect (CRAFT §3.6), and
+                    // "dup" is how you add a second motif to a group.
+                    symmetry: None,
                 },
                 None,
                 Vec3::splat(0.9),
@@ -3293,10 +3386,203 @@ impl App {
             return;
         }
         let before = self.edit_snapshot();
+        self.hold_dimension_through(idx, matrix);
         self.scene.transforms[idx].matrix = matrix;
         self.bump_matrix_generation();
         self.sync_transforms_to_gpu();
         self.commit_edit(label, coalesce_key.as_deref(), before);
+    }
+
+    /// Set a transform's post-affine slot — the matrix applied *after* the
+    /// variation blend (see `scene::TransformSpec::post_affine`).
+    ///
+    /// Its own entry point rather than a flag on `set_transform_matrix`
+    /// because the two halves are edited by different controls and want
+    /// different history labels, and because the dimension lock has to see the
+    /// right pair: the post-affine carries contraction too, so changing it
+    /// moves `d` exactly as a pre-affine scale does.
+    pub fn set_transform_post_affine(
+        &mut self,
+        idx: usize,
+        post: Mat4,
+        label: impl Into<String>,
+        coalesce_key: Option<String>,
+    ) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.hold_dimension_through_post(idx, post);
+        self.scene.transforms[idx].post_affine = post;
+        self.bump_matrix_generation();
+        self.sync_transforms_to_gpu();
+        self.commit_edit(label, coalesce_key.as_deref(), before);
+    }
+
+    /// The number of maps the attractor is actually made of: every transform
+    /// counted once, or `|G|` times if it is a motif.
+    pub fn effective_map_count(&self) -> usize {
+        self.scene
+            .transforms
+            .iter()
+            .map(|t| t.symmetry.as_ref().map_or(1, |g| g.order()))
+            .sum()
+    }
+
+    /// Enrol a transform in a symmetry group, change the group it is in, or
+    /// (with `None`) withdraw it.
+    ///
+    /// **The undo label carries the arithmetic**, and that is not decoration.
+    /// "Edited transform" is a lie about an edit that took a scene from 15 maps
+    /// to 180 — it reads like a nudge and undoes a transformation. History here
+    /// snapshots whole scenes, so nothing about this is structurally expensive;
+    /// the only thing that can be got wrong is what it *says*, and this is the
+    /// one edit in the program whose magnitude isn't visible from its name.
+    pub fn set_transform_symmetry(
+        &mut self,
+        idx: usize,
+        symmetry: Option<crate::symmetry::Symmetry>,
+    ) {
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let was = self.scene.transforms[idx]
+            .symmetry
+            .as_ref()
+            .map(|s| s.label())
+            .unwrap_or_else(|| "none".to_string());
+        let now = symmetry.as_ref().map(|s| s.label()).unwrap_or_else(|| "none".to_string());
+        let maps_before = self.effective_map_count();
+
+        self.scene.transforms[idx].symmetry = symmetry;
+        let maps_after = self.effective_map_count();
+
+        // The gizmo ghosts and the drawn axis are keyed on this, so a group
+        // change has to bump it or the 3D view keeps drawing the old orbit.
+        self.bump_matrix_generation();
+        self.sync_transforms_to_gpu();
+
+        let label = if maps_before == maps_after {
+            format!("Symmetry {} → {}", was, now)
+        } else {
+            format!(
+                "Symmetry {} → {} ({} → {} maps)",
+                was, now, maps_before, maps_after
+            )
+        };
+        // Deliberately not coalesced. Each of these is a discrete structural
+        // decision, and stepping back through them one at a time is the point;
+        // a group picker clicked three times should be three undo steps, unlike
+        // a slider dragged for three seconds.
+        self.commit_edit(label, None, before);
+    }
+
+    /// The dimension-lock gate for a post-affine edit. Same shape as
+    /// [`Self::hold_dimension_through`], with the roles of the two matrices
+    /// swapped: here the pre-affine is the factor that stays put.
+    fn hold_dimension_through_post(&mut self, idx: usize, new_post: Mat4) {
+        if !self.ui_state.dimension_lock {
+            return;
+        }
+        let Some(spec) = self.scene.transforms.get(idx) else { return };
+        if !(spec.weight > 0.0) {
+            return;
+        }
+        let pre_det = spec.matrix.determinant();
+        let old_s = (pre_det * spec.post_affine.determinant()).abs().powf(1.0 / 3.0);
+        let new_s = (pre_det * new_post.determinant()).abs().powf(1.0 / 3.0);
+        let participates = |s: f32| s > 0.0 && s < 1.0;
+        if !participates(old_s) || !participates(new_s) || (old_s - new_s).abs() <= 1e-6 {
+            return;
+        }
+        self.apply_dimension_lock(idx, old_s, new_s);
+    }
+
+    /// Gate for the dimension lock: decide whether replacing transform `idx`'s
+    /// matrix with `new` is an edit the lock should balance, and balance it.
+    ///
+    /// Call *before* storing `new` — the balance is computed against the state
+    /// the edit is leaving. A no-op when the lock is off, which is why every
+    /// matrix-setting path can call it unconditionally.
+    fn hold_dimension_through(&mut self, idx: usize, new: Mat4) {
+        if !self.ui_state.dimension_lock {
+            return;
+        }
+        let Some(spec) = self.scene.transforms.get(idx) else { return };
+
+        // The edited map has to be one of the maps `d` is computed from, or
+        // the balance below is solving against a sum it isn't part of. Same
+        // filter as `similarity_dimension`.
+        if !(spec.weight > 0.0) {
+            return;
+        }
+        // Both sides have to include the post-affine slot, or a map that keeps
+        // its scale there is measured as if it did not contract. Only the
+        // pre-affine is being replaced, so the post-affine determinant is the
+        // same factor on each side.
+        let post_det = spec.post_affine.determinant();
+        let old_s = (spec.matrix.determinant() * post_det).abs().powf(1.0 / 3.0);
+        let new_s = (new.determinant() * post_det).abs().powf(1.0 / 3.0);
+        let participates = |s: f32| s > 0.0 && s < 1.0;
+        if !participates(old_s) || !participates(new_s) {
+            return;
+        }
+        // Rotation and translation edits come through here too and leave the
+        // determinant alone; there is nothing to balance.
+        if (old_s - new_s).abs() <= 1e-6 {
+            return;
+        }
+        self.apply_dimension_lock(idx, old_s, new_s);
+    }
+
+    /// Rescale every *other* map so the similarity dimension survives a change
+    /// to map `edited_idx`'s contraction. See
+    /// [`crate::scene::dimension_lock_factor`] for the balance itself.
+    ///
+    /// `d` is re-measured from the live transforms on every call rather than
+    /// anchored at the start of a drag, and that is deliberate: the balance has
+    /// `d` as an exact fixed point, so re-measuring re-anchors to the truth
+    /// each frame instead of accumulating the drift a held target would.
+    fn apply_dimension_lock(&mut self, edited_idx: usize, old_s: f32, new_s: f32) {
+        let Some(d) = crate::scene::similarity_dimension(&self.scene.transforms) else {
+            return;
+        };
+
+        let Some(factor) = crate::scene::dimension_lock_factor(d, old_s, new_s) else {
+            // No balance exists — the edited map was already the whole sum, or
+            // the new scale would need the others to vanish. Leave the scene be.
+            return;
+        };
+
+        for (i, t) in self.scene.transforms.iter_mut().enumerate() {
+            if i == edited_idx {
+                continue;
+            }
+            // Only maps that *count toward* `d` may be moved to hold it. A
+            // zero-weight map contributes nothing to the sum, so rescaling it
+            // would silently reshape a map that is not part of the balance;
+            // an expanding one is excluded from `d` entirely, and shrinking it
+            // under 1.0 would make it join the sum and step `d` discontinuously.
+            // The filter has to match `similarity_dimension`'s exactly.
+            let s = t.linear_determinant().abs().powf(1.0 / 3.0);
+            if !(t.weight > 0.0 && s > 0.0 && s < 1.0) {
+                continue;
+            }
+            // Scale the linear part in place rather than decomposing. A
+            // `to_scale_rotation_translation` round trip silently discards
+            // shear and mangles a mirrored (det<0) matrix — the repo carries
+            // `Trs::is_faithful` precisely because that decomposition is not
+            // always honest, and the inspector falls back to a raw matrix grid
+            // when it isn't. Scaling the three basis columns multiplies the
+            // determinant by `factor³` and so the contraction by `factor`,
+            // which is the whole intent, and it is what the gizmo's own
+            // uniform-scale drag already does. `w_axis` is left alone, matching
+            // that drag: scaling a map changes its size, not its offset.
+            t.matrix.x_axis *= factor;
+            t.matrix.y_axis *= factor;
+            t.matrix.z_axis *= factor;
+        }
     }
 
     /// Discard any shear/mirroring in a transform's matrix by rebuilding it
@@ -3597,8 +3883,13 @@ impl App {
     // the relative `adjust_*` nudges the keybinds use. Which of these commit
     // history is deliberate and follows Phase 3: parameters that get written
     // back into the scene TOML by Ctrl+S (point size, color falloff, color
-    // contrast) are edits; view-only knobs (renderer mode, exposure) are
-    // not, matching the keyboard paths exactly.
+    // contrast, exposure — see `adjust_exposure`/`set_exposure` above) are
+    // edits; the renderer mode (points/splat) is the one knob here that
+    // stays view-only, because nothing in `Scene`/`SceneMeta` records it —
+    // Ctrl+S can't write what doesn't change, so it can't be undoable
+    // either. It's still saved, just not as scene data: `View::renderer`
+    // (src/view.rs) carries it, written by `V` / `App::save_view`. Matches
+    // the keyboard path (`toggle_render_mode`) exactly.
 
     pub fn set_render_mode(&mut self, mode: RenderMode) {
         if self.render_mode != mode {
@@ -4124,15 +4415,34 @@ impl App {
 
     /// Turn infinite zoom on for `map`, or off with `None`, and re-form the
     /// point cloud (every point moves, so the buffer has to refill).
+    ///
+    /// This writes `self.scene.zoom` — the same `[zoom]` block `set_zoom_spec`
+    /// edits and Ctrl+S writes back — so it has to go through `commit_edit`
+    /// too, on the same terms as any other discrete pick (`set_color_mode`):
+    /// no coalesce key, since choosing a map or switching zoom off is a
+    /// one-shot action, not a drag.
     pub fn set_zoom_map(&mut self, map: Option<usize>) {
+        let before = self.edit_snapshot();
         self.scene.zoom = map.map(|map| crate::renorm::ZoomSpec {
             map,
             ..self.scene.zoom.clone().unwrap_or_default()
         });
         self.refresh_zoom();
         self.zoom_level = 0;
+        self.zoom_turns = 0;
+        self.zoom_turns_base = 0;
+        self.zoom_turns_drawn = 0;
+        self.pending_rewrap = 0;
         self.point_compute.reset(&self.gpu.queue);
         self.frame_count = 0;
+        self.commit_edit(
+            match map {
+                Some(_) => "Infinite zoom on",
+                None => "Infinite zoom off",
+            },
+            None,
+            before,
+        );
     }
 
     /// The scene's authored band settings, for the Render window's sliders.
@@ -4158,7 +4468,46 @@ impl App {
     /// Keep the eye inside one zoom period; see `renorm::Renorm::wrap`
     fn wrap_zoom(&mut self) {
         let Some(zoom) = self.point_compute.zoom else { return };
-        self.zoom_level += zoom.wrap(&mut self.camera);
+        let levels = zoom.wrap(&mut self.camera);
+        self.zoom_level += levels;
+        self.zoom_turns += levels;
+
+        // The points go with the camera, or the wrap resamples the whole dot
+        // field in one frame and a sparse scene twitches (see `rewrap` in
+        // `shaders/points/chaos.wgsl`).
+        //
+        // Against the monotone count, and not against `levels`, which is the
+        // same trap the zoom readout fell into: while a path is flying, what
+        // `wrap` returns is the absolute depth of an unwrapped spline sample,
+        // so carrying the buffer by it would carry it nine periods a frame
+        // rather than the nought or one it actually moved.
+        self.pending_rewrap += self.zoom_turns - self.zoom_turns_drawn;
+        self.zoom_turns_drawn = self.zoom_turns;
+    }
+
+    /// The frame the world axes have been carried into by the zoom.
+    ///
+    /// A wrap is invisible in the fractal — that is the whole construction —
+    /// but it is *not* invisible in the world, because it turns the camera by
+    /// the map's rotation. Anything drawn in world axes therefore jumps by
+    /// that rotation on the frame the camera folds, while the picture behind
+    /// it does not move at all. The axis cross is the one such thing on
+    /// screen, and on a scene that spirals rather than descending straight in
+    /// it visibly snaps once a period.
+    ///
+    /// Carrying the axes by `A⁻ᵗᵘʳⁿˢ` cancels it exactly. `wrap` premultiplies
+    /// the camera's orientation by `rot⁻¹` per level, so a direction shown as
+    /// `rot⁻ᵗᵘʳⁿˢ·w` keeps the screen position `w` had before the fold. What
+    /// the cross then reads is the frame the *picture* has been accumulating,
+    /// which is the honest answer for a camera spiralling inward forever:
+    /// it keeps turning rather than closing, because the descent does.
+    ///
+    /// Identity for every scene without an infinite zoom, which is most.
+    pub fn zoom_frame(&self) -> crate::rot::Orientation {
+        match self.zoom() {
+            Some(z) => z.carried_frame(self.zoom_turns),
+            None => crate::rot::Orientation::IDENTITY,
+        }
     }
 
     /// What the drawn-point budget is keyed on: any change to the maps, to
@@ -4194,6 +4543,29 @@ impl App {
         self.attractor = crate::trace::measure(&self.scene.transforms, &self.transform_enabled);
     }
 
+    /// Re-measure lacunarity on a slower cadence (once per second). More
+    /// expensive than the attractor measure since it runs multiple resolutions.
+    fn refresh_lacunarity(&mut self) {
+        let key = self.attractor_fingerprint();
+        if key == self.lacunarity_key {
+            return;
+        }
+        if self.lacunarity.is_some()
+            && self.lacunarity_measured_at.elapsed() < Duration::from_secs(1)
+        {
+            return;
+        }
+        self.lacunarity_key = key;
+        self.lacunarity_measured_at = Instant::now();
+        self.lacunarity =
+            crate::trace::lacunarity_summary(&self.scene.transforms, &self.transform_enabled);
+    }
+
+    /// Current lacunarity summary for the status bar.
+    pub fn lacunarity(&self) -> Option<f32> {
+        self.lacunarity
+    }
+
     pub fn update(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_update).as_secs_f32().min(0.1);
@@ -4204,6 +4576,7 @@ impl App {
         // Before the path lines are built, so what's drawn is what will fly.
         self.refresh_default_path();
         self.refresh_attractor();
+        self.refresh_lacunarity();
         self.refresh_indicators();
         self.refresh_path_lines();
         self.poll_job();
@@ -4218,14 +4591,25 @@ impl App {
         // loop's, so the turntable and a hand-authored flythrough are the same
         // three lines of code and behave identically.
         if let Some(t) = self.path_t {
-            let (duration, loops, playable) = {
+            let (duration, loops, playable, periods) = {
                 let p = self.camera_path();
-                (p.duration(), p.wraps(), p.playable())
+                let periods = match p.loops {
+                    crate::path::Loop::Zoom(z) => z.periods as i32,
+                    _ => 0,
+                };
+                (p.duration(), p.wraps(), p.playable(), periods)
             };
             if !playable {
                 self.path_t = None;
             } else {
                 let t = t + dt / duration;
+                // Each pass of a zoom loop descends `periods` periods and
+                // arrives on the frame it left — the same picture, one level
+                // down. The playhead rolling over is the only record that it
+                // happened, so it is where the monotone count is kept whole.
+                if loops && t >= 1.0 {
+                    self.zoom_turns_base += periods;
+                }
                 // A zoom loop wraps like a closed one: it ends on the frame it
                 // began, so there is nothing to stop for.
                 let ended = !loops && t >= 1.0;
@@ -4246,6 +4630,7 @@ impl App {
                 // has to be reset rather than added to. Miss this and the
                 // reading runs away by nine per frame.
                 self.zoom_level = 0;
+                self.zoom_turns = self.zoom_turns_base;
                 self.path_t = if ended { None } else { Some(t) };
                 if ended {
                     log::info!("Camera path: finished");
@@ -4588,7 +4973,15 @@ impl App {
             label: Some("frame_encoder"),
         });
 
-        // === STEP 1: RUN CHAOS GAME ===
+        // === STEP 1: CARRY THE POINTS THROUGH ANY WRAP, THEN RUN CHAOS ===
+        // Before the chaos dispatch, which writes fresh points into the band
+        // this pass is re-folding. In the frame's own encoder rather than a
+        // submit of its own: it is one pass over the whole buffer, landing on
+        // the single frame a period that is already doing the most work, and a
+        // separate submit adds a queue flush to exactly that frame.
+        self.point_compute
+            .rewrap_in(&self.gpu.queue, &mut encoder, self.pending_rewrap);
+        self.pending_rewrap = 0;
         self.point_compute.dispatch(&mut encoder);
 
         // === STEP 2: RENDER POINTS ===

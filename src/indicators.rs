@@ -54,6 +54,187 @@ pub fn build(matrix: Mat4) -> Vec<LineVertex> {
     verts
 }
 
+/// Symmetry colour: violet, so a group's axis or cage reads apart from both
+/// the amber offset vector and the cyan rotation arc of the map it governs —
+/// all three can be on screen at once, and they say different things.
+const SYM_COLOR: [f32; 4] = [0.72, 0.55, 1.0, 0.75];
+/// The spokes that make the fold count countable are drawn brighter than the
+/// axis: they are the part you read a number off.
+const SYM_SPOKE_COLOR: [f32; 4] = [0.85, 0.72, 1.0, 0.95];
+
+/// Draw a symmetry group into the scene.
+///
+/// A symmetry you can't see is a symmetry you can't edit, and until this the
+/// only evidence a group existed was that the fractal had more arms than the
+/// transform list explained. Two shapes, because the groups come in two kinds:
+///
+/// * **`C_n` / `D_n`** — the axis as a line through the attractor, with `n`
+///   spokes around it. You read the fold count by counting spokes, which is the
+///   one number about a cyclic group you actually need at a glance. `D_n` adds
+///   its half-turn axes lying in the equator, which is exactly the difference
+///   between `D` and `C` and so is exactly what should distinguish them here.
+/// * **`T` / `O` / `I`** — the group's namesake solid as a wireframe cage. The
+///   polyhedral groups have no single axis to draw, and a tetrahedron, cube or
+///   icosahedron says "you are working in T/O/I" faster than any label can.
+///
+/// `radius` is the attractor's own 95th-percentile radius, so the drawing sits
+/// on the form rather than at some fixed world scale.
+pub fn build_symmetry(sym: &crate::symmetry::Symmetry, radius: f32) -> Vec<LineVertex> {
+    use crate::symmetry::OrbitKind;
+
+    let r = radius.max(1e-3);
+    let mut verts = Vec::new();
+
+    match sym.kind() {
+        OrbitKind::Cyclic(n) | OrbitKind::Dihedral(n) => {
+            let axis = sym.axis();
+            let (u, v) = perpendicular_basis(axis);
+
+            // The axis, run a little past the form so both ends are visible.
+            seg(&mut verts, -axis * r * 1.35, axis * r * 1.35, SYM_COLOR);
+
+            // n spokes in the equatorial plane: the fold count, countable.
+            // Drawn from a small hub rather than from the centre so they read
+            // as a wheel and not as a starburst that fills the middle of the
+            // scene where the fractal is densest.
+            let hub = r * 0.18;
+            for k in 0..n {
+                let t = std::f32::consts::TAU * k as f32 / n as f32;
+                let dir = u * t.cos() + v * t.sin();
+                seg(&mut verts, dir * hub, dir * r * 0.95, SYM_SPOKE_COLOR);
+            }
+
+            // A ring joining the spoke tips, so the plane of the rotation is
+            // legible edge-on as well as face-on.
+            let ring = 64;
+            let mut prev = u * r * 0.95;
+            for i in 1..=ring {
+                let t = std::f32::consts::TAU * i as f32 / ring as f32;
+                let next = (u * t.cos() + v * t.sin()) * r * 0.95;
+                seg(&mut verts, prev, next, SYM_COLOR);
+                prev = next;
+            }
+
+            // D_n's half-turn axes. They bisect the spokes rather than lying
+            // along them, which is where the generator actually puts them.
+            if matches!(sym.kind(), OrbitKind::Dihedral(_)) {
+                for k in 0..n {
+                    let t = std::f32::consts::TAU * (k as f32 + 0.5) / n as f32;
+                    let dir = u * t.cos() + v * t.sin();
+                    // Short struts through the ring: a two-fold axis is a line
+                    // you spin about, so it is drawn as one, sticking out both
+                    // sides of the ring it pierces.
+                    seg(&mut verts, dir * r * 0.82, dir * r * 1.12, SYM_SPOKE_COLOR);
+                }
+            }
+        }
+        // A repeat has no cage and no spokes — it is a chain, so it is drawn as
+        // one: the path the copies actually walk, with a tick at each. The
+        // ghosts show where the copies are; this shows the rule that put them
+        // there, which is the thing being edited.
+        OrbitKind::Repeat(_) => {
+            let axis = sym.axis();
+            seg(&mut verts, -axis * r * 1.15, axis * r * 1.15, SYM_COLOR);
+
+            let (u, v) = perpendicular_basis(axis);
+            let nodes: Vec<Vec3> = sym
+                .elements()
+                .iter()
+                .map(|e| e.transform_point3(Vec3::ZERO))
+                .collect();
+            let tick = r * 0.05;
+            for (i, node) in nodes.iter().enumerate() {
+                if i + 1 < nodes.len() {
+                    seg(&mut verts, *node, nodes[i + 1], SYM_SPOKE_COLOR);
+                }
+                // A cross rather than a dot: the line renderer has no points,
+                // and a cross stays visible when the chain is viewed end-on.
+                seg(&mut verts, *node - u * tick, *node + u * tick, SYM_COLOR);
+                seg(&mut verts, *node - v * tick, *node + v * tick, SYM_COLOR);
+            }
+        }
+        kind => {
+            for (a, b) in cage_edges(kind) {
+                seg(&mut verts, a * r, b * r, SYM_COLOR);
+            }
+        }
+    }
+
+    verts
+}
+
+/// The wireframe of a polyhedral group's namesake solid, as unit-radius
+/// vertex pairs.
+///
+/// The orientations here are not decorative — they are the same ones
+/// `symmetry.rs` generates the groups in, and a cage in the wrong frame would
+/// draw a symmetry the attractor doesn't have. `the_cage_matches_its_group`
+/// checks exactly that, by applying every group element to the vertex set.
+///
+/// Edges are found by distance rather than listed: in each of these solids the
+/// edges are precisely the vertex pairs at the minimum separation, so a short
+/// search is both shorter than a table and impossible to mistype.
+fn cage_edges(kind: crate::symmetry::OrbitKind) -> Vec<(Vec3, Vec3)> {
+    use crate::symmetry::OrbitKind;
+
+    let verts: Vec<Vec3> = match kind {
+        // The tetrahedron on alternate cube corners — the frame in which the
+        // group's 3-fold generator is the cube diagonal (1,1,1).
+        OrbitKind::Tetrahedral => vec![
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+        ],
+        // The cube, axis-aligned: its 4-fold axes are the coordinate axes.
+        OrbitKind::Octahedral => (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { 1.0 } else { -1.0 },
+                    if i & 2 == 0 { 1.0 } else { -1.0 },
+                    if i & 4 == 0 { 1.0 } else { -1.0 },
+                )
+            })
+            .collect(),
+        // The icosahedron as the cyclic permutations of (0, ±1, ±φ), which is
+        // the construction the 5-fold generator's axis (0, 1, φ) comes from.
+        OrbitKind::Icosahedral => {
+            let phi = (1.0 + 5.0f32.sqrt()) / 2.0;
+            let mut v = Vec::with_capacity(12);
+            for &s1 in &[1.0f32, -1.0] {
+                for &s2 in &[1.0f32, -1.0] {
+                    v.push(Vec3::new(0.0, s1, s2 * phi));
+                    v.push(Vec3::new(s1, s2 * phi, 0.0));
+                    v.push(Vec3::new(s2 * phi, 0.0, s1));
+                }
+            }
+            v
+        }
+        // C/D are drawn as an axis, not a cage.
+        _ => return Vec::new(),
+    };
+
+    let scale = verts[0].length();
+    let unit: Vec<Vec3> = verts.iter().map(|v| *v / scale).collect();
+
+    let mut shortest = f32::MAX;
+    for (i, a) in unit.iter().enumerate() {
+        for b in &unit[i + 1..] {
+            shortest = shortest.min(a.distance_squared(*b));
+        }
+    }
+
+    let mut edges = Vec::new();
+    for (i, a) in unit.iter().enumerate() {
+        for b in &unit[i + 1..] {
+            if (a.distance_squared(*b) - shortest).abs() < 1e-3 {
+                edges.push((*a, *b));
+            }
+        }
+    }
+    edges
+}
+
 /// Camera-path polyline colour: green, so it reads apart from the amber
 /// offset vector and the cyan rotation arc a selected transform draws.
 const PATH_COLOR: [f32; 4] = [0.4, 0.95, 0.55, 0.7];
@@ -241,6 +422,82 @@ mod tests {
             verts.iter().all(|v| v.position.iter().all(|c| c.is_finite())),
             "indicator geometry must never contain NaN"
         );
+    }
+
+    /// The cage has to be drawn in the same frame the group is generated in.
+    ///
+    /// This is the check that makes hardcoded vertex lists safe: every element
+    /// of the group must permute the cage's vertices among themselves. A cage
+    /// in the wrong orientation looks perfectly plausible on screen — a
+    /// tetrahedron is a tetrahedron — while telling you the symmetry is
+    /// somewhere it isn't, which is the one thing a symmetry gizmo must never
+    /// do.
+    #[test]
+    fn the_cage_matches_its_group() {
+        use crate::symmetry::{OrbitKind, OrbitColor, Symmetry};
+
+        for (kind, corners, edges) in [
+            (OrbitKind::Tetrahedral, 4, 6),
+            (OrbitKind::Octahedral, 8, 12),
+            (OrbitKind::Icosahedral, 12, 30),
+        ] {
+            let cage = super::cage_edges(kind);
+            assert_eq!(cage.len(), edges, "{:?}: wrong edge count", kind);
+
+            let mut verts: Vec<Vec3> = Vec::new();
+            for (a, b) in &cage {
+                for v in [a, b] {
+                    if !verts.iter().any(|u| u.distance(*v) < 1e-3) {
+                        verts.push(*v);
+                    }
+                }
+            }
+            assert_eq!(verts.len(), corners, "{:?}: wrong vertex count", kind);
+
+            let group = Symmetry::new(kind, Vec3::Y, false, OrbitColor::Shared).unwrap();
+            for g in group.elements() {
+                for v in &verts {
+                    let moved = g.transform_point3(*v);
+                    assert!(
+                        verts.iter().any(|u| u.distance(moved) < 1e-3),
+                        "{:?}: a group element moves the cage off itself — the \
+                         gizmo and the group are in different frames",
+                        kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// A cyclic group's drawing has to have as many spokes as the group has
+    /// folds, because counting them is how the fold count is read.
+    #[test]
+    fn a_cyclic_axis_draws_one_spoke_per_fold() {
+        use crate::symmetry::{OrbitKind, OrbitColor, Symmetry};
+        for n in [3u32, 5, 12] {
+            let sym =
+                Symmetry::new(OrbitKind::Cyclic(n), Vec3::Y, false, OrbitColor::Shared).unwrap();
+            let verts = super::build_symmetry(&sym, 1.0);
+            let spokes = verts.iter().filter(|v| v.color == super::SYM_SPOKE_COLOR).count() / 2;
+            assert_eq!(spokes, n as usize, "C{n} should draw {n} spokes");
+            assert!(
+                verts.iter().all(|v| v.position.iter().all(|c| c.is_finite())),
+                "symmetry geometry must never contain NaN"
+            );
+        }
+    }
+
+    /// The axis is the group's, not the world's — swinging it has to swing the
+    /// drawing.
+    #[test]
+    fn the_drawn_axis_follows_the_group() {
+        use crate::symmetry::{OrbitKind, OrbitColor, Symmetry};
+        let axis = Vec3::new(0.3, 0.6, -0.74).normalize();
+        let sym = Symmetry::new(OrbitKind::Cyclic(4), axis, false, OrbitColor::Shared).unwrap();
+        let verts = super::build_symmetry(&sym, 1.0);
+        // The axis line is the first segment drawn, from -axis to +axis.
+        let end = Vec3::from(verts[1].position).normalize();
+        assert!((end - axis).length() < 1e-3, "the axis line should lie along {axis:?}");
     }
 
     #[test]

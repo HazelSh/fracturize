@@ -486,7 +486,7 @@ fn ramp_rows(stops: &[Vec3], color: bool, indent: &str, per_line: usize) -> Vec<
 /// and the cube root of a negative determinant is negative. It costs no column
 /// and there is nothing to look up.
 fn contraction_of(t: &TransformSpec) -> f32 {
-    let det = t.matrix.determinant();
+    let det = t.linear_determinant();
     det.abs().powf(1.0 / 3.0) * det.signum()
 }
 
@@ -521,6 +521,13 @@ fn build(subject: &Subject) -> Report {
     }
     sections.push(shape_section(subject, &effective, &mut notes));
     sections.push(maps_section(subject, &resolved, &mut notes));
+    // Only for scenes that have one. A block that said "symmetry none" on
+    // every one of the forty-odd scenes without it would cost a line each to
+    // report an absence the `maps` count already implies — the same trade the
+    // `set` and `view` blocks make above.
+    if scene.transforms.iter().any(|t| t.symmetry.is_some()) {
+        sections.push(symmetry_section(subject, &mut notes));
+    }
     sections.push(render_section(scene));
     sections.push(colour_section(subject, &resolved, &mut notes));
     sections.push(camera_section(subject, &effective, layered, &mut notes));
@@ -727,6 +734,48 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         Cell::new("occupancy", format!("{:>7.1}%", m.occupancy * 100.0)),
     ]);
 
+    // Similarity dimension: the single best predictor of dust/shell/mush
+    let dim = crate::scene::similarity_dimension(&scene.transforms);
+    let dim_str = dim.map_or("n/a".to_string(), |d| format!("{:>8.2}", d));
+    let dim_class = match dim {
+        Some(d) if d < 1.7 => "dust",
+        Some(d) if d < 2.1 => "lace",
+        Some(d) if d < 2.6 => "shell",
+        Some(d) if d < 3.0 => "solid",
+        Some(_) => "overfull",
+        None => "n/a",
+    };
+
+    // Weighted geometric mean of contractions: overall "tightness" of the IFS.
+    // A scene with all maps at 0.5 contracts 50% per step on average; one with
+    // maps at 0.3 and 0.7 contracts faster per step but reaches the same d.
+    let total_weight: f32 = scene.transforms.iter().map(|t| t.weight).sum();
+    let compactness = if total_weight > 0.0 {
+        let log_sum: f32 = scene
+            .transforms
+            .iter()
+            .filter(|t| t.weight > 0.0)
+            .map(|t| {
+                let c = contraction_of(t).abs().clamp(0.01, 0.99);
+                (t.weight / total_weight) * c.ln()
+            })
+            .sum();
+        Some(log_sum.exp())
+    } else {
+        None
+    };
+
+    // Lacunarity: density variance across scales
+    let lacunarity = crate::trace::lacunarity_summary(&scene.transforms, &enabled);
+    let lacunarity_str = lacunarity.map_or("n/a".to_string(), |l| format!("{:>5.1}", l));
+
+    s.cells(vec![
+        Cell::new("dimension", dim_str),
+        Cell::note(format!("({})", dim_class)),
+        Cell::new("compactness", compactness.map_or("n/a".to_string(), |c| format!("{:>5.2}", c))),
+        Cell::new("lacunarity", lacunarity_str),
+    ]);
+
     let framed = (m.radius * 2.4).clamp(0.8, 12.0);
     let crisp = 1.5 * framed / 1080.0;
     s.text(format!("{:<19} -S camera.distance={:.2}", "to fill the frame", framed));
@@ -773,6 +822,27 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
             format!("focus is {:.2} from the centre, outside the {:.2} radius", off, m.radius),
         );
     }
+
+    // A measure no clumpier than a random scatter has no gaps to read, and a
+    // high dimension means it fills space while having none — which is the
+    // fuzz/mush wall. The threshold is off the calibration sweep over
+    // `scenes/` (2026-08-08): `menger`, the known flat-measure case, sits at
+    // 1.6, and the next scene up is `diamond` at 2.2, so 2.0 separates the
+    // one from the other. Said as a note, never a refusal — CRAFT's own rule.
+    if let (Some(d), Some(l)) = (dim, lacunarity) {
+        if d > 2.5 && l < 2.0 {
+            notes.add(
+                "shape",
+                format!(
+                    "dimension {:.2} fills space but lacunarity {:.1} is near a random \
+                     scatter — the measure is smooth, so there may be nothing to resolve \
+                     at any scale. A weight spread, or rotations on a shared axis, is \
+                     what puts gaps back.",
+                    d, l
+                ),
+            );
+        }
+    }
     s
 }
 
@@ -796,6 +866,11 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
         "{}   share of the walk, contraction, colour as rendered",
         scene.transforms.len()
     ));
+
+    // Whether *any* map uses the post-affine slot. Decided once for the whole
+    // block so the per-map schema is uniform within a report — see the `post`
+    // rows below.
+    let any_post = scene.transforms.iter().any(|t| t.post_affine != glam::Mat4::IDENTITY);
 
     let names: Vec<String> = (0..scene.transforms.len()).map(|i| name_of(scene, i)).collect();
     let nw = names.iter().map(|n| n.chars().count()).max().unwrap_or(6).clamp(6, 14);
@@ -871,6 +946,30 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
         // Its own line because a real summary runs to 41 columns — longer than
         // anything it could share with.
         s.text(format!("    vars  {}", t.variation_summary()));
+
+        // The post-affine half of the map. Without this the three petals of a
+        // symmetry orbit print identically — same scale, same rotation, same
+        // move — and the one thing that distinguishes them is invisible, which
+        // is the worst possible failure for the report an agent authors by.
+        //
+        // Rule 7 says every row prints every time, and this honours it per
+        // *report* rather than per row: `any_post` is scene-wide, so within one
+        // report the line is on every map or on none, and two reports of the
+        // same scene still diff row for row. Paying three lines per map across
+        // the forty-odd scenes that leave the slot empty would buy nothing.
+        if any_post {
+            let p = crate::rot::Trs::of(t.post_affine);
+            let (px, py, pz) = p.rotation.as_quat().to_euler(glam::EulerRot::XYZ);
+            s.text(format!(
+                "    post  scale {:<sw$}   rot ({:>4.0},{:>4.0},{:>4.0})°",
+                fmt_scale(p.scale),
+                degrees(px),
+                degrees(py),
+                degrees(pz),
+                sw = sw
+            ));
+            s.text(format!("          move  {}", point(p.translation)));
+        }
     }
 
     // Rotations are re-derived from the matrix, so a transform authored as
@@ -881,6 +980,116 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
     s.text("a negative contraction is a map that reflects; one at or past 1.0");
     s.text("expands. rotations are re-derived from the matrix, so the euler");
     s.text("branch may differ from the file — the rotation itself is the same");
+    s
+}
+
+/// What the scene's symmetry groups are, and what they multiply out to.
+///
+/// **It summarises and never enumerates.** The whole point of keeping the group
+/// live is that a 120-map scene stays legible, and a block that listed the orbit
+/// would hand back exactly the 120 rows the design exists to avoid. So: one row
+/// per group, the motifs it governs, and the arithmetic.
+fn symmetry_section(subject: &Subject, notes: &mut Notes) -> Section {
+    let scene = subject.scene;
+    let mut s = Section::new("symmetry");
+
+    // Distinct groups, in the order their first motif appears.
+    let mut groups: Vec<(&crate::symmetry::Symmetry, Vec<usize>)> = Vec::new();
+    for (i, t) in scene.transforms.iter().enumerate() {
+        let Some(sym) = t.symmetry.as_ref() else { continue };
+        match groups.iter_mut().find(|(g, _)| *g == sym) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((sym, vec![i])),
+        }
+    }
+
+    let loose: Vec<usize> = (0..scene.transforms.len())
+        .filter(|i| scene.transforms[*i].symmetry.is_none())
+        .collect();
+    let effective: usize = scene
+        .transforms
+        .iter()
+        .map(|t| t.symmetry.as_ref().map_or(1, |g| g.order()))
+        .sum();
+
+    s.text(format!(
+        "{}   {} transform{} authored, {} maps in the attractor",
+        groups.len(),
+        scene.transforms.len(),
+        if scene.transforms.len() == 1 { "" } else { "s" },
+        effective,
+    ));
+
+    let names: Vec<String> = (0..scene.transforms.len()).map(|i| name_of(scene, i)).collect();
+    let summaries: Vec<String> = groups.iter().map(|(g, _)| g.summary()).collect();
+    // 43 is the widest summary that can be generated at all — `Dih60 + mirror
+    // about [-0.000 -1.000 -0.000]`, since the axis is normalized and so each
+    // component is at most six characters. The ceiling is there to bound a
+    // pathological row, and no row can exceed this one, so the columns always
+    // line up; a scene with only short summaries still gets a short column.
+    let gw = summaries.iter().map(|t| t.chars().count()).max().unwrap_or(8).clamp(8, 43);
+
+    for ((group, members), summary) in groups.iter().zip(&summaries) {
+        s.text(format!(
+            "{:<gw$}   {} motif{} -> {} maps",
+            summary,
+            members.len(),
+            if members.len() == 1 { "" } else { "s" },
+            members.len() * group.order(),
+            gw = gw
+        ));
+        s.text(format!(
+            "    motifs  {}",
+            members.iter().map(|i| names[*i].clone()).collect::<Vec<_>>().join(", ")
+        ));
+        if group.color() != crate::symmetry::OrbitColor::Shared {
+            s.text(format!("    colour  {}", group.color().name()));
+        }
+        if !group.is_group() {
+            s.text("    note    a repeat, not a group — copies, but no invariance");
+        }
+    }
+
+    // The defect (CRAFT §3.6): a scene that is *entirely* symmetric has a flat
+    // measure by construction — every copy in an orbit shares a contraction and
+    // a weight — which is the unrecoverable-scene failure mode arrived at from
+    // a new direction. `menger` is exactly this. So the report says whether the
+    // defect is there, and complains in `notes` when it isn't.
+    let total: f32 = scene.transforms.iter().map(|t| t.weight).sum();
+    // A *repeat* is not part of this complaint. The flat-measure argument turns
+    // on every copy sharing a contraction, which is true of a group's orthogonal
+    // elements and false of a shrinking repeat — its k-th copy is `scaleᵏ` of
+    // the first, so the variance the defect exists to restore is already there.
+    let all_groups = scene
+        .transforms
+        .iter()
+        .filter_map(|t| t.symmetry.as_ref())
+        .all(|g| g.is_group() || g.element_scales().iter().all(|s| (*s - 1.0).abs() < 1e-6));
+    if loose.is_empty() && all_groups {
+        s.text("defect    none — every map is in a group");
+        notes.add(
+            "symmetry",
+            "every map belongs to a group, so the measure is flat by \
+             construction (all copies share a contraction and a weight). Add one \
+             map outside the group — see CRAFT §3.6",
+        );
+    } else if loose.is_empty() {
+        s.text("defect    none authored — the repeat's taper carries the variance");
+    } else {
+        let share: f32 = loose.iter().map(|i| scene.transforms[*i].weight).sum();
+        let share = if total > 0.0 { share / total * 100.0 } else { 0.0 };
+        s.text(format!(
+            "defect    {}, {} map{} outside the group, {} of the walk",
+            loose.iter().map(|i| names[*i].clone()).collect::<Vec<_>>().join(", "),
+            loose.len(),
+            if loose.len() == 1 { "" } else { "s" },
+            percent(share),
+        ));
+    }
+
+    s.text("a motif and its orbit are one transform everywhere — in the file, in");
+    s.text("`maps` above, and on the GPU. `effective` is what the attractor is");
+    s.text("made of: sum over motifs of |G|, which is what `dimension` counts");
     s
 }
 

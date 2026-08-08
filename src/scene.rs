@@ -98,6 +98,10 @@ pub const VARIATION_NAMES: [&str; NUM_VARIATIONS] = [
 pub struct TransformSpec {
     /// Affine part (applied before variations)
     pub matrix: Mat4,
+    /// Post-affine part (applied after variations). Identity by default.
+    /// This is the slot that enables symmetry: `g ∘ f` where g is drawn from
+    /// a group and f is the pre-affine + variations.
+    pub post_affine: Mat4,
     /// Colormap index (0.0-1.0)
     pub color_value: f32,
     /// Selection weight
@@ -109,6 +113,22 @@ pub struct TransformSpec {
     pub explicit_color_speed: Option<f32>,
     /// Variation blend weights, by slot (see VARIATION_NAMES)
     pub variations: [f32; NUM_VARIATIONS],
+    /// The finite symmetry group this map is a motif of, if any.
+    ///
+    /// `None` is an ordinary transform. `Some(g)` means the chaos game draws an
+    /// element of `g` uniformly *after* this map's post-affine slot and applies
+    /// it, so what the attractor actually contains is the `|G|` maps
+    /// `{g ∘ f : g ∈ G}` — see `crate::symmetry`. The orbit is never expanded
+    /// into the transform list: this stays one transform, in the file, in the
+    /// panel, in `--info` and on the GPU.
+    ///
+    /// A property of the transform rather than a scene-level table because
+    /// that is what it is — two motifs can sit under different groups, and
+    /// enrolling a map is then an edit to that map and nothing else. The
+    /// `[[symmetry]]` block in a scene file is sugar over this: it names one
+    /// group and the motifs that carry it, so a 120-map scene is still eight
+    /// lines to read and to write.
+    pub symmetry: Option<crate::symmetry::Symmetry>,
 }
 
 /// Resolve each transform's effective color_speed.
@@ -135,12 +155,158 @@ pub fn resolve_color_speeds(transforms: &mut [TransformSpec], global_speed: f32,
     }
 }
 
+/// Similarity dimension of an IFS: solve Σsᵢᵈ = 1 for d.
+///
+/// Each sᵢ is a contraction factor (< 1). The sum of sᵢᵈ equals 1 at exactly
+/// one value of d, which is the similarity dimension — the fractal dimension
+/// of the attractor when transforms overlap minimally.
+///
+/// Returns `None` if no transforms have weight, or if all contractions are ≥ 1
+/// (the IFS expands rather than contracts).
+pub fn similarity_dimension(transforms: &[TransformSpec]) -> Option<f32> {
+    similarity_dimension_weighted(transforms, None)
+}
+
+/// Similarity dimension with optional per-transform weighting.
+///
+/// When `weights` is `Some`, uses those weights instead of the transforms'
+/// own weights. This allows computing dimension for a subset of enabled maps.
+pub fn similarity_dimension_weighted(
+    transforms: &[TransformSpec],
+    weights: Option<&[f32]>,
+) -> Option<f32> {
+    // One entry per map in the *effective* set. A motif under a symmetry group
+    // contributes `|G|` maps, not one: the group's elements are orthogonal, so
+    // every copy has the motif's own contraction, and `Σsᵢᵈ = 1` becomes
+    // `Σ|Gᵢ|·sᵢᵈ = 1`.
+    //
+    // This is not a refinement — it is the difference between a number and
+    // nonsense. A single map under `C5` reads as `d = 0` ("dust") if the group
+    // is ignored, because one contraction can never sum to 1; counted properly
+    // it is `ln 5 / ln(1/s)`, which for a half-scale motif is 2.3 and is the
+    // dimension the picture actually has.
+    //
+    // A *repeat* is where the `|G|·sᵈ` shorthand stops working: its k-th copy
+    // carries `scaleᵏ` on top of the motif's own contraction, so the copies are
+    // not all the same size and the sum is `Σₖ (s·scaleᵏ)ᵈ`. Hence
+    // `element_scales`, which is all ones for a group and a geometric run for a
+    // repeat — without it a tapering helix reads as `count` copies of its
+    // widest turn, which overstates the dimension badly.
+    let contractions: Vec<f32> = transforms
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let w = weights.map_or(t.weight, |ws| ws.get(i).copied().unwrap_or(0.0));
+            if w > 0.0 {
+                let s = t.linear_determinant().abs().powf(1.0 / 3.0);
+                if s > 0.0 && s < 1.0 {
+                    let scales = t
+                        .symmetry
+                        .as_ref()
+                        .map_or_else(|| vec![1.0], |g| g.element_scales());
+                    Some(
+                        scales
+                            .into_iter()
+                            .map(move |e| s * e)
+                            .filter(|c| *c > 0.0 && *c < 1.0)
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    if contractions.is_empty() {
+        return None;
+    }
+
+    // Bisection: find d where Σsᵢᵈ = 1
+    // At d=0, sum = N > 1 (assuming N > 1 contracting maps)
+    // As d → ∞, sum → 0 (each sᵢᵈ → 0 for sᵢ < 1)
+    let sum_at = |d: f32| -> f32 { contractions.iter().map(|&s| s.powf(d)).sum() };
+
+    let mut lo = 0.0f32;
+    let mut hi = 10.0f32;
+
+    // If even at d=0 the sum is < 1, there's only one transform
+    if sum_at(lo) < 1.0 {
+        return Some(0.0);
+    }
+    // Expand upper bound if needed
+    while sum_at(hi) > 1.0 && hi < 100.0 {
+        hi *= 2.0;
+    }
+
+    // Bisect for ~200 steps gives ~6 decimal places
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        if sum_at(mid) > 1.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    Some((lo + hi) / 2.0)
+}
+
+/// The factor every *other* map's contraction must be multiplied by to hold
+/// the similarity dimension `d` fixed while one map moves `old_s -> new_s`.
+///
+/// From `Σsᵢᵈ = 1`: the edited map contributes `sₖᵈ`, so the rest contribute
+/// `1 - sₖᵈ`. Requiring the same identity after the edit, with the rest scaled
+/// by a common `f`:
+///
+/// ```text
+///     sₖ'ᵈ + fᵈ·(1 - sₖᵈ) = 1   =>   f = ((1 - sₖ'ᵈ) / (1 - sₖᵈ))^(1/d)
+/// ```
+///
+/// `None` when the balance has no solution: the edited map was already the
+/// whole sum (nothing left to take up the slack), or the new scale would need
+/// the others to vanish. Callers leave the scene alone in that case rather
+/// than collapsing it.
+pub fn dimension_lock_factor(d: f32, old_s: f32, new_s: f32) -> Option<f32> {
+    if !(d > 1e-4) {
+        return None;
+    }
+    let others = 1.0 - old_s.powf(d);
+    let needed = 1.0 - new_s.powf(d);
+    if others < 1e-6 || needed < 1e-6 {
+        return None;
+    }
+    let f = (needed / others).powf(1.0 / d);
+    f.is_finite().then_some(f)
+}
+
 impl TransformSpec {
-    /// Spatial contraction factor of the affine part (cube root of the
-    /// determinant), clamped away from 0 and 1 so falloff-derived speeds
-    /// stay sane for degenerate or expanding transforms.
+    /// Determinant of the map's whole linear part — the pre-affine matrix and
+    /// the post-affine slot together, since `det(BA) = det(B)·det(A)`.
+    ///
+    /// Every contraction question has to ask this rather than `matrix` alone.
+    /// A KIFS-style map carries its scale in the post-affine slot and leaves
+    /// the pre-affine at identity; read only `matrix` and it looks like a map
+    /// that does not contract at all, which silently takes it out of the
+    /// similarity dimension, out of the dimension lock, and out of
+    /// `color_falloff`'s speed resolution.
+    ///
+    /// Signed, because a negative determinant is a map that turns space inside
+    /// out and that is worth being able to see. Note this is exact only for
+    /// affine maps: a nonlinear variation sits between the two matrices and
+    /// has a Jacobian of its own that no single number captures.
+    pub fn linear_determinant(&self) -> f32 {
+        self.matrix.determinant() * self.post_affine.determinant()
+    }
+
+    /// Spatial contraction factor of the linear part (cube root of
+    /// [`Self::linear_determinant`]), clamped away from 0 and 1 so
+    /// falloff-derived speeds stay sane for degenerate or expanding transforms.
     pub fn contraction(&self) -> f32 {
-        self.matrix.determinant().abs().powf(1.0 / 3.0).clamp(0.05, 0.95)
+        self.linear_determinant().abs().powf(1.0 / 3.0).clamp(0.05, 0.95)
     }
 
     /// Weights for a pure-linear (classic affine) transform
@@ -172,6 +338,180 @@ impl TransformSpec {
             .collect::<Vec<_>>()
             .join(" + ")
     }
+}
+
+/// Resolve the `[[symmetry]]` blocks onto the motifs they name.
+///
+/// After this, nothing downstream knows blocks exist: a symmetry is a property
+/// of a transform (`TransformSpec::symmetry`), which is what lets the panel edit
+/// it per map, the GPU carry it per map, and a motif be withdrawn from its group
+/// without touching anything else.
+///
+/// Every failure here is a load error rather than a warning. A scene that
+/// quietly rendered without the symmetry it asked for would be a scene whose
+/// picture silently disagreed with its file — and the failure modes are all
+/// typos (a misspelled motif name, a group that isn't a group), which are much
+/// cheaper to fix when something says so.
+fn apply_symmetries(
+    defs: &[SymmetryDef],
+    transforms: &mut [TransformSpec],
+    names: &[Option<String>],
+) -> Result<(), String> {
+    if defs.is_empty() {
+        return Ok(());
+    }
+
+    let mut total_elements = 0usize;
+    let mut claimed: Vec<Option<usize>> = vec![None; transforms.len()];
+
+    for (block, def) in defs.iter().enumerate() {
+        let kind = match (&def.group, def.repeat) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "[[symmetry]] #{} names both `group` and `repeat`. A block is \
+                     one or the other — a group's copies are its elements, a \
+                     repeat's are its steps",
+                    block + 1
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "[[symmetry]] #{} names neither `group` nor `repeat`. Use \
+                     `group = \"Icosa\"` for a symmetry group, or `repeat = 8` \
+                     with `step`/`turn`/`shrink` for a progression",
+                    block + 1
+                ));
+            }
+            (Some(g), None) => crate::symmetry::OrbitKind::parse(g)
+                .map_err(|e| format!("[[symmetry]] #{}: {}", block + 1, e))?,
+            (None, Some(count)) => {
+                let d = crate::symmetry::Repeat::default();
+                crate::symmetry::OrbitKind::Repeat(crate::symmetry::Repeat {
+                    count,
+                    translate: def
+                        .step
+                        .map(|v| Vec3::from(v.map(|c| c as f32)))
+                        .unwrap_or(d.translate),
+                    turn: def.turn.map(|t| t as f32).unwrap_or(d.turn),
+                    scale: def.shrink.map(|t| t as f32).unwrap_or(d.scale),
+                })
+            }
+        };
+        let axis = def
+            .axis
+            .map(|a| Vec3::from(a.map(|v| v as f32)))
+            .unwrap_or(Vec3::Y);
+        let color = def
+            .color
+            .as_deref()
+            .map(crate::symmetry::OrbitColor::parse)
+            .transpose()
+            .map_err(|e| format!("[[symmetry]] #{}: {}", block + 1, e))?
+            .unwrap_or_default();
+
+        let group =
+            crate::symmetry::Symmetry::new(kind, axis, def.mirror.unwrap_or(false), color)
+                .map_err(|e| format!("[[symmetry]] #{}: {}", block + 1, e))?;
+
+        if def.applies_to.is_empty() {
+            return Err(format!(
+                "[[symmetry]] #{} ({}) governs no transforms. Name them in \
+                 `applies_to = [\"...\"]`",
+                block + 1,
+                group.label()
+            ));
+        }
+
+        total_elements += group.order();
+        if total_elements > crate::gpu::points::compute::MAX_GROUP_ELEMENTS {
+            return Err(format!(
+                "this scene's symmetry groups need {} elements, more than the \
+                 {} the renderer holds. Use fewer distinct groups, or smaller ones",
+                total_elements,
+                crate::gpu::points::compute::MAX_GROUP_ELEMENTS
+            ));
+        }
+
+        for reference in &def.applies_to {
+            let idx = resolve_transform_ref(reference, names).map_err(|e| {
+                format!("[[symmetry]] #{} ({}): {}", block + 1, group.label(), e)
+            })?;
+            if let Some(first) = claimed[idx] {
+                return Err(format!(
+                    "transform '{}' is claimed by two symmetry blocks (#{} and #{}). \
+                     A map belongs to one group; to compose two symmetries, use the \
+                     larger group that contains both",
+                    reference,
+                    first + 1,
+                    block + 1
+                ));
+            }
+            claimed[idx] = Some(block);
+            transforms[idx].symmetry = Some(group.clone());
+        }
+    }
+
+    Ok(())
+}
+
+/// Group the transforms' symmetries back into `[[symmetry]]` blocks for saving.
+///
+/// The inverse of [`apply_symmetries`], and the reason a symmetry survives a
+/// round trip through the panel: motifs sharing a group come back out as one
+/// block naming all of them, in the order they appear in the transform list.
+pub fn symmetry_blocks(
+    transforms: &[TransformSpec],
+    names: &[Option<String>],
+) -> Vec<SymmetryDef> {
+    let mut blocks: Vec<(&crate::symmetry::Symmetry, Vec<String>)> = Vec::new();
+
+    for (i, t) in transforms.iter().enumerate() {
+        let Some(sym) = t.symmetry.as_ref() else { continue };
+        // A motif with no name is referenced by index, which `applies_to`
+        // accepts on the same terms as `[zoom].map` — so an unnamed transform
+        // can still carry a symmetry through a save.
+        let reference = names
+            .get(i)
+            .and_then(|n| n.clone())
+            .unwrap_or_else(|| i.to_string());
+        match blocks.iter_mut().find(|(s, _)| *s == sym) {
+            Some((_, members)) => members.push(reference),
+            None => blocks.push((sym, vec![reference])),
+        }
+    }
+
+    blocks
+        .into_iter()
+        .map(|(sym, applies_to)| {
+            let step = sym.kind().repeat();
+            SymmetryDef {
+                // A repeat is spelled `repeat = n`, never `group = "..."`, so
+                // the two keys stay mutually exclusive on the way out as well
+                // as on the way in.
+                group: step.is_none().then(|| sym.kind().label()),
+                repeat: step.map(|r| r.count),
+                // Written even at their defaults: a repeat with `repeat = 8`
+                // and nothing else is a file that doesn't say what it does, and
+                // the step is the whole content of the block.
+                step: step.map(|r| r.translate.to_array().map(|v| v as f64)),
+                turn: step.map(|r| r.turn as f64),
+                shrink: step.map(|r| r.scale as f64),
+                // Only where it means something: writing an axis beside
+                // `group = "Icosa"` would say the polyhedral group is aimed,
+                // and it isn't.
+                axis: sym
+                    .kind()
+                    .uses_axis()
+                    .then(|| sym.axis().to_array().map(|v| v as f64)),
+                mirror: sym.mirror().then_some(true),
+                applies_to,
+                color: match sym.color() {
+                    crate::symmetry::OrbitColor::Shared => None,
+                    other => Some(other.name().to_string()),
+                },
+            }
+        })
+        .collect()
 }
 
 /// Resolve a transform reference — a name, or an index written as a string —
@@ -379,6 +719,15 @@ pub struct TransformDef {
     /// Defaults to { linear = 1.0 } (classic affine IFS)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variations: Option<BTreeMap<String, f64>>,
+    /// Post-affine translation (applied after variations). Default [0,0,0].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_translation: Option<[f64; 3]>,
+    /// Post-affine scale (applied after variations). Default 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scale: Option<ScaleDef>,
+    /// Post-affine rotation in degrees (applied after variations). Default [0,0,0].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_rotation: Option<[f64; 3]>,
 }
 
 fn default_scale() -> ScaleDef {
@@ -611,8 +960,60 @@ pub struct SceneFile {
     /// a scene can carry both and be flipped between them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub palette: Option<PaletteDef>,
+    /// Symmetry groups, each naming the motifs it governs.
+    ///
+    /// The large-scene lever: two motifs under `group = "I"` are an effective
+    /// map set of 120, and the file, the panel and `--info` all still see two
+    /// transforms plus a group. Deliberately a top-level array rather than a
+    /// key on each transform, because that is how it reads — one group, these
+    /// motifs — and because it keeps a scene's whole symmetry structure in one
+    /// place you can take in at a glance. It resolves onto the transforms named
+    /// in `applies_to` (see `TransformSpec::symmetry`), so *internally* it is a
+    /// per-transform property and nothing downstream has to know about blocks.
+    #[serde(default, rename = "symmetry", skip_serializing_if = "Vec::is_empty")]
+    pub symmetries: Vec<SymmetryDef>,
     #[serde(rename = "transform")]
     pub transforms: Vec<TransformDef>,
+}
+
+/// A `[[symmetry]]` block.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SymmetryDef {
+    /// `Cyc<n>`, `Dih<n>`, `Tetra`, `Octa` or `Icosa` — the bare `C<n>`, `D<n>`,
+    /// `T`, `O`, `I` are accepted too. See `symmetry::OrbitKind::parse`.
+    ///
+    /// Exactly one of `group` and `repeat` names what the block is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// How many copies, for a repeat block. Mutually exclusive with `group`.
+    ///
+    /// A repeat is spelled as its own key rather than as `group = "Repeat"`
+    /// because it is not a group, and because the count belongs in the data
+    /// rather than inside a name that would then have to be parsed back out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<u32>,
+    /// Slide per copy, for a repeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<[f64; 3]>,
+    /// Degrees about `axis` per copy, for a repeat. 137.5 is the golden angle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<f64>,
+    /// Size multiplier per copy, for a repeat. `0 < shrink <= 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shrink: Option<f64>,
+    /// The rotation axis for `C_n` / `D_n`, or the axis a repeat turns about.
+    /// Ignored by the polyhedral groups, which have no single axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<[f64; 3]>,
+    /// Extend the group by the central inversion, doubling its order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<bool>,
+    /// The transforms this group governs, by name (or by index written as a
+    /// string, on the same terms as `[zoom].map`).
+    pub applies_to: Vec<String>,
+    /// `"shared"` (default) or `"orbit"` — see `symmetry::OrbitColor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Default point buffer size for the simple point renderer
@@ -723,10 +1124,12 @@ impl Scene {
                 glam::Quat::IDENTITY,
                 offset,
             ),
+            post_affine: Mat4::IDENTITY,
             color_value: i as f32 / colors.len() as f32,
             weight: 1.0,
             color_speed: default_color_speed() as f32,
             explicit_color_speed: None,
+            symmetry: None,
             variations: TransformSpec::linear_variations(),
         };
         let colormap = generate_colormap(&colors);
@@ -855,18 +1258,47 @@ impl Scene {
                     None => TransformSpec::linear_variations(),
                 };
 
+                // Build post-affine matrix from optional fields (default to identity)
+                let post_affine = if t.post_translation.is_some()
+                    || t.post_scale.is_some()
+                    || t.post_rotation.is_some()
+                {
+                    let post_trans = t
+                        .post_translation
+                        .map(|v| Vec3::from(v.map(|x| x as f32)))
+                        .unwrap_or(Vec3::ZERO);
+                    let post_scale = t.post_scale.unwrap_or(ScaleDef::Uniform(1.0)).to_vec3();
+                    let post_rot = t
+                        .post_rotation
+                        .map(|v| {
+                            crate::rot::Orientation::from_xyz_degrees(v.map(|x| x as f32))
+                        })
+                        .unwrap_or(crate::rot::Orientation::IDENTITY);
+                    crate::rot::Trs {
+                        scale: post_scale,
+                        rotation: post_rot,
+                        translation: post_trans,
+                    }
+                    .matrix()
+                } else {
+                    Mat4::IDENTITY
+                };
+
                 Ok(TransformSpec {
                     matrix,
+                    post_affine,
                     color_value,
                     weight: t.weight as f32,
                     color_speed: speed,
                     explicit_color_speed: t.color_speed.map(|v| v as f32),
+                    symmetry: None,
                     variations,
                 })
             })
             .collect::<Result<_, String>>()?;
 
         let mut transforms = transforms;
+        apply_symmetries(&scene_file.symmetries, &mut transforms, &transform_names)?;
         resolve_color_speeds(&mut transforms, global_speed, scene_file.meta.color_falloff as f32);
 
         // A `[palette]` table selects palette mode by its presence alone;
@@ -1249,6 +1681,35 @@ impl Scene {
                     ScaleDef::PerAxis(scale.to_array().map(tidy))
                 };
 
+                // Serialize post-affine only if it's not identity
+                let (post_translation, post_scale, post_rotation) =
+                    if spec.post_affine == Mat4::IDENTITY {
+                        (None, None, None)
+                    } else {
+                        let post_trs = crate::rot::Trs::of(spec.post_affine);
+                        let post_trans = if post_trs.translation.length_squared() > 1e-8 {
+                            Some(post_trs.translation.to_array().map(tidy))
+                        } else {
+                            None
+                        };
+                        let post_scale = if (post_trs.scale - Vec3::ONE).length_squared() > 1e-8 {
+                            let s = post_trs.scale;
+                            Some(if approx(s.x as f64, s.y as f64) && approx(s.x as f64, s.z as f64) {
+                                ScaleDef::Uniform(tidy(s.x))
+                            } else {
+                                ScaleDef::PerAxis(s.to_array().map(tidy))
+                            })
+                        } else {
+                            None
+                        };
+                        let post_rot = if post_trs.rotation.angle_to(crate::rot::Orientation::IDENTITY) > 1e-4 {
+                            Some(post_trs.rotation.to_xyz_degrees().map(tidy))
+                        } else {
+                            None
+                        };
+                        (post_trans, post_scale, post_rot)
+                    };
+
                 TransformDef {
                     name: self.transform_names.get(i).cloned().flatten(),
                     translation: trans.to_array().map(tidy),
@@ -1270,6 +1731,9 @@ impl Scene {
                     } else {
                         Some(variations)
                     },
+                    post_translation,
+                    post_scale,
+                    post_rotation,
                 }
             })
             .collect();
@@ -1372,6 +1836,10 @@ impl Scene {
                 edge_guard: Some(tidy(z.edge_guard)),
                 octave_fade: None,
             }),
+            // Regrouped from the transforms' own symmetries, so a motif
+            // enrolled or withdrawn in the panel comes back out as the right
+            // blocks. Motifs sharing a group share a block.
+            symmetries: symmetry_blocks(&self.transforms, &self.transform_names),
             transforms,
         }
     }
@@ -1830,6 +2298,23 @@ fn merge_scene_into_document(
         }
     }
 
+    // The symmetry blocks, rebuilt wholesale rather than merged key by key.
+    //
+    // They are *derived* — `symmetry_blocks` regroups them from the transforms'
+    // own symmetries every save — so there is no stable correspondence between
+    // an existing block and a new one to merge against: enrolling one motif can
+    // split a block in two or merge two into one. Rebuilding is the only
+    // description of the result that is always right. The cost is comments
+    // written inside a `[[symmetry]]` block; everything else in the file keeps
+    // them. (Not writing this at all was the `[zoom]` mistake above, one
+    // version further on: a save would have dropped the scene's symmetry
+    // silently, which is as destructive as an edit gets.)
+    doc.remove("symmetry");
+    if !file.symmetries.is_empty() {
+        let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
+        doc["symmetry"] = fresh_doc.get("symmetry")?.clone();
+    }
+
     let existing_len = doc
         .get("transform")
         .and_then(|t| t.as_array_of_tables())
@@ -1941,6 +2426,396 @@ mod tests {
     /// `[179.2, 87.6, -179.3]` — correct, but a place where small errors turn
     /// into large ones. Where the degrees can't reproduce the matrix, an exact
     /// `rotvec` is written instead; either way the matrix has to come back.
+    /// Build a set of maps with the given contractions, all weight 1.
+    fn maps_with(contractions: &[f32]) -> Vec<TransformSpec> {
+        contractions
+            .iter()
+            .map(|&s| TransformSpec {
+                matrix: Mat4::from_scale(Vec3::splat(s)),
+                post_affine: Mat4::IDENTITY,
+                color_value: 0.5,
+                weight: 1.0,
+                color_speed: 0.5,
+                explicit_color_speed: None,
+                symmetry: None,
+                variations: TransformSpec::linear_variations(),
+            })
+            .collect()
+    }
+
+    /// The Sierpinski gasket in 3D: four half-scale maps, d = log4/log2 = 2.
+    #[test]
+    fn similarity_dimension_matches_known_fractals() {
+        let d = similarity_dimension(&maps_with(&[0.5; 4])).unwrap();
+        assert!((d - 2.0).abs() < 1e-3, "4 maps at 0.5 should be d=2, got {d}");
+
+        // Cantor-style: 2 maps at 1/3 -> log2/log3
+        let d = similarity_dimension(&maps_with(&[1.0 / 3.0; 2])).unwrap();
+        let want = 2.0f32.ln() / 3.0f32.ln();
+        assert!((d - want).abs() < 1e-3, "2 maps at 1/3 should be {want}, got {d}");
+
+        // 20 maps at 1/3 is the Menger sponge: log20/log3 = 2.727
+        let d = similarity_dimension(&maps_with(&[1.0 / 3.0; 20])).unwrap();
+        let want = 20.0f32.ln() / 3.0f32.ln();
+        assert!((d - want).abs() < 1e-3, "menger should be {want}, got {d}");
+    }
+
+    /// Where a map keeps its scale must not change what the scale *means*.
+    /// A KIFS map parks its contraction in the post-affine slot and leaves the
+    /// pre-affine at identity; reading only `matrix` scored it as
+    /// non-contracting, which dropped it out of `d` entirely (the whole scene
+    /// reported `dimension n/a`) and out of `color_falloff`'s speed resolution.
+    #[test]
+    fn contraction_counts_both_affine_slots() {
+        let pre = TransformSpec {
+            matrix: Mat4::from_scale(Vec3::splat(0.5)),
+            post_affine: Mat4::IDENTITY,
+            ..maps_with(&[0.5])[0].clone()
+        };
+        let post = TransformSpec {
+            matrix: Mat4::IDENTITY,
+            post_affine: Mat4::from_scale(Vec3::splat(0.5)),
+            ..maps_with(&[0.5])[0].clone()
+        };
+        let split = TransformSpec {
+            matrix: Mat4::from_scale(Vec3::splat(0.25)),
+            post_affine: Mat4::from_scale(Vec3::splat(2.0)),
+            ..maps_with(&[0.5])[0].clone()
+        };
+        for (label, t) in [("pre", &pre), ("post", &post), ("split", &split)] {
+            let s = t.linear_determinant().abs().powf(1.0 / 3.0);
+            assert!(
+                (s - 0.5).abs() < 1e-5,
+                "{label}: contraction should be 0.5, got {s}"
+            );
+            assert!(
+                (t.contraction() - 0.5).abs() < 1e-5,
+                "{label}: clamped contraction should be 0.5, got {}",
+                t.contraction()
+            );
+        }
+
+        // And a scene built the KIFS way still has a dimension at all.
+        let kifs: Vec<TransformSpec> = (0..4).map(|_| post.clone()).collect();
+        let d = similarity_dimension(&kifs).expect("post-affine scale must yield a dimension");
+        assert!((d - 2.0).abs() < 1e-3, "4 maps at 0.5 should be d=2, got {d}");
+    }
+
+    /// The dimension lock's whole claim is that `d` does not move. Assert it
+    /// directly: scale one map, apply the factor to the rest, re-measure.
+    #[test]
+    fn dimension_lock_holds_the_dimension() {
+        for start in [[0.5f32, 0.5, 0.5, 0.5], [0.62, 0.44, 0.44, 0.31]] {
+            let mut maps = maps_with(&start);
+            let d0 = similarity_dimension(&maps).unwrap();
+
+            // Drag map 0's contraction well away from where it started, in the
+            // small steps a real drag would deliver.
+            let mut s0 = start[0];
+            for _ in 0..40 {
+                let next = s0 * 1.01;
+                if next >= 0.999 {
+                    break;
+                }
+                let d = similarity_dimension(&maps).unwrap();
+                let f = dimension_lock_factor(d, s0, next).expect("balance should exist");
+                for (i, m) in maps.iter_mut().enumerate() {
+                    if i == 0 {
+                        continue;
+                    }
+                    m.matrix.x_axis *= f;
+                    m.matrix.y_axis *= f;
+                    m.matrix.z_axis *= f;
+                }
+                maps[0].matrix = Mat4::from_scale(Vec3::splat(next));
+                s0 = next;
+            }
+
+            let d1 = similarity_dimension(&maps).unwrap();
+            assert!(
+                (d1 - d0).abs() < 1e-2,
+                "d drifted {d0:.4} -> {d1:.4} over a 40-step drag from {start:?}"
+            );
+            // And the edit actually did something.
+            assert!(s0 > start[0] * 1.2, "the drag should have moved map 0");
+        }
+    }
+
+    /// Parse a scene from a string, through a temp file (the loader takes a
+    /// path so it can report one).
+    fn load_str(toml: &str, tag: &str) -> Result<super::Scene, String> {
+        let tmp = std::env::temp_dir().join(format!("fracturize-sym-{tag}.toml"));
+        std::fs::write(&tmp, toml).unwrap();
+        let out = super::Scene::load(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        out
+    }
+
+    fn two_motif_scene(block: &str) -> String {
+        format!(
+            r#"
+[meta]
+name = "test"
+{block}
+[[transform]]
+name = "petal"
+translation = [0.6, 0.1, 0.0]
+scale = 0.45
+color = [1.0, 0.3, 0.2]
+
+[[transform]]
+name = "spine"
+translation = [0.0, 0.4, 0.0]
+scale = 0.5
+color = [0.2, 0.5, 1.0]
+"#
+        )
+    }
+
+    /// The headline of the format: six lines make an effective map set of 120
+    /// while the scene still holds two transforms.
+    #[test]
+    fn a_symmetry_block_lands_on_the_motifs_it_names() {
+        let scene = load_str(
+            &two_motif_scene(
+                "\n[[symmetry]]\ngroup = \"I\"\napplies_to = [\"petal\"]\n",
+            ),
+            "lands",
+        )
+        .unwrap();
+
+        assert_eq!(scene.transforms.len(), 2, "the orbit must not be expanded");
+        let petal = scene.transforms[0].symmetry.as_ref().expect("petal is enrolled");
+        assert_eq!(petal.order(), 60);
+        assert!(scene.transforms[1].symmetry.is_none(), "spine is not named");
+    }
+
+    #[test]
+    fn a_symmetry_block_round_trips_through_a_save() {
+        for (tag, block) in [
+            ("cyclic", "\n[[symmetry]]\ngroup = \"C5\"\naxis = [0.0, 1.0, 0.0]\napplies_to = [\"petal\", \"spine\"]\n"),
+            ("axis", "\n[[symmetry]]\ngroup = \"D3\"\naxis = [0.3, 0.9, -0.2]\napplies_to = [\"petal\"]\n"),
+            ("mirror", "\n[[symmetry]]\ngroup = \"O\"\nmirror = true\napplies_to = [\"petal\"]\n"),
+            ("orbit-colour", "\n[[symmetry]]\ngroup = \"C7\"\ncolor = \"orbit\"\napplies_to = [\"spine\"]\n"),
+            // A repeat writes a different set of keys entirely, so it is a
+            // separate path through both the reader and the writer.
+            (
+                "repeat",
+                "\n[[symmetry]]\nrepeat = 9\naxis = [0.0, 1.0, 0.0]\nstep = [0.0, 0.21, 0.0]\n\
+                 turn = 137.5\nshrink = 0.88\napplies_to = [\"petal\"]\n",
+            ),
+            (
+                "repeat-defaults",
+                "\n[[symmetry]]\nrepeat = 4\napplies_to = [\"spine\"]\n",
+            ),
+        ] {
+            let scene = load_str(&two_motif_scene(block), tag).unwrap();
+            let tmp = std::env::temp_dir().join(format!("fracturize-sym-rt-{tag}.toml"));
+            let _ = std::fs::remove_file(&tmp);
+            scene.save(&tmp).unwrap();
+            let after = super::Scene::load(&tmp).unwrap();
+
+            for (i, (a, b)) in scene.transforms.iter().zip(&after.transforms).enumerate() {
+                assert_eq!(
+                    a.symmetry.is_some(),
+                    b.symmetry.is_some(),
+                    "{tag}: transform {i} lost or gained a symmetry"
+                );
+                if let (Some(a), Some(b)) = (&a.symmetry, &b.symmetry) {
+                    assert_eq!(a, b, "{tag}: transform {i}'s group changed");
+                    assert_eq!(a.order(), b.order(), "{tag}: order changed");
+                }
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// Saving over an existing file goes through the comment-preserving merge,
+    /// which is a different path from a fresh write — and the one that has
+    /// historically dropped whole tables (`[zoom]`, `path_zoom_loop`).
+    #[test]
+    fn a_save_over_an_existing_file_keeps_the_symmetry() {
+        let tmp = std::env::temp_dir().join("fracturize-sym-merge.toml");
+        let source = two_motif_scene(
+            "\n[[symmetry]]\ngroup = \"C6\"\napplies_to = [\"petal\"]\n",
+        );
+        std::fs::write(&tmp, &source).unwrap();
+
+        // Load and save back over itself, twice — the merge path both times.
+        for pass in 0..2 {
+            let scene = super::Scene::load(&tmp).unwrap();
+            assert_eq!(
+                scene.transforms[0].symmetry.as_ref().map(|s| s.order()),
+                Some(6),
+                "pass {pass}: the group did not survive"
+            );
+            scene.save(&tmp).unwrap();
+        }
+        let text = std::fs::read_to_string(&tmp).unwrap();
+        assert!(text.contains("[[symmetry]]"), "the block was dropped:\n{text}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Withdrawing the last motif has to remove the block, not leave an empty
+    /// one behind that fails to load.
+    #[test]
+    fn withdrawing_every_motif_removes_the_block() {
+        let tmp = std::env::temp_dir().join("fracturize-sym-withdraw.toml");
+        std::fs::write(
+            &tmp,
+            two_motif_scene("\n[[symmetry]]\ngroup = \"C4\"\napplies_to = [\"petal\"]\n"),
+        )
+        .unwrap();
+
+        let mut scene = super::Scene::load(&tmp).unwrap();
+        scene.transforms[0].symmetry = None;
+        scene.save(&tmp).unwrap();
+
+        let text = std::fs::read_to_string(&tmp).unwrap();
+        assert!(!text.contains("[[symmetry]]"), "an empty block was left:\n{text}");
+        assert!(super::Scene::load(&tmp).unwrap().transforms[0].symmetry.is_none());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Every way of writing the block wrong should say so rather than render
+    /// something that quietly isn't symmetric.
+    #[test]
+    fn malformed_symmetry_blocks_are_load_errors() {
+        for (tag, block, expect) in [
+            (
+                "unknown group",
+                "\n[[symmetry]]\ngroup = \"hexagonal\"\napplies_to = [\"petal\"]\n",
+                "hexagonal",
+            ),
+            (
+                "unknown motif",
+                "\n[[symmetry]]\ngroup = \"C3\"\napplies_to = [\"petla\"]\n",
+                "petla",
+            ),
+            (
+                "no motifs",
+                "\n[[symmetry]]\ngroup = \"C3\"\napplies_to = []\n",
+                "applies_to",
+            ),
+            (
+                "both group and repeat",
+                "\n[[symmetry]]\ngroup = \"C3\"\nrepeat = 4\napplies_to = [\"petal\"]\n",
+                "both",
+            ),
+            (
+                "neither group nor repeat",
+                "\n[[symmetry]]\naxis = [0.0, 1.0, 0.0]\napplies_to = [\"petal\"]\n",
+                "neither",
+            ),
+            (
+                "a repeat that grows",
+                "\n[[symmetry]]\nrepeat = 4\nshrink = 1.5\napplies_to = [\"petal\"]\n",
+                "scale",
+            ),
+            (
+                "two blocks claiming one motif",
+                "\n[[symmetry]]\ngroup = \"C3\"\napplies_to = [\"petal\"]\n\n\
+                 [[symmetry]]\ngroup = \"C4\"\napplies_to = [\"petal\"]\n",
+                "two symmetry blocks",
+            ),
+            (
+                "unknown colour",
+                "\n[[symmetry]]\ngroup = \"C3\"\ncolor = \"rainbow\"\napplies_to = [\"petal\"]\n",
+                "rainbow",
+            ),
+        ] {
+            let Err(err) = load_str(&two_motif_scene(block), "bad") else {
+                panic!("{tag} should not load");
+            };
+            assert!(
+                err.contains(expect),
+                "{tag}: the error should mention '{expect}', got: {err}"
+            );
+        }
+    }
+
+    /// An unnamed motif is referenced by index, the same escape hatch
+    /// `[zoom].map` has — so a symmetry can survive on a transform the author
+    /// never named.
+    #[test]
+    fn an_unnamed_motif_round_trips_by_index() {
+        let tmp = std::env::temp_dir().join("fracturize-sym-index.toml");
+        let mut scene = super::Scene::blank();
+        scene.transforms[0].symmetry = Some(
+            crate::symmetry::Symmetry::new(
+                crate::symmetry::OrbitKind::Cyclic(3),
+                Vec3::Y,
+                false,
+                crate::symmetry::OrbitColor::Shared,
+            )
+            .unwrap(),
+        );
+        let _ = std::fs::remove_file(&tmp);
+        scene.save(&tmp).unwrap();
+        let after = super::Scene::load(&tmp).unwrap();
+        assert_eq!(after.transforms[0].symmetry.as_ref().map(|s| s.order()), Some(3));
+        assert!(after.transforms[1].symmetry.is_none());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A post-affine slot has to survive the same round trip the pre-affine
+    /// one does. No scene on disk carries one yet, so
+    /// `every_scenes_transforms_survive_a_save` proves nothing about it —
+    /// this builds the cases by hand.
+    #[test]
+    fn post_affine_survives_a_save() {
+        let cases: [(&str, Mat4); 5] = [
+            ("identity", Mat4::IDENTITY),
+            (
+                "translate",
+                Mat4::from_translation(Vec3::new(0.25, -0.5, 0.125)),
+            ),
+            (
+                "rotate 72 about Y",
+                Mat4::from_rotation_y(72.0f32.to_radians()),
+            ),
+            (
+                "full trs",
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.8, 0.5, 0.8),
+                    glam::Quat::from_rotation_z(0.7),
+                    Vec3::new(0.1, 0.2, 0.3),
+                ),
+            ),
+            // The XYZ-euler pole. `TransformDef::rotation` has a `rotvec`
+            // escape hatch for exactly this; `post_rotation` does not, so
+            // this is the case that says whether it needs one.
+            (
+                "quarter turn about Y (euler pole)",
+                Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            ),
+        ];
+
+        let tmp = std::env::temp_dir().join("fracturize-roundtrip-post-affine.toml");
+        for (label, post) in cases {
+            let mut scene = super::Scene::blank();
+            scene.transforms[0].post_affine = post;
+            let _ = std::fs::remove_file(&tmp);
+            scene.save(&tmp).unwrap();
+            let after = super::Scene::load(&tmp).unwrap();
+
+            let diff = post
+                .to_cols_array()
+                .iter()
+                .zip(after.transforms[0].post_affine.to_cols_array().iter())
+                .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+            assert!(
+                diff < 1e-3,
+                "{}: post_affine moved {:.6}\n  wrote {:?}\n  read  {:?}",
+                label,
+                diff,
+                post.to_cols_array(),
+                after.transforms[0].post_affine.to_cols_array(),
+            );
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     #[test]
     fn every_scenes_transforms_survive_a_save() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/scenes");
@@ -1963,13 +2838,18 @@ mod tests {
             for (i, (a, b)) in
                 before.transforms.iter().zip(after.transforms.iter()).enumerate()
             {
-                let diff = a
-                    .matrix
-                    .to_cols_array()
-                    .iter()
-                    .zip(b.matrix.to_cols_array().iter())
-                    .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+                let worst = |x: Mat4, y: Mat4| {
+                    x.to_cols_array()
+                        .iter()
+                        .zip(y.to_cols_array().iter())
+                        .fold(0.0f32, |acc, (p, q)| acc.max((p - q).abs()))
+                };
+                let diff = worst(a.matrix, b.matrix);
                 assert!(diff < 1e-3, "{} transform {}: matrix moved {:.6}", name, i, diff);
+                // The post-affine slot has to survive too, or a scene built
+                // the KIFS way silently loads back as a different attractor.
+                let diff = worst(a.post_affine, b.post_affine);
+                assert!(diff < 1e-3, "{} transform {}: post_affine moved {:.6}", name, i, diff);
             }
         }
         let _ = std::fs::remove_file(&tmp);

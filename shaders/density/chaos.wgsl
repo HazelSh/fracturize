@@ -9,12 +9,26 @@ struct HashCell {
     min_depth: atomic<u32>,
 }
 
+// Must match GpuTransform in buffers.rs (240 bytes). This pass only reads
+// `matrix` and the colour scalars, but the *layout* still has to be declared
+// in full: the buffer is a flat array, so a short struct here silently makes
+// `transforms[1]` onward read from the middle of their predecessor.
+// Must match GpuTransform in buffers.rs (256 bytes). This renderer is the
+// inactive experimental one and does NOT apply symmetry groups — but it reads
+// the same `GpuTransform` buffer, so the tail fields have to be declared or
+// every transform after the first would be read from the wrong offset.
 struct Transform {
     matrix: mat4x4<f32>,
+    post_affine: mat4x4<f32>,
     color_value: f32,
     weight: f32,
     cumulative_weight: f32,
     color_speed: f32,
+    var_weights: array<vec4<f32>, 5>,
+    color_rgb: vec3<f32>,
+    group_start: u32,
+    group_count: u32,
+    orbit_color: f32,
 }
 
 struct WalkerState {
@@ -166,8 +180,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let transform_idx = select_transform(r, compute_params.num_transforms);
         let transform = transforms[transform_idx];
 
+        // NOTE: this walk is affine-only — it does not apply the variation
+        // blend, so it already disagrees with points/chaos.wgsl for any scene
+        // that uses one. Pre-existing; this module is not currently wired into
+        // the app (nothing outside `gpu::density` refers to it). The
+        // post-affine is applied so the two walks at least agree on the maps
+        // they can both express.
         let pos4 = transform.matrix * vec4<f32>(pos, 1.0);
-        pos = pos4.xyz;
+        pos = (transform.post_affine * vec4<f32>(pos4.xyz, 1.0)).xyz;
 
         let speed = transform.color_speed;
         color_val = color_val * (1.0 - speed) + transform.color_value * speed;

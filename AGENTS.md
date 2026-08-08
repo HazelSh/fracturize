@@ -57,6 +57,8 @@ src/
   trace.rs       # CPU chaos walkers (variation port) for the trace overlay
   prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
   scene.rs       # TOML scene parsing AND saving, TransformSpec, variation names/slots
+  symmetry.rs    # Finite subgroups of SO(3) (C/D/T/O/I) by closure, plus
+                 # `repeat` progressions, which are not groups
   gpu/
     context.rs   # wgpu device/surface setup (vsync flag, adapter limits)
     buffers.rs   # GPU struct definitions (GpuTransform, Point, CameraUniforms)
@@ -264,12 +266,11 @@ and `--render` prints whichever form the framing it landed on needs.
 | H / ? / F1 | toggle the Controls window (input prefs + every keybind) |
 | Esc | **cancel**: a menu, then a dialog, then the browser, then the selection |
 | Ctrl+Q | quit (asks first if the scene has unsaved edits, as does the window's close button) |
-| Space | re-seed points (reset) |
 | Up / Down | zoom in / out (steps the selection when a transform is selected) |
 | Home | put the camera on the selected transform's fixed point |
 | Enter | enable/disable selected transform |
-| G | toggle transform gizmos and their name labels |
-| O or Z | play / stop the camera flying its path (two keys, one action) |
+| G / Tab | toggle transform gizmos and their name labels |
+| O, Z, or Space | play / stop the camera flying its path (three keys, one action) |
 | Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
@@ -567,6 +568,82 @@ undefended absence reads as an accident, so they are written down:
   Eight 200×200 thumbnails at low point counts are cheap next to a 50M-point
   live view. Still on `todo.txt`.
 
+### The chrome doesn't move
+
+Small conventions, easy to break by accident because breaking each one looks
+locally reasonable. Read the module before adding a widget that resembles
+what it owns — each is a precedent, not a helper you can route around:
+
+- **A numeric readout never resizes itself** (`src/ui/num.rs`). Round to
+  display precision *before* testing the sign (`-0.004` at two places is
+  `"0.00"`, not `"-0.00"`, and this is not IEEE negative zero so `v == 0.0`
+  doesn't catch it), use a monospace face, and size the *widget* to a
+  declared character budget — not just the string. A bare
+  `format!("{:.2}", v)` dropped into a content-sized label is a regression:
+  a value dithering across a boundary re-lays-out its row every frame and
+  reads as the interface vibrating.
+- **Every interactive widget is hinted** (`src/ui/hints.rs`). `hinted()`
+  attaches a tooltip and sets the status bar's left-hand hint in the same
+  call, and it works on disabled widgets, where egui's own `on_hover_text`
+  silently shows nothing. A widget with no `hinted()` call is one nobody can
+  find out about — the one documented exception is a bare camera drag on
+  empty viewport space, which falls back to `HINT_VIEWPORT`.
+- **A destructive action is armed, not asked-to-confirm**
+  (`src/ui/confirm.rs`). `danger_button` disables the control for a fixed
+  countdown, then makes it available in danger colours with a different,
+  more explicit label; clicking anywhere else disarms it, and nothing times
+  out once armed. New destructive actions route through this, not a bespoke
+  are-you-sure popup — see the module doc for why a plain two-click guard
+  and an arm-window timeout both fail in the dangerous direction.
+- **Choose-1-of-n with no off state is a segmented radio** (`src/ui/radio.rs`),
+  never a row of toggle buttons. A row of independent toggles can (as drawn)
+  all be off or all be on at once; a control that always has exactly one
+  answer shouldn't be able to draw a picture that isn't true.
+- **Icons name actions and windows, never domain objects** (`src/ui/icons.rs`).
+  A transform is identified by its colour swatch and name, not a glyph.
+  Icons live on the things you click to *do* something — toolbar toggles,
+  buttons — not on the things the scene is made of.
+
+**Zero animation, ever.** This is a realtime renderer: the fractal is the
+thing on screen that's supposed to be moving, every frame, continuously.
+Chrome that also moves — a menu fading in, a panel easing open, a scrollbar
+coasting to a stop — competes with it for attention, and in a program whose
+entire point is instantaneous visual feedback, chrome with its own
+independent sense of time reads as the UI lagging behind the click that just
+landed. So: no fade-ins on menus, popups or tooltips, no easing on
+collapsing disclosures, no smoothed scroll-to. A click's effect is drawn in
+full on the very next frame, or it hasn't happened yet.
+
+Enforced once, not per call site: `EguiLayer::new` (`src/ui/mod.rs`) sets
+`Style::animation_time = 0.0` and `Style::scroll_animation =
+ScrollAnimation::none()` via `ctx.all_styles_mut`, at startup. The first
+field is the one egui checks everywhere it would otherwise interpolate —
+window/menu/tooltip fade-in (`Area`'s `fade_in`, which every popup and menu
+is built on), collapsing headers, side panels, scrollbar fade-and-grow — all
+of it funnels through `animate_bool`/`animate_value`, which divide elapsed
+time by this field and snap to the target when it's zero. The second field
+is separate because `scroll_to_me`/`scroll_to_rect`/`scroll_to_cursor` (e.g.
+the Scenes browser snapping the selected row into view) glide on their own
+`ScrollAnimation { points_per_second, duration }`, not on `animation_time`.
+
+One thing egui 0.35 hands us no knob for: a mouse wheel's discrete notches
+are low-pass filtered over several frames before egui ever sees them
+(`WheelState::after_events`, hardcoded, not read from `Style`) — that's
+input smoothing so one loud notch on a mouse doesn't register as fourteen,
+not a UI animation, and it only touches wheel-scrolled lists (Scenes,
+Keybinds). Anything with its own `.animate(true)` builder flag (`egui::
+ProgressBar` has one) bypasses `animation_time` entirely and has to be
+turned off at the call site. The render-job dialog is the one place in the
+app that still animates, and it does so deliberately, in exactly one spot:
+its **encode** bar pulses while encoding is live. That phase reports no
+progress at all — `rav1e` defers virtually all its work to the flush, so
+`offline.rs` sends the `"encoding"` phase and then nothing until it's done —
+and a pulse is the one case where motion carries information a static bar
+cannot: that work is happening, with unknown extent. The render bar next to
+it always has a real fraction and does *not* animate. If encode progress
+ever gets plumbed through (`src/avif.rs`'s `drain()` already knows its own
+done/total), the pulse should go with it and this exception disappears.
+
 ## Random Flames
 
 `--random` (windowed or with `--render`) and the Explore window's dice button
@@ -821,6 +898,32 @@ levels = 15               # octaves rendered below it
 edge_guard = 1.0          # octaves the picture's outer edge fades over (0 = hard)
 octave_falloff = 0.0      # point-budget falloff per octave (power of the scale)
 
+# Symmetry: a finite rotation group applied to named motifs (see "Symmetry").
+# Repeatable — a scene can hold several groups over different motifs.
+[[symmetry]]
+group = "Icosa"           # Cyc<n> | Dih<n> | Tetra | Octa | Icosa. Cyc is
+                          # n-fold about an axis, Dih adds the half-turn flip,
+                          # and the three polyhedral groups are the rotations
+                          # of a tetrahedron (12), a cube (24) and an
+                          # icosahedron (60). The mathematical C<n>/D<n>/T/O/I
+                          # parse too, and always will
+axis = [0.0, 1.0, 0.0]    # Cyc/Dih only; the polyhedral groups have no single
+                          # axis and are generated in a canonical orientation
+mirror = false            # extend by the central inversion, doubling |G|
+applies_to = ["petal"]    # the motifs, by name (or index as a string)
+color = "shared"          # "shared" (every copy the motif's colour) or
+                          # "orbit" (index offset by the drawn group element)
+
+# The same block, in its other form: a repeat instead of a group. `repeat` and
+# `group` are mutually exclusive, and a repeat is NOT a symmetry — see below.
+[[symmetry]]
+repeat = 20               # how many copies, counting the motif itself
+axis = [0.0, 1.0, 0.0]    # the axis `turn` turns about
+step = [0.0, 0.135, 0.0]  # slide per copy
+turn = 137.5              # degrees per copy; 137.5 is the golden angle
+shrink = 0.9              # size multiplier per copy, 0 < shrink <= 1
+applies_to = ["frond"]
+
 [[transform]]
 name = "whorl"                 # optional label shown in overlays
 translation = [0.0, 0.0, 0.5]
@@ -903,6 +1006,90 @@ Scene-design notes learned the hard way:
   palette range toward the mean — raise `color_contrast` (2-4) to re-stretch it
   (cyclic: large stretches also rotate hues when the mean index is off-center).
   Both are keybind-tunable live (D / C) and saved into view files.
+
+## Symmetry
+
+A transform can be a **motif** of a finite rotation group. For a group `G` and
+maps `{fᵢ}`, the IFS `{g ∘ fᵢ : g ∈ G}` has an attractor that is exactly
+`G`-symmetric — one line of proof (`hG = G`), and the reason two authored maps
+under `I` are an effective map set of 120. `src/symmetry.rs` owns the groups;
+`scenes/reliquary.toml` is the worked example.
+
+**The group stays live; the orbit is never expanded.** A scene under `I` holds
+two transforms and a group, not 120 transforms. So the panel shows two rows,
+`pick.rs` has two things to hit, `--info` prints two maps, mutation operators
+have two maps to perturb, and the file is eight lines. The complexity lives in
+the one place that wants it — the walk — rather than in the twelve places that
+don't. This is the whole design, and it is why symmetry is not a loader macro.
+
+Mechanically it is **one matrix drawn uniformly per iteration**, applied after
+`post_affine` (`shaders/points/chaos.wgsl`, mirrored in `trace.rs` — keep them
+in sync, as ever). That is not an approximation of the `|G|·N` map set: picking
+`fᵢ` with weight `wᵢ` then `g` uniformly *is* sampling `{g ∘ fᵢ}` with weights
+`wᵢ/|G|`, so a motif keeps the share it was written with and convergence is
+unchanged. Cost is one RNG draw and one matrix multiply.
+
+- **The elements are generated by closure, not tabulated.** Two generators are
+  multiplied until the set stops growing. Sixty hand-written rotation matrices
+  is exactly the arithmetic that is silent when wrong — a near-group gives a
+  near-symmetric attractor, which reads as a smear rather than as an error — so
+  the tests check the group axioms and the known orders instead.
+- **Symmetry is a property of a transform** (`TransformSpec::symmetry`), which
+  is why it is a block in the Transforms inspector rather than a window of its
+  own. `[[symmetry]]` in a scene file is sugar that names one group and its
+  motifs, because that is how it reads best on a page; it resolves onto the
+  transforms at load and is regrouped on save.
+- **`|G|` counts toward the similarity dimension.** `Σsᵢᵈ = 1` becomes
+  `Σ|Gᵢ|·sᵢᵈ = 1`. Without this every symmetric scene reads as `d = 0` — one
+  contraction can never sum to 1 — which is the opposite of what it is.
+- **The group supplies the gizmo's snap increment**: 72° under `Cyc5`, where an
+  ordinary map snaps to 15°.
+- **The names are spelled out**, `Cyc5` / `Dih3` / `Tetra` / `Octa` / `Icosa`,
+  not the mathematician's bare `C5`/`D3`/`T`/`O`/`I`. The notation is correct
+  and unreadable to anyone not already holding it, and both a scene file and a
+  panel badge get read by people meeting the feature for the first time. The
+  bare letters parse and always will, so notation-first authors lose nothing;
+  `label()` emits the long form, so a save normalises to it.
+- **In the viewport** (gizmos on, a motif selected): the axis with one spoke
+  per fold for Cyc/Dih, the namesake solid as a wireframe for the polyhedra, and
+  the motif's `|G| − 1` orbit ghosts drawn dimmed. Ghosts are deliberately not
+  pickable — a ghost is an image of an object, not an object.
+- **Symmetry alone is wallpaper.** An orbit distributes measure evenly by
+  construction (every copy shares a contraction and a weight), which is the one
+  thing splat cannot recover. `--info` raises a `notes` line when every map is
+  in a group, and the panel puts "Add a map outside this group" next to the
+  picker. See CRAFT §3.6: *symmetry gets you a form, one map outside the group
+  gets you a picture.*
+- **A `repeat` is not a group, and the code says so out loud.** `OrbitKind`
+  holds five groups and one progression. For a group `hG = G`, so the attractor
+  of `{g ∘ fᵢ}` is *exactly* `G`-invariant; a repeat is the truncation
+  `{S⁰ … S^(N-1)}`, which is not closed (`S·S^(N-1)` is outside it), so its
+  attractor repeats without being invariant. `--info` prints "a repeat, not a
+  group", the panel badge says "repeats, not symmetric", and
+  `OrbitKind::is_group` is the predicate. Everything downstream — the GPU
+  table, the ghosts, the chaos walk — takes a list of matrices and never needed
+  to know the difference.
+- **A repeat's step is capped at `shrink <= 1`.** `Sᵏ ∘ f` has linear part
+  `S_linᵏ · f_lin`, so a growing step makes the far copies expansive and the
+  walk unbounded. No pictures are lost: a growing repeat of `N` copies from `m`
+  is the same set as a shrinking one from `S^(N-1) m`.
+- **A repeat is also the one case where `|G|·sᵈ` is wrong.** Its k-th copy
+  carries `shrinkᵏ`, so the copies are not all the same size and the dimension
+  sum is `Σₖ (s·shrinkᵏ)ᵈ`. `Symmetry::element_scales` is all ones for a group
+  and a geometric run for a repeat; without it a tapering helix reads as `count`
+  copies of its widest turn. For the same reason a shrinking repeat is exempt
+  from the flat-measure complaint below — the taper already carries the variance
+  a defect would restore.
+- **The five rotation groups are all of them.** The finite subgroups of SO(3)
+  are `C_n`, `D_n`, `T`, `O`, `I` and nothing else — a classification, not a
+  selection, so there is no sixth polyhedral group to add. Anything genuinely
+  new has to leave SO(3): reflections (the point groups, of which only `C_nv`
+  and `T_d` are unreachable from the current `mirror`), translations (`repeat`),
+  or conformal maps.
+- **`color = "orbit"` is not "colour each copy".** With `g` redrawn every
+  iteration it tracks the walker's most recent group element, so it reads as an
+  interference pattern through the form rather than as `|G|` solid petals. A
+  good look, but not the one the name suggests, so it is opt-in.
 
 ## Colour: two sources, one colormap
 

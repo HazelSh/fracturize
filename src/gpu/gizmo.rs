@@ -205,6 +205,15 @@ fn create_pipeline(
     })
 }
 
+/// Instance slots kept spare for symmetry orbit ghosts.
+///
+/// Sized for the largest group this can draw — icosahedral with a mirror, 120,
+/// less the motif itself, which is drawn solid as instance `i + 1` already.
+/// Fixed rather than grown to fit so that changing a group, or changing which
+/// motif is selected, is a buffer write instead of a pipeline rebuild: these
+/// are things you do by dragging.
+const MAX_GHOSTS: u32 = 120;
+
 pub struct GizmoRenderer {
     /// Pipeline for edges + dots (depth write ON)
     edge_dot_pipeline: wgpu::RenderPipeline,
@@ -214,13 +223,17 @@ pub struct GizmoRenderer {
     camera_buffer: wgpu::Buffer,
     /// Vertex buffer layout: [ref_edges_dots | xform_edges_dots | ref_faces | xform_faces]
     vertex_buffer: wgpu::Buffer,
-    /// Instance 0 = identity reference, then one matrix per transform
+    /// Instance 0 = identity reference, then one matrix per transform, then
+    /// [`MAX_GHOSTS`] slots for the selected motif's symmetry orbit.
     transform_buffer: wgpu::Buffer,
     /// Per-instance alpha multiplier (1.0 = full, <1.0 = greyed out)
     alpha_buffer: wgpu::Buffer,
     /// Hovered part uniform: [instance (0 = none), part id, 0, 0]
     highlight_buffer: wgpu::Buffer,
+    /// Reference + one per transform. Ghosts live past this.
     instance_count: u32,
+    /// Ghosts currently written, from `set_ghosts`.
+    ghost_count: u32,
 }
 
 impl GizmoRenderer {
@@ -235,13 +248,16 @@ impl GizmoRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/gizmo.wgsl").into()),
         });
 
-        // Build transform storage buffer: instance 0 = identity, then one per transform
+        // Build transform storage buffer: instance 0 = identity, then one per
+        // transform, then the ghost slots (written by `set_ghosts`).
         let instance_count = 1 + transforms.len() as u32;
-        let mut matrices: Vec<[[f32; 4]; 4]> = Vec::with_capacity(instance_count as usize);
+        let slots = (instance_count + MAX_GHOSTS) as usize;
+        let mut matrices: Vec<[[f32; 4]; 4]> = Vec::with_capacity(slots);
         matrices.push(Mat4::IDENTITY.to_cols_array_2d());
         for spec in transforms {
             matrices.push(spec.matrix.to_cols_array_2d());
         }
+        matrices.resize(slots, Mat4::IDENTITY.to_cols_array_2d());
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("gizmo_transforms"),
             contents: bytemuck::cast_slice(&matrices),
@@ -249,7 +265,7 @@ impl GizmoRenderer {
         });
 
         // Per-instance alpha (all 1.0 initially)
-        let alphas = vec![1.0f32; instance_count as usize];
+        let alphas = vec![1.0f32; slots];
         let alpha_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("gizmo_alphas"),
             contents: bytemuck::cast_slice(&alphas),
@@ -377,7 +393,41 @@ impl GizmoRenderer {
             alpha_buffer,
             highlight_buffer,
             instance_count,
+            ghost_count: 0,
         }
+    }
+
+    /// Draw the selected motif's symmetry orbit as dimmed copies of its gizmo.
+    ///
+    /// This is what makes a live group visible: the motif's `|G| − 1` images
+    /// under its own group, drawn faint beside the solid one. It costs nothing
+    /// but instances — the matrices are `g · matrix`, the same product the
+    /// chaos game composes, so the ghosts follow a drag for free and can never
+    /// disagree with what the walk is doing.
+    ///
+    /// Element 0 of a group is the identity, so the caller passes the orbit
+    /// *without* it: instance `i + 1` is already drawn solid there.
+    ///
+    /// Ghosts are deliberately not pickable (`pick.rs` never sees them). A
+    /// ghost is not an editable object — it is an image of one — so clicking
+    /// one would select something you cannot change.
+    pub fn set_ghosts(&mut self, queue: &wgpu::Queue, ghosts: &[Mat4]) {
+        let n = ghosts.len().min(MAX_GHOSTS as usize);
+        self.ghost_count = n as u32;
+        if n == 0 {
+            return;
+        }
+        let matrices: Vec<[[f32; 4]; 4]> =
+            ghosts[..n].iter().map(|m| m.to_cols_array_2d()).collect();
+        let offset = self.instance_count as u64 * std::mem::size_of::<[[f32; 4]; 4]>() as u64;
+        queue.write_buffer(&self.transform_buffer, offset, bytemuck::cast_slice(&matrices));
+
+        // Faint, and fainter the more of them there are: five ghosts can each
+        // be a legible arrow, sixty would be a ball of wool at that weight.
+        let alpha = if n <= 8 { 0.34 } else { 0.10 + 1.9 / n as f32 };
+        let alphas = vec![alpha; n];
+        let offset = self.instance_count as u64 * std::mem::size_of::<f32>() as u64;
+        queue.write_buffer(&self.alpha_buffer, offset, bytemuck::cast_slice(&alphas));
     }
 
     /// Set (or clear) the hovered gizmo part. Instance 0 is the reference
@@ -422,6 +472,9 @@ impl GizmoRenderer {
     /// Update per-instance alpha based on enabled state
     /// Instance 0 is the reference gizmo (always full alpha),
     /// instances 1..N correspond to transforms[0..N-1]
+    /// Writes only the reference-plus-transforms run, deliberately: the ghost
+    /// slots past it carry their own alpha from `set_ghosts`, and a full-length
+    /// write here would reset them to opaque on every enable/disable.
     pub fn update_alpha(&self, queue: &wgpu::Queue, enabled: &[bool]) {
         let mut alphas = vec![1.0f32; self.instance_count as usize];
         for (i, &on) in enabled.iter().enumerate() {
@@ -455,6 +508,14 @@ impl GizmoRenderer {
         render_pass.draw(0..ed, 0..1); // reference
         if self.instance_count > 1 {
             render_pass.draw(ed..ed * 2, 1..self.instance_count); // transforms
+        }
+        // Symmetry orbit ghosts, using the transforms' own geometry so a copy
+        // reads as the same object. Edges and dots only, no faces: sixty
+        // translucent faces stacked through each other is a fog, and it is the
+        // *placement* of a copy you need to see, which the edges give.
+        if self.ghost_count > 0 {
+            let first = self.instance_count;
+            render_pass.draw(ed..ed * 2, first..first + self.ghost_count);
         }
 
         // Pass 2: faces (depth write OFF — read-only depth test, no z-fighting)
