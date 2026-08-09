@@ -2816,6 +2816,50 @@ color = [0.2, 0.5, 1.0]
         let _ = std::fs::remove_file(&tmp);
     }
 
+    /// A mirrored transform survives a save and reload.
+    ///
+    /// This is the claim `Trs::is_faithful` was relaxed on: a reflection with
+    /// perpendicular columns decomposes exactly, because glam puts the sign on
+    /// `scale.x` and `ScaleDef::PerAxis` can write a negative component. If
+    /// that were wrong, dragging a tip handle through the origin would author
+    /// a map the file cannot hold -- which is exactly the trap shear is being
+    /// kept out of the gizmo for.
+    #[test]
+    fn a_mirrored_transform_survives_a_save() {
+        let mut scene = super::Scene::blank();
+        // Flip one axis of the first map by reversing its column, the way a
+        // tip-handle drag through the origin does.
+        let m = &mut scene.transforms[0].matrix;
+        m.z_axis = -m.z_axis;
+        let before = *m;
+        assert!(before.determinant() < 0.0, "test setup: expected a mirror");
+
+        let tmp = std::env::temp_dir().join("fracturize-roundtrip-mirrored.toml");
+        let _ = std::fs::remove_file(&tmp);
+        scene.save(&tmp).unwrap();
+
+        // It has to be written as a plain negative scale, not smuggled out as
+        // something else -- that is what makes the file readable by a human.
+        let text = std::fs::read_to_string(&tmp).unwrap();
+        assert!(
+            text.contains("scale = [") && text.contains('-'),
+            "a mirror should be written as a per-axis scale with a negative component:\n{text}"
+        );
+
+        let after = super::Scene::load(&tmp).unwrap();
+        let worst = before
+            .to_cols_array()
+            .iter()
+            .zip(after.transforms[0].matrix.to_cols_array().iter())
+            .fold(0.0f32, |acc, (p, q)| acc.max((p - q).abs()));
+        assert!(worst < 1e-3, "mirrored matrix moved {worst:.6} across a save");
+        assert!(
+            after.transforms[0].matrix.determinant() < 0.0,
+            "the reflection was lost on reload"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     #[test]
     fn every_scenes_transforms_survive_a_save() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/scenes");

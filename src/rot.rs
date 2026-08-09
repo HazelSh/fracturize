@@ -599,8 +599,29 @@ impl Trs {
         )
     }
 
-    /// Whether recomposing reproduces `m` — false for shear and for a
-    /// negative determinant, where the split is a lie.
+    /// Whether recomposing reproduces `m` — false for shear, where the split
+    /// really is a lie.
+    ///
+    /// This asks one question and nothing else: does `scale · rotation ·
+    /// translation` rebuild the matrix it came from? It used to also demand a
+    /// non-negative determinant, which sounds like the same caution but isn't.
+    /// A mirrored matrix with perpendicular columns decomposes *exactly*:
+    /// glam puts the reflection's sign on `scale.x` and derives the rotation
+    /// from the sign-corrected columns, so the round trip is lossless, and
+    /// `ScaleDef::PerAxis` has always been able to write a negative component.
+    /// Rejecting it meant every mirrored transform lost the inspector's
+    /// position/rotation/scale fields and fell back to a raw 4×4 grid, for a
+    /// reason that was never true — which mattered the moment dragging a tip
+    /// handle through the origin made mirroring a normal thing to do.
+    ///
+    /// Shear is the real failure and is still caught, because a sheared matrix
+    /// genuinely cannot be rebuilt from these three parts.
+    ///
+    /// Note the asymmetry this leaves in what gets *written*: the sign always
+    /// lands on `scale.x`, so mirroring Y comes back as a negative X scale plus
+    /// a compensating rotation. Identical as a map, surprising in a diff. Ask
+    /// `determinant() < 0` when you want to say "mirrored" to a human; don't
+    /// read it off which component carries the minus.
     pub fn is_faithful(&self, m: glam::Mat4) -> bool {
         let back = self.matrix();
         let norm = m.to_cols_array().iter().fold(1.0f32, |a, v| a.max(v.abs()));
@@ -609,7 +630,7 @@ impl Trs {
             .iter()
             .zip(back.to_cols_array().iter())
             .fold(0.0f32, |a, (x, y)| a.max((x - y).abs()));
-        diff < 1e-4 * norm && m.determinant() >= 0.0
+        diff < 1e-4 * norm
     }
 }
 

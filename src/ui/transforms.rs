@@ -2,8 +2,9 @@
 //! click-to-select, right-click context menu) plus a selected-transform
 //! inspector implementing the plan's "Inspector: Mat4 <-> TRS" design —
 //! position/rotation/scale fields when the matrix decomposes faithfully, a
-//! raw matrix grid + "Orthogonalize -> TRS" fallback when it doesn't (shear
-//! or a mirrored/det<0 matrix), plus weight/color/variation editing.
+//! raw matrix grid + "Orthogonalize -> TRS" fallback when it doesn't (shear —
+//! and only shear; a mirrored matrix decomposes exactly and keeps the fields,
+//! flagged with a "mirrored" readout), plus weight/color/variation editing.
 //!
 //! Every mutation funnels through a matching `App` method (`set_transform_*`,
 //! `rename_transform`, `duplicate_transform_at`, ...) that snapshots, edits,
@@ -869,6 +870,10 @@ pub struct TrsCache {
     scale: [f32; 3],
     uniform_scale_linked: bool,
     faithful: bool,
+    /// Reverses handedness. Cached alongside `faithful` because it is read off
+    /// the same matrix, and because it is *not* derivable from the scale fields
+    /// below — the decomposition always parks a reflection's sign on x.
+    mirrored: bool,
     /// Column-major, matching `Mat4::to_cols_array_2d` (`[col][row]`) — used
     /// for the non-TRS fallback grid.
     matrix_cols: [[f32; 4]; 4],
@@ -904,6 +909,7 @@ impl TrsCache {
             scale: fields.scale.to_array(),
             uniform_scale_linked,
             faithful: fields.faithful,
+            mirrored: matrix.determinant() < 0.0,
             matrix_cols: matrix.to_cols_array_2d(),
             post_position: pf.position.to_array(),
             post_rotation_deg: pf.rotation_deg.to_array(),
@@ -1660,6 +1666,24 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
 fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut TrsCache, editing: &mut bool) {
     let mut changed_field: Option<&'static str> = None;
 
+    // Say "mirrored" rather than leaving it to be read off a minus sign. The
+    // decomposition always puts a reflection's sign on the *x* scale, whichever
+    // axis was actually flipped, so the fields below can't be trusted to point
+    // at it — mirroring Y shows up as a negative X and a rotation. The
+    // determinant is the honest source, and it is one bit.
+    if cache.mirrored {
+        ui.label(
+            egui::RichText::new("mirrored (det < 0)")
+                .small()
+                .color(egui::Color32::from_rgb(230, 180, 80)),
+        )
+        .on_hover_text(
+            "This map reverses handedness. The sign always lands on the x scale \
+             below, whichever axis you flipped — drag any tip handle back through \
+             its origin to undo it.",
+        );
+    }
+
     if drag_row(
         ui,
         app,
@@ -1790,7 +1814,8 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
     ui.label(egui::RichText::new("matrix (non-TRS)").color(egui::Color32::from_rgb(230, 180, 80)));
     ui.label(
         egui::RichText::new(
-            "Shear, or a mirrored (det<0) matrix — edit components directly, or discard the shear/mirroring.",
+            "Sheared: no position/rotation/scale can rebuild this. Edit components \
+             directly, or discard the shear.",
         )
         .small()
         .weak(),
@@ -2278,8 +2303,17 @@ mod tests {
         );
     }
 
+    /// A mirrored map keeps the position/rotation/scale fields.
+    ///
+    /// This used to assert the opposite, and the opposite was wrong: a mirror
+    /// with perpendicular columns rebuilds exactly from scale/rotation/
+    /// translation, and the scene format has always been able to write a
+    /// negative scale component. The determinant test that sent it to the raw
+    /// 4×4 grid was caution about shear misapplied to reflection. Dragging a
+    /// tip handle through the origin makes mirroring routine, so "routine
+    /// operation drops you into the fallback editor" stopped being tolerable.
     #[test]
-    fn mirrored_det_negative_routes_to_fallback() {
+    fn a_mirrored_map_stays_on_the_trs_path() {
         // Mirror one axis: determinant goes negative even though the matrix
         // is otherwise a clean axis-aligned scale (no shear).
         let m = Mat4::from_scale_rotation_translation(
@@ -2288,9 +2322,37 @@ mod tests {
             Vec3::ZERO,
         );
         assert!(m.determinant() < 0.0, "test setup: expected a mirrored matrix");
+        let fields = decompose_trs(m);
+        assert!(
+            fields.faithful,
+            "a clean mirror recomposes exactly and must keep the TRS fields"
+        );
+        // And it round-trips: the recomposed matrix is the one we started with.
+        let back = crate::rot::Trs::of(m).matrix();
+        for k in 0..4 {
+            assert!(
+                (m.col(k) - back.col(k)).length() < 1e-5,
+                "column {k} did not survive the round trip"
+            );
+        }
+    }
+
+    /// Shear is the thing the fallback grid exists for, and still routes there.
+    #[test]
+    fn shear_still_routes_to_the_fallback() {
+        // Add a multiple of the x column to the y column: determinant is
+        // untouched, but the columns are no longer perpendicular, and no
+        // scale/rotation/translation triple can rebuild that.
+        let mut m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.5),
+            Quat::IDENTITY,
+            Vec3::ZERO,
+        );
+        m.y_axis += m.x_axis * 0.4;
+        assert!(m.determinant() > 0.0, "test setup: shear alone keeps det > 0");
         assert!(
             !decompose_trs(m).faithful,
-            "det<0 must route to the non-TRS fallback regardless of recompose closeness"
+            "a sheared matrix cannot be rebuilt from T/R/S and must use the grid"
         );
     }
 
