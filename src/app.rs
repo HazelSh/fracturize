@@ -434,6 +434,22 @@ fn lerp_camera(a: &OrbitCamera, b: &OrbitCamera, s: f32) -> OrbitCamera {
 /// hand makes while clicking a mouse button.
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
+/// How long the pointer must sit still over the artwork, in view mode, before
+/// it is hidden (`App::update_cursor_visibility`).
+///
+/// Two seconds: long enough that it never goes while you are still deciding
+/// where to click, short enough that it is gone by the time you have settled
+/// into watching. Video players land in the same place for the same reason.
+const CURSOR_IDLE_HIDE: Duration = Duration::from_secs(2);
+
+/// Should the pointer be hidden right now? Split out from
+/// `App::update_cursor_visibility` because the decision is the whole of the
+/// feature and the rest is one winit call — and because every clause here is a
+/// case somebody has to be able to check without a mouse and a stopwatch.
+fn cursor_should_hide(view_mode: bool, over_ui: bool, dragging: bool, idle: Duration) -> bool {
+    view_mode && !over_ui && !dragging && idle >= CURSOR_IDLE_HIDE
+}
+
 /// What a mouse drag is currently doing
 #[derive(Clone, Copy, Debug)]
 enum Drag {
@@ -710,13 +726,25 @@ pub struct App {
     /// release — a drag is a single history entry, not one per frame.
     gizmo_drag_before: Option<EditSnapshot>,
 
-    /// Whether the scene has edits that haven't been written to disk.
+    /// When the pointer last did anything — moved, clicked, scrolled. Read by
+    /// `update_cursor_visibility` for the idle auto-hide.
+    cursor_last_moved: Instant,
+    /// Whether we currently have the pointer hidden. Tracked so the winit call
+    /// is made on the frame the state changes and not on every frame.
+    cursor_hidden: bool,
+    /// The document state that was last written to disk, as a history serial
+    /// (see `History::top_serial`). `None` means "nothing has been edited
+    /// since this scene was opened", which is also what a freshly-loaded
+    /// scene's history reads.
     ///
-    /// The cheapest honest version of the question: set by `commit_edit` (the
-    /// one choke point every scene-mutating path already goes through),
-    /// cleared by a successful save and by opening a different scene. It
-    /// drives the window title's `*` marker and the unsaved-changes prompt.
-    scene_dirty: bool,
+    /// A *position*, not a flag. `is_dirty` compares it against where the
+    /// history is now, so undoing back past the last save reports the scene as
+    /// clean — which it is, byte for byte — and redoing forward past it
+    /// reports dirty again. The boolean this replaced could only ever be set
+    /// by an edit and cleared by a save, so a scene you had edited and then
+    /// completely undone still claimed to be modified, and closing it still
+    /// demanded an answer about work that no longer existed.
+    saved_serial: Option<u64>,
     /// Why the last attempt to write the scene failed, if it did (see
     /// `write_scene_to`).
     last_save_error: Option<String>,
@@ -968,7 +996,9 @@ impl App {
             browser_selected: 0,
             history: History::new(),
             gizmo_drag_before: None,
-            scene_dirty: false,
+            cursor_last_moved: Instant::now(),
+            cursor_hidden: false,
+            saved_serial: None,
             last_save_error: None,
             window_title: String::new(),
             pending_action: None,
@@ -1640,7 +1670,7 @@ impl App {
         self.scene.save(path).map_err(|e| e.to_string())?;
         log::info!("Scene saved as {} ({})", path, self.scene.name);
         self.scene_path = Some(path.to_string());
-        self.scene_dirty = false;
+        self.mark_saved();
         // The slug feeds views/ lookups and render filenames, and it comes
         // from the scene name, not the path — but the *saved views* cache is
         // keyed on it, so a rename has to drop it.
@@ -1700,7 +1730,7 @@ impl App {
             Ok(()) => {
                 log::info!("Scene saved to {}", path);
                 self.scene_path = Some(path.to_string());
-                self.scene_dirty = false;
+                self.mark_saved();
                 self.last_save_error = None;
             }
             Err(e) => {
@@ -1769,14 +1799,25 @@ impl App {
     /// lets rapid same-key commits (held weight/color keys, drag-scroll
     /// bursts) merge into one entry instead of flooding the stack.
     pub fn commit_edit(&mut self, label: impl Into<String>, coalesce_key: Option<&str>, before: EditSnapshot) {
+        // No dirty flag to raise: committing moves the history to a state the
+        // save point doesn't name, which is what `is_dirty` asks about.
         self.history.commit(label, coalesce_key, before, Instant::now());
-        self.scene_dirty = true;
+    }
+
+    /// Record that the scene as it stands right now is what's on disk. Called
+    /// by every successful write, and by opening a scene (where both sides are
+    /// `None`: a fresh history at a fresh file).
+    fn mark_saved(&mut self) {
+        self.saved_serial = self.history.top_serial();
     }
 
     /// Whether the scene has edits not yet on disk. Drives the title bar's
     /// dirty marker and every "are you sure" prompt.
+    ///
+    /// Undo and redo need no special case here, and deliberately don't have
+    /// one: they move the history, and this reads where the history is.
     pub fn is_dirty(&self) -> bool {
-        self.scene_dirty
+        self.history.top_serial() != self.saved_serial
     }
 
     // === Losing work: the prompts that stand in the way (see ui::confirm) ===
@@ -1784,7 +1825,7 @@ impl App {
     /// Ask to leave. Prompts first if there is unsaved work; otherwise the
     /// event loop is told to exit on its next pass.
     pub fn request_quit(&mut self) {
-        if self.scene_dirty {
+        if self.is_dirty() {
             self.pending_action = Some(crate::ui::confirm::Pending::Quit);
         } else {
             self.exit_requested = true;
@@ -1794,7 +1835,7 @@ impl App {
     /// Ask to open a scene. Same shape as `request_quit`: opening replaces the
     /// scene *and* clears the undo stack, so it is exactly as destructive.
     pub fn request_load_scene(&mut self, path: &Path) {
-        if self.scene_dirty {
+        if self.is_dirty() {
             self.pending_action = Some(crate::ui::confirm::Pending::Load(path.to_path_buf()));
         } else {
             self.load_scene_file(path);
@@ -2083,6 +2124,7 @@ impl App {
     /// visibility". A navigation gesture must not be able to change the
     /// artwork. Alt costs one finger and the hint line is right there.
     pub fn on_scroll(&mut self, steps: f32) {
+        self.note_pointer_activity();
         if let Some(hit) = self.hovered.filter(|_| self.alt_held) {
             self.selected_transform = Some(hit.transform);
             let before = self.edit_snapshot();
@@ -2199,9 +2241,51 @@ impl App {
     /// drag is active — gizmo hover-picking is skipped so egui panels don't
     /// fight the 3D gizmo highlight/cursor-icon underneath them. Active
     /// drags (orbit/pan/gizmo) always keep receiving motion regardless.
+    /// The pointer did something. Restarts the idle clock behind the cursor
+    /// auto-hide, and brings the cursor straight back if it had gone.
+    ///
+    /// Called from every pointer entry point — motion, press, release, scroll
+    /// — rather than motion alone, so a wheel-zoom or a click that the hand
+    /// makes without moving the mouse still counts as "someone is using this".
+    fn note_pointer_activity(&mut self) {
+        self.cursor_last_moved = Instant::now();
+        if self.cursor_hidden {
+            self.cursor_hidden = false;
+            self.window.set_cursor_visible(true);
+        }
+    }
+
+    /// Hide the pointer once it has sat still over the artwork, and bring it
+    /// back the moment anything happens.
+    ///
+    /// The pointer is a black arrow parked in the middle of a picture, and
+    /// this is a program for looking at pictures. Nothing else fades, and
+    /// nothing here contradicts the zero-animation rule — the cursor is the
+    /// operating system's furniture, not this app's chrome, and it doesn't
+    /// fade: it is drawn on one frame and not on the next.
+    ///
+    /// **View mode only.** In edit mode every gizmo is a thing you aim at,
+    /// hover-highlight and grab, so a cursor that disappears while you line
+    /// one up disappears at exactly the moment it is being used. `over_ui`
+    /// keeps it while the pointer is parked in a panel, where the same
+    /// argument applies to every widget.
+    pub fn update_cursor_visibility(&mut self, over_ui: bool) {
+        let hide = cursor_should_hide(
+            !self.show_gizmos,
+            over_ui,
+            !matches!(self.drag, Drag::None),
+            self.cursor_last_moved.elapsed(),
+        );
+        if hide != self.cursor_hidden {
+            self.cursor_hidden = hide;
+            self.window.set_cursor_visible(!hide);
+        }
+    }
+
     pub fn on_cursor_moved(&mut self, x: f32, y: f32, suppress_hover: bool) {
         let (dx, dy) = (x - self.cursor.0, y - self.cursor.1);
         self.cursor = (x, y);
+        self.note_pointer_activity();
 
         // Travel from the press, tracked for every drag — but it *gates*
         // almost nothing. See `drag_moved` for why the camera doesn't wait.
@@ -2368,6 +2452,7 @@ impl App {
     }
 
     pub fn on_mouse_press(&mut self, button: winit::event::MouseButton) {
+        self.note_pointer_activity();
         use winit::event::MouseButton;
         self.drag_origin = self.cursor;
         self.drag_moved = false;
@@ -2430,6 +2515,7 @@ impl App {
     }
 
     pub fn on_mouse_release(&mut self, button: winit::event::MouseButton) {
+        self.note_pointer_activity();
         use winit::event::MouseButton;
         if matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right) {
             // A left-click on empty viewport space that never became a drag is
@@ -2769,7 +2855,7 @@ impl App {
         // editor ever written. The surprise was never the clear — it was that
         // it happened without asking, which is what `request_load_scene` fixes.
         self.history.clear();
-        self.scene_dirty = false;
+        self.mark_saved();
         self.rebuild_pipelines();
     }
 
@@ -4682,7 +4768,7 @@ impl App {
             .unwrap_or_else(|| format!("{} (unsaved)", self.scene.name));
         let title = format!(
             "{}{} — Fracturize",
-            if self.scene_dirty { "*" } else { "" },
+            if self.is_dirty() { "*" } else { "" },
             doc,
         );
         if self.window_title != title {
@@ -5156,5 +5242,47 @@ impl App {
         surface_texture.present();
 
         FrameOutcome::Presented
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STILL: Duration = Duration::from_secs(5);
+    const JUST_MOVED: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn the_pointer_goes_when_it_is_parked_on_the_artwork_in_view_mode() {
+        assert!(cursor_should_hide(true, false, false, STILL));
+    }
+
+    #[test]
+    fn edit_mode_always_keeps_the_pointer() {
+        // Gizmos are things you aim at. Losing the cursor while lining one up
+        // loses it at exactly the moment it is in use — so this holds however
+        // long the hand has been still.
+        assert!(!cursor_should_hide(false, false, false, STILL));
+        assert!(!cursor_should_hide(false, false, false, Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_pointer_parked_on_a_panel_keeps_it() {
+        assert!(!cursor_should_hide(true, true, false, STILL));
+    }
+
+    #[test]
+    fn a_held_drag_keeps_it() {
+        // An orbit drag held still for a few seconds is still a gesture in
+        // progress, and the thing being dragged is under the pointer.
+        assert!(!cursor_should_hide(true, false, true, STILL));
+    }
+
+    #[test]
+    fn it_stays_while_the_pointer_is_being_used() {
+        assert!(!cursor_should_hide(true, false, false, JUST_MOVED));
+        // Right up to the threshold, and not before it.
+        assert!(!cursor_should_hide(true, false, false, CURSOR_IDLE_HIDE - Duration::from_millis(1)));
+        assert!(cursor_should_hide(true, false, false, CURSOR_IDLE_HIDE));
     }
 }

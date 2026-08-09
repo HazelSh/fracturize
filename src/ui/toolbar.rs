@@ -338,7 +338,10 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
             &point_count_label(app.max_point_capacity()),
         ],
     );
-    let resp = ui.add(egui::Button::new(label).min_size(egui::vec2(point_count_width, 0.0)));
+    let resp = ui.add(
+        egui::Button::new((label, egui::Atom::grow()))
+            .min_size(egui::vec2(point_count_width, 0.0)),
+    );
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -364,7 +367,11 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     let resp = ui.add(
         egui::Button::selectable(
             app.show_gizmos,
-            if app.show_gizmos { (icons::CUBE, "Edit Mode") } else { (icons::EYE, "View Mode") },
+            if app.show_gizmos {
+                (icons::CUBE, "Edit Mode", egui::Atom::grow())
+            } else {
+                (icons::EYE, "View Mode", egui::Atom::grow())
+            },
         )
         .min_size(egui::vec2(mode_width, 0.0)),
     );
@@ -387,8 +394,12 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     let moving = app.camera_moving();
     let play_width = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
     let resp = ui.add(
-        egui::Button::new(if moving { (icons::PAUSE, "Pause") } else { (icons::PLAY, "Play") })
-            .min_size(egui::vec2(play_width, 0.0)),
+        egui::Button::new(if moving {
+            (icons::PAUSE, "Pause", egui::Atom::grow())
+        } else {
+            (icons::PLAY, "Play", egui::Atom::grow())
+        })
+        .min_size(egui::vec2(play_width, 0.0)),
     );
     let resp = hinted(
         resp,

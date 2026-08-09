@@ -66,6 +66,11 @@ struct HistoryEntry {
     key: Option<String>,
     at: Instant,
     before: EditSnapshot,
+    /// Identifies the document state this entry *produced*, for the dirty bit
+    /// (see [`History::top_serial`]). Unique, never reused, and it travels
+    /// with the entry across the undo/redo boundary so a round trip comes back
+    /// to the same state by the same name.
+    serial: u64,
 }
 
 /// Unified undo/redo stacks. Newest entry is the *last* element of `undo`
@@ -85,6 +90,11 @@ pub struct History {
     /// who thinks they have 60 steps of undo and has 10 finds out at the worst
     /// possible moment.
     dropped: usize,
+    /// Source of [`HistoryEntry::serial`]. Monotonic for the life of the
+    /// `History`, and deliberately not reset by `clear` — a serial handed out
+    /// before a scene was opened must never be able to match one handed out
+    /// after it.
+    next_serial: u64,
 }
 
 /// Entries the byte cap may never take, however large the snapshots are.
@@ -112,7 +122,32 @@ impl History {
             max_entries,
             max_bytes,
             dropped: 0,
+            next_serial: 0,
         }
+    }
+
+    /// Names the document state the stacks are currently at: the serial of the
+    /// newest applied edit, or `None` for "nothing has been done".
+    ///
+    /// This is the whole of the dirty bit. `App` remembers what this returned
+    /// when the scene was last written and compares; equal means the file on
+    /// disk and the scene in memory are the same document, whether you got
+    /// back here by not editing, by undoing every edit, or by redoing forward
+    /// to where you saved. A boolean flag can't say any of that — it only ever
+    /// went one way, so undoing back past your last save left a scene that was
+    /// byte-for-byte the saved one still claiming to be modified.
+    ///
+    /// Fails safe under the caps: an entry evicted from the bottom of the
+    /// stack takes its serial with it, so a save point that has been evicted
+    /// simply never compares equal again and the scene stays dirty.
+    pub fn top_serial(&self) -> Option<u64> {
+        self.undo.last().map(|e| e.serial)
+    }
+
+    fn take_serial(&mut self) -> u64 {
+        let s = self.next_serial;
+        self.next_serial += 1;
+        s
     }
 
     /// Undo entries evicted since the last `clear`, for the history list's
@@ -135,19 +170,28 @@ impl History {
         self.redo.clear();
 
         if let Some(key) = coalesce_key {
+            // A coalesced commit still *changes the document*, so it still
+            // takes a fresh serial even though it adds no entry. Without that,
+            // saving mid-drag and then dragging further within the coalescing
+            // window would leave the file reading as clean while the scene
+            // moved out from under it.
+            let serial = self.take_serial();
             if let Some(top) = self.undo.last_mut() {
                 if top.key.as_deref() == Some(key) && now.saturating_duration_since(top.at) < COALESCE_WINDOW {
                     top.at = now;
+                    top.serial = serial;
                     return;
                 }
             }
         }
 
+        let serial = self.take_serial();
         self.undo.push(HistoryEntry {
             label: label.into(),
             key: coalesce_key.map(str::to_string),
             at: now,
             before,
+            serial,
         });
         self.dropped += Self::evict(&mut self.undo, self.max_entries, self.max_bytes);
     }
@@ -162,6 +206,11 @@ impl History {
             key: None,
             at: Instant::now(),
             before: current,
+            // The serial names the state this edit produced, so it belongs to
+            // the edit wherever the edit currently sits. Redoing pushes it
+            // back onto the undo stack and `top_serial` reads the same value
+            // it did before the undo.
+            serial: entry.serial,
         });
         // Redo-side eviction isn't counted: the footer speaks about the undo
         // list, and a redo entry lost to the caps is already unreachable by the
@@ -179,6 +228,7 @@ impl History {
             key: None,
             at: Instant::now(),
             before: current,
+            serial: entry.serial,
         });
         self.dropped += Self::evict(&mut self.undo, self.max_entries, self.max_bytes);
         Some((entry.label, restore))
@@ -491,6 +541,79 @@ mod tests {
             h.commit(format!("E{}", i), None, snap(i as f32), t0 + Duration::from_secs(2 * i));
         }
         assert_eq!(h.undo_len(), 2);
+    }
+
+    // === The save point (App::is_dirty compares `top_serial` against it) ===
+
+    #[test]
+    fn undoing_back_to_the_save_point_reads_as_saved() {
+        let mut h = History::new();
+        let t0 = Instant::now();
+        h.commit("A", None, snap(1.0), t0);
+        h.commit("B", None, snap(2.0), t0 + Duration::from_secs(2));
+        // ...saved here...
+        let saved = h.top_serial();
+        h.commit("C", None, snap(3.0), t0 + Duration::from_secs(4));
+        h.commit("D", None, snap(4.0), t0 + Duration::from_secs(6));
+        assert_ne!(h.top_serial(), saved, "two edits past the save point");
+
+        h.undo(snap(5.0)).unwrap();
+        assert_ne!(h.top_serial(), saved, "one edit past it is still not it");
+        h.undo(snap(4.0)).unwrap();
+        assert_eq!(h.top_serial(), saved, "back at the state that was written");
+
+        // ...and forward again, which the old boolean could never report.
+        h.redo(snap(3.0)).unwrap();
+        assert_ne!(h.top_serial(), saved, "redoing past the save point is dirty again");
+        h.undo(snap(4.0)).unwrap();
+        assert_eq!(h.top_serial(), saved, "and undoing back to it is clean again");
+    }
+
+    #[test]
+    fn undoing_every_edit_reaches_the_freshly_opened_state() {
+        // The literal todo.txt item: "full undo should mark file undirty".
+        let mut h = History::new();
+        let t0 = Instant::now();
+        let opened = h.top_serial();
+        assert_eq!(opened, None);
+        h.commit("A", None, snap(1.0), t0);
+        h.commit("B", None, snap(2.0), t0 + Duration::from_secs(2));
+        h.undo(snap(3.0)).unwrap();
+        h.undo(snap(2.0)).unwrap();
+        assert_eq!(h.top_serial(), opened);
+    }
+
+    #[test]
+    fn a_coalesced_commit_still_moves_off_the_save_point() {
+        // Save mid-drag, then keep dragging: the commit coalesces into the
+        // entry that was on top when you saved, so the *entry* is the same one
+        // — but the scene has moved and the file has not.
+        let mut h = History::new();
+        let t0 = Instant::now();
+        h.commit("Weight", Some("weight:T0"), snap(1.0), t0);
+        let saved = h.top_serial();
+        h.commit("Weight", Some("weight:T0"), snap(1.15), t0 + Duration::from_millis(200));
+        assert_eq!(h.undo_len(), 1, "still one entry — it coalesced");
+        assert_ne!(h.top_serial(), saved, "but the document is not the saved one");
+    }
+
+    #[test]
+    fn an_evicted_save_point_never_compares_equal_again() {
+        // Fails safe: if the caps take the entry you saved at, the scene stays
+        // dirty rather than claiming to be a file it can no longer get back to.
+        let mut h = History::with_caps(3, usize::MAX);
+        let t0 = Instant::now();
+        h.commit("A", None, snap(1.0), t0);
+        let saved = h.top_serial();
+        for i in 1..6 {
+            h.commit(format!("E{}", i), None, snap(i as f32), t0 + Duration::from_secs(2 * i));
+        }
+        while h.undo_len() > 0 {
+            h.undo(snap(9.0)).unwrap();
+            assert_ne!(h.top_serial(), saved, "the evicted save point is unreachable");
+        }
+        assert_eq!(h.top_serial(), None);
+        assert_ne!(h.top_serial(), saved);
     }
 
     #[test]

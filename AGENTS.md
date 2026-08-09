@@ -234,6 +234,21 @@ and without looking, the fractal fully occludes gizmos while they keep taking
 input, and so zooming through a scene silently edited whatever happened to pass
 under the pointer. A navigation gesture must not be able to change the artwork.
 
+**The pointer hides itself in view mode**, once it has sat still over the
+artwork for two seconds (`App::update_cursor_visibility`, and
+`cursor_should_hide` for the decision on its own, which is unit-tested).
+Anything at all — motion, a click, a wheel notch — brings it straight back.
+It is a black arrow parked in the middle of a picture, and this is a program
+for looking at pictures.
+
+**Edit mode always keeps it**, however long the hand has been still: every
+gizmo is a thing you aim at, hover-highlight and grab, so a cursor that
+vanishes while you line one up vanishes at exactly the moment it is in use.
+Nor does it go while the pointer is over a panel, or while a drag is being
+held. This is not a breach of the zero-animation rule below: the cursor is the
+operating system's furniture rather than this app's chrome, and it doesn't
+fade — it is drawn on one frame and not on the next.
+
 Grabbable gizmo parts glow and grow on hover (edges widen and whiten, the
 origin dot enlarges) and the cursor switches to a grab hand. Gizmo drags
 re-run the chaos game live; the fractal re-forms as you drag (sparse while
@@ -308,12 +323,28 @@ scene browser → the transform selection → nothing. Quitting is Ctrl+Q or the
 window's close button, and both check for unsaved edits first, as does opening
 a scene (which clears the undo stack).
 
-**A scene is a document.** It has a dirty bit, set by `commit_edit` and cleared
-by saving or opening; the window title is `document — application` with a `*`
-when dirty, and the toolbar's scene name carries the same marker. The rule that
-settles what counts as an edit: **if it changes what Ctrl+S writes, it is an
-undoable edit** — with one conventional exception, continuous view state, since
-nobody expects Ctrl+Z to un-orbit a camera and no 3D application offers it.
+**A scene is a document.** The window title is `document — application` with a
+`*` when there are unsaved edits, and the toolbar's scene name carries the same
+marker. The rule that settles what counts as an edit: **if it changes what
+Ctrl+S writes, it is an undoable edit** — with one conventional exception,
+continuous view state, since nobody expects Ctrl+Z to un-orbit a camera and no
+3D application offers it.
+
+**The dirty bit is a position, not a flag.** Every history entry carries a
+unique serial (`History::top_serial` names the state the stacks are currently
+at); `App::saved_serial` remembers what that was when the scene was last
+written, and `is_dirty` compares the two. So undoing back past your last save
+reports the scene as clean — which it is, byte for byte — and redoing forward
+past it reports dirty again. Undo and redo need no special case and deliberately
+don't have one: they move the history, and the dirty bit reads where the history
+is. A boolean could only be raised by an edit and cleared by a save, so a scene
+you had edited and then completely undone still demanded an answer, on quit,
+about work that no longer existed. It fails safe under the history caps: an
+entry evicted from the bottom of the stack takes its serial with it, so an
+evicted save point never compares equal again and the scene stays dirty. A
+*coalesced* commit takes a fresh serial even though it adds no entry — else
+saving mid-drag and dragging on within the coalescing window would leave the
+file reading clean while the scene moved.
 
 **Orbit style** (Controls window, `orbit_style` in prefs) picks what a
 horizontal drag yaws about, and is the other preference of this kind.
@@ -380,7 +411,7 @@ right for. Undo and redo are the opposite trade, so they get visible buttons.
 
 | Window | What lives there |
 |--------|------------------|
-| Transforms | Vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Behaviour / Appearance / Identity |
+| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
 | Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
@@ -437,6 +468,17 @@ Conventions worth keeping:
   the widget. The last is the one that can't be done by formatting alone, and
   it is what stops dragging **x** through zero from shoving **y** and **z**
   sideways while your pointer is on the control.
+
+  The same module's `icon_button_width` / `text_button_width` do this for a
+  *button* whose caption changes length between states (Edit Mode/View Mode,
+  Play/Pause, the point-count readout). **Pin the width, then pin the caption
+  to one end of it**: egui centres a button's atoms inside `min_size`, so a
+  widened button holds its neighbours still while its own icon and text slide
+  by half the difference every time the caption changes — the same jitter,
+  moved inside the control. Append an `egui::Atom::grow()` after the text to
+  spend the slack on the right. Left rather than centred because the icon is
+  the part you aim at, and a column of buttons whose icons don't line up reads
+  as a column that is subtly misaligned.
 - **Destructive confirmations use `ui::confirm::danger_button`.** One widget,
   five steps, and every step is visible:
 
@@ -468,7 +510,11 @@ Conventions worth keeping:
   is still there when it arrives.
 
   All three states are drawn in **one fixed-width cell**, sized to the longest,
-  so the row doesn't re-lay-out under a pointer that is aimed at it.
+  so the row doesn't re-lay-out under a pointer that is aimed at it. The icon
+  (`danger_button` takes it as its own argument) leads all three captions, the
+  countdown included: it names the action, which doesn't change while the
+  button arms, and a glyph coming and going between states would be the control
+  flickering at you during the one interaction where it must look deliberate.
 
   Note that confirmation-as-a-*checkbox*
   (Save-As's overwrite acknowledgement) is inherently safe here in a way
@@ -486,6 +532,39 @@ Conventions worth keeping:
   right edge, with the rail recessed behind it — that continuity is what makes
   it read as selector-and-detail. Don't reduce it to a highlighted row; a
   highlight that never touches the fields can't say which fields it owns.
+
+  Two things about the rail are load-bearing and easy to undo by accident.
+  **A tab must occupy exactly `TAB_HEIGHT`** (`ui::transforms`, enforced with
+  `set_min_height`), because that is the row pitch the rail's virtualization is
+  told about, and a tab that lays out shorter mis-virtualizes the list: egui
+  draws `viewport / TAB_HEIGHT` tabs and stops, so rows past that are
+  unreachable, the drawn ones leave a band of dead rail below them, and the
+  scrollbar sizes itself to a content height the content doesn't have. Three
+  symptoms, one number, and none of them looks like the same bug from outside.
+  **And the list takes `ui.available_height()`**, not a constant — a fixed
+  height means growing the window grows empty rail instead of showing more
+  transforms.
+
+  Add / duplicate / delete sit *above* the list. They act on the list, so they
+  belong at one of its ends, and the end that doesn't move is the top; below it
+  they sat wherever the list happened to stop.
+- **A transform's name is edited where it is read.** The detail pane's header
+  name is a label until clicked, then a text field in the same spot
+  (`transforms::draw_header_name`). There is no "Identity" block — a heading
+  and a rule around one field, five headings down a pane you have to scroll, is
+  furniture that doesn't earn itself, and it put the most-edited property of a
+  transform as far as possible from the header already displaying it. The
+  action row's Rename button stays, because click-to-edit is invisible until
+  you hover the right four words and the button is what says the gesture is
+  there.
+- **A control stacked on top of another says where it is.** The weight bar
+  along a tab's bottom edge is registered after the tab and so takes the
+  pointer inside its own strip — which means every pixel it covers is a place
+  where clicking does not do what the tab under it advertises. So the strip is
+  small (`BAR_GRAB`, centred on the drawn bar) and it *shows* itself on hover,
+  growing into a full-width track with the value filled in. It was 40% of the
+  tab, silently, with only the cursor to say so — and the cursor changes at the
+  top of the screen, nowhere near the thing it is talking about.
 - **Gizmo indicators** (`src/indicators.rs`) draw the selected transform's
   relationship to the grey identity cell: an offset vector from the world
   origin with an arrowhead and a length label, and the rotation as an axis

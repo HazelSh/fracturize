@@ -60,8 +60,15 @@ pub struct UiState {
     /// one row can be mid-rename at a time.
     pub renaming_transform: Option<(usize, String)>,
     /// Set for one frame by the inspector's Rename button, asking the pane's
-    /// own Name field to take the caret (see `transforms::draw_identity`).
+    /// header name to open its editor and take the caret (see
+    /// `transforms::draw_header_name`).
     pub focus_name_field: bool,
+    /// Transforms window inspector: the pane header's name mid-edit, as
+    /// `(transform index, buffer)`. `Some` once the header name has been
+    /// clicked — the name is a label until then. The index is carried so an
+    /// editor left open when the selection moves can be dropped rather than
+    /// renaming whatever got selected next.
+    pub editing_name: Option<(usize, String)>,
     /// Filter text for the Transforms rail. Session state, not a preference:
     /// it's a way of looking at *this* list right now.
     pub transform_filter: String,
@@ -126,6 +133,7 @@ impl UiState {
             trs_cache: None,
             renaming_transform: None,
             focus_name_field: false,
+            editing_name: None,
             transform_filter: String::new(),
             pending_ui_scale: None,
             transform_menu: None,

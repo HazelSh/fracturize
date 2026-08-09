@@ -114,23 +114,29 @@ pub fn danger_button(
     ui: &mut egui::Ui,
     ui_state: &mut super::UiState,
     mut arm: Arm,
+    icon: &str,
     idle: &str,
     danger: &str,
     idle_tip: &str,
     danger_tip: &str,
 ) -> (Arm, bool) {
     let state = arm.state();
-    let counting = format!("waiting ({})", COUNTDOWN.as_secs());
+    // The icon leads all three captions, the countdown included. It names the
+    // action, which does not change while the button is arming — a glyph that
+    // came and went between states would be the button flickering at you
+    // during the one interaction where it must look deliberate.
+    let cap = |text: &str| format!("{icon} {text}");
+    let counting = cap(&format!("waiting ({})", COUNTDOWN.as_secs()));
 
     let (text, enabled) = match state {
-        ArmState::Idle => (idle.to_string(), true),
-        ArmState::Counting(n) => (format!("waiting ({})", n), false),
-        ArmState::Ready => (danger.to_string(), true),
+        ArmState::Idle => (cap(idle), true),
+        ArmState::Counting(n) => (cap(&format!("waiting ({})", n)), false),
+        ArmState::Ready => (cap(danger), true),
     };
 
     // One width for all three states, so the row doesn't re-lay-out under the
     // pointer at the exact moment the pointer is aimed at it — see `ui::num`.
-    let w = [idle, counting.as_str(), danger]
+    let w = [cap(idle), counting.clone(), cap(danger)]
         .iter()
         .map(|t| text_width(ui, t))
         .fold(0.0f32, f32::max)

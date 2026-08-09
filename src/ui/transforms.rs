@@ -60,8 +60,37 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 /// Width of the tab rail in points. Narrow on purpose: it carries identity
 /// (colour, name, enabled) and relative weight, and nothing else.
 const RAIL_WIDTH: f32 = 132.0;
-/// Height of one tab, including its weight bar.
+/// Height of one tab, including its weight bar and the gap below it.
+///
+/// **This is the row pitch the rail's virtualization is told about**, so a tab
+/// has to actually occupy it — see `draw_tab`'s `set_min_height`. It didn't,
+/// once: the tabs laid out at their content height (~21pt, one `interact_size`
+/// row plus spacing) while `show_rows` reserved 30, and every consequence of
+/// that mismatch read as a different bug. egui drew only `viewport / 30` tabs
+/// and stopped, so nine of a twenty-transform scene's rows were unreachable;
+/// the drawn tabs filled 11/30ths less than the viewport, leaving a band of
+/// dead rail above the buttons that followed; and the scrollbar sized itself
+/// to a content height half again as tall as the content. One number, three
+/// symptoms, none of which looks like the same bug from the outside.
 const TAB_HEIGHT: f32 = 30.0;
+/// The gap between painted tabs: a tab's body is `TAB_HEIGHT - TAB_GAP`, and
+/// the rest is the space that keeps two selected-coloured fills apart.
+const TAB_GAP: f32 = 4.0;
+/// Thickness of the weight bar drawn along a tab's bottom edge.
+const BAR_THICKNESS: f32 = 2.0;
+/// How far the weight bar is inset from each end of its tab.
+const BAR_INSET: f32 = 8.0;
+/// Height of the weight bar's *grab* strip, centred on the drawn bar.
+///
+/// Deliberately much smaller than the tab: this strip is registered after the
+/// tab and so takes the pointer from it, and it used to be 8pt of a 21pt row —
+/// 40% of every tab, including the whole lower half of the name, was silently
+/// not the click target it looked like. Centred on the 2pt bar it is now 20%
+/// of a 30pt row, sitting under the thing it adjusts and nothing else.
+const BAR_GRAB: f32 = 6.0;
+/// Shortest the rail's list is allowed to get when the window is dragged small.
+/// Below about three rows a list stops being one.
+const MIN_LIST_HEIGHT: f32 = TAB_HEIGHT * 3.0;
 
 /// The rail's backdrop: recessed relative to the detail pane, so the active
 /// tab (which is filled with the *pane's* colour) reads as lifted out of it.
@@ -200,58 +229,106 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
             .inner_margin(egui::Margin::symmetric(0, 4))
             .show(ui, |ui| {
                 ui.set_width(RAIL_WIDTH);
+                // Above the list, not below it. These are the list's own
+                // operations, so they belong at one of its ends — and the end
+                // that doesn't move is the top. Under the list they sat
+                // wherever the list happened to stop, which on a scene with
+                // more transforms than fit was nowhere near it.
+                draw_list_actions(ui, app, selected);
                 draw_filter(ui, app);
+                // The list takes the rest of the window. It used to take 320pt
+                // whatever the window was, so growing the window grew a band of
+                // empty rail instead of showing more transforms.
+                let height = ui.available_height().max(MIN_LIST_HEIGHT);
                 // Virtualized: L-system scenes reach tens of thousands of
                 // transforms, and laying every tab out per frame would cost
                 // more than the whole rest of the UI.
                 egui::ScrollArea::vertical()
                     .id_salt("fracturize_transform_rail")
-                    .max_height(320.0)
-                    .auto_shrink([false, true])
+                    .max_height(height)
+                    // Both axes: the list is the rail's body and should hold
+                    // its height whether it has four transforms or four
+                    // thousand, so the pane beside it doesn't change size when
+                    // the filter box matches fewer rows.
+                    .auto_shrink([false, false])
                     .show_rows(ui, TAB_HEIGHT, n, |ui, range| {
+                        if n == 0 {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Nothing matches that filter.")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
                         for slot in range {
                             let i = visible[slot];
                             let row = row_data(app, i);
                             draw_tab(ui, app, i, row, selected == Some(i), max_weight);
                         }
                     });
-                if n == 0 {
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new("Nothing matches that filter.")
-                            .small()
-                            .weak(),
-                    );
-                }
-
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(4.0);
-                    let resp = ui.small_button("+ add");
-                    let resp = hinted(
-                        resp,
-                        &mut app.ui_state,
-                        "Add a fresh transform (Shift+A)",
-                        "click: add a new transform",
-                    );
-                    if resp.clicked() {
-                        app.add_transform(true);
-                    }
-
-                    let resp = ui.add_enabled(selected.is_some(), egui::Button::new("dup").small());
-                    let resp = hinted(
-                        resp,
-                        &mut app.ui_state,
-                        "Duplicate the selected transform (A)",
-                        "click: duplicate selected transform",
-                    );
-                    if resp.clicked() {
-                        if let Some(i) = selected {
-                            app.duplicate_transform_at(i);
-                        }
-                    }
-                });
             });
+    });
+}
+
+/// Add / duplicate / delete: the operations that act on the *list*, at the top
+/// of the rail that shows it.
+///
+/// Duplicate and delete read as list operations even though they need a
+/// selection — "one more like that one", "that one goes" — which is why they
+/// sit here rather than beside Disable and Rename in the detail pane, where
+/// the controls describe the selected transform itself. Both are shown
+/// disabled rather than hidden when there's no selection, per the house rule.
+fn draw_list_actions(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) {
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let resp = ui.add(egui::Button::new(format!("{} Add", icons::PLUS)).small());
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Add a fresh transform (Shift+A)",
+            "click: add a new transform",
+        );
+        if resp.clicked() {
+            app.add_transform(true);
+        }
+
+        let resp = ui.add_enabled(
+            selected.is_some(),
+            egui::Button::new(format!("{} Dup", icons::COPY)).small(),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Duplicate the selected transform (A)",
+            "click: duplicate selected transform",
+        );
+        if resp.clicked() {
+            if let Some(i) = selected {
+                app.duplicate_transform_at(i);
+            }
+        }
+
+        // The chaos game needs somewhere to send the point, so the last
+        // transform can't go — same rule as the context menu's Delete.
+        let can_delete = selected.is_some() && app.scene.transforms.len() > 1;
+        let resp = ui.add_enabled(can_delete, egui::Button::new(icons::TRASH).small());
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if selected.is_none() {
+                "Delete a transform (Del) — select one first"
+            } else if app.scene.transforms.len() > 1 {
+                "Delete the selected transform (Del)"
+            } else {
+                "A scene needs at least one transform"
+            },
+            "click: delete selected transform",
+        );
+        if resp.clicked() {
+            if let Some(i) = selected {
+                app.delete_transform_at(i);
+            }
+        }
     });
 }
 
@@ -289,6 +366,11 @@ fn draw_tab(
     let tab_resp = ui
         .scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
             ui.set_width(ui.available_width());
+            // A tab is exactly one row of the rail's virtualization, whatever
+            // its content happens to measure. Without this the row pitch and
+            // `TAB_HEIGHT` disagree and the list mis-virtualizes — see the
+            // constant's own note.
+            ui.set_min_height(TAB_HEIGHT);
             // Reserved now, sized after layout: `max_rect()` is all remaining
             // space, not this tab.
             let bg_idx = ui.painter().add(egui::Shape::Noop);
@@ -361,7 +443,7 @@ fn draw_tab(
             });
 
             let mut rect = ui.min_rect();
-            rect.max.y = rect.min.y + TAB_HEIGHT - 4.0;
+            rect.max.y = rect.min.y + TAB_HEIGHT - TAB_GAP;
             // Selected tabs run past the rail's right edge so no border or gap
             // separates them from the detail pane.
             if selected {
@@ -387,13 +469,10 @@ fn draw_tab(
             }
 
             // Relative chaos weight, as a bar along the tab's bottom edge.
-            let frac = (row.weight / max_weight).clamp(0.0, 1.0);
-            let bar_w = (rect.width() - 16.0) * frac;
+            let track = weight_bar_track(rect);
+            let bar_w = track.width() * (row.weight / max_weight).clamp(0.0, 1.0);
             if bar_w > 0.5 {
-                let bar = egui::Rect::from_min_size(
-                    egui::pos2(rect.min.x + 8.0, rect.max.y - 3.0),
-                    egui::vec2(bar_w, 2.0),
-                );
+                let bar = egui::Rect::from_min_size(track.min, egui::vec2(bar_w, BAR_THICKNESS));
                 let color = if row.enabled {
                     accent.gamma_multiply(0.8)
                 } else {
@@ -423,24 +502,52 @@ fn draw_tab(
     // Registered *after* the tab, so egui hands it the pointer inside its own
     // strip — later registration wins. That puts the most-adjusted
     // per-transform value under the pointer that is already there to select the
-    // row, which is the whole argument for it.
+    // row, which is the whole argument for it. It is also why the strip has to
+    // be small and has to *say* where it is: everything it covers is a place
+    // where clicking does not do the thing the tab under it advertises.
     //
     // Multiplicative, like the scroll gesture and the , / . keys, rather than
     // an absolute position-to-weight mapping. An absolute mapping would be a
     // feedback loop for whichever transform is currently the largest: the bar
     // is drawn relative to the maximum, so dragging the maximum wider changes
     // the scale it is measured against and the bar never moves.
-    let mut bar_rect = tab_resp.rect;
-    bar_rect.min.y = bar_rect.max.y - 8.0;
-    bar_rect.min.x += 8.0;
-    bar_rect.max.x -= 8.0;
+    let mut body = tab_resp.rect;
+    body.max.y -= TAB_GAP;
+    let track = weight_bar_track(body);
+    let bar_rect = egui::Rect::from_center_size(
+        track.center(),
+        egui::vec2(track.width(), BAR_GRAB),
+    );
     let bar_resp = ui.interact(
         bar_rect,
         ui.id().with(("weight_bar", i)),
         egui::Sense::drag(),
     );
-    if bar_resp.hovered() || bar_resp.dragged() {
+    let bar_active = bar_resp.hovered() || bar_resp.dragged();
+    if bar_active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        // Say which of the two controls stacked here the pointer is on. The
+        // cursor alone can't: it changes at the top of the app's window
+        // furniture and is nowhere near the thing it's talking about, and a
+        // tab that looks identical whether a click will select it or drag its
+        // weight is a tab that surprises you every time it does the second.
+        //
+        // Drawn from the parent painter, after the tab's own shapes, so it
+        // lands on top of the bar rather than needing last frame's hover
+        // state to paint inside it.
+        let painter = ui.painter();
+        let grown = egui::Rect::from_center_size(
+            track.center(),
+            egui::vec2(track.width(), BAR_THICKNESS * 2.0),
+        );
+        // The full track first: hovering says how much room the value has to
+        // move in, which is the one thing a bar drawn relative to the maximum
+        // can't show while it's short.
+        painter.rect_filled(grown, 1.0, ui.visuals().widgets.inactive.bg_fill);
+        let frac = (row.weight / max_weight).clamp(0.0, 1.0);
+        let mut fill = grown;
+        fill.max.x = fill.min.x + grown.width() * frac;
+        painter.rect_filled(fill, 1.0, color32_from_vec3(row.color));
     }
     let bar_resp = hinted(
         bar_resp,
@@ -472,6 +579,18 @@ fn draw_tab(
             ui.close();
         }
     });
+}
+
+/// Where a tab's weight bar is drawn, given the tab's painted body rect: a
+/// `BAR_THICKNESS` strip along the bottom edge, inset from both ends.
+///
+/// One function so the painted bar and the strip you grab it by cannot drift
+/// apart — the grab strip is this rect grown to `BAR_GRAB` about its centre.
+fn weight_bar_track(body: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(body.min.x + BAR_INSET, body.max.y - 1.0 - BAR_THICKNESS),
+        egui::vec2((body.width() - 2.0 * BAR_INSET).max(0.0), BAR_THICKNESS),
+    )
 }
 
 /// One transform's context menu. Shared by its row in this window and by
@@ -652,16 +771,21 @@ fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         // This used to open an inline editor over in the *rail*, six rows away
         // from the Name field sitting right below it — two visible rename
         // controls in one window that put your caret in different places, which
-        // is worse than either alone. It focuses the pane's own field now, so
-        // the button and the field are one affordance rather than two. The
+        // is worse than either alone. It opens the header's own editor now, so
+        // the button and the name are one affordance rather than two. The
         // rail's inline editor is still there, reached by double-clicking a tab
-        // where the name is actually drawn.
+        // where the name is also drawn.
+        //
+        // Kept even though the header name is click-to-edit: click-to-edit is
+        // invisible until you hover the right four words, and this button is
+        // what says the gesture exists.
         let resp = ui.add(egui::Button::new("Rename").small());
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Put the caret in this transform's Name field, below. \
-             Double-clicking its tab in the rail edits it there instead.",
+            "Edit this transform's name, up in the header. Clicking the name \
+             itself does the same; double-clicking its tab in the rail edits \
+             it there instead.",
             "click: rename this transform",
         );
         if resp.clicked() {
@@ -814,20 +938,20 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
 
     // Header repeats the selected row's swatch and name so it's unambiguous
     // which row the fields below belong to — the list is a selector, and this
-    // is the detail view for whatever it has selected.
+    // is the detail view for whatever it has selected. The name here is also
+    // the *only* place the pane edits it: see `draw_header_name`.
     let name = app
         .scene
         .transform_names
         .get(idx)
         .and_then(|n| n.clone())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| format!("T{}", idx));
+        .unwrap_or_default();
     let color = app.scene.colors.get(idx).copied().unwrap_or(Vec3::ONE);
     let n = app.scene.transforms.len();
     ui.horizontal(|ui| {
         let (swatch, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
         ui.painter().rect_filled(swatch, 2.0, color32_from_vec3(color));
-        ui.label(egui::RichText::new(&name).strong());
+        draw_header_name(ui, app, idx, &name);
         ui.label(egui::RichText::new(format!("(T{})", idx)).weak().small());
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -885,15 +1009,18 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     let mut cache = app.ui_state.trs_cache.take().unwrap();
     let mut editing = false;
 
-    // Four blocks with headings, rather than fifteen-odd controls in a flat
-    // stack with two anonymous rules doing all the grouping work.
+    // Blocks with headings, rather than fifteen-odd controls in a flat stack
+    // with two anonymous rules doing all the grouping work.
     //
     //   Shape       position, rotation, scale — already together
     //   Behaviour   weight *and* variations: what this map does in the chaos
     //               game. The two controls that most define the transform, and
     //               they used to sit at opposite ends with colour in between.
     //   Appearance  colour, colour value, colour speed
-    //   Identity    name
+    //
+    // There was an `Identity` block too, holding one Name field. It's gone:
+    // the name is edited in the header that already displays it (see
+    // `draw_header_name`), which is both nearer and one fewer heading.
     //
     // Headings rather than disclosure sections: `todo.txt` is explicit that
     // hidden bits are the problem and not the solution, and that instinct is
@@ -925,9 +1052,6 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
 
     block_heading(ui, "Appearance");
     draw_appearance(ui, app, idx);
-
-    block_heading(ui, "Identity");
-    draw_identity(ui, app, idx);
 }
 
 fn drag_row(
@@ -1893,38 +2017,80 @@ fn draw_orbit_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
 /// can put the caret in it (see `draw_transform_actions`).
 pub const NAME_FIELD_ID: &str = "fracturize_inspector_name";
 
-fn draw_identity(ui: &mut egui::Ui, app: &mut App, idx: usize) {
-    let mut name = app
-        .scene
-        .transform_names
-        .get(idx)
-        .and_then(|n| n.clone())
-        .unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.label("Name");
-        let id = egui::Id::new(NAME_FIELD_ID);
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut name)
-                .id(id)
-                .desired_width(140.0)
-                .hint_text("unnamed"),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Label shown in the list and the gizmo overlay. Double-clicking the \
-             transform's tab in the rail edits it there instead.",
-            "type: rename this transform",
-        );
-        if resp.changed() {
-            app.rename_transform(idx, if name.trim().is_empty() { None } else { Some(name.clone()) });
+/// The pane header's name: a label until it's clicked, a text field after.
+///
+/// This is the *only* place the pane edits a name. It used to carry a whole
+/// "Identity" block whose entire content was one Name field — last of five
+/// headings, below the variations and the colour, at the bottom of a pane you
+/// have to scroll to reach on any transform with a few variations on it. A
+/// heading for one field is furniture that doesn't earn its rule and its
+/// label, and putting the most-edited property of a transform furthest from
+/// the header that already displays it is exactly backwards.
+///
+/// Click-to-edit-in-place, so the name is edited where it is read. The gesture
+/// matches the rail's own double-click-to-rename (single click here, because a
+/// single click on the header has nothing else to mean — over in the rail it
+/// selects the row).
+fn draw_header_name(ui: &mut egui::Ui, app: &mut App, idx: usize, name: &str) {
+    // An editor left open by a selection change belongs to the transform it
+    // was opened on, not to whatever is selected now.
+    if app.ui_state.editing_name.as_ref().is_some_and(|(i, _)| *i != idx) {
+        app.ui_state.editing_name = None;
+    }
+    // The action row's Rename button asks for the caret by opening this.
+    if app.ui_state.focus_name_field {
+        app.ui_state.focus_name_field = false;
+        app.ui_state.editing_name = Some((idx, name.to_owned()));
+    }
+
+    if app.ui_state.editing_name.is_some() {
+        let resp = {
+            let (_, buf) = app.ui_state.editing_name.as_mut().unwrap();
+            ui.add(
+                egui::TextEdit::singleline(buf)
+                    .id(egui::Id::new(NAME_FIELD_ID))
+                    .desired_width(150.0)
+                    .hint_text("unnamed"),
+            )
+        };
+        resp.request_focus();
+        let enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
+        if escape {
+            app.ui_state.editing_name = None;
+        } else if enter || resp.lost_focus() {
+            if let Some((i, text)) = app.ui_state.editing_name.take() {
+                let trimmed = text.trim();
+                app.rename_transform(
+                    i,
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_owned()) },
+                );
+            }
         }
-        // The action row's Rename button asks for the caret to land here.
-        if app.ui_state.focus_name_field {
-            app.ui_state.focus_name_field = false;
-            resp.request_focus();
-        }
-    });
+        return;
+    }
+
+    // Unnamed transforms say so rather than repeating the `(T3)` index label
+    // sitting immediately to their right, which is what the fallback name did.
+    let text = if name.trim().is_empty() {
+        egui::RichText::new("unnamed").weak().italics()
+    } else {
+        egui::RichText::new(name).strong()
+    };
+    let resp = ui.add(egui::Label::new(text).sense(egui::Sense::click()).selectable(false));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "This transform's label, shown in the rail and on its gizmo. Click to \
+         edit it here; double-clicking its tab in the rail edits it there.",
+        "click: rename this transform",
+    );
+    if resp.clicked() {
+        app.ui_state.editing_name = Some((idx, name.to_owned()));
+    }
 }
 
 fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {

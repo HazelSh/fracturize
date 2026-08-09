@@ -1505,6 +1505,11 @@ impl ApplicationHandler for AppWrapper {
 
             WindowEvent::RedrawRequested => {
                 app.update();
+                // Last frame's egui layout is what says whether the pointer is
+                // parked on a panel; a frame of lag is nothing against a
+                // two-second timer, and asking before `run_ui` keeps this out
+                // of the middle of the frame's own bookkeeping.
+                app.update_cursor_visibility(egui.ctx.is_pointer_over_egui());
 
                 // Handle --screenshot mode: take screenshot after delay and exit
                 if self.args.screenshot && app.frame_count == self.args.delay {

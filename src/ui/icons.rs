@@ -91,3 +91,16 @@ pub const SHUFFLE: &str = "\u{E424}";
 pub const LOCK: &str = "\u{E308}";
 /// Dimension-lock toggle: unlocked — Phosphor `lock-open`, mirror of `LOCK`.
 pub const LOCK_OPEN: &str = "\u{E30A}";
+
+/// Add a new thing to a list (Transforms rail) — Phosphor `plus`. Located the
+/// same way as the block above: `play` (E3D0, already trusted here) anchors
+/// that stretch of the sheet, and `plus` sits two even codepoints along.
+///
+/// Note this font's PUA is *even*-codepointed — the odd slots between these
+/// are unmapped — so a neighbouring icon is +2, not +1.
+pub const PLUS: &str = "\u{E3D4}";
+/// Duplicate the selected thing (Transforms rail) — Phosphor `copy`, the two
+/// overlapping sheets. Picked over `copy-simple` (E1CC, a single sheet), which
+/// at button size is hard to tell from `file`. `cube` (E1DA) anchors this
+/// stretch of the sheet.
+pub const COPY: &str = "\u{E1CA}";

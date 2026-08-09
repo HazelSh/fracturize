@@ -18,6 +18,7 @@ use crate::render_job::{
 };
 
 use super::hints::hinted;
+use super::icons;
 
 /// The app's established "this is healthy/good" green — the p99 sparkline in
 /// `ui::status_bar` uses the same value for a frametime under budget. Reused
@@ -273,7 +274,8 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let params = app.ui_state.render_job.params();
         let named = !params.out_path.as_os_str().is_empty();
-        let resp = ui.add_enabled(named, egui::Button::new("Start"));
+        let resp =
+            ui.add_enabled(named, egui::Button::new(format!("{} Start", icons::PLAY)));
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -297,7 +299,7 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
             app.start_job(params);
         }
 
-        let resp = ui.button("Close");
+        let resp = ui.button(format!("{} Close", icons::X));
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -793,6 +795,18 @@ enum BarState {
     Done,
 }
 
+/// A progress bar's percentage caption: `"100.00%"` down to `"  0.00%"`, in a
+/// fixed six-character-plus-sign budget, monospace.
+///
+/// Six characters is the exact width of the widest value it can print, so the
+/// caption never changes length and the two bars' readouts line up with each
+/// other however far along they each are.
+fn percent(fraction: f32) -> egui::WidgetText {
+    egui::RichText::new(format!("{:>6}%", super::num::fixed(fraction * 100.0, 2)))
+        .monospace()
+        .into()
+}
+
 fn bar_state(current: Stage, bar: Stage, fraction: Option<f32>) -> BarState {
     match current.cmp(&bar) {
         std::cmp::Ordering::Less => BarState::NotStarted,
@@ -814,19 +828,24 @@ fn progress_row(ui: &mut egui::Ui, label: &str, state: BarState, allow_pulse: bo
             [60.0, ui.spacing().interact_size.y],
             egui::Label::new(egui::RichText::new(label).small()),
         );
-        let (fraction, text, animate, fill) = match state {
-            BarState::NotStarted => (0.0, "not started".to_string(), false, None),
-            BarState::Active(Some(f)) => {
-                (f, format!("{:>3}%", (f * 100.0).round() as i32), false, None)
-            }
-            // No fraction while active means the underlying phase hasn't
-            // reported one — either it's the genuinely-unknown-extent case
-            // (encoding) or a brief gap right as a phase starts, before its
-            // first progress report arrives. Only the former pulses.
-            BarState::Active(None) if allow_pulse => (0.0, "working…".to_string(), true, None),
-            BarState::Active(None) => (0.0, "  0%".to_string(), false, None),
-            BarState::Done => (1.0, "done".to_string(), false, Some(DONE_GREEN)),
-        };
+        let (fraction, text, animate, fill): (f32, egui::WidgetText, bool, Option<egui::Color32>) =
+            match state {
+                BarState::NotStarted => (0.0, "not started".into(), false, None),
+                // Two decimal places, not whole percent. A whole-percent
+                // readout on an hours-long render sits on the same number for
+                // minutes at a time, which is indistinguishable from a job that
+                // has wedged — precisely when you most want to know it hasn't.
+                // Monospace and right-aligned in a fixed budget for the usual
+                // reason (`ui::num`): these digits change every frame.
+                BarState::Active(Some(f)) => (f, percent(f), false, None),
+                // No fraction while active means the underlying phase hasn't
+                // reported one — either it's the genuinely-unknown-extent case
+                // (encoding) or a brief gap right as a phase starts, before its
+                // first progress report arrives. Only the former pulses.
+                BarState::Active(None) if allow_pulse => (0.0, "working…".into(), true, None),
+                BarState::Active(None) => (0.0, percent(0.0), false, None),
+                BarState::Done => (1.0, "done".into(), false, Some(DONE_GREEN)),
+            };
         let mut bar = egui::ProgressBar::new(fraction)
             .desired_width(ui.available_width())
             .text(text)
@@ -906,7 +925,11 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
 
     ui.separator();
     ui.horizontal(|ui| {
-        let resp = ui.button(if paused { "Resume" } else { "Pause" });
+        let resp = ui.button(if paused {
+            format!("{} Resume", icons::PLAY)
+        } else {
+            format!("{} Pause", icons::PAUSE)
+        });
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -924,7 +947,10 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
         // Two stages: `Cancel` arms it, it counts down disabled, then it comes
         // back as a red `Abort render`. See `ui::confirm::danger_button`.
         if cancelling {
-            let resp = ui.add_enabled(false, egui::Button::new("Aborting…"));
+            let resp = ui.add_enabled(
+                false,
+                egui::Button::new(format!("{} Aborting…", icons::TRASH)),
+            );
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -936,6 +962,7 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
                 ui,
                 &mut app.ui_state,
                 cancel_arm,
+                icons::TRASH,
                 "Cancel",
                 "Abort render",
                 "Stop the render and throw it away",
@@ -950,7 +977,7 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             }
         }
 
-        let resp = ui.button("Close");
+        let resp = ui.button(format!("{} Close", icons::X));
         let resp = hinted(
             resp,
             &mut app.ui_state,

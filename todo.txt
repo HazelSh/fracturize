@@ -69,34 +69,35 @@
 ---- UI restructure.
  -- WIP: adding text labels to icons
   - [DONE] need to also add icons to text buttons!
-   - File menu (New/Save/Save as/Screenshot/Render job/Quit), undo+redo, camera panel
-     (level, save current, reset, play/stop), explore (mutate/undo/redo), save-as modal,
-     unsaved-changes modal. new codepoints added to icons.rs: SAVE TRASH QUIT CAMERA STACK
-     UNDO REDO RESET TARGET SHUFFLE -- each verified by rendering Phosphor.ttf's cmap to a
-     contact sheet and looking at the glyph, not guessed.
    - left text-only on purpose: readouts (scene identity, point count), "+ Add key" (icon
      would double the literal "+"), checkboxes and segmented radios, and scene/view name
      rows (domain objects -- the icons.rs convention says glyphs go on actions, not things).
-   - still needs it, in files another agent held: ui/render_job.rs "Aborting…" and the
-     danger_button labels ("Cancel" / "Abort render") at :715.
- -- break out save, save as, etc into scene browser, rename to files/open?
- -- break out renderer to toplayer option, "render" to something else -- 'view' / 'display'? etc
- -- no hidden bits in render -- color dropdown thing with palette octaves, collapsable infzoom bits
-
----- trying to select transforms in the transforms window fiddly and annoying
+   - [DONE] the ones another agent was holding: render_job.rs now has icons on Start (play),
+     Close (x), Pause/Resume (pause/play), "Aborting…" and the danger_button pair
+     (trash). danger_button takes the icon as its own argument and leads all three
+     captions with it -- the countdown included, so the glyph doesn't come and go
+     mid-arm. two new codepoints verified off a rendered contact sheet: plus E3D4,
+     copy E1CA (this font's PUA is even-codepointed; neighbours are +2, not +1).
+ -- rename "render" to something else -- 'view' / 'display'? etc? awkward
+ 
+---- [DONE] trying to select transforms in the transforms window fiddly and annoying
  -- click&drag for transform-weight bar under transform *way* too big on the contact are
   - & doesn't show on-hover what clicks will select the transform vs what will put you in drag-the-weight mode
-   - possibly just delete the feature? 
+   - possibly just delete the feature?
+ -- kept the feature, fixed the two real complaints. it was 8pt of a 21pt row -- 40% of every
+    tab, the whole lower half of the name -- registered after the tab so it silently won the
+    pointer. now a 6pt strip centred on the drawn bar, 20% of a 30pt row, over the bar and
+    nothing else.
+ -- and it shows itself: hovering grows it into a full-width track with the value filled in,
+    so you can see both that this strip is a control and how much room the value has. the
+    cursor change was the only signal before, and it happens at the top of the screen,
+    nowhere near the thing it's talking about.
 
 ---- [DONE ALREADY? verify] cursor for mouse actions!
  -- click -> trackball motion of scene, mid-click -> drag scene, rightclick -> roll scene
   - & scroll -> zoom scene. all need to activate cursor icon as-appropriate!
    - may need to look hard for trackball-motion icon...
  -- hand when mouseover gizmos, etc.
- -- this reads as already shipped at HEAD, not by this pass: app.rs sets ZoomIn/ZoomOut on
-    scroll (debounced through a signed accumulator so a stray step doesn't flip it), Grab on
-    gizmo hover, Grabbing on orbit/gizmo drag, Move on pan, EwResize on roll. winit has no
-    trackball cursor, and set_drag_cursor says so in a comment. left in the file to verify.
 
 ---- [SKIPPED - needs your call] "color value" needs to be high by default! 0.5 means
      effectively no color when adding color
@@ -125,7 +126,7 @@ Ask for papers to implement?
 
 Ask for scenes & transforms to enable
  -- lotus blooms 
- -- Julia
+ -- Julia - have variation, see what can be drawn?
 
 Symmetries
  -- in the format 
@@ -189,12 +190,30 @@ Do default-orbit as camera yaw? orient to
 -- camera-path is wrong for infinite-zoom scenes -- it shows it looping back, not forward
  - probably needs to show partial, fade it out with dashed line...?
 
--- transforms list weirdness
+-- [DONE] transforms list weirdness
  - add/dup need to be at top, also need other right-click controls, disable/delete
  - list not using full height?
  - odd extra spacing
+ - the last two were ONE bug, and it explains the first as well. show_rows() was told each
+   tab is 30pt; a tab actually laid out at ~21pt (one interact_size row + spacing). so egui
+   drew viewport/30 = 11 tabs and stopped -- nine of menger.toml's twenty were unreachable --
+   the 11 drawn filled 231 of the 320pt viewport, leaving ~90pt of dead rail, and the
+   scrollbar sized itself to 600pt of content that was 420pt. tabs now occupy TAB_HEIGHT.
+ - full height: the list had a hardcoded max_height(320.0), so a taller window grew empty
+   rail rather than showing more transforms. takes available_height() now.
+ - add/dup at the top, with delete alongside them (icons: plus / copy / trash). deliberately
+   NOT disable: every row already carries an eye toggle, and the pane's own argument for
+   keeping per-transform state on the transform's side still holds. say the word if you want
+   the whole context menu replicated in that row.
 
--- mouse should fade-out after 2s not moving while over scene/bg (but not while over UI element)
+-- [DONE] mouse should fade-out after 2s not moving while over scene/bg (but not while over UI element)
+ - view mode only, per your call. hides after 2s still; any motion, click or wheel notch
+   brings it back. held drags and the pointer being over a panel both hold it.
+ - no fade -- drawn one frame, not the next. noted in AGENTS.md as not-an-exception to the
+   zero-animation rule: the cursor is the OS's furniture, not our chrome.
+ - the decision is a free function (cursor_should_hide) with five unit tests, because
+   "did it hide?" is otherwise only answerable with a mouse and a stopwatch. verified live
+   too, both modes, with an x11grab that draws the pointer.
 
 -- [DONE-ish] points count needs to go by OOMs / exp/log scaling, not linear in Ms of points.
  - both sliders were *already* logarithmic (since their first commit). the real bug behind
@@ -412,10 +431,26 @@ slight delay on the pointcount ramp-up after editing?
     a forgotten alias now fails safe though -- it rejects a legacy key loudly rather than
     silently swallowing a typo.
 
----- delete "identity" section in transforms window, make transform name at top of window  click-to-edit
+---- [DONE] delete "identity" section in transforms window, make transform name at top of window  click-to-edit
  -- dropdown or in place?
+ -- in place. click the header name, it becomes a field in the same spot; Enter or click-away
+    commits, Esc cancels. Identity block and its heading are gone.
+ -- the header no longer says "T0 (T0)" for an unnamed transform: it reads a weak italic
+    "unnamed" beside the index label, which is also the field's hint text.
+ -- kept the action row's Rename button, now pointed at the header field. click-to-edit is
+    invisible until you hover the right four words; that button is what says it's there.
 
----- full undo should mark file undirty
+---- [DONE] full undo should mark file undirty
+ -- the dirty bit is a *position* now, not a flag. every history entry carries a unique
+    serial; App remembers which one was on top when the scene was last written, and is_dirty
+    compares. so undo past the save point reads clean, and redo forward past it reads dirty
+    again -- neither needed a special case, they just move the history.
+ -- fails safe: if the caps evict the entry you saved at, it can never compare equal again
+    and the scene stays dirty rather than claiming to be a file it can't get back to.
+ -- one subtle one closed on the way: a *coalesced* commit takes a fresh serial even though
+    it adds no entry, or saving mid-drag and dragging on within the 1s window would leave the
+    file reading clean while the scene moved.
+ -- four new tests in history.rs; verified live (mutate -> "*menger.toml", Ctrl+Z -> clean).
 
 ---- needs an AI button! "LLM edit"
  -- gives: freeform text field, goes to configured local LLM or agent, asks for scene change or ideas.
@@ -424,12 +459,19 @@ slight delay on the pointcount ramp-up after editing?
  -- mutate over strength
  -- undo/redo grouped with history
 
----- width-controlled buttons with icons (play/pause, view/edit mode) should hard-left align the icon
+---- [DONE] width-controlled buttons with icons (play/pause, view/edit mode) should hard-left align the icon
  -- actually just left-align the whole textbox, icon and text?
+ -- the whole thing, icon and text, as you guessed. egui 0.35 centres a button's atoms inside
+    min_size, so appending an egui::Atom::grow() after the text spends the slack on the right.
+    applied to all three pinned-width buttons: point count, Edit/View Mode, Play/Pause.
+ -- written up next to icon_button_width in num.rs, since pinning a width without pinning the
+    caption to one end of it just moves the same jitter inside the control.
 
----- dimension-lock icon is now 1px different between open/close
+---- [SKIPPED - your call] dimension-lock icon is now 1px different between open/close
 
----- render job needs to go to %00.00 at least -- people will do hours-long renders.
+---- [DONE] render job needs to go to %00.00 at least -- people will do hours-long renders.
+ -- was {:>3}% (whole percent). now two decimals, monospace, in a fixed six-character budget
+    so the two bars' readouts line up and neither changes length. seen live at "  4.17%".
 
 ---- spots in bg on mp4 renders?
  -- check on .avif as well?

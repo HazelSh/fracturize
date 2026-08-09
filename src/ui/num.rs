@@ -162,6 +162,23 @@ fn galley_width(ui: &egui::Ui, font: &egui::FontId, text: &str) -> f32 {
 /// flips. Same defect as an unstable numeric cell, just with words instead of
 /// digits.
 ///
+/// **Pin the width, then pin the caption to one end of it.** egui centres a
+/// button's atoms inside `min_size`, so a widened button holds its *neighbours*
+/// still while its own icon and text slide left and right by half the
+/// difference every time the caption changes length — the same jitter, moved
+/// inside the control. Append an `egui::Atom::grow()` after the text to spend
+/// the slack on the right and hard-left-align the caption:
+///
+/// ```ignore
+/// let w = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
+/// ui.add(egui::Button::new((icons::PLAY, "Play", egui::Atom::grow()))
+///     .min_size(egui::vec2(w, 0.0)));
+/// ```
+///
+/// Left rather than centred because the icon is the part you aim at and
+/// recognise, and a column of buttons whose icons don't line up vertically
+/// reads as a column of buttons that are subtly misaligned.
+///
 /// Deliberately not [`mono_width`]: these are icon+word pairs set in the
 /// toolbar's proportional face, where a fixed per-character advance doesn't
 /// hold, and switching a single toggle to monospace would look out of place
