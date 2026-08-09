@@ -36,6 +36,12 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     ));
     let font = egui::FontId::proportional(FONT_SIZE);
     let selected = app.selected_transform();
+    // Hovering a gizmo promotes its label to the same solid backdrop the
+    // selected one gets. Bare white text vanishes against a bright attractor,
+    // and reading a name is how you decide whether this is the transform you
+    // meant — which matters most *before* you have selected it, exactly when
+    // the label was hardest to read.
+    let hovered = app.hovered_transform();
 
     // Offset magnitude, printed at the midpoint of the offset vector
     // src/indicators.rs draws from the origin to the selected transform.
@@ -66,10 +72,14 @@ pub fn draw(ctx: &egui::Context, app: &App) {
 
         let pos = egui::pos2(sx / ppp + 8.0, sy / ppp - 7.0);
 
-        if selected == Some(i) {
+        if selected == Some(i) || hovered == Some(i) {
             let galley = painter.layout_no_wrap(label, font.clone(), egui::Color32::BLACK);
             let rect = egui::Rect::from_min_size(pos, galley.size()).expand2(egui::vec2(4.0, 2.0));
-            painter.rect_filled(rect, 3.0, egui::Color32::from_white_alpha(225));
+            // The hovered-but-unselected label sits a touch more opaque, so
+            // scrubbing across a crowded scene reads as one name at a time
+            // rather than two competing plates.
+            let plate = if selected == Some(i) { 225 } else { 245 };
+            painter.rect_filled(rect, 3.0, egui::Color32::from_white_alpha(plate));
             painter.galley(pos, galley, egui::Color32::BLACK);
         } else {
             let alpha: u8 = if app.is_transform_enabled(i) { 200 } else { 80 };

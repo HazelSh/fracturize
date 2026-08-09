@@ -234,6 +234,79 @@ fn create_pipeline(
     })
 }
 
+/// The x-ray pipeline: same shader, same vertex layout, but it neither tests
+/// nor writes depth.
+///
+/// This is what puts a buried gizmo back on screen. The point cloud writes
+/// depth and the gizmos test against it, so a dense attractor hides them
+/// completely — while `pick.rs`, which is pure screen-space projection with no
+/// depth awareness at all, goes on offering them to the cursor. That gap is the
+/// bug behind "zooming breaks horribly as things move to under the scrollwheel
+/// without visibility": you were dragging things you could not see.
+///
+/// Depth *write* stays off as well as depth test. A pass that ignored depth but
+/// still wrote it would stamp the gizmo's depth over the fractal and punch a
+/// hole in everything drawn afterwards.
+fn create_xray_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    vertex_buffer_layout: wgpu::VertexBufferLayout<'_>,
+    samples: u32,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gizmo_xray_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[vertex_buffer_layout],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// Instance slots kept spare for symmetry orbit ghosts.
 ///
 /// Sized for the largest group this can draw — icosahedral with a mirror, 120,
@@ -242,6 +315,21 @@ fn create_pipeline(
 /// motif is selected, is a buffer write instead of a pipeline rebuild: these
 /// are things you do by dragging.
 const MAX_GHOSTS: u32 = 120;
+
+/// One extra instance slot, past the ghosts, holding a copy of the selected
+/// transform's matrix for the x-ray pass.
+///
+/// A slot rather than a new binding or a dynamic offset: the ghost mechanism
+/// already proves the pattern, and "draw the same geometry from another matrix
+/// at another alpha" is exactly what an instance slot is for. Costs one matrix
+/// and one float.
+const XRAY_SLOT: u32 = 1;
+
+/// How faint the buried part of the selected gizmo reads.
+///
+/// Low enough that it can't be mistaken for the real thing sitting in front of
+/// the fractal, high enough to aim at.
+const XRAY_ALPHA: f32 = 0.3;
 
 pub struct GizmoRenderer {
     /// Pipeline for edges + dots (depth write ON)
@@ -259,10 +347,15 @@ pub struct GizmoRenderer {
     alpha_buffer: wgpu::Buffer,
     /// Hovered part uniform: [instance (0 = none), part id, 0, 0]
     highlight_buffer: wgpu::Buffer,
+    /// Draws the selected gizmo, and every origin dot, ignoring depth so a
+    /// buried gizmo is still visible. See [`GizmoRenderer::draw`].
+    xray_pipeline: wgpu::RenderPipeline,
     /// Reference + one per transform. Ghosts live past this.
     instance_count: u32,
     /// Ghosts currently written, from `set_ghosts`.
     ghost_count: u32,
+    /// Whether the x-ray slot currently holds a transform worth drawing.
+    xray_active: bool,
 }
 
 impl GizmoRenderer {
@@ -280,7 +373,7 @@ impl GizmoRenderer {
         // Build transform storage buffer: instance 0 = identity, then one per
         // transform, then the ghost slots (written by `set_ghosts`).
         let instance_count = 1 + transforms.len() as u32;
-        let slots = (instance_count + MAX_GHOSTS) as usize;
+        let slots = (instance_count + MAX_GHOSTS + XRAY_SLOT) as usize;
         let mut matrices: Vec<[[f32; 4]; 4]> = Vec::with_capacity(slots);
         matrices.push(Mat4::IDENTITY.to_cols_array_2d());
         for spec in transforms {
@@ -395,8 +488,11 @@ impl GizmoRenderer {
         );
         let face_pipeline = create_pipeline(
             device, format, &shader, &pipeline_layout,
-            vertex_buffer_layout,
+            vertex_buffer_layout.clone(),
             false, samples, "gizmo_face_pipeline",
+        );
+        let xray_pipeline = create_xray_pipeline(
+            device, format, &shader, &pipeline_layout, vertex_buffer_layout, samples,
         );
 
         let camera_buffer = create_camera_buffer(device);
@@ -415,6 +511,8 @@ impl GizmoRenderer {
         Self {
             edge_dot_pipeline,
             face_pipeline,
+            xray_pipeline,
+            xray_active: false,
             bind_group,
             camera_buffer,
             vertex_buffer,
@@ -457,6 +555,31 @@ impl GizmoRenderer {
         let alphas = vec![alpha; n];
         let offset = self.instance_count as u64 * std::mem::size_of::<f32>() as u64;
         queue.write_buffer(&self.alpha_buffer, offset, bytemuck::cast_slice(&alphas));
+    }
+
+    /// Point the x-ray slot at the selected transform's matrix, or clear it.
+    ///
+    /// Only the selected one. Making every gizmo always-on-top would defeat the
+    /// G/Tab toggle that exists so the art can be looked at without wireframe
+    /// over it — and at twenty transforms it would be soup. The one you are
+    /// working on is the one you need to see through the fractal.
+    pub fn set_xray(&mut self, queue: &wgpu::Queue, matrix: Option<Mat4>) {
+        self.xray_active = matrix.is_some();
+        let Some(m) = matrix else { return };
+        let slot = self.instance_count + MAX_GHOSTS;
+
+        let stride = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
+        queue.write_buffer(
+            &self.transform_buffer,
+            slot as u64 * stride,
+            bytemuck::cast_slice(&[m.to_cols_array_2d()]),
+        );
+        let stride = std::mem::size_of::<f32>() as u64;
+        queue.write_buffer(
+            &self.alpha_buffer,
+            slot as u64 * stride,
+            bytemuck::cast_slice(&[XRAY_ALPHA]),
+        );
     }
 
     /// Set (or clear) the highlighted gizmo part. Instance 0 is the reference
@@ -530,8 +653,11 @@ impl GizmoRenderer {
 
     /// Draw gizmos in a render pass (should be called after the point cloud pass).
     ///
-    /// Draw order: edges+dots first (depth-write ON), then faces (depth-write OFF).
-    /// This ensures edges/dots are always visible and faces blend correctly.
+    /// Draw order: the x-ray pass first (no depth at all), then edges+dots
+    /// (depth-write ON), then faces (depth-write OFF). X-ray goes first so the
+    /// solid pass paints over it wherever the gizmo is genuinely visible — the
+    /// gizmo you can see looks exactly as it always did, and only the part
+    /// buried in the attractor shows through, faintly.
     ///
     /// Vertex buffer layout: [ref_edges_dots(60) | xform_edges_dots(60) | ref_faces(9) | xform_faces(9)]
     pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
@@ -545,6 +671,21 @@ impl GizmoRenderer {
         //   xform_edges_dots: 60 .. 120
         //   ref_faces:        120 .. 129
         //   xform_faces:      129 .. 138
+
+        // Pass 0: x-ray. Two draws, both ignoring depth.
+        render_pass.set_pipeline(&self.xray_pipeline);
+        if self.instance_count > 1 {
+            // Every transform's origin dot, at its normal alpha. The origin dot
+            // is the one part of an unselected gizmo you can grab, so it is the
+            // one part that must never be invisible while still taking clicks.
+            let dot = ed + EDGE_VERTS;
+            render_pass.draw(dot..dot + 6, 1..self.instance_count);
+        }
+        if self.xray_active {
+            // The selected transform's whole gizmo, faint.
+            let slot = self.instance_count + MAX_GHOSTS;
+            render_pass.draw(ed..ed * 2, slot..slot + 1);
+        }
 
         // Pass 1: edges + dots (depth write ON)
         render_pass.set_pipeline(&self.edge_dot_pipeline);

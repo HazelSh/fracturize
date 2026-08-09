@@ -1959,6 +1959,13 @@ impl App {
         self.selected_transform
     }
 
+    /// Which transform the pointer is over, if any — whichever part of its
+    /// gizmo is under the cursor. `src/ui/labels.rs` uses it to promote that
+    /// transform's name to a readable backdrop.
+    pub fn hovered_transform(&self) -> Option<usize> {
+        self.hovered.map(|hit| hit.transform)
+    }
+
     /// Select a transform from the Transforms window's list (or clear the
     /// selection). Gizmo clicks and Up/Down go through `selected_transform`
     /// directly; this is the same field, so both stay in sync automatically.
@@ -3308,6 +3315,14 @@ impl App {
             }
         }
         self.gizmo_renderer.set_ghosts(&self.gpu.queue, &ghosts);
+        // The selected gizmo also gets drawn ignoring depth, so a dense
+        // attractor can't hide the thing you're editing while `pick.rs` — which
+        // has no depth awareness at all — goes on offering it to the cursor.
+        let xray = key
+            .map(|(i, _)| i)
+            .and_then(|i| self.scene.transforms.get(i))
+            .map(|spec| spec.matrix);
+        self.gizmo_renderer.set_xray(&self.gpu.queue, xray);
         self.indicator_renderer.set_lines(&self.gpu.device, &verts);
     }
 

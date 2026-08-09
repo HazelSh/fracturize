@@ -263,6 +263,23 @@ the highlight uniform. Gizmo drags re-run the chaos game live; the fractal
 re-forms as you drag (sparse while moving, densifying when you pause — warmup
 refills in ~1s). Picking math lives in `pick.rs`, drag application in `app.rs`.
 
+Gizmos are drawn in three passes, in this order (`GizmoRenderer::draw`):
+**x-ray** (no depth test, no depth write), then **edges+dots** (depth-write on),
+then **faces** (depth-write off). The x-ray pass goes first so the solid pass
+paints over it wherever the gizmo is really visible: a visible gizmo looks
+exactly as it always did, and only the part buried in the attractor shows
+through, faintly. It draws two things -- every transform's origin dot, and the
+*selected* transform's whole gizmo. Not every gizmo in full: that would defeat
+the G/Tab toggle that exists so the art can be looked at. The origin dot is the
+one part of an unselected gizmo you can grab, so it is the one part that must
+never be invisible while still taking clicks. `XRAY_ALPHA` is the knob if the
+ghost reads too faint or too loud over a bright attractor.
+
+Hovering a gizmo also promotes that transform's name label to the solid
+backdrop the selected one gets (`src/ui/labels.rs`). Bare white text disappears
+against a bright attractor, and reading a name is how you decide whether this is
+the transform you meant -- which matters most before you have selected it.
+
 Three rules the gizmo geometry depends on:
 
 * **The tip handles scale by rewriting one matrix column, never by decomposing.**
