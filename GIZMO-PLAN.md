@@ -10,7 +10,7 @@
 > `XRAY_ALPHA` (0.3 reads quite faint over a bright attractor) and the roll
 > ring's neutral, which sits close to the reference tetrahedron's grey.
 
-Design for the next round of IFS transform gizmos. Nothing here is implemented.
+Design for the next round of IFS transform gizmos.
 Two Sonnet agents brainstormed the manipulation grammar and the legibility half
 separately; this is the synthesis, with their conclusions corrected where the
 code disagreed with them.
