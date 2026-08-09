@@ -207,6 +207,8 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | shift during a gizmo drag | fine: a fifth of the travel. Anchored, so pressing or releasing it mid-drag doesn't jump |
 | alt+drag an outer gizmo edge | snap the rotation to 15° |
 | alt+drag an axis endpoint | snap that axis's scale to 0.1 |
+| drag the ring around the selected gizmo | roll it about the camera's view axis, through its own origin |
+| alt+drag the ring | snap the roll to 15° (or the transform's symmetry-group step) |
 | alt+scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
@@ -272,6 +274,22 @@ no depth awareness, so every part of every gizmo used to be grabbable whether
 or not the attractor hid it. Now the pickable set is the visible set, and the
 contest shrinks from ~140 candidates at twenty transforms to ~9. The cost is
 one extra click to switch transforms, which is the order people work in anyway.
+
+The **roll ring** is painted in screen space through egui
+(`src/ui/gizmo_ring.rs`), not built as world geometry, and that is the honest
+choice rather than the cheap one: the view plane is a screen-space idea with no
+world shape to be faithful to. It also falls out that the ring is exactly
+screen-constant and costs no vertex-buffer churn — `indicators.rs` rebuilds only
+when the *matrix* changes, so a camera-facing ring built there would have sat
+still while the camera orbited around it. `pick::roll_ring` is the single
+definition of its centre and radius, called by both the drawing and the picking,
+because a ring you can see in one place and grab in another is worse than no
+ring. It is derived from the gizmo's projected silhouette so it always sits just
+outside the tetrahedron, and it is dashed at rest and solid while held — the one
+part whose held state *drops* its distinguishing mark rather than gaining one,
+which is how a ring reads as engaged. A circle also never degenerates, unlike
+the three local-axis rotate edges, which collapse to a line seen edge-on —
+exactly when you need another way round.
 
 Gizmos are drawn in three passes, in this order (`GizmoRenderer::draw`):
 **x-ray** (no depth test, no depth write), then **edges+dots** (depth-write on),

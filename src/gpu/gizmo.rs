@@ -617,6 +617,11 @@ impl GizmoRenderer {
                     GizmoPart::RotEdge(_) => 5, // x-z edge rotates around y
                     GizmoPart::Origin => 6,
                     GizmoPart::Tip(k) => 7 + k as u32,
+                    // The ring isn't part of the tetrahedron geometry -- it is
+                    // painted in screen space by `ui::gizmo_ring`, which reads
+                    // the hover state from `App::hovered` directly. Nothing in
+                    // this vertex buffer should light up for it.
+                    GizmoPart::Roll => u32::MAX,
                 };
                 [(t + 1) as u32, part_id, held as u32, 0]
             }

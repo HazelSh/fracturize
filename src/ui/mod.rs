@@ -26,6 +26,7 @@ pub mod explore;
 pub mod gradient;
 pub mod hints;
 pub mod icons;
+pub mod gizmo_ring;
 pub mod labels;
 pub mod num;
 pub mod radio;
@@ -351,6 +352,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     status_bar::draw(ui, app);
     step("status_bar", t, &mut timings);
     let t = std::time::Instant::now();
+    // Under the labels: a name should never be obscured by the ring
+    // encircling it.
+    gizmo_ring::draw(&ctx, app);
     labels::draw(&ctx, app);
     step("labels", t, &mut timings);
     let t = std::time::Instant::now();

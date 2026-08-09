@@ -341,6 +341,14 @@ enum GizmoDragMode {
     /// Dragging an outer edge: rotate around the transform's local axis
     /// (world direction `axis`, through the transform origin)
     Rotate { axis: Vec3, center: (f32, f32), start_angle: crate::rot::Angle },
+    /// Dragging the ring: roll about the camera's own view axis, through the
+    /// transform's origin.
+    ///
+    /// Carries the same three values as [`GizmoDragMode::Rotate`] and is driven
+    /// by exactly the same math — the only difference is where the axis came
+    /// from, and that the undo entry says "Roll". It is a separate variant
+    /// rather than a flag so that difference is visible at the call site.
+    Roll { axis: Vec3, center: (f32, f32), start_angle: crate::rot::Angle },
     /// Ctrl-drag anywhere on the gizmo: uniform scale, drag up = grow
     Scale { start_y: f32 },
 }
@@ -1963,6 +1971,19 @@ impl App {
         self.selected_transform
     }
 
+    /// Whether a roll drag is in progress — `ui::gizmo_ring` draws the ring
+    /// solid while it is.
+    pub fn rolling(&self) -> bool {
+        matches!(self.drag, Drag::Gizmo { mode: GizmoDragMode::Roll { .. }, .. })
+    }
+
+    /// Whether the pointer is over the roll ring. The ring is painted in screen
+    /// space rather than built as gizmo geometry, so it can't light up through
+    /// the highlight uniform the way the tetrahedron's parts do.
+    pub fn hovering_roll(&self) -> bool {
+        matches!(self.hovered, Some(hit) if hit.part == crate::pick::GizmoPart::Roll)
+    }
+
     /// Which transform the pointer is over, if any — whichever part of its
     /// gizmo is under the cursor. `src/ui/labels.rs` uses it to promote that
     /// transform's name to a readable backdrop.
@@ -2165,6 +2186,7 @@ impl App {
             GizmoPart::Tip(_) => hints::HINT_TIP,
             GizmoPart::Axis(_) => hints::HINT_AXIS,
             GizmoPart::RotEdge(_) => hints::HINT_ROT_EDGE,
+            GizmoPart::Roll => hints::HINT_ROLL,
         })
     }
 
@@ -2680,6 +2702,8 @@ impl App {
                 "Move".to_string()
             }
             GizmoDragMode::Rotate { .. } => "Rotate".to_string(),
+            // Its own verb, matching the camera's vocabulary for the same idea.
+            GizmoDragMode::Roll { .. } => "Roll".to_string(),
             GizmoDragMode::Scale { .. } => "Scale".to_string(),
             // Which axis, because "Scale" three times in the undo list doesn't
             // say what you'd be undoing.
@@ -2778,6 +2802,18 @@ impl App {
                         start_angle: crate::pick::screen_angle(center, self.cursor),
                     }
                 }
+                GizmoPart::Roll => {
+                    // The view axis, pointing back at the eye, so a clockwise
+                    // drag rolls the map clockwise on screen. Captured once:
+                    // the camera can't move mid-gizmo-drag.
+                    let axis = -self.camera.forward();
+                    let center = crate::camera::world_to_screen(origin, view_proj, w, h)?;
+                    GizmoDragMode::Roll {
+                        axis,
+                        center,
+                        start_angle: crate::pick::screen_angle(center, self.cursor),
+                    }
+                }
             }
         };
 
@@ -2817,7 +2853,12 @@ impl App {
                 m.w_axis = (start_origin + axis * (s - s0)).extend(1.0);
                 m
             }
-            GizmoDragMode::Rotate { axis, center, start_angle } => {
+            // One body for both: a roll is a rotation whose axis happens to be
+            // the camera's. Sharing the arm is what keeps the snap, the
+            // shortest-way-round and the group-step lookup from drifting
+            // between the two controls.
+            GizmoDragMode::Rotate { axis, center, start_angle }
+            | GizmoDragMode::Roll { axis, center, start_angle } => {
                 let angle = crate::pick::screen_angle(center, cursor);
                 // Shortest way round is right for a drag: nobody swings the
                 // pointer more than half a turn between two frames.

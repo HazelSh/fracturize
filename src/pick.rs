@@ -42,6 +42,45 @@ pub const EDGE_RADIUS_PX: f32 = 7.0;
 /// pretends the axis is bigger than it is.
 pub const MIN_AXIS_PX: f32 = 8.0;
 
+/// How far outside the gizmo's own silhouette the roll ring sits, in pixels.
+pub const RING_MARGIN_PX: f32 = 22.0;
+/// Smallest the roll ring may draw, so it stays grabbable around a transform
+/// that is tiny on screen.
+pub const RING_MIN_PX: f32 = 46.0;
+/// Half-width of the grabbable band around the drawn ring.
+pub const RING_BAND_PX: f32 = 9.0;
+
+/// Screen centre and radius of a transform's roll ring — the control that
+/// rotates it against the camera plane.
+///
+/// Derived from the gizmo's own projected silhouette rather than fixed, so the
+/// ring sits just outside the tetrahedron at any scale or camera distance and
+/// can't drift out of register when a tip handle is dragged to a wildly
+/// different length. One function because `pick.rs` and the drawing in
+/// `ui::gizmo_ring` must agree exactly: a ring you can see in one place and
+/// grab in another is worse than no ring.
+///
+/// A screen-space circle is the honest shape here. The view plane is a
+/// screen-space idea with no world geometry to be faithful to, and unlike the
+/// three local-axis rotate edges — which collapse to a line when seen edge-on,
+/// exactly when you need another way round — a circle never degenerates.
+pub fn roll_ring(
+    matrix: Mat4,
+    view_proj: Mat4,
+    w: f32,
+    h: f32,
+) -> Option<((f32, f32), f32)> {
+    let origin_s = world_to_screen(matrix.w_axis.truncate(), view_proj, w, h)?;
+    let mut reach: f32 = 0.0;
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        if let Some(e) = world_to_screen(matrix.transform_point3(axis), view_proj, w, h) {
+            let (dx, dy) = (e.0 - origin_s.0, e.1 - origin_s.1);
+            reach = reach.max((dx * dx + dy * dy).sqrt());
+        }
+    }
+    Some((origin_s, (reach + RING_MARGIN_PX).max(RING_MIN_PX)))
+}
+
 /// Which part of a gizmo was grabbed
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GizmoPart {
@@ -55,6 +94,9 @@ pub enum GizmoPart {
     /// An outer edge: rotate around the given local axis index
     /// (edge x-y rotates around z, y-z around x, x-z around y)
     RotEdge(usize),
+    /// The ring around the selected gizmo: roll it about the camera's own view
+    /// axis, through the transform's origin
+    Roll,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +231,16 @@ pub fn pick_gizmo(
                 if d <= EDGE_RADIUS_PX {
                     consider(d, GizmoHit { transform: i, part: GizmoPart::RotEdge(rot_axis) });
                 }
+            }
+        }
+
+        // The roll ring, last and with a positive bias: it encircles everything
+        // else, so wherever it overlaps a real handle the handle must win.
+        if let Some((c, r)) = roll_ring(*m, view_proj, w, h) {
+            let (dx, dy) = (cursor.0 - c.0, cursor.1 - c.1);
+            let off = ((dx * dx + dy * dy).sqrt() - r).abs();
+            if off <= RING_BAND_PX {
+                consider(off + 4.0, GizmoHit { transform: i, part: GizmoPart::Roll });
             }
         }
     }
@@ -437,6 +489,79 @@ mod tests {
         let hit = pick_gizmo(&[m], None, vp, (sx + 2.0, sy), 1280.0, 720.0).unwrap();
         assert_eq!(hit.transform, 0);
         assert_eq!(hit.part, GizmoPart::Origin);
+    }
+
+    /// The ring encircles the gizmo, so it must lose wherever it overlaps a
+    /// real handle — and win in the empty band outside them.
+    #[test]
+    fn the_roll_ring_is_grabbable_and_never_steals_a_handle() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.6),
+            glam::Quat::IDENTITY,
+            Vec3::ZERO,
+        );
+        let (c, r) = roll_ring(m, vp, 1280.0, 720.0).unwrap();
+
+        // On the band, away from everything else.
+        for turn in 0..8 {
+            let t = std::f32::consts::TAU * turn as f32 / 8.0;
+            let at = (c.0 + r * t.cos(), c.1 + r * t.sin());
+            let hit = pick_gizmo(&[m], Some(0), vp, at, 1280.0, 720.0);
+            assert_eq!(
+                hit.map(|h| h.part),
+                Some(GizmoPart::Roll),
+                "the ring should be grabbable at turn {turn}"
+            );
+        }
+
+        // The ring is derived from the silhouette, so it sits outside every
+        // tip — grabbing a tip must still give the tip.
+        for k in 0..3 {
+            let tip = m.transform_point3(match k {
+                0 => Vec3::X,
+                1 => Vec3::Y,
+                _ => Vec3::Z,
+            });
+            let (sx, sy) = world_to_screen(tip, vp, 1280.0, 720.0).unwrap();
+            let hit = pick_gizmo(&[m], Some(0), vp, (sx, sy), 1280.0, 720.0).unwrap();
+            assert_eq!(hit.part, GizmoPart::Tip(k), "the ring stole tip {k}");
+        }
+    }
+
+    /// The ring is screen-space furniture: scaling the transform moves it, but
+    /// it never collapses, because it has a floor.
+    #[test]
+    fn the_roll_ring_never_collapses() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        for scale in [0.0005f32, 0.01, 0.5, 3.0] {
+            let m = Mat4::from_scale_rotation_translation(
+                Vec3::splat(scale),
+                glam::Quat::IDENTITY,
+                Vec3::ZERO,
+            );
+            let (_, r) = roll_ring(m, vp, 1280.0, 720.0).unwrap();
+            assert!(r >= RING_MIN_PX, "scale {scale} gave a {r}px ring");
+            assert!(r.is_finite());
+        }
+    }
+
+    /// An unselected transform has no ring: it is a manipulator, and the whole
+    /// point of the selection rule is that manipulators belong to the selection.
+    #[test]
+    fn an_unselected_transform_has_no_ring() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.6),
+            glam::Quat::IDENTITY,
+            Vec3::ZERO,
+        );
+        let (c, r) = roll_ring(m, vp, 1280.0, 720.0).unwrap();
+        let at = (c.0 + r, c.1);
+        assert!(pick_gizmo(&[m], None, vp, at, 1280.0, 720.0).is_none());
     }
 
     #[test]

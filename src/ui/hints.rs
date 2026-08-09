@@ -24,6 +24,9 @@ pub const HINT_AXIS: &str =
 /// Dragging an outer gizmo edge
 pub const HINT_ROT_EDGE: &str =
     "drag: rotate around axis (shift: fine, alt: snap 15°) · alt+scroll: chaos weight";
+/// Dragging the ring around the selected gizmo
+pub const HINT_ROLL: &str =
+    "drag: roll against the camera view (shift: fine, alt: snap 15°) · alt+scroll: chaos weight";
 /// Nothing hinted, nothing hovered: the bare-viewport default
 pub const HINT_VIEWPORT: &str =
     "drag: orbit · shift/middle-drag: pan · right-drag: roll · scroll: zoom";
