@@ -11,6 +11,10 @@ use super::UiState;
 /// Dragging a gizmo's origin dot
 pub const HINT_ORIGIN: &str =
     "drag: move in view plane (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
+/// Hovering an *unselected* transform's origin dot — the only part of one that
+/// is on offer, and it only selects (see `pick::pick_gizmo`)
+pub const HINT_SELECT: &str =
+    "click: select this transform · alt+scroll: chaos weight";
 /// Dragging a gizmo's axis endpoint handle
 pub const HINT_TIP: &str =
     "drag: scale this axis (shift: fine, alt: snap 0.1) · drag past the origin to mirror";

@@ -198,7 +198,8 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | right-click a gizmo | that transform's context menu: duplicate / enable / delete / rename — the same menu its row in the Transforms window has |
 | scroll | zoom — **always**, whatever is under the pointer |
 | click empty space | deselect (the only way to clear a selection) |
-| drag a gizmo's origin dot | select + translate the transform in the view plane |
+| click an unselected gizmo's origin dot | select it, and nothing else — the press starts no drag at all, not even a camera orbit |
+| drag the selected gizmo's origin dot | translate the transform in the view plane |
 | drag an axis endpoint (tip dot) | scale that one axis; drag past the origin to mirror it |
 | drag an origin→axis gizmo edge | translate along that axis |
 | drag an outer gizmo edge | rotate around the third local axis (edge x-y rotates around z) |
@@ -262,6 +263,15 @@ recomputed". `try_grab_gizmo` now says so explicitly, via the `held` flag in
 the highlight uniform. Gizmo drags re-run the chaos game live; the fractal
 re-forms as you drag (sparse while moving, densifying when you pause — warmup
 refills in ~1s). Picking math lives in `pick.rs`, drag application in `app.rs`.
+
+**Only the selected transform is manipulable.** An unselected one offers its
+origin dot and nothing else, and that dot only selects. Tips, shafts and rotate
+edges belong to the transform you have already chosen. This is what closes the
+invisible-click hole: picking (`pick.rs`) is pure screen-space projection with
+no depth awareness, so every part of every gizmo used to be grabbable whether
+or not the attractor hid it. Now the pickable set is the visible set, and the
+contest shrinks from ~140 candidates at twenty transforms to ~9. The cost is
+one extra click to switch transforms, which is the order people work in anyway.
 
 Gizmos are drawn in three passes, in this order (`GizmoRenderer::draw`):
 **x-ray** (no depth test, no depth write), then **edges+dots** (depth-write on),

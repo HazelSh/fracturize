@@ -530,6 +530,10 @@ enum Drag {
     Pan,
     /// Right-drag on empty space: roll the camera about its view axis
     Roll,
+    /// The press landed on an unselected transform's origin dot and was spent
+    /// selecting it. Nothing follows: no transform edit, and no camera orbit
+    /// either, so the view doesn't swing off a click that was aimed at a dot.
+    Consumed,
     /// Left-drag on a gizmo: edit that transform live
     Gizmo {
         transform: usize,
@@ -2151,6 +2155,12 @@ impl App {
     pub fn hovered_hint(&self) -> Option<&'static str> {
         use crate::pick::GizmoPart;
         self.hovered.map(|hit| match hit.part {
+            // On an unselected transform the dot only selects, so promising a
+            // drag would be a lie — and it's the one part of one that's on
+            // offer at all.
+            GizmoPart::Origin if self.selected_transform != Some(hit.transform) => {
+                hints::HINT_SELECT
+            }
             GizmoPart::Origin => hints::HINT_ORIGIN,
             GizmoPart::Tip(_) => hints::HINT_TIP,
             GizmoPart::Axis(_) => hints::HINT_AXIS,
@@ -2390,6 +2400,11 @@ impl App {
                     self.update_hover();
                 }
             }
+            // The press already did its whole job (it selected something).
+            // Moving the pointer with the button still down must not start
+            // anything, or "click to select" would become "click to select and
+            // then drag whatever I happen to be over".
+            Drag::Consumed => {}
             Drag::Orbit => {
                 let dy = if self.prefs.invert_pitch { -dy } else { dy };
                 self.camera.orbit(dx, dy, self.prefs.orbit_style);
@@ -2464,7 +2479,9 @@ impl App {
     fn set_drag_cursor(&mut self) {
         use winit::window::CursorIcon;
         let icon = match self.drag {
-            Drag::None => return,
+            // Nothing is being dragged in either case, so the pointer keeps
+            // whatever hover icon it already had.
+            Drag::None | Drag::Consumed => return,
             Drag::Orbit | Drag::Gizmo { .. } => CursorIcon::Grabbing,
             Drag::Pan => CursorIcon::Move,
             // `winit` has no trackball or rotate cursor. Roll is driven purely
@@ -2486,6 +2503,7 @@ impl App {
             let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
             crate::pick::pick_gizmo(
                 &matrices,
+                self.selected_transform,
                 self.current_view_proj(),
                 self.cursor,
                 w as f32,
@@ -2685,7 +2703,17 @@ impl App {
         let view_proj = self.current_view_proj();
 
         let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
-        let hit = pick_gizmo(&matrices, view_proj, self.cursor, w, h)?;
+        let was_selected = self.selected_transform;
+        let hit = pick_gizmo(&matrices, was_selected, view_proj, self.cursor, w, h)?;
+
+        // Grabbing an *unselected* transform selects it and stops there. The
+        // gesture is spent on choosing; it starts no drag, and deliberately not
+        // a camera orbit either — swinging the view off a press that was aimed
+        // at a dot would be its own small betrayal. Press to choose, then drag.
+        if was_selected != Some(hit.transform) {
+            self.select_transform(Some(hit.transform));
+            return Some(Drag::Consumed);
+        }
 
         // Say so on the gizmo itself, now, rather than leaving the hover glow
         // to stand in for a grab. `update_hover` won't run again until the drag
@@ -3320,8 +3348,7 @@ impl App {
         // has no depth awareness at all — goes on offering it to the cursor.
         let xray = key
             .map(|(i, _)| i)
-            .and_then(|i| self.scene.transforms.get(i))
-            .map(|spec| spec.matrix);
+            .and_then(|i| self.scene.transforms.get(i).map(|spec| (i, spec.matrix)));
         self.gizmo_renderer.set_xray(&self.gpu.queue, xray);
         self.indicator_renderer.set_lines(&self.gpu.device, &verts);
     }

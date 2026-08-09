@@ -356,6 +356,9 @@ pub struct GizmoRenderer {
     ghost_count: u32,
     /// Whether the x-ray slot currently holds a transform worth drawing.
     xray_active: bool,
+    /// Instance index of the selected transform, if any — the only instance
+    /// that draws tip handles. See [`GizmoRenderer::draw`].
+    selected_instance: Option<u32>,
 }
 
 impl GizmoRenderer {
@@ -513,6 +516,7 @@ impl GizmoRenderer {
             face_pipeline,
             xray_pipeline,
             xray_active: false,
+            selected_instance: None,
             bind_group,
             camera_buffer,
             vertex_buffer,
@@ -563,9 +567,12 @@ impl GizmoRenderer {
     /// G/Tab toggle that exists so the art can be looked at without wireframe
     /// over it — and at twenty transforms it would be soup. The one you are
     /// working on is the one you need to see through the fractal.
-    pub fn set_xray(&mut self, queue: &wgpu::Queue, matrix: Option<Mat4>) {
-        self.xray_active = matrix.is_some();
-        let Some(m) = matrix else { return };
+    /// `selected` is `(transform index, its matrix)`.
+    pub fn set_xray(&mut self, queue: &wgpu::Queue, selected: Option<(usize, Mat4)>) {
+        self.xray_active = selected.is_some();
+        // Instance 0 is the reference, so transform i is instance i + 1.
+        self.selected_instance = selected.map(|(i, _)| i as u32 + 1);
+        let Some((_, m)) = selected else { return };
         let slot = self.instance_count + MAX_GHOSTS;
 
         let stride = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
@@ -688,10 +695,25 @@ impl GizmoRenderer {
         }
 
         // Pass 1: edges + dots (depth write ON)
+        //
+        // Tip handles are split off from the rest and drawn only for the
+        // selected transform, because they are only *grabbable* on the selected
+        // transform (`pick::pick_gizmo`). Drawing a handle on something that
+        // won't respond to it is the same lie the reference tetrahedron avoids
+        // by building its tip dots degenerate — the difference is only that
+        // this one changes with the selection, so it's a draw range rather than
+        // geometry.
+        let solid = ed + EDGE_VERTS + 6; // edges + the origin dot
         render_pass.set_pipeline(&self.edge_dot_pipeline);
+        // The reference keeps its full range: its tip dots are degenerate
+        // geometry, so it shows no handles for its own reason (one that a test
+        // can check without a GPU) rather than by sharing this one.
         render_pass.draw(0..ed, 0..1); // reference
         if self.instance_count > 1 {
-            render_pass.draw(ed..ed * 2, 1..self.instance_count); // transforms
+            render_pass.draw(ed..solid, 1..self.instance_count); // transforms
+        }
+        if let Some(sel) = self.selected_instance {
+            render_pass.draw(solid..ed * 2, sel..sel + 1);
         }
         // Symmetry orbit ghosts, using the transforms' own geometry so a copy
         // reads as the same object. Edges and dots only, no faces: sixty
@@ -699,7 +721,9 @@ impl GizmoRenderer {
         // *placement* of a copy you need to see, which the edges give.
         if self.ghost_count > 0 {
             let first = self.instance_count;
-            render_pass.draw(ed..ed * 2, first..first + self.ghost_count);
+            // No tip handles on a ghost either — a ghost is an image of a map,
+            // not an editable one, and `pick.rs` never sees them.
+            render_pass.draw(ed..solid, first..first + self.ghost_count);
         }
 
         // Pass 2: faces (depth write OFF — read-only depth test, no z-fighting)

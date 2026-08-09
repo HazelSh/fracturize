@@ -89,8 +89,23 @@ fn dist_point_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
 /// That ordering also handles the degenerate case for free — when a transform
 /// is so small on screen that its tips land on its origin, every tip is at
 /// distance ~0 and so is the origin, and the origin's larger bonus wins.
+///
+/// `selected` scopes what is on offer. **An unselected transform offers only
+/// its origin dot**; tips, shafts and rotate edges belong to the transform you
+/// have already chosen.
+///
+/// This is the rule that closes the invisible-click hole. Every part of every
+/// gizmo used to be pickable whether or not you could see it, so a gizmo buried
+/// in the attractor still ate clicks and scrolls aimed at something else. The
+/// x-ray pass makes the *selected* gizmo and every origin dot visible; this
+/// makes the pickable set exactly the visible set. It also shrinks the contest
+/// from ~140 candidates at twenty transforms to ~9.
+///
+/// The cost is one extra click to work on a different transform, which is the
+/// order people work in anyway: pick the thing, then change it.
 pub fn pick_gizmo(
     matrices: &[Mat4],
+    selected: Option<usize>,
     view_proj: Mat4,
     cursor: (f32, f32),
     w: f32,
@@ -121,10 +136,16 @@ pub fn pick_gizmo(
             .map(|&e| world_to_screen(e, view_proj, w, h))
             .collect();
 
-        // Origin dot
+        // Origin dot — always on offer, for every transform. On an unselected
+        // one it is the whole of what a click can do (select it); on the
+        // selected one it translates, as it always has.
         let d = dist_point_segment(cursor, origin_s, origin_s);
         if d <= ORIGIN_RADIUS_PX {
             consider(d - 8.0, GizmoHit { transform: i, part: GizmoPart::Origin });
+        }
+
+        if selected != Some(i) {
+            continue;
         }
 
         // An axis has to project far enough to be worth offering at all; see
@@ -257,7 +278,7 @@ mod tests {
             Vec3::new(0.2, 0.1, -0.3),
         );
         let (sx, sy) = world_to_screen(m.w_axis.truncate(), vp, 1280.0, 720.0).unwrap();
-        let hit = pick_gizmo(&[m], vp, (sx + 3.0, sy - 2.0), 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], Some(0), vp, (sx + 3.0, sy - 2.0), 1280.0, 720.0).unwrap();
         assert_eq!(hit.transform, 0);
         assert_eq!(hit.part, GizmoPart::Origin);
     }
@@ -274,7 +295,7 @@ mod tests {
         // Midpoint of the origin->Y edge in world space
         let mid = m.transform_point3(Vec3::new(0.0, 0.5, 0.0));
         let (sx, sy) = world_to_screen(mid, vp, 1280.0, 720.0).unwrap();
-        let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], Some(0), vp, (sx, sy), 1280.0, 720.0).unwrap();
         assert_eq!(hit.part, GizmoPart::Axis(1));
     }
 
@@ -290,7 +311,7 @@ mod tests {
         // Midpoint of the X-Y outer edge: rotation around local z
         let mid = m.transform_point3(Vec3::new(0.5, 0.5, 0.0));
         let (sx, sy) = world_to_screen(mid, vp, 1280.0, 720.0).unwrap();
-        let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], Some(0), vp, (sx, sy), 1280.0, 720.0).unwrap();
         assert_eq!(hit.part, GizmoPart::RotEdge(2));
     }
 
@@ -313,7 +334,7 @@ mod tests {
                 _ => Vec3::Z,
             });
             let (sx, sy) = world_to_screen(tip, vp, 1280.0, 720.0).unwrap();
-            let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
+            let hit = pick_gizmo(&[m], Some(0), vp, (sx, sy), 1280.0, 720.0).unwrap();
             assert_eq!(hit.part, GizmoPart::Tip(k), "axis {k}");
         }
     }
@@ -333,7 +354,7 @@ mod tests {
             Vec3::new(0.1, 0.0, 0.0),
         );
         let (sx, sy) = world_to_screen(m.w_axis.truncate(), vp, 1280.0, 720.0).unwrap();
-        let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], Some(0), vp, (sx, sy), 1280.0, 720.0).unwrap();
         assert_eq!(hit.part, GizmoPart::Origin);
     }
 
@@ -353,8 +374,69 @@ mod tests {
         // Just outside the origin dot, where a tip or shaft would otherwise be
         // the only candidate.
         let (sx, sy) = world_to_screen(m.w_axis.truncate(), vp, 1280.0, 720.0).unwrap();
-        let hit = pick_gizmo(&[m], vp, (sx + ORIGIN_RADIUS_PX + 1.0, sy), 1280.0, 720.0);
+        let hit = pick_gizmo(&[m], Some(0), vp, (sx + ORIGIN_RADIUS_PX + 1.0, sy), 1280.0, 720.0);
         assert!(hit.is_none(), "got {hit:?} from an axis under the projection floor");
+    }
+
+    /// An unselected transform offers its origin dot and nothing else.
+    ///
+    /// The rule exists because picking has no depth awareness: before this, a
+    /// gizmo buried in the attractor still took clicks aimed past it. The
+    /// origin dot is exempt because the x-ray pass draws every one of them
+    /// through the fractal — what you can grab is what you can see.
+    #[test]
+    fn an_unselected_transform_offers_only_its_origin() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.6),
+            glam::Quat::IDENTITY,
+            Vec3::new(-0.2, 0.1, 0.0),
+        );
+
+        // Every part that isn't the origin: the three tips, and the midpoints
+        // of a shaft and an outer edge.
+        let probes = [
+            Vec3::X, Vec3::Y, Vec3::Z,
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::new(0.5, 0.5, 0.0),
+        ];
+        for probe in probes {
+            let at = m.transform_point3(probe);
+            let (sx, sy) = world_to_screen(at, vp, 1280.0, 720.0).unwrap();
+
+            let selected = pick_gizmo(&[m], Some(0), vp, (sx, sy), 1280.0, 720.0);
+            assert!(
+                selected.is_some(),
+                "the selected transform must still offer {probe:?}"
+            );
+
+            match pick_gizmo(&[m], None, vp, (sx, sy), 1280.0, 720.0) {
+                None => {}
+                // Close to the origin the dot legitimately wins; anything else
+                // means an unselected transform handed out a manipulator.
+                Some(hit) => assert_eq!(
+                    hit.part, GizmoPart::Origin,
+                    "unselected transform offered {:?} at {probe:?}", hit.part
+                ),
+            }
+        }
+    }
+
+    /// ...but its origin dot stays grabbable, which is how it gets selected.
+    #[test]
+    fn an_unselected_transform_still_offers_its_origin() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.5),
+            glam::Quat::IDENTITY,
+            Vec3::new(0.2, 0.1, -0.3),
+        );
+        let (sx, sy) = world_to_screen(m.w_axis.truncate(), vp, 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], None, vp, (sx + 2.0, sy), 1280.0, 720.0).unwrap();
+        assert_eq!(hit.transform, 0);
+        assert_eq!(hit.part, GizmoPart::Origin);
     }
 
     #[test]
@@ -362,7 +444,7 @@ mod tests {
         let cam = test_cam();
         let vp = cam.view_proj(16.0 / 9.0);
         let m = Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0));
-        assert!(pick_gizmo(&[m], vp, (30.0, 30.0), 1280.0, 720.0).is_none());
+        assert!(pick_gizmo(&[m], Some(0), vp, (30.0, 30.0), 1280.0, 720.0).is_none());
     }
 
     /// Full drag simulation: grab the origin dot, move the cursor, verify the
