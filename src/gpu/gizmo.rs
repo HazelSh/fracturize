@@ -37,8 +37,19 @@ const Z: [f32; 3] = [0.0, 0.0, 1.0];
 /// Vertex counts per gizmo variant
 const FACE_VERTS: u32 = 9;   // 3 faces × 3 verts
 const EDGE_VERTS: u32 = 36;  // 6 edges × 6 verts
-const DOT_VERTS: u32 = 6;    // 1 dot billboard
-const EDGE_DOT_VERTS: u32 = EDGE_VERTS + DOT_VERTS; // 42
+/// Dots, in build order: the origin, then the X, Y and Z endpoints. The three
+/// endpoints are the scale handles; see [`crate::pick::GizmoPart::Tip`].
+const DOT_COUNT: u32 = 4;
+const DOT_VERTS: u32 = DOT_COUNT * 6; // billboard quads
+/// One instance's worth of edges and dots.
+///
+/// **`shaders/gizmo.wgsl` carries this number too**, as the modulus that turns
+/// a vertex index back into a part id, and the two must agree or every
+/// highlight lands on the wrong part. `the_shader_agrees_about_the_vertex_block`
+/// checks it. That is a test rather than a compile error — WGSL is opaque to
+/// the Rust compiler — so it is the one place here where drift is caught late
+/// rather than prevented.
+const EDGE_DOT_VERTS: u32 = EDGE_VERTS + DOT_VERTS; // 60
 
 /// Build gizmo vertices, returning (edges_and_dots, faces) separately
 fn build_gizmo_vertices(is_reference: bool) -> (Vec<GizmoVertex>, Vec<GizmoVertex>) {
@@ -120,7 +131,9 @@ fn build_gizmo_vertices(is_reference: bool) -> (Vec<GizmoVertex>, Vec<GizmoVerte
         edges_dots.push(GizmoVertex { position: *b, color: color_neg, edge_other: *a, vertex_type: 1 });
     }
 
-    // === ORIGIN DOT (6 vertices) ===
+    // === DOTS (4 billboards, 6 vertices each) ===
+    // Build order is [origin, x, y, z] and the shader reads part ids straight
+    // off it, so this order is load-bearing.
     let corners: [[f32; 3]; 6] = [
         [-1.0, -1.0, 0.0],
         [1.0, -1.0, 0.0],
@@ -129,13 +142,29 @@ fn build_gizmo_vertices(is_reference: bool) -> (Vec<GizmoVertex>, Vec<GizmoVerte
         [-1.0, 1.0, 0.0],
         [-1.0, -1.0, 0.0],
     ];
-    for corner in &corners {
-        edges_dots.push(GizmoVertex {
-            position: O,
-            color: dot_color,
-            edge_other: *corner,
-            vertex_type: 2,
-        });
+    let tip_alpha: f32 = 1.0;
+    let dots: [([f32; 3], [f32; 4]); DOT_COUNT as usize] = [
+        (O, dot_color),
+        (X, [edge_ox[0], edge_ox[1], edge_ox[2], tip_alpha]),
+        (Y, [edge_oy[0], edge_oy[1], edge_oy[2], tip_alpha]),
+        (Z, [edge_oz[0], edge_oz[1], edge_oz[2], tip_alpha]),
+    ];
+    for (i, (pos, color)) in dots.iter().enumerate() {
+        for corner in &corners {
+            // The reference tetrahedron's endpoints are not handles — it is the
+            // identity drawn for comparison, and nothing about it can be
+            // dragged. Its tip dots are built degenerate (every corner at the
+            // centre) so they rasterize no fragments at all. Alpha 0 would not
+            // do: this pipeline writes depth, so a fully transparent quad would
+            // still punch an invisible hole in whatever is behind it.
+            let degenerate = is_reference && i > 0;
+            edges_dots.push(GizmoVertex {
+                position: *pos,
+                color: *color,
+                edge_other: if degenerate { [0.0; 3] } else { *corner },
+                vertex_type: 2,
+            });
+        }
     }
 
     assert_eq!(edges_dots.len(), EDGE_DOT_VERTS as usize);
@@ -430,12 +459,25 @@ impl GizmoRenderer {
         queue.write_buffer(&self.alpha_buffer, offset, bytemuck::cast_slice(&alphas));
     }
 
-    /// Set (or clear) the hovered gizmo part. Instance 0 is the reference
+    /// Set (or clear) the highlighted gizmo part. Instance 0 is the reference
     /// gizmo, so transform i maps to instance i+1.
-    pub fn set_highlight(&self, queue: &wgpu::Queue, hover: Option<(usize, crate::pick::GizmoPart)>) {
+    ///
+    /// `held` separates "the pointer is over this" from "you have hold of this".
+    /// They used to render identically, and not by choice: `App::update_hover`
+    /// is the only writer and is deliberately not called during a drag, because
+    /// by then the pointer has left the part and recomputing would un-highlight
+    /// the very thing being dragged. So "held" was only ever "a hover that
+    /// stopped being recomputed", with no feedback at the instant a press
+    /// landed. Now the grab says so itself.
+    pub fn set_highlight(
+        &self,
+        queue: &wgpu::Queue,
+        hover: Option<(usize, crate::pick::GizmoPart)>,
+        held: bool,
+    ) {
         use crate::pick::GizmoPart;
         // Part ids follow the vertex build order: edges [ox oy oz xy yz xz],
-        // then 6 = origin dot
+        // then the dots [origin, x, y, z] as 6..9.
         let data: [u32; 4] = match hover {
             Some((t, part)) => {
                 let part_id = match part {
@@ -444,8 +486,9 @@ impl GizmoRenderer {
                     GizmoPart::RotEdge(0) => 4, // y-z edge rotates around x
                     GizmoPart::RotEdge(_) => 5, // x-z edge rotates around y
                     GizmoPart::Origin => 6,
+                    GizmoPart::Tip(k) => 7 + k as u32,
                 };
-                [(t + 1) as u32, part_id, 0, 0]
+                [(t + 1) as u32, part_id, held as u32, 0]
             }
             None => [0, 0xFFFF, 0, 0],
         };
@@ -490,18 +533,18 @@ impl GizmoRenderer {
     /// Draw order: edges+dots first (depth-write ON), then faces (depth-write OFF).
     /// This ensures edges/dots are always visible and faces blend correctly.
     ///
-    /// Vertex buffer layout: [ref_edges_dots(42) | xform_edges_dots(42) | ref_faces(9) | xform_faces(9)]
+    /// Vertex buffer layout: [ref_edges_dots(60) | xform_edges_dots(60) | ref_faces(9) | xform_faces(9)]
     pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_bind_group(0, &self.bind_group, &[]);
 
-        let ed = EDGE_DOT_VERTS; // 42
+        let ed = EDGE_DOT_VERTS; // 60
         let f = FACE_VERTS;      // 9
         // Offsets in vertex buffer:
-        //   ref_edges_dots:   0 .. 42
-        //   xform_edges_dots: 42 .. 84
-        //   ref_faces:        84 .. 93
-        //   xform_faces:      93 .. 102
+        //   ref_edges_dots:   0 .. 60
+        //   xform_edges_dots: 60 .. 120
+        //   ref_faces:        120 .. 129
+        //   xform_faces:      129 .. 138
 
         // Pass 1: edges + dots (depth write ON)
         render_pass.set_pipeline(&self.edge_dot_pipeline);
@@ -523,6 +566,94 @@ impl GizmoRenderer {
         render_pass.draw(ed * 2..ed * 2 + f, 0..1); // reference
         if self.instance_count > 1 {
             render_pass.draw(ed * 2 + f..ed * 2 + f * 2, 1..self.instance_count); // transforms
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shader turns a vertex index back into a part id by taking it modulo
+    /// one instance's block of edge+dot vertices. That number lives in two
+    /// languages, and if they disagree every highlight silently lands on the
+    /// wrong part — the gizmo would glow somewhere you aren't pointing.
+    ///
+    /// WGSL is opaque to the Rust compiler, so this can't be a build error the
+    /// way an exhaustive match is. It is the residual gap, and this test is
+    /// what stands in for it.
+    #[test]
+    fn the_shader_agrees_about_the_vertex_block() {
+        let src = include_str!("../../shaders/gizmo.wgsl");
+        let modulus = format!("% {}u", EDGE_DOT_VERTS);
+        assert!(
+            src.contains(&modulus),
+            "gizmo.wgsl must take vertex_index {modulus} to match EDGE_DOT_VERTS"
+        );
+        // The dot block starts where the edges end, and the shader offsets into
+        // it by that same number.
+        let dot_start = format!("{}u", EDGE_VERTS);
+        assert!(
+            src.contains(&dot_start),
+            "gizmo.wgsl must split edges from dots at {dot_start}"
+        );
+    }
+
+    /// Both variants have to lay out identically: `draw` slices the vertex
+    /// buffer by multiples of one block, so a reference block of a different
+    /// size would shift every transform's geometry by that difference.
+    #[test]
+    fn both_variants_fill_the_same_block() {
+        for is_reference in [true, false] {
+            let (edges_dots, faces) = build_gizmo_vertices(is_reference);
+            assert_eq!(edges_dots.len(), EDGE_DOT_VERTS as usize, "reference={is_reference}");
+            assert_eq!(faces.len(), FACE_VERTS as usize, "reference={is_reference}");
+        }
+    }
+
+    /// The three tip dots are handles, and the identity tetrahedron has no
+    /// handles — nothing about it can be dragged. Its tips are built degenerate
+    /// so they rasterize nothing; alpha would not do, because this pipeline
+    /// writes depth and an invisible quad would still occlude.
+    #[test]
+    fn the_reference_gizmo_draws_no_tip_handles() {
+        let (reference, _) = build_gizmo_vertices(true);
+        let (transform, _) = build_gizmo_vertices(false);
+        let dots = |v: &[GizmoVertex]| -> Vec<GizmoVertex> {
+            v.iter().filter(|d| d.vertex_type == 2).copied().collect()
+        };
+
+        let ref_dots = dots(&reference);
+        let xform_dots = dots(&transform);
+        assert_eq!(ref_dots.len(), DOT_VERTS as usize);
+        assert_eq!(xform_dots.len(), DOT_VERTS as usize);
+
+        // The origin dot (first six) is real in both.
+        assert!(
+            ref_dots[..6].iter().any(|d| d.edge_other != [0.0; 3]),
+            "the reference origin dot must still be drawn"
+        );
+        // Every tip corner past it collapses to a point.
+        assert!(
+            ref_dots[6..].iter().all(|d| d.edge_other == [0.0; 3]),
+            "reference tip dots must be degenerate"
+        );
+        assert!(
+            xform_dots[6..].iter().any(|d| d.edge_other != [0.0; 3]),
+            "a transform's tip dots must actually be drawn"
+        );
+    }
+
+    /// Tip dots wear their axis's colour, so the handle and the shaft it ends
+    /// read as the same axis.
+    #[test]
+    fn tip_dots_match_their_axis_colours() {
+        let (verts, _) = build_gizmo_vertices(false);
+        let dots: Vec<&GizmoVertex> = verts.iter().filter(|d| d.vertex_type == 2).collect();
+        for (i, expected) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].iter().enumerate() {
+            let dot = dots[6 * (i + 1)];
+            assert_eq!(&dot.color[..3], expected, "tip {i} colour");
+            assert_eq!(dot.position, [expected[0], expected[1], expected[2]], "tip {i} position");
         }
     }
 }

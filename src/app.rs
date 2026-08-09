@@ -319,11 +319,81 @@ enum GizmoDragMode {
     TranslateView { normal: Vec3, grab_offset: Vec3 },
     /// Dragging an origin->axis edge: slide along that world-space axis line
     TranslateAxis { axis: Vec3, s0: f32 },
+    /// Dragging an axis endpoint: stretch that one axis, leaving the other two
+    /// alone.
+    ///
+    /// `dir` is the axis's world direction captured at grab and held fixed for
+    /// the drag, so the column only ever changes length. That keeps the three
+    /// columns mutually perpendicular, which is what keeps the matrix an honest
+    /// scale-rotate-translate and so keeps it saveable — the file format has no
+    /// way to write a sheared matrix (see GIZMO-PLAN.md §1.1).
+    ///
+    /// `len0` is the column's length at grab and `s0` the pointer's parameter
+    /// along the axis line, so grabbing slightly off the end doesn't snap.
+    /// Length is signed: dragging back through the origin flips the axis, which
+    /// mirrors the map, and that is a continuous move rather than a special
+    /// case.
+    ///
+    /// `dash_pitch` is the world-space period of the extension line drawn while
+    /// this is held, fixed here at grab time so the dashes don't crawl as the
+    /// axis changes length (see `indicators::build_axis_extension`).
+    ScaleAxis { k: usize, dir: Vec3, len0: f32, s0: f32, dash_pitch: f32 },
     /// Dragging an outer edge: rotate around the transform's local axis
     /// (world direction `axis`, through the transform origin)
     Rotate { axis: Vec3, center: (f32, f32), start_angle: crate::rot::Angle },
     /// Ctrl-drag anywhere on the gizmo: uniform scale, drag up = grow
     Scale { start_y: f32 },
+}
+
+/// Smallest a scaled axis may get. A zero-length column is a singular matrix,
+/// and everything downstream divides by the column length — the inspector's
+/// decomposition, the save path, the contraction measure.
+const MIN_AXIS_LEN: f32 = 1e-4;
+
+/// Signed length for an axis-scale drag: where the pointer is along the axis,
+/// offset so that grabbing slightly off the endpoint doesn't snap it.
+///
+/// Signed on purpose. Dragging back past the origin takes the length negative,
+/// which reverses that column and mirrors the map through the other two axes.
+/// It is one continuous move with no branch in it, which is the whole reason it
+/// is safe to leave ungated.
+///
+/// `snap` is alt: tenths, because the tetrahedron is the unit shape, so a
+/// column's length *is* that axis's scale factor and 0.1 steps are the round
+/// numbers scenes get written in.
+fn axis_scale_length(len0: f32, s: f32, s0: f32, snap: bool) -> f32 {
+    let mut len = len0 + (s - s0);
+    if snap {
+        const SNAP: f32 = 0.1;
+        len = (len / SNAP).round() * SNAP;
+    }
+    if len.abs() < MIN_AXIS_LEN {
+        // Keep whichever side of zero the drag asked for; clamping to a fixed
+        // sign would make the mirror stick on the way through.
+        len = if len < 0.0 { -MIN_AXIS_LEN } else { MIN_AXIS_LEN };
+    }
+    len
+}
+
+/// Replace one column of a matrix's linear part with `dir * len`, leaving the
+/// other two columns and the translation exactly as they were.
+///
+/// Written as a column store rather than a decompose-and-recompose, and that is
+/// the point: `dir` is fixed at grab time, so the column changes length without
+/// changing direction, the three columns stay mutually perpendicular, and the
+/// matrix stays a faithful scale-rotate-translate. A round trip through
+/// `to_scale_rotation_translation` here would quietly destroy any shear the
+/// matrix already carried, and the scene format has nowhere to write shear
+/// back out (GIZMO-PLAN.md §1.1).
+fn with_scaled_column(start: Mat4, k: usize, dir: Vec3, len: f32) -> Mat4 {
+    let mut m = start;
+    let col = (dir * len).extend(0.0);
+    match k {
+        0 => m.x_axis = col,
+        1 => m.y_axis = col,
+        _ => m.z_axis = col,
+    }
+    m
 }
 
 /// Actions dispatchable by clicking a row in the Keybinds window
@@ -617,7 +687,10 @@ pub struct App {
     indicator_renderer: LineRenderer,
     /// `(selected transform, matrix generation)` the indicator buffer was
     /// built for; rebuilt only when that changes.
-    indicator_key: Option<(usize, u64)>,
+    /// What the indicator lines were last built for: the selected transform and
+    /// its matrix generation, plus the axis handle being held (with its dash
+    /// pitch, as raw bits so the key stays comparable).
+    indicator_key: (Option<(usize, u64)>, Option<(usize, u32)>),
     /// Third line buffer: the camera path's route through space
     /// (see `indicators::build_path`).
     path_renderer: LineRenderer,
@@ -957,7 +1030,7 @@ impl App {
             gizmo_renderer,
             line_renderer,
             indicator_renderer,
-            indicator_key: None,
+            indicator_key: (None, None),
             path_renderer,
             path_lines_key: None,
             overlay,
@@ -2072,6 +2145,7 @@ impl App {
         use crate::pick::GizmoPart;
         self.hovered.map(|hit| match hit.part {
             GizmoPart::Origin => hints::HINT_ORIGIN,
+            GizmoPart::Tip(_) => hints::HINT_TIP,
             GizmoPart::Axis(_) => hints::HINT_AXIS,
             GizmoPart::RotEdge(_) => hints::HINT_ROT_EDGE,
         })
@@ -2301,7 +2375,7 @@ impl App {
             Drag::None => {
                 if suppress_hover {
                     if self.hovered.is_some() {
-                        self.gizmo_renderer.set_highlight(&self.gpu.queue, None);
+                        self.gizmo_renderer.set_highlight(&self.gpu.queue, None, false);
                         self.window.set_cursor(winit::window::CursorIcon::Default);
                         self.hovered = None;
                     }
@@ -2420,9 +2494,12 @@ impl App {
             _ => true,
         };
         if changed {
+            // Hover, never held: `update_hover` doesn't run during a drag, for
+            // the reason set out on `set_highlight`.
             self.gizmo_renderer.set_highlight(
                 &self.gpu.queue,
                 hit.map(|h| (h.transform, h.part)),
+                false,
             );
             // Not while the zoom magnifier is up: scrolling moves the scene
             // under a still pointer, so the hovered gizmo changes constantly
@@ -2574,9 +2651,16 @@ impl App {
             .map(str::to_string)
             .unwrap_or_else(|| format!("T{}", transform));
         let verb = match mode {
-            GizmoDragMode::TranslateView { .. } | GizmoDragMode::TranslateAxis { .. } => "Move",
-            GizmoDragMode::Rotate { .. } => "Rotate",
-            GizmoDragMode::Scale { .. } => "Scale",
+            GizmoDragMode::TranslateView { .. } | GizmoDragMode::TranslateAxis { .. } => {
+                "Move".to_string()
+            }
+            GizmoDragMode::Rotate { .. } => "Rotate".to_string(),
+            GizmoDragMode::Scale { .. } => "Scale".to_string(),
+            // Which axis, because "Scale" three times in the undo list doesn't
+            // say what you'd be undoing.
+            GizmoDragMode::ScaleAxis { k, .. } => {
+                format!("Scale {}", ["X", "Y", "Z"][k.min(2)])
+            }
         };
         format!("{} {}", verb, name)
     }
@@ -2595,6 +2679,13 @@ impl App {
 
         let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
         let hit = pick_gizmo(&matrices, view_proj, self.cursor, w, h)?;
+
+        // Say so on the gizmo itself, now, rather than leaving the hover glow
+        // to stand in for a grab. `update_hover` won't run again until the drag
+        // ends, so without this the press produces no feedback at all.
+        self.hovered = Some(hit);
+        self.gizmo_renderer
+            .set_highlight(&self.gpu.queue, Some((hit.transform, hit.part)), true);
 
         self.selected_transform = Some(hit.transform);
         let m = matrices[hit.transform];
@@ -2616,6 +2707,27 @@ impl App {
                     let axis = m.col(k).truncate().normalize_or(Vec3::X);
                     let s0 = crate::pick::line_param_closest_to_ray(origin, axis, ray_o, ray_d);
                     GizmoDragMode::TranslateAxis { axis, s0 }
+                }
+                GizmoPart::Tip(k) => {
+                    let col = m.col(k).truncate();
+                    let len0 = col.length();
+                    let dir = col.normalize_or(Vec3::X);
+                    let s0 = crate::pick::line_param_closest_to_ray(origin, dir, ray_o, ray_d);
+                    // One dash period ≈ 16px on screen at the moment of the
+                    // grab: 8 on, 8 off. Measured once, here, and then held in
+                    // world units for the life of the drag — see the note on
+                    // `indicators::build_axis_extension` for why recomputing it
+                    // per frame would make the dashes crawl.
+                    let dash_pitch = crate::camera::world_to_screen(origin + col, view_proj, w, h)
+                        .zip(crate::camera::world_to_screen(origin, view_proj, w, h))
+                        .map(|(tip_s, origin_s)| {
+                            let px = ((tip_s.0 - origin_s.0).powi(2)
+                                + (tip_s.1 - origin_s.1).powi(2))
+                            .sqrt();
+                            if px > 1.0 { 16.0 * len0 / px } else { len0 * 0.25 }
+                        })
+                        .unwrap_or(len0 * 0.25);
+                    GizmoDragMode::ScaleAxis { k, dir, len0, s0, dash_pitch }
                 }
                 GizmoPart::RotEdge(k) => {
                     let mut axis = m.col(k).truncate().normalize_or(Vec3::Y);
@@ -2717,11 +2829,21 @@ impl App {
                 m.z_axis *= factor;
                 m
             }
+            GizmoDragMode::ScaleAxis { k, dir, len0, s0, .. } => {
+                let s = crate::pick::line_param_closest_to_ray(start_origin, dir, ray_o, ray_d);
+                let len = axis_scale_length(len0, s, s0, self.alt_held);
+                with_scaled_column(start, k, dir, len)
+            }
         };
 
-        // Hold `d` across a scale drag. Only Scale can change a contraction,
-        // so the other modes never pay for the check.
-        if matches!(mode, GizmoDragMode::Scale { .. }) {
+        // Hold `d` across any drag that can change the map's contraction — both
+        // scale modes can. Translation and rotation leave the determinant
+        // alone, and `hold_dimension_through` returns immediately for them, so
+        // this gate saves the work rather than guarding correctness.
+        if matches!(
+            mode,
+            GizmoDragMode::Scale { .. } | GizmoDragMode::ScaleAxis { .. }
+        ) {
             self.hold_dimension_through(transform, new_matrix);
         }
 
@@ -3128,17 +3250,43 @@ impl App {
     /// the selection or its matrix changes. Cheap (a few dozen segments) but
     /// pointless to redo every frame.
     fn refresh_indicators(&mut self) {
-        let key = self.selected_transform.map(|i| (i, self.matrix_generation));
+        // The held axis is part of the key, not just of the drawing. A drag
+        // bumps `matrix_generation` every frame so the dash keeps up on its
+        // own, but *releasing* changes nothing else — without the axis here the
+        // last frame's key would still match and the dashes would stay on
+        // screen after the grab ended.
+        let held_axis = match self.drag {
+            Drag::Gizmo { mode: GizmoDragMode::ScaleAxis { k, dash_pitch, .. }, .. } => {
+                Some((k, dash_pitch.to_bits()))
+            }
+            _ => None,
+        };
+        let key = (
+            self.selected_transform.map(|i| (i, self.matrix_generation)),
+            held_axis,
+        );
         if key == self.indicator_key {
             return;
         }
         self.indicator_key = key;
+        let key = key.0;
         let mut verts = match key {
             Some((i, _)) if i < self.scene.transforms.len() => {
                 crate::indicators::build(self.scene.transforms[i].matrix)
             }
             _ => Vec::new(),
         };
+
+        // The axis being scaled, extended past both ends of itself.
+        if let (Some((i, _)), Some((k, pitch))) = (key, held_axis) {
+            if let Some(spec) = self.scene.transforms.get(i) {
+                verts.extend(crate::indicators::build_axis_extension(
+                    spec.matrix,
+                    k,
+                    f32::from_bits(pitch),
+                ));
+            }
+        }
 
         // The selected map's symmetry, drawn into the scene: its axis and fold
         // count, or the polyhedral group's cage. Sized to the attractor rather
@@ -5284,5 +5432,131 @@ mod tests {
         // Right up to the threshold, and not before it.
         assert!(!cursor_should_hide(true, false, false, CURSOR_IDLE_HIDE - Duration::from_millis(1)));
         assert!(cursor_should_hide(true, false, false, CURSOR_IDLE_HIDE));
+    }
+}
+
+#[cfg(test)]
+mod axis_scale_tests {
+    use super::*;
+
+    fn cell() -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            Vec3::new(0.6, 0.4, 0.5),
+            glam::Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.7, 0.2),
+            Vec3::new(0.1, -0.2, 0.3),
+        )
+    }
+
+    /// The scale handle exists to change one axis. If it moved anything else,
+    /// it would be the uniform-scale drag with extra steps.
+    #[test]
+    fn only_the_dragged_column_moves() {
+        let start = cell();
+        for k in 0..3 {
+            let dir = start.col(k).truncate().normalize();
+            let out = with_scaled_column(start, k, dir, 1.25);
+            for other in (0..3).filter(|&o| o != k) {
+                assert_eq!(
+                    out.col(other), start.col(other),
+                    "scaling axis {k} disturbed axis {other}"
+                );
+            }
+            assert_eq!(out.w_axis, start.w_axis, "scaling axis {k} moved the origin");
+            assert!((out.col(k).truncate().length() - 1.25).abs() < 1e-5);
+        }
+    }
+
+    /// Dragging the handle back through the origin mirrors the map. It has to
+    /// be one continuous move — no jump, no branch — because it is reached by
+    /// dragging, not by choosing it.
+    #[test]
+    fn passing_through_zero_mirrors_the_axis() {
+        let start = cell();
+        let dir = start.col(1).truncate().normalize();
+
+        let before = with_scaled_column(start, 1, dir, 0.05);
+        let after = with_scaled_column(start, 1, dir, -0.05);
+
+        // The column reverses, and nothing else changes.
+        assert!((before.col(1) + after.col(1)).length() < 1e-6);
+        assert_eq!(before.col(0), after.col(0));
+        assert_eq!(before.col(2), after.col(2));
+        // Handedness flips, which is what "mirrored" means.
+        assert!(before.determinant() * after.determinant() < 0.0);
+    }
+
+    /// The guard that keeps this feature saveable: an axis-scale drag must
+    /// never introduce shear, because the scene format has no way to write it
+    /// (GIZMO-PLAN.md §1.1). Columns stay perpendicular because the direction
+    /// is fixed at grab time and only the length moves.
+    #[test]
+    fn scaling_every_axis_leaves_the_matrix_decomposable() {
+        let mut m = cell();
+        for (k, len) in [(0usize, 0.9f32), (1, 0.15), (2, 1.7)] {
+            let dir = m.col(k).truncate().normalize();
+            m = with_scaled_column(m, k, dir, len);
+        }
+        let trs = crate::rot::Trs::of(m);
+        assert!(
+            trs.is_faithful(m),
+            "an axis-scale drag produced a matrix the save path cannot write"
+        );
+        // And the lengths are the ones asked for, in order.
+        for (k, len) in [(0usize, 0.9f32), (1, 0.15), (2, 1.7)] {
+            assert!((m.col(k).truncate().length() - len).abs() < 1e-5, "axis {k}");
+        }
+    }
+
+    /// A mirrored matrix is still a *rigid* frame — perpendicular columns, one
+    /// of them reversed — so it round-trips through the decomposition exactly.
+    /// `Trs::is_faithful` rejects it anyway on the determinant sign alone; that
+    /// is slice 2's job, and this test pins the fact it depends on.
+    #[test]
+    fn a_mirrored_cell_recomposes_exactly() {
+        let start = cell();
+        let dir = start.col(2).truncate().normalize();
+        let m = with_scaled_column(start, 2, dir, -0.5);
+
+        let trs = crate::rot::Trs::of(m);
+        let back = trs.matrix();
+        for k in 0..4 {
+            assert!(
+                (m.col(k) - back.col(k)).length() < 1e-5,
+                "column {k} did not survive the round trip: {:?} vs {:?}",
+                m.col(k), back.col(k)
+            );
+        }
+        assert!(m.determinant() < 0.0);
+    }
+
+    #[test]
+    fn the_grab_offset_means_a_drag_starts_where_you_grabbed() {
+        // Grabbed 0.1 short of the endpoint: the length shouldn't jump to meet
+        // the pointer, it should move with it.
+        let len = axis_scale_length(0.6, 0.5, 0.5, false);
+        assert!((len - 0.6).abs() < 1e-6, "a still pointer changed the length");
+        let len = axis_scale_length(0.6, 0.8, 0.5, false);
+        assert!((len - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_column_never_reaches_zero_and_keeps_its_sign() {
+        // Just above zero clamps up and stays positive...
+        let len = axis_scale_length(0.5, 5e-5, 0.5, false);
+        assert!(len > 0.0 && len <= MIN_AXIS_LEN, "got {len}");
+        // ...and just below stays negative, so the mirror doesn't stick on the
+        // way through: the sign the pointer asked for is the sign it gets.
+        let len = axis_scale_length(0.5, -5e-5, 0.5, false);
+        assert!(len < 0.0 && len >= -MIN_AXIS_LEN, "got {len}");
+        // Exactly zero has to go somewhere; positive is the tie-break, so a
+        // drag that stops dead on the origin leaves the map unmirrored.
+        assert!(axis_scale_length(0.5, 0.0, 0.5, false) > 0.0);
+    }
+
+    #[test]
+    fn alt_snaps_to_tenths_including_through_zero() {
+        assert!((axis_scale_length(0.63, 0.5, 0.5, true) - 0.6).abs() < 1e-6);
+        assert!((axis_scale_length(0.66, 0.5, 0.5, true) - 0.7).abs() < 1e-6);
+        assert!((axis_scale_length(0.6, 0.5, 1.2, true) + 0.1).abs() < 1e-6);
     }
 }

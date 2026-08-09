@@ -235,6 +235,67 @@ fn cage_edges(kind: crate::symmetry::OrbitKind) -> Vec<(Vec3, Vec3)> {
     edges
 }
 
+/// The axis colours the gizmo already uses for its shafts and tip handles, so
+/// the extension line and the handle you are holding read as the same axis.
+const AXIS_COLORS: [[f32; 4]; 3] = [
+    [1.0, 0.35, 0.35, 0.7],
+    [0.35, 1.0, 0.35, 0.7],
+    [0.45, 0.55, 1.0, 0.7],
+];
+
+/// The line of the axis being scaled, drawn dashed and running well past both
+/// ends of it.
+///
+/// Only while an endpoint handle is held. A scale drag is the one gesture where
+/// the thing you are setting — a length along a line — is invisible past the
+/// end of the shaft you are dragging, and where the interesting landmark is
+/// *behind* you: the origin, where the axis passes through zero and the map
+/// mirrors. So the line is drawn both ways from the origin, and the origin is
+/// therefore always on screen as the point the dashes pivot around.
+///
+/// Dashed rather than solid so it can't be mistaken for a sixth edge of the
+/// tetrahedron: this is a readout, not a part of the shape.
+///
+/// `pitch` is one dash period in world units, and the caller fixes it at grab
+/// time from the axis's projected length (see `App::try_grab_gizmo`). Sizing it
+/// once, in world space, is what stops the dashes from crawling: the boundaries
+/// sit at fixed multiples of `pitch` along a world-space line, so they stay put
+/// while the length changes under them. Deriving the pitch from the *current*
+/// length every frame would slide every dash on every mouse move.
+pub fn build_axis_extension(matrix: Mat4, k: usize, pitch: f32) -> Vec<LineVertex> {
+    let origin = matrix.w_axis.truncate();
+    let col = matrix.col(k).truncate();
+    let len = col.length();
+    if !len.is_finite() || len < 1e-6 || !(pitch > 0.0) {
+        return Vec::new();
+    }
+    let dir = col / len;
+
+    // Far enough past the tip to show where the drag is going, and the same
+    // distance behind the origin so the mirror point reads as a midpoint rather
+    // than an edge.
+    let reach = (len * 2.5).max(pitch * 4.0);
+    let color = AXIS_COLORS[k.min(2)];
+
+    let steps = ((2.0 * reach) / pitch).ceil() as usize;
+    // A runaway pitch (a near-degenerate projection at grab time) would ask for
+    // millions of segments; the drawing is worthless long before that.
+    let steps = steps.min(512);
+
+    let mut verts = Vec::with_capacity(steps * 2);
+    for i in 0..steps {
+        let a = -reach + pitch * i as f32;
+        // Half on, half off — the dash and the gap read as equals, which is
+        // what makes it obviously a dashed line and not a broken one.
+        let b = (a + pitch * 0.5).min(reach);
+        if a >= reach {
+            break;
+        }
+        seg(&mut verts, origin + dir * a, origin + dir * b, color);
+    }
+    verts
+}
+
 /// Camera-path polyline colour: green, so it reads apart from the amber
 /// offset vector and the cyan rotation arc a selected transform draws.
 const PATH_COLOR: [f32; 4] = [0.4, 0.95, 0.55, 0.7];

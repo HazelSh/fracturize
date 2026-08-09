@@ -199,11 +199,13 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | scroll | zoom — **always**, whatever is under the pointer |
 | click empty space | deselect (the only way to clear a selection) |
 | drag a gizmo's origin dot | select + translate the transform in the view plane |
+| drag an axis endpoint (tip dot) | scale that one axis; drag past the origin to mirror it |
 | drag an origin→axis gizmo edge | translate along that axis |
 | drag an outer gizmo edge | rotate around the third local axis (edge x-y rotates around z) |
 | ctrl+drag any gizmo part | uniform scale (drag up = grow) |
 | shift during a gizmo drag | fine: a fifth of the travel. Anchored, so pressing or releasing it mid-drag doesn't jump |
 | alt+drag an outer gizmo edge | snap the rotation to 15° |
+| alt+drag an axis endpoint | snap that axis's scale to 0.1 |
 | alt+scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
@@ -249,11 +251,37 @@ held. This is not a breach of the zero-animation rule below: the cursor is the
 operating system's furniture rather than this app's chrome, and it doesn't
 fade — it is drawn on one frame and not on the next.
 
-Grabbable gizmo parts glow and grow on hover (edges widen and whiten, the
-origin dot enlarges) and the cursor switches to a grab hand. Gizmo drags
-re-run the chaos game live; the fractal re-forms as you drag (sparse while
-moving, densifying when you pause — warmup refills in ~1s). Picking math
-lives in `pick.rs`, drag application in `app.rs`.
+Grabbable gizmo parts glow and grow on hover (edges widen and whiten, dots
+enlarge) and the cursor switches to a grab hand. **Held is a separate state
+from hovered**: a held part drops the white mix and shows its own colour at
+full strength, rather than glowing harder. They used to be indistinguishable,
+and not by choice — `update_hover` is deliberately not called during a drag
+(by then the pointer has left the part, and recomputing would un-highlight the
+thing being dragged), so "held" was only ever "a hover that stopped being
+recomputed". `try_grab_gizmo` now says so explicitly, via the `held` flag in
+the highlight uniform. Gizmo drags re-run the chaos game live; the fractal
+re-forms as you drag (sparse while moving, densifying when you pause — warmup
+refills in ~1s). Picking math lives in `pick.rs`, drag application in `app.rs`.
+
+Three rules the gizmo geometry depends on:
+
+* **The tip handles scale by rewriting one matrix column, never by decomposing.**
+  The axis direction is captured at grab and held fixed, so the column only
+  changes length, the three columns stay perpendicular, and the matrix stays a
+  faithful T·R·S. This is not fussiness: the scene format has no way to write a
+  sheared matrix, so a drag that introduced shear would author something the
+  save silently discards (see `GIZMO-PLAN.md` §1.1, which also notes that
+  `mutate.rs` already hits this).
+* **An axis that projects shorter than `pick::MIN_AXIS_PX` offers no tip, no
+  shaft and no adjacent rotate edge.** An axis pointing near the camera has
+  almost no screen gain, so dragging along it doesn't degrade — it explodes.
+  Zooming in is the fix, and it is the honest one.
+* **`EDGE_DOT_VERTS` in `gpu/gizmo.rs` and the modulus in `shaders/gizmo.wgsl`
+  are one fact in two languages.** WGSL is opaque to the compiler, so this is
+  the one invariant here that a test guards rather than the build
+  (`the_shader_agrees_about_the_vertex_block`). The reference tetrahedron's tip
+  dots are built *degenerate* rather than transparent, because that pipeline
+  writes depth and an invisible quad would still punch a hole.
 
 The camera eye always sits on the orbit sphere: the legacy scene/view
 `offset` (which made pitch drift the view distance) is folded into the

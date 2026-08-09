@@ -5,6 +5,7 @@
 //! affine matrix; its screen-space parts are hit-tested against the cursor:
 //!
 //! - the origin dot          -> translate in the view plane
+//! - an axis endpoint (tip)  -> scale that axis alone
 //! - an O->axis edge         -> translate along that (world-space) local axis
 //! - an outer axis-axis edge -> rotate around the remaining local axis
 //!
@@ -17,14 +18,38 @@ use crate::rot::Angle;
 
 /// Pick radius around the origin dot, in pixels
 pub const ORIGIN_RADIUS_PX: f32 = 12.0;
+/// Pick radius around an axis endpoint handle, in pixels. Smaller than the
+/// origin's: three of these sit around one origin, and the origin is the part
+/// you want when they crowd together.
+pub const TIP_RADIUS_PX: f32 = 8.0;
 /// Pick radius around gizmo edges, in pixels
 pub const EDGE_RADIUS_PX: f32 = 7.0;
+
+/// Shortest an axis may project and still offer its tip, its shaft, or the
+/// outer edges that meet it.
+///
+/// Two reasons, and the second is the load-bearing one:
+///
+/// * an axis a few pixels long has no room to distinguish three parts along it;
+/// * an axis pointing nearly at the camera has almost no screen gain, so
+///   [`line_param_closest_to_ray`] — which every drag along it uses — swings
+///   enormously for a pixel of pointer movement. Grabbing it does not fail
+///   gracefully, it explodes.
+///
+/// The guard is in screen space, so it is a statement about this camera and not
+/// about the transform: an axis that is too short to grab becomes grabbable by
+/// zooming in, which is the honest fix rather than a rendering trick that
+/// pretends the axis is bigger than it is.
+pub const MIN_AXIS_PX: f32 = 8.0;
 
 /// Which part of a gizmo was grabbed
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GizmoPart {
     /// The origin dot: translate in the view plane
     Origin,
+    /// An axis endpoint (0=x, 1=y, 2=z): scale that axis on its own, and pass
+    /// through zero to mirror it
+    Tip(usize),
     /// An origin->axis edge (0=x, 1=y, 2=z): translate along that axis
     Axis(usize),
     /// An outer edge: rotate around the given local axis index
@@ -51,8 +76,19 @@ fn dist_point_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// Hit-test the cursor against every transform's gizmo. Returns the best hit,
-/// with the origin dot given priority over edges when both are in range.
+/// Hit-test the cursor against every transform's gizmo. Returns the best hit.
+///
+/// Overlapping parts are resolved by score (lower wins), and the biases are the
+/// whole design: an axis endpoint sits *on* the end of its own shaft and at the
+/// meeting point of two outer edges, so without a bias the tip would be a
+/// coin-toss against three other parts. The order is
+/// origin (−8) < tip (−4) < edges (0), which reads as: when parts crowd
+/// together, prefer the one whose drag is least destructive. The origin only
+/// moves the map; a tip reshapes it.
+///
+/// That ordering also handles the degenerate case for free — when a transform
+/// is so small on screen that its tips land on its origin, every tip is at
+/// distance ~0 and so is the origin, and the origin's larger bonus wins.
 pub fn pick_gizmo(
     matrices: &[Mat4],
     view_proj: Mat4,
@@ -91,9 +127,29 @@ pub fn pick_gizmo(
             consider(d - 8.0, GizmoHit { transform: i, part: GizmoPart::Origin });
         }
 
+        // An axis has to project far enough to be worth offering at all; see
+        // `MIN_AXIS_PX`. Computed once here because the tip, the shaft and the
+        // two outer edges that meet this axis all depend on the same answer.
+        let long_enough: [bool; 3] = std::array::from_fn(|k| {
+            ends_s[k].is_some_and(|es| {
+                let (dx, dy) = (es.0 - origin_s.0, es.1 - origin_s.1);
+                (dx * dx + dy * dy).sqrt() >= MIN_AXIS_PX
+            })
+        });
+
+        // Axis endpoints
+        for (k, end_s) in ends_s.iter().enumerate() {
+            if let (Some(es), true) = (end_s, long_enough[k]) {
+                let d = dist_point_segment(cursor, *es, *es);
+                if d <= TIP_RADIUS_PX {
+                    consider(d - 4.0, GizmoHit { transform: i, part: GizmoPart::Tip(k) });
+                }
+            }
+        }
+
         // Origin->axis edges
         for (k, end_s) in ends_s.iter().enumerate() {
-            if let Some(es) = end_s {
+            if let (Some(es), true) = (end_s, long_enough[k]) {
                 let d = dist_point_segment(cursor, origin_s, *es);
                 if d <= EDGE_RADIUS_PX {
                     consider(d, GizmoHit { transform: i, part: GizmoPart::Axis(k) });
@@ -104,6 +160,9 @@ pub fn pick_gizmo(
         // Outer edges: (x,y) rotates around z, (y,z) around x, (x,z) around y
         const OUTER: [(usize, usize, usize); 3] = [(0, 1, 2), (1, 2, 0), (0, 2, 1)];
         for &(a, b, rot_axis) in &OUTER {
+            if !(long_enough[a] && long_enough[b]) {
+                continue;
+            }
             if let (Some(asr), Some(bs)) = (ends_s[a], ends_s[b]) {
                 let d = dist_point_segment(cursor, asr, bs);
                 if d <= EDGE_RADIUS_PX {
@@ -233,6 +292,69 @@ mod tests {
         let (sx, sy) = world_to_screen(mid, vp, 1280.0, 720.0).unwrap();
         let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
         assert_eq!(hit.part, GizmoPart::RotEdge(2));
+    }
+
+    /// The tip sits exactly where its own shaft ends and two outer edges meet.
+    /// Without the bias this is a four-way tie decided by float noise, so this
+    /// is the test that says the handle is reachable at all.
+    #[test]
+    fn tip_beats_the_parts_it_touches() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.6),
+            glam::Quat::IDENTITY,
+            Vec3::new(-0.2, 0.1, 0.0),
+        );
+        for k in 0..3 {
+            let tip = m.transform_point3(match k {
+                0 => Vec3::X,
+                1 => Vec3::Y,
+                _ => Vec3::Z,
+            });
+            let (sx, sy) = world_to_screen(tip, vp, 1280.0, 720.0).unwrap();
+            let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
+            assert_eq!(hit.part, GizmoPart::Tip(k), "axis {k}");
+        }
+    }
+
+    /// ...but not at the cost of the origin. When a transform is tiny on screen
+    /// its tips pile onto its own origin dot, and the least destructive grab
+    /// has to win: moving a map is recoverable at a glance, reshaping it is not.
+    #[test]
+    fn the_origin_still_wins_when_the_gizmo_is_tiny() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        // Small enough that all three tips project within a pixel or two of
+        // the origin at this camera distance.
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.002),
+            glam::Quat::IDENTITY,
+            Vec3::new(0.1, 0.0, 0.0),
+        );
+        let (sx, sy) = world_to_screen(m.w_axis.truncate(), vp, 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], vp, (sx, sy), 1280.0, 720.0).unwrap();
+        assert_eq!(hit.part, GizmoPart::Origin);
+    }
+
+    /// An axis too short to read is also too short to drag: `line_param_
+    /// closest_to_ray` has almost no gain along it, so a pixel of pointer
+    /// movement would swing the scale wildly. Offer nothing rather than
+    /// something that can't be controlled.
+    #[test]
+    fn a_barely_projected_axis_offers_nothing() {
+        let cam = test_cam();
+        let vp = cam.view_proj(16.0 / 9.0);
+        let m = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.002),
+            glam::Quat::IDENTITY,
+            Vec3::new(0.1, 0.0, 0.0),
+        );
+        // Just outside the origin dot, where a tip or shaft would otherwise be
+        // the only candidate.
+        let (sx, sy) = world_to_screen(m.w_axis.truncate(), vp, 1280.0, 720.0).unwrap();
+        let hit = pick_gizmo(&[m], vp, (sx + ORIGIN_RADIUS_PX + 1.0, sy), 1280.0, 720.0);
+        assert!(hit.is_none(), "got {hit:?} from an axis under the projection floor");
     }
 
     #[test]

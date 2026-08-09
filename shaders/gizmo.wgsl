@@ -46,22 +46,27 @@ struct VertexOutput {
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<storage, read> transforms: array<mat4x4<f32>>;
 @group(0) @binding(2) var<storage, read> instance_alpha: array<f32>;
-// Hovered gizmo part: x = instance index (0 = none), y = part id
-// (0..5 = edge index in build order [ox oy oz xy yz xz], 6 = origin dot)
+// Highlighted gizmo part:
+//   x = instance index (0 = none)
+//   y = part id: 0..5 = edge index in build order [ox oy oz xy yz xz],
+//                6..9 = dot index in build order [origin, x, y, z]
+//   z = 1 when the part is *held* rather than merely hovered
 @group(0) @binding(3) var<uniform> highlight: vec4<u32>;
 
-// 1.0 when this vertex belongs to the hovered part of the hovered instance.
-// Edge identity comes from the vertex index: edges+dots live in 42-vertex
-// blocks (6 edges x 6 verts, then a 6-vert dot billboard); faces are drawn
-// from separate ranges and never highlight (vertex_type guards them).
+// 1.0 when this vertex belongs to the highlighted part of the highlighted
+// instance. Part identity comes from the vertex index: edges+dots live in
+// 60-vertex blocks (6 edges x 6 verts, then 4 dot billboards x 6 verts); faces
+// are drawn from separate ranges and never highlight (vertex_type guards them).
+//
+// The 60 must match `EDGE_DOT_VERTS` in gpu/gizmo.rs — see the note there.
 fn highlight_factor(instance_index: u32, vertex_index: u32, vertex_type: u32) -> f32 {
     if instance_index != highlight.x {
         return 0.0;
     }
-    let local = vertex_index % 42u;
+    let local = vertex_index % 60u;
     if vertex_type == 2u {
-        // origin dot
-        if highlight.y == 6u {
+        // dots: part ids 6..9, in build order [origin, x, y, z]
+        if local >= 36u && 6u + (local - 36u) / 6u == highlight.y {
             return 1.0;
         }
     } else if vertex_type == 1u {
@@ -81,6 +86,10 @@ fn vs_main(
     let transform = transforms[instance_index];
     let alpha_mult = instance_alpha[instance_index];
     let hl = highlight_factor(instance_index, vertex_index, in.vertex_type);
+    // Hover glows toward white; held drops the glow and shows the part's own
+    // colour at full strength instead. A different signal, not a louder one —
+    // so "I am over this" and "I have hold of this" can't be confused.
+    let held = f32(highlight.z) * hl;
 
     var out: VertexOutput;
     out.color = in.color;
@@ -174,8 +183,9 @@ fn vs_main(
             depth,
             1.0
         );
-        // Hovered edges glow toward white at full opacity
-        let edge_rgb = mix(in.color.rgb, vec3<f32>(1.0), 0.55 * hl);
+        // Hovered edges glow toward white at full opacity; a held one stays its
+        // own colour, saturated.
+        let edge_rgb = mix(in.color.rgb, vec3<f32>(1.0), 0.55 * hl * (1.0 - held));
         out.color = vec4<f32>(edge_rgb, max(abs(in.color.a), hl));
 
     } else {
@@ -190,11 +200,16 @@ fn vs_main(
 
         let ndc = clip.xyz / clip.w;
 
-        // 6px dot; grows to 10px on hover
-        let half_size_ndc_y = (6.0 + 4.0 * hl) / camera.screen_height;
+        // 6px dot; 10px hovered, 12px held. Size carries the held state here as
+        // well as colour, because the origin dot is already white and mixing
+        // white toward white says nothing.
+        let half_size_ndc_y = (6.0 + 4.0 * hl + 2.0 * held) / camera.screen_height;
         let half_size_ndc_x = half_size_ndc_y / camera.aspect_ratio;
 
-        // Billboard offset encoded in edge_other.xy (-1..1 range)
+        // Billboard offset encoded in edge_other.xy (-1..1 range). The
+        // reference gizmo's tip dots store a zero corner on purpose, which
+        // collapses the quad to a point and draws nothing — see
+        // `build_gizmo_vertices`.
         let corner = in.edge_other.xy;
 
         out.clip_position = vec4<f32>(
@@ -203,6 +218,8 @@ fn vs_main(
             ndc.z,
             1.0
         );
+        let dot_rgb = mix(in.color.rgb, vec3<f32>(1.0), 0.55 * hl * (1.0 - held));
+        out.color = vec4<f32>(dot_rgb, in.color.a);
     }
 
     return out;

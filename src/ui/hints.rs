@@ -11,6 +11,9 @@ use super::UiState;
 /// Dragging a gizmo's origin dot
 pub const HINT_ORIGIN: &str =
     "drag: move in view plane (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
+/// Dragging a gizmo's axis endpoint handle
+pub const HINT_TIP: &str =
+    "drag: scale this axis (shift: fine, alt: snap 0.1) · drag past the origin to mirror";
 /// Dragging an origin→axis gizmo edge
 pub const HINT_AXIS: &str =
     "drag: slide along axis (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
