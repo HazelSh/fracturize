@@ -1,10 +1,11 @@
 # Gizmo plan: more control, and a gizmo you can see
 
-> **Status: slices 1–5 are implemented**, on branch `gizmo-tip-handles`
-> (`2c7e720`…`3e70040`, off `main` at `81fca03`). 419 tests pass, and every
-> slice was verified by driving the running app as well. Hazel has not used any
-> of it yet. Slices 6–7 and everything under "Recorded, deferred" are still
-> just design.
+> **Status: slices 1–5 are implemented and merged to `main`** (2026-08-10,
+> fast-forward from `gizmo-tip-handles`, `2c7e720`…`ab3954f`). 419 tests pass,
+> and every slice was verified by driving the running app as well — but Hazel
+> had not used any of it at merge time, so treat it as landed rather than
+> settled. Slices 6–7 and everything under "Recorded, deferred" are still just
+> design.
 >
 > Two things worth a second look by eye, both named in §2 and the commits:
 > `XRAY_ALPHA` (0.3 reads quite faint over a bright attractor) and the roll
