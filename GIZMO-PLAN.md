@@ -1,5 +1,15 @@
 # Gizmo plan: more control, and a gizmo you can see
 
+> **Status: slices 1–5 are implemented**, on branch `gizmo-tip-handles`
+> (`2c7e720`…`3e70040`, off `main` at `81fca03`). 419 tests pass, and every
+> slice was verified by driving the running app as well. Hazel has not used any
+> of it yet. Slices 6–7 and everything under "Recorded, deferred" are still
+> just design.
+>
+> Two things worth a second look by eye, both named in §2 and the commits:
+> `XRAY_ALPHA` (0.3 reads quite faint over a bright attractor) and the roll
+> ring's neutral, which sits close to the reference tetrahedron's grey.
+
 Design for the next round of IFS transform gizmos. Nothing here is implemented.
 Two Sonnet agents brainstormed the manipulation grammar and the legibility half
 separately; this is the synthesis, with their conclusions corrected where the
@@ -412,28 +422,28 @@ for every new mode.
 Each is independently shippable and independently testable. **Scope is slices
 1–5.** Slices 6 and 7 are recorded for later, not to be built now.
 
-**Slice 1 — tip handles that scale one axis.** Delivers ask #1 whole.
+**Slice 1 — tip handles that scale one axis.** ✅ `2c7e720` Delivers ask #1 whole.
 `GizmoPart::Tip(k)` + pick test + sub-pixel guard; three tip dot billboards and
 the 42→60 vertex-block/part-id rework (§1.4); `GizmoDragMode::ScaleAxis`;
 the dimension-lock gate widened (§1.3); the dashed extension while held (§3.5);
 held-vs-hover split (§3.5). Reuses `line_param_closest_to_ray` verbatim.
 
-**Slice 2 — `is_faithful` accepts reflection.** (§1.2) Small, and wants to land
+**Slice 2 — `is_faithful` accepts reflection.** ✅ `f430f73` (§1.2) Small, and wants to land
 right behind slice 1, because slice 1 is what makes mirroring easy to reach.
 Pure `rot.rs` change plus a round-trip test; the inspector gains a "mirrored"
 readout driven by `determinant() < 0`.
 
-**Slice 3 — the X-ray ghost, always-visible origin dots, and the hover label.**
+**Slice 3 — the X-ray ghost, always-visible origin dots, and the hover label.** ✅ `c2f97e8`
 (§3.5, §3.3) Pure rendering plus one egui backdrop, touches nothing slices 1–2
 own, fixes the todo item noted twice. Must land before slice 4: it is what makes
 "select first, then manipulate" tolerable, and slice 4 without it would be a
 regression rather than a fix.
 
-**Slice 4 — selection scoping.** (§3.3) `pick_gizmo` gains a `selected`
+**Slice 4 — selection scoping.** ✅ `c7d7417` (§3.3) `pick_gizmo` gains a `selected`
 parameter and offers non-selected transforms only their origin dot, select-only.
 Press-on-unselected-dot must start no drag of any kind.
 
-**Slice 5 — the ring, and roll.** Ring geometry, radius derivation, annulus
+**Slice 5 — the ring, and roll.** ✅ `3e70040` Ring geometry, radius derivation, annulus
 pick, `GizmoDragMode::Roll`. Delivers ask #2 in its conflict-free form. **Stop
 here.**
 
