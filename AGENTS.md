@@ -304,7 +304,12 @@ never be invisible while still taking clicks. `XRAY_ALPHA` is the knob if the
 ghost reads too faint or too loud over a bright attractor.
 
 Hovering a gizmo also promotes that transform's name label to the solid
-backdrop the selected one gets (`src/ui/labels.rs`). Bare white text disappears
+backdrop the selected one gets (`src/ui/labels.rs`); a bare label carries a
+1px black drop shadow instead, for the same reason the origin dots wear a
+rim. Both are drawn over whatever the attractor happens to be, and white on
+a pale fractal is not text. Note `Painter::galley`'s colour argument is only
+a *fallback*, so the shadow and the label share one galley laid out in
+`Color32::PLACEHOLDER` — laid out white, the shadow would paint white too. Bare white text disappears
 against a bright attractor, and reading a name is how you decide whether this is
 the transform you meant -- which matters most before you have selected it.
 

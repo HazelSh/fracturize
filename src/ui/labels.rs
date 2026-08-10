@@ -69,13 +69,31 @@ pub fn draw(ctx: &egui::Context, app: &App) {
             painter.galley(pos, galley, egui::Color32::BLACK);
         } else {
             let alpha: u8 = if app.is_transform_enabled(i) { 200 } else { 80 };
-            painter.text(
-                pos,
-                egui::Align2::LEFT_TOP,
+            // A 1px black shadow, for the same reason the origin dots gained a
+            // rim: this text is drawn over whatever the attractor happens to
+            // be, and white on a pale fractal is not text. The plated cases
+            // above don't need it — the plate *is* the contrast — so only the
+            // bare label carries one.
+            //
+            // Laid out once and painted twice rather than calling `text`
+            // twice, which would shape the glyphs a second time to put them in
+            // exactly the same places. Laid out in `PLACEHOLDER` because
+            // `Painter::galley`'s colour argument is only a *fallback* — it
+            // recolours the parts of a galley that have no colour of their own,
+            // so a galley laid out white would paint the shadow white too.
+            let galley = painter.layout_no_wrap(
                 label,
                 font.clone(),
-                egui::Color32::from_white_alpha(alpha),
+                egui::Color32::PLACEHOLDER,
             );
+            // The shadow fades with the label, so a disabled transform doesn't
+            // end up with a hard black edge round faint grey text.
+            painter.galley(
+                pos + egui::vec2(1.0, 1.0),
+                galley.clone(),
+                egui::Color32::from_black_alpha(alpha),
+            );
+            painter.galley(pos, galley, egui::Color32::from_white_alpha(alpha));
         }
     }
 }
