@@ -145,7 +145,15 @@ fn vs_main(
         let edge_dir = normalize(screen_b - screen_a);
         let perp = vec2<f32>(-edge_dir.y, edge_dir.x);
 
-        // 2px width in NDC; hovered edges grow to 4.6px
+        // 2px width in NDC; hovered edges grow to 4.6px.
+        //
+        // No dark rim here, unlike the origin dots. It was tried — the muted
+        // palette makes a thin line easy to lose over a pale attractor, and an
+        // outline is how the dots and the name labels solve exactly that. At
+        // two pixels it doesn't work: half the line becomes border, and the
+        // overlay's 4x MSAA isn't enough to keep a one-pixel outline on a
+        // near-horizontal edge from breaking into steps. It would need real
+        // analytic edge antialiasing first.
         let half_width_ndc_y = (2.0 + 2.6 * hl) / camera.screen_height;
         let half_width_ndc_x = half_width_ndc_y / camera.aspect_ratio;
         let offset = vec2<f32>(perp.x * half_width_ndc_x, perp.y * half_width_ndc_y);
@@ -269,7 +277,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Dots wear a dark rim in the margin added for it, so they stay findable on
     // a pale attractor. Drawn as a hard step: this is a border, not a glow, and
     // the overlay target is multisampled so the outer edge is antialiased for
-    // free.
+    // free. A dot is several pixels across in both axes, which is what lets it
+    // carry a border the two-pixel edge quads cannot — see `vs_main`.
     if in.kind == 2u {
         let edge = max(abs(in.local.x), abs(in.local.y));
         if edge > in.rim {

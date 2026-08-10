@@ -32,10 +32,14 @@ const MARGIN: egui::Vec2 = egui::vec2(-16.0, -34.0);
 /// Coloured by axis rather than by sign — the two ends of one axis are the same
 /// axis, and giving them different hues would say otherwise. The negative ends
 /// are drawn hollow, which is the convention everyone else uses too.
+///
+/// The hues are [`crate::palette::axes`], shared with the transform gizmos: the
+/// cross in the corner is the legend for the coloured shafts out in the scene,
+/// and a legend that disagrees with the thing it labels is worse than none.
 const AXES: [(&str, Vec3, egui::Color32); 3] = [
-    ("X", Vec3::X, egui::Color32::from_rgb(226, 92, 92)),
-    ("Y", Vec3::Y, egui::Color32::from_rgb(126, 206, 106)),
-    ("Z", Vec3::Z, egui::Color32::from_rgb(102, 150, 232)),
+    ("X", Vec3::X, crate::palette::axes::axis_color32(0)),
+    ("Y", Vec3::Y, crate::palette::axes::axis_color32(1)),
+    ("Z", Vec3::Z, crate::palette::axes::axis_color32(2)),
 ];
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {

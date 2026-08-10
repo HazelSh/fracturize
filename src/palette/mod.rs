@@ -22,6 +22,7 @@
 //! has to encode it first — see [`to_srgb8`]. Anything that *imports* one from
 //! a file written in display space has to decode it — see [`srgb8_to_linear`].
 
+pub mod axes;
 pub mod import;
 pub mod library;
 pub mod random;

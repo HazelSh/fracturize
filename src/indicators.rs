@@ -240,13 +240,19 @@ fn cage_edges(kind: crate::symmetry::OrbitKind) -> Vec<(Vec3, Vec3)> {
     edges
 }
 
-/// The axis colours the gizmo already uses for its shafts and tip handles, so
-/// the extension line and the handle you are holding read as the same axis.
-const AXIS_COLORS: [[f32; 4]; 3] = [
-    [1.0, 0.35, 0.35, 0.7],
-    [0.35, 1.0, 0.35, 0.7],
-    [0.45, 0.55, 1.0, 0.7],
-];
+/// The axis colours the gizmo uses for its shafts and tip handles, so the
+/// extension line and the handle you are holding read as the same axis.
+///
+/// This used to be its own hand-written triple, under a comment making exactly
+/// the claim above while the gizmo was drawing full-saturation primaries — the
+/// two had never matched. They come from [`crate::palette::axes`] now, so the
+/// claim is enforced rather than asserted.
+const AXIS_ALPHA: f32 = 0.7;
+
+fn axis_color(k: usize) -> [f32; 4] {
+    let c = crate::palette::axes::axis_linear(k);
+    [c.x, c.y, c.z, AXIS_ALPHA]
+}
 
 /// The line of the axis being scaled, drawn dashed and running well past both
 /// ends of it.
@@ -284,7 +290,7 @@ pub fn build_axis_extension(matrix: Mat4, k: usize, pitch: f32, min_reach: f32) 
     // distance behind the origin so the mirror point reads as a midpoint rather
     // than an edge.
     let reach = (len * 2.5).max(min_reach).max(pitch * 4.0);
-    let color = AXIS_COLORS[k.min(2)];
+    let color = axis_color(k);
 
     let steps = ((2.0 * reach) / pitch).ceil() as usize;
     // A runaway pitch (a near-degenerate projection at grab time) would ask for

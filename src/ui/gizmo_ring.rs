@@ -21,13 +21,18 @@
 
 use crate::app::App;
 
-/// Desaturated, so it doesn't compete with the six hues already spent on the
-/// tetrahedron's axes and faces — and separated from everything else neutral in
-/// the viewport by *lightness* rather than hue. The reference tetrahedron is a
-/// mid grey and the scene carries a pale warm line through the origin; a
-/// control that reads as either of those is a control you have to think about.
-/// This sits above both, faintly cool, and the dashes finish the job.
-const IDLE: egui::Color32 = egui::Color32::from_rgb(214, 218, 228);
+/// Desaturated, so it doesn't compete with the hues spent on the tetrahedron's
+/// axes — and separated from everything else neutral in the viewport by
+/// *lightness* rather than hue. The reference tetrahedron is a mid grey and the
+/// scene carries a pale warm line through the origin; a control that reads as
+/// either of those is a control you have to think about. This sits above both,
+/// faintly cool, and the dashes finish the job.
+///
+/// It is now *the* interface neutral rather than a colour of its own: the
+/// gizmo's shafts fade to this same value at the origin, where they belong to
+/// no axis. One neutral shared by everything that isn't an axis says something;
+/// three near-identical greys said only that nobody had compared them.
+const IDLE: egui::Color32 = crate::palette::axes::neutral_color32();
 const ACTIVE: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
 
 /// Dashes around the ring, and how much of each dash's slot is drawn.
