@@ -43,7 +43,12 @@ pub const EDGE_RADIUS_PX: f32 = 7.0;
 pub const MIN_AXIS_PX: f32 = 8.0;
 
 /// How far outside the gizmo's own silhouette the roll ring sits, in pixels.
-pub const RING_MARGIN_PX: f32 = 22.0;
+///
+/// Zero: the ring passes through whichever corner projects furthest from the
+/// origin, so it reads as the gizmo's own extent rather than as a separate
+/// object floating around it. It still can't steal that corner's handle — the
+/// tip's negative bias beats the ring's positive one wherever they meet.
+pub const RING_MARGIN_PX: f32 = 0.0;
 /// Smallest the roll ring may draw, so it stays grabbable around a transform
 /// that is tiny on screen.
 pub const RING_MIN_PX: f32 = 46.0;
@@ -504,17 +509,23 @@ mod tests {
         );
         let (c, r) = roll_ring(m, vp, 1280.0, 720.0).unwrap();
 
-        // On the band, away from everything else.
-        for turn in 0..8 {
-            let t = std::f32::consts::TAU * turn as f32 / 8.0;
+        // The ring now passes *through* the corner that projects furthest, so
+        // going round it the answer is Roll everywhere except where a handle
+        // sits on the band — and there the handle wins. Both halves matter: a
+        // ring with dead arcs would be a broken control, and a ring that
+        // swallowed a tip would make the corner it touches ungrabbable.
+        let mut rolls = 0;
+        for turn in 0..16 {
+            let t = std::f32::consts::TAU * turn as f32 / 16.0;
             let at = (c.0 + r * t.cos(), c.1 + r * t.sin());
-            let hit = pick_gizmo(&[m], Some(0), vp, at, 1280.0, 720.0);
-            assert_eq!(
-                hit.map(|h| h.part),
-                Some(GizmoPart::Roll),
-                "the ring should be grabbable at turn {turn}"
-            );
+            let part = pick_gizmo(&[m], Some(0), vp, at, 1280.0, 720.0).map(|h| h.part);
+            match part {
+                Some(GizmoPart::Roll) => rolls += 1,
+                Some(GizmoPart::Tip(_)) => {}
+                other => panic!("nothing grabbable on the ring at turn {turn}: {other:?}"),
+            }
         }
+        assert!(rolls >= 12, "only {rolls}/16 of the ring was grabbable");
 
         // The ring is derived from the silhouette, so it sits outside every
         // tip — grabbing a tip must still give the tip.

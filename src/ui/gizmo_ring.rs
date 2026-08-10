@@ -21,15 +21,34 @@
 
 use crate::app::App;
 
-/// Neutral, so it doesn't compete with the six hues already spent on the
-/// tetrahedron's axes and faces — and so it reads as chrome rather than as part
-/// of the shape.
-const IDLE: egui::Color32 = egui::Color32::from_rgb(150, 152, 160);
-const ACTIVE: egui::Color32 = egui::Color32::from_rgb(236, 238, 245);
+/// Desaturated, so it doesn't compete with the six hues already spent on the
+/// tetrahedron's axes and faces — and separated from everything else neutral in
+/// the viewport by *lightness* rather than hue. The reference tetrahedron is a
+/// mid grey and the scene carries a pale warm line through the origin; a
+/// control that reads as either of those is a control you have to think about.
+/// This sits above both, faintly cool, and the dashes finish the job.
+const IDLE: egui::Color32 = egui::Color32::from_rgb(214, 218, 228);
+const ACTIVE: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
 
-/// Segments in the drawn circle. Enough that the dashes read as arcs rather
-/// than as a polygon at the sizes this is drawn at.
-const SEGMENTS: usize = 96;
+/// Dashes around the ring, and how much of each dash's slot is drawn.
+///
+/// **Fixed in angle, not in arc length**, and that is the whole point. egui's
+/// `dashed_line` measures dashes along the polyline in pixels, so as the ring's
+/// radius changes — which it does constantly while the camera flies a path, as
+/// the transform moves through 3-space — the circumference changes, the number
+/// of dashes that fit changes, and the pattern slides around the seam where the
+/// polyline closes. The result reads as the ring *spinning*, which is a motion
+/// the app is not making and an outright lie about a rotation control.
+///
+/// Anchoring each dash to a fixed angle removes the failure at the source:
+/// dash *k* always occupies the same wedge, so changing the radius scales the
+/// dashes and moves nothing. There is no seam, because there is no running
+/// arc-length to accumulate error in.
+const DASHES: usize = 48;
+const DASH_FILL: f32 = 0.55;
+/// Points per dash. Three is enough for a dash spanning a fraction of a
+/// forty-eighth of a turn to read as curved rather than straight.
+const DASH_POINTS: usize = 3;
 
 pub fn draw(ctx: &egui::Context, app: &App) {
     if !app.show_gizmos {
@@ -64,17 +83,23 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     ));
     let stroke = egui::Stroke::new(width, color);
 
-    let points: Vec<egui::Pos2> = (0..=SEGMENTS)
-        .map(|i| {
-            let t = std::f32::consts::TAU * i as f32 / SEGMENTS as f32;
-            egui::pos2(c.x + r * t.cos(), c.y + r * t.sin())
-        })
-        .collect();
+    let at = |t: f32| egui::pos2(c.x + r * t.cos(), c.y + r * t.sin());
 
     if held {
         // Solid: you have hold of it, and the dashes have done their job.
+        let full = DASHES * DASH_POINTS;
+        let points: Vec<egui::Pos2> = (0..=full)
+            .map(|i| at(std::f32::consts::TAU * i as f32 / full as f32))
+            .collect();
         painter.add(egui::Shape::line(points, stroke));
     } else {
-        painter.add(egui::Shape::dashed_line(&points, stroke, 6.0, 6.0));
+        let slot = std::f32::consts::TAU / DASHES as f32;
+        for i in 0..DASHES {
+            let start = slot * i as f32;
+            let points: Vec<egui::Pos2> = (0..=DASH_POINTS)
+                .map(|j| at(start + slot * DASH_FILL * j as f32 / DASH_POINTS as f32))
+                .collect();
+            painter.add(egui::Shape::line(points, stroke));
+        }
     }
 }

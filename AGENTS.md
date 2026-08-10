@@ -203,12 +203,12 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | drag an axis endpoint (tip dot) | scale that one axis; drag past the origin to mirror it |
 | drag an origin→axis gizmo edge | translate along that axis |
 | drag an outer gizmo edge | rotate around the third local axis (edge x-y rotates around z) |
-| ctrl+drag any gizmo part | uniform scale (drag up = grow) |
+| ctrl+drag the origin dot or an axis shaft | uniform scale (drag up = grow) |
 | shift during a gizmo drag | fine: a fifth of the travel. Anchored, so pressing or releasing it mid-drag doesn't jump |
-| alt+drag an outer gizmo edge | snap the rotation to 15° |
-| alt+drag an axis endpoint | snap that axis's scale to 0.1 |
+| ctrl+drag an outer gizmo edge | snap the rotation to 15° (or the transform's symmetry-group step) |
+| ctrl+drag an axis endpoint | snap that axis's scale to 0.1 |
 | drag the ring around the selected gizmo | roll it about the camera's view axis, through its own origin |
-| alt+drag the ring | snap the roll to 15° (or the transform's symmetry-group step) |
+| ctrl+drag the ring | snap the roll to 15° (or the transform's symmetry-group step) |
 | alt+scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
@@ -307,6 +307,15 @@ Hovering a gizmo also promotes that transform's name label to the solid
 backdrop the selected one gets (`src/ui/labels.rs`). Bare white text disappears
 against a bright attractor, and reading a name is how you decide whether this is
 the transform you meant -- which matters most before you have selected it.
+
+**Ctrl snaps wherever the grab has something to snap to** — a tip's scale, a
+rotate edge's angle, the ring's — and means uniform scale everywhere else. It
+used to be alt, and alt+drag never reaches the app on XFCE, which claims it for
+move-window: a modifier the window manager eats is not a modifier. Ctrl was free
+to take over on exactly those handles because "ctrl = uniform scale" was
+redundant there; uniform scale is still reachable from the origin dot and every
+axis shaft. Alt is kept as an alias for desktops that leave it alone, and
+alt+scroll (chaos weight) is untouched — the window manager only takes drags.
 
 Three rules the gizmo geometry depends on:
 

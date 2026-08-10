@@ -335,9 +335,12 @@ enum GizmoDragMode {
     /// case.
     ///
     /// `dash_pitch` is the world-space period of the extension line drawn while
-    /// this is held, fixed here at grab time so the dashes don't crawl as the
-    /// axis changes length (see `indicators::build_axis_extension`).
-    ScaleAxis { k: usize, dir: Vec3, len0: f32, s0: f32, dash_pitch: f32 },
+    /// this is held, and `dash_reach` the shortest it may run from the origin.
+    /// Both are fixed here at grab time so the dashes don't crawl as the axis
+    /// changes length (see `indicators::build_axis_extension`), and both come
+    /// from a screen measurement, so a very short axis still draws a line long
+    /// enough to see and aim along.
+    ScaleAxis { k: usize, dir: Vec3, len0: f32, s0: f32, dash_pitch: f32, dash_reach: f32 },
     /// Dragging an outer edge: rotate around the transform's local axis
     /// (world direction `axis`, through the transform origin)
     Rotate { axis: Vec3, center: (f32, f32), start_angle: crate::rot::Angle },
@@ -702,7 +705,7 @@ pub struct App {
     /// What the indicator lines were last built for: the selected transform and
     /// its matrix generation, plus the axis handle being held (with its dash
     /// pitch, as raw bits so the key stays comparable).
-    indicator_key: (Option<(usize, u64)>, Option<(usize, u32)>),
+    indicator_key: (Option<(usize, u64)>, Option<(usize, u32, u32)>),
     /// Third line buffer: the camera path's route through space
     /// (see `indicators::build_path`).
     path_renderer: LineRenderer,
@@ -2752,8 +2755,26 @@ impl App {
         let inv_vp = view_proj.inverse();
         let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, self.cursor.0, self.cursor.1, w, h);
 
-        // Ctrl turns any grab into a uniform scale
-        let mode = if self.ctrl_held {
+        // Ctrl turns any grab into a uniform scale — except on the two rotation
+        // controls, where it is the snap modifier instead.
+        //
+        // Alt was the snap, and on this desktop alt+drag never reaches the app
+        // at all: XFCE claims it for move-window. A modifier the window manager
+        // eats is not a modifier. Ctrl was free to take over here because
+        // "ctrl = uniform scale" on a *rotation* control was the one place that
+        // meaning was redundant — uniform scale is still reachable by ctrl on
+        // the origin dot, on any axis shaft, and on any tip. Alt is kept as an
+        // alias for anyone whose desktop leaves it alone.
+        //
+        // The rule this settles on: **ctrl snaps wherever the grab has
+        // something to snap to** — a tip's scale, a rotate edge's angle, the
+        // ring's — and means uniform scale everywhere else. Uniform scale loses
+        // only the entry points where it was redundant.
+        let snappable = matches!(
+            hit.part,
+            GizmoPart::Tip(_) | GizmoPart::RotEdge(_) | GizmoPart::Roll
+        );
+        let mode = if self.ctrl_held && !snappable {
             GizmoDragMode::Scale { start_y: self.cursor.1 }
         } else {
             match hit.part {
@@ -2772,21 +2793,27 @@ impl App {
                     let len0 = col.length();
                     let dir = col.normalize_or(Vec3::X);
                     let s0 = crate::pick::line_param_closest_to_ray(origin, dir, ray_o, ray_d);
-                    // One dash period ≈ 16px on screen at the moment of the
-                    // grab: 8 on, 8 off. Measured once, here, and then held in
-                    // world units for the life of the drag — see the note on
+                    // How much world distance one screen pixel is worth along
+                    // this axis, measured once at the grab. Everything about
+                    // the dashed line is sized from it: a period of ~16px
+                    // (8 on, 8 off), and a minimum run of a fifth of the
+                    // smaller screen dimension so a nearly-flat axis still
+                    // draws a line you can see and aim along. Measured once
+                    // rather than per frame — see the note on
                     // `indicators::build_axis_extension` for why recomputing it
-                    // per frame would make the dashes crawl.
-                    let dash_pitch = crate::camera::world_to_screen(origin + col, view_proj, w, h)
+                    // would make the dashes crawl.
+                    let world_per_px = crate::camera::world_to_screen(origin + col, view_proj, w, h)
                         .zip(crate::camera::world_to_screen(origin, view_proj, w, h))
                         .map(|(tip_s, origin_s)| {
                             let px = ((tip_s.0 - origin_s.0).powi(2)
                                 + (tip_s.1 - origin_s.1).powi(2))
                             .sqrt();
-                            if px > 1.0 { 16.0 * len0 / px } else { len0 * 0.25 }
+                            if px > 1.0 { len0 / px } else { len0 * 0.02 }
                         })
-                        .unwrap_or(len0 * 0.25);
-                    GizmoDragMode::ScaleAxis { k, dir, len0, s0, dash_pitch }
+                        .unwrap_or(len0 * 0.02);
+                    let dash_pitch = 16.0 * world_per_px;
+                    let dash_reach = 0.2 * w.min(h) * world_per_px;
+                    GizmoDragMode::ScaleAxis { k, dir, len0, s0, dash_pitch, dash_reach }
                 }
                 GizmoPart::RotEdge(k) => {
                     let mut axis = m.col(k).truncate().normalize_or(Vec3::Y);
@@ -2863,17 +2890,19 @@ impl App {
                 // Shortest way round is right for a drag: nobody swings the
                 // pointer more than half a turn between two frames.
                 let mut delta = start_angle.shortest_to(angle);
-                // Alt snaps to 15°. Worth more here than in a general 3D tool:
+                // Ctrl snaps to 15°, with alt kept as an alias. Worth more here
+                // than in a general 3D tool:
                 // IFS aesthetics live on clean rotational symmetry, and a
                 // fifteenth of a degree off exact is visible as a smear in the
-                // attractor. Ctrl is taken by uniform scale, so Alt it is.
+                // attractor. Ctrl doesn't mean uniform scale on a rotation grab
+                // (see `try_grab_gizmo`), which is what frees it to mean this.
                 //
                 // When the map is a motif of a symmetry group, the *group's*
                 // own step is the clean increment — 72° under C5 — so the
                 // constant becomes a lookup. A group is a statement about which
                 // rotations are exact in this scene, and this is the control
                 // that was already trying to guess that.
-                if self.alt_held {
+                if self.ctrl_held || self.alt_held {
                     const SNAP: f32 = std::f32::consts::FRAC_PI_2 / 6.0; // 15°
                     let snap = self
                         .selected_transform
@@ -2907,7 +2936,7 @@ impl App {
             }
             GizmoDragMode::ScaleAxis { k, dir, len0, s0, .. } => {
                 let s = crate::pick::line_param_closest_to_ray(start_origin, dir, ray_o, ray_d);
-                let len = axis_scale_length(len0, s, s0, self.alt_held);
+                let len = axis_scale_length(len0, s, s0, self.ctrl_held || self.alt_held);
                 with_scaled_column(start, k, dir, len)
             }
         };
@@ -3332,9 +3361,10 @@ impl App {
         // last frame's key would still match and the dashes would stay on
         // screen after the grab ended.
         let held_axis = match self.drag {
-            Drag::Gizmo { mode: GizmoDragMode::ScaleAxis { k, dash_pitch, .. }, .. } => {
-                Some((k, dash_pitch.to_bits()))
-            }
+            Drag::Gizmo {
+                mode: GizmoDragMode::ScaleAxis { k, dash_pitch, dash_reach, .. },
+                ..
+            } => Some((k, dash_pitch.to_bits(), dash_reach.to_bits())),
             _ => None,
         };
         let key = (
@@ -3348,18 +3378,19 @@ impl App {
         let key = key.0;
         let mut verts = match key {
             Some((i, _)) if i < self.scene.transforms.len() => {
-                crate::indicators::build(self.scene.transforms[i].matrix)
+                crate::indicators::build_rotation(self.scene.transforms[i].matrix)
             }
             _ => Vec::new(),
         };
 
         // The axis being scaled, extended past both ends of itself.
-        if let (Some((i, _)), Some((k, pitch))) = (key, held_axis) {
+        if let (Some((i, _)), Some((k, pitch, reach))) = (key, held_axis) {
             if let Some(spec) = self.scene.transforms.get(i) {
                 verts.extend(crate::indicators::build_axis_extension(
                     spec.matrix,
                     k,
                     f32::from_bits(pitch),
+                    f32::from_bits(reach),
                 ));
             }
         }
@@ -3417,14 +3448,6 @@ impl App {
             _ => Vec::new(),
         };
         self.path_renderer.set_lines(&self.gpu.device, &verts);
-    }
-
-    /// World-space offset of the selected transform from the origin, for the
-    /// label `ui::labels` paints on the offset vector.
-    pub fn selected_offset(&self) -> Option<(Vec3, f32)> {
-        let i = self.selected_transform?;
-        let t = self.scene.transforms.get(i)?.matrix.w_axis.truncate();
-        (t.length() > 1e-4).then(|| (t, t.length()))
     }
 
     // === Evolutionary exploration (U / Shift+U) ===
@@ -4062,6 +4085,12 @@ impl App {
             self.overlay.samples(),
             &self.scene.transforms,
         );
+        // A fresh renderer knows nothing about the selection, so the x-ray slot
+        // and the tip handles are off until something tells it again — and
+        // `refresh_indicators` only speaks up when its key *changes*. Clear the
+        // key so the next frame re-states the selection instead of waiting for
+        // one to happen.
+        self.indicator_key = (None, None);
         self.point_compute.update_weights(
             &self.gpu.queue,
             &self.scene.transforms,

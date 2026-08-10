@@ -327,9 +327,14 @@ const XRAY_SLOT: u32 = 1;
 
 /// How faint the buried part of the selected gizmo reads.
 ///
-/// Low enough that it can't be mistaken for the real thing sitting in front of
-/// the fractal, high enough to aim at.
-const XRAY_ALPHA: f32 = 0.3;
+/// Written **negative** into the per-instance alpha buffer, which is how the
+/// shader tells "x-ray" from "disabled". Both are less than fully opaque, but
+/// only the disabled one should desaturate — an x-ray gizmo is the same object
+/// seen through something, so it keeps its colours.
+///
+/// Higher than it first was: at 0.3, and greyed by the disabled path it was
+/// accidentally sharing, the ghost was invisible over anything bright.
+const XRAY_ALPHA: f32 = 0.55;
 
 pub struct GizmoRenderer {
     /// Pipeline for edges + dots (depth write ON)
@@ -585,7 +590,7 @@ impl GizmoRenderer {
         queue.write_buffer(
             &self.alpha_buffer,
             slot as u64 * stride,
-            bytemuck::cast_slice(&[XRAY_ALPHA]),
+            bytemuck::cast_slice(&[-XRAY_ALPHA]),
         );
     }
 

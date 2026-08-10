@@ -40,7 +40,16 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Magnitude is the instance's opacity. A *negative* value marks the x-ray
+    // copy, which must keep its colours -- see `fs_main`. Sign-encoding a
+    // second meaning onto a float is the same trick the edge quads already use
+    // for which side of the line a vertex is on.
     @location(1) @interpolate(flat) inst_alpha: f32,
+    // Dots only: position within the billboard, -1..1 on each axis.
+    @location(2) local: vec2<f32>,
+    // Dots only: where the dark rim starts, as a fraction of the half-extent.
+    @location(3) @interpolate(flat) rim: f32,
+    @location(4) @interpolate(flat) kind: u32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -94,6 +103,9 @@ fn vs_main(
     var out: VertexOutput;
     out.color = in.color;
     out.inst_alpha = alpha_mult;
+    out.local = vec2<f32>(0.0);
+    out.rim = 2.0;              // past the corner: no rim unless a dot says so
+    out.kind = in.vertex_type;
 
     if in.vertex_type == 0u {
         // === FACE VERTEX: simple transform + project ===
@@ -203,8 +215,18 @@ fn vs_main(
         // 6px dot; 10px hovered, 12px held. Size carries the held state here as
         // well as colour, because the origin dot is already white and mixing
         // white toward white says nothing.
-        let half_size_ndc_y = (6.0 + 4.0 * hl + 2.0 * held) / camera.screen_height;
+        //
+        // BORDER_PX is added on the outside and spent on a dark rim (see
+        // `fs_main`), so the dot keeps its drawn size and gains an outline
+        // rather than losing colour to one. Origin dots are drawn ignoring
+        // depth over whatever the fractal happens to be, and a white dot on a
+        // pale attractor is no dot at all.
+        let BORDER_PX = 1.6;
+        let core_px = 6.0 + 4.0 * hl + 2.0 * held;
+        let half_px = core_px + BORDER_PX;
+        let half_size_ndc_y = half_px / camera.screen_height;
         let half_size_ndc_x = half_size_ndc_y / camera.aspect_ratio;
+        out.rim = core_px / half_px;
 
         // Billboard offset encoded in edge_other.xy (-1..1 range). The
         // reference gizmo's tip dots store a zero corner on purpose, which
@@ -220,6 +242,7 @@ fn vs_main(
         );
         let dot_rgb = mix(in.color.rgb, vec3<f32>(1.0), 0.55 * hl * (1.0 - held));
         out.color = vec4<f32>(dot_rgb, in.color.a);
+        out.local = corner;
     }
 
     return out;
@@ -228,10 +251,30 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var c = in.color;
-    if in.inst_alpha < 1.0 {
-        // Desaturate towards grey for disabled gizmos
+
+    // A negative instance alpha is the x-ray copy of the selected gizmo: fainter
+    // than the real thing, but *the same object*, so it keeps its colours. Only
+    // a genuinely disabled transform desaturates. These used to share the one
+    // `inst_alpha < 1.0` branch, which meant the x-ray came out grey at a
+    // quarter opacity and was invisible over anything bright -- the whole point
+    // of it defeated by inheriting a rule meant for something else.
+    let opacity = abs(in.inst_alpha);
+    if in.inst_alpha < 0.0 {
+        c = vec4<f32>(c.rgb, c.a * opacity);
+    } else if opacity < 1.0 {
         let lum = dot(c.rgb, vec3<f32>(0.3, 0.6, 0.1));
-        c = vec4<f32>(vec3<f32>(lum), c.a * in.inst_alpha);
+        c = vec4<f32>(vec3<f32>(lum), c.a * opacity);
+    }
+
+    // Dots wear a dark rim in the margin added for it, so they stay findable on
+    // a pale attractor. Drawn as a hard step: this is a border, not a glow, and
+    // the overlay target is multisampled so the outer edge is antialiased for
+    // free.
+    if in.kind == 2u {
+        let edge = max(abs(in.local.x), abs(in.local.y));
+        if edge > in.rim {
+            c = vec4<f32>(vec3<f32>(0.04, 0.04, 0.05), c.a);
+        }
     }
     return c;
 }

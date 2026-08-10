@@ -29,9 +29,6 @@ use glam::{Mat4, Quat, Vec3};
 use crate::gpu::LineVertex;
 use crate::path::CameraPath;
 
-/// Offset vector colour: warm, so it reads apart from the cool rotation
-/// indicator and from the palette colours the fractal itself uses.
-const OFFSET_COLOR: [f32; 4] = [1.0, 0.78, 0.35, 0.85];
 /// Rotation axis / arc colour.
 const ROT_COLOR: [f32; 4] = [0.45, 0.85, 1.0, 0.8];
 /// Segments in the angle arc — enough that a full turn still reads as round.
@@ -40,16 +37,24 @@ const ARC_SEGMENTS: usize = 48;
 /// line alone says "barely rotated".
 const MIN_ARC_ANGLE: f32 = 0.02;
 
-/// Build the indicator line list for one transform's matrix. Returns pairs of
+/// Build the rotation indicator for one transform's matrix. Returns pairs of
 /// vertices (the line renderer draws a `LineList`).
-pub fn build(matrix: Mat4) -> Vec<LineVertex> {
+///
+/// The offset-from-the-origin vector that used to be drawn alongside this is
+/// gone, at Hazel's call. It was a line from the world origin to the
+/// transform's own, with an arrowhead built from four struts — and the
+/// arrowhead never read as one from most angles, which was the original
+/// complaint in `todo.txt`. The information it carried was also the one thing
+/// the inspector already states exactly, as three numbers under "Position".
+/// The rotation is the opposite case: an axis and an angle are genuinely hard
+/// to read off Euler triples, and easy to see drawn, so it stays.
+pub fn build_rotation(matrix: Mat4) -> Vec<LineVertex> {
     let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
     // Characteristic size of this transform's cell, used to scale the
-    // indicators so they stay legible for both tiny and large transforms.
+    // indicator so it stays legible for both tiny and large transforms.
     let cell = ((scale.x.abs() + scale.y.abs() + scale.z.abs()) / 3.0).max(0.02);
 
-    let mut verts = Vec::with_capacity(2 * (2 + 4 + 1 + ARC_SEGMENTS + 2));
-    push_offset(&mut verts, translation, cell);
+    let mut verts = Vec::with_capacity(2 * (1 + ARC_SEGMENTS + 2));
     push_rotation(&mut verts, translation, rotation, cell);
     verts
 }
@@ -262,7 +267,11 @@ const AXIS_COLORS: [[f32; 4]; 3] = [
 /// sit at fixed multiples of `pitch` along a world-space line, so they stay put
 /// while the length changes under them. Deriving the pitch from the *current*
 /// length every frame would slide every dash on every mouse move.
-pub fn build_axis_extension(matrix: Mat4, k: usize, pitch: f32) -> Vec<LineVertex> {
+///
+/// `min_reach` is the same idea applied to length: an axis squashed almost to
+/// nothing would otherwise draw a line too short to aim along, exactly when the
+/// line is the only way to see where the axis goes.
+pub fn build_axis_extension(matrix: Mat4, k: usize, pitch: f32, min_reach: f32) -> Vec<LineVertex> {
     let origin = matrix.w_axis.truncate();
     let col = matrix.col(k).truncate();
     let len = col.length();
@@ -274,7 +283,7 @@ pub fn build_axis_extension(matrix: Mat4, k: usize, pitch: f32) -> Vec<LineVerte
     // Far enough past the tip to show where the drag is going, and the same
     // distance behind the origin so the mirror point reads as a midpoint rather
     // than an edge.
-    let reach = (len * 2.5).max(pitch * 4.0);
+    let reach = (len * 2.5).max(min_reach).max(pitch * 4.0);
     let color = AXIS_COLORS[k.min(2)];
 
     let steps = ((2.0 * reach) / pitch).ceil() as usize;
@@ -356,25 +365,6 @@ fn seg(verts: &mut Vec<LineVertex>, a: Vec3, b: Vec3, color: [f32; 4]) {
     verts.push(LineVertex { position: b.to_array(), color });
 }
 
-/// Origin -> transform position, with a four-strut arrowhead. The arrowhead
-/// is built from two vectors perpendicular to the shaft rather than billboard
-/// geometry, so it reads as an arrow from any camera angle.
-fn push_offset(verts: &mut Vec<LineVertex>, translation: Vec3, cell: f32) {
-    let len = translation.length();
-    if len < 1e-4 {
-        return;
-    }
-    let dir = translation / len;
-    seg(verts, Vec3::ZERO, translation, OFFSET_COLOR);
-
-    let (u, v) = perpendicular_basis(dir);
-    let head = (cell * 0.35).min(len * 0.3);
-    let base = translation - dir * head;
-    for offset in [u, -u, v, -v] {
-        seg(verts, translation, base + offset * head * 0.45, OFFSET_COLOR);
-    }
-}
-
 /// The rotation axis through the transform's origin, plus an arc sweeping the
 /// rotation angle in the plane perpendicular to it, with radial ticks at both
 /// ends so the direction of the sweep is unambiguous.
@@ -449,22 +439,8 @@ mod tests {
 
     #[test]
     fn identity_transform_draws_nothing() {
-        // No offset and no rotation means there is nothing to say.
-        assert!(build(Mat4::IDENTITY).is_empty());
-    }
-
-    #[test]
-    fn offset_only_draws_the_vector_but_no_arc() {
-        let m = Mat4::from_scale_rotation_translation(
-            Vec3::splat(0.5),
-            Quat::IDENTITY,
-            Vec3::new(1.0, 0.0, 0.0),
-        );
-        let verts = build(m);
-        assert!(!verts.is_empty());
-        // Shaft plus four arrowhead struts, and nothing in the rotation colour.
-        assert_eq!(verts.len(), 10);
-        assert!(verts.iter().all(|v| v.color == OFFSET_COLOR));
+        // No rotation means there is nothing to say.
+        assert!(build_rotation(Mat4::IDENTITY).is_empty());
     }
 
     #[test]
@@ -474,7 +450,7 @@ mod tests {
             Quat::from_euler(EulerRot::XYZ, 0.0, 1.2, 0.0),
             Vec3::ZERO,
         );
-        let verts = build(m);
+        let verts = build_rotation(m);
         assert!(
             verts.iter().any(|v| v.color == ROT_COLOR),
             "a rotated transform must draw its axis and arc"
@@ -570,6 +546,6 @@ mod tests {
             Quat::from_euler(EulerRot::XYZ, 0.0, 1e-6, 0.0),
             Vec3::ZERO,
         );
-        assert!(build(m).iter().all(|v| v.color != ROT_COLOR));
+        assert!(build_rotation(m).iter().all(|v| v.color != ROT_COLOR));
     }
 }

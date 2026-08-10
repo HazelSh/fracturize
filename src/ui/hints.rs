@@ -17,16 +17,16 @@ pub const HINT_SELECT: &str =
     "click: select this transform · alt+scroll: chaos weight";
 /// Dragging a gizmo's axis endpoint handle
 pub const HINT_TIP: &str =
-    "drag: scale this axis (shift: fine, alt: snap 0.1) · drag past the origin to mirror";
+    "drag: scale this axis (shift: fine, ctrl: snap 0.1) · drag past the origin to mirror";
 /// Dragging an origin→axis gizmo edge
 pub const HINT_AXIS: &str =
     "drag: slide along axis (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
 /// Dragging an outer gizmo edge
 pub const HINT_ROT_EDGE: &str =
-    "drag: rotate around axis (shift: fine, alt: snap 15°) · alt+scroll: chaos weight";
+    "drag: rotate around axis (shift: fine, ctrl: snap 15°) · alt+scroll: chaos weight";
 /// Dragging the ring around the selected gizmo
 pub const HINT_ROLL: &str =
-    "drag: roll against the camera view (shift: fine, alt: snap 15°) · alt+scroll: chaos weight";
+    "drag: roll against the camera view (shift: fine, ctrl: snap 15°) · alt+scroll: chaos weight";
 /// Nothing hinted, nothing hovered: the bare-viewport default
 pub const HINT_VIEWPORT: &str =
     "drag: orbit · shift/middle-drag: pan · right-drag: roll · scroll: zoom";
