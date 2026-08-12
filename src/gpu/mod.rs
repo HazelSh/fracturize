@@ -12,6 +12,7 @@ pub mod gizmo;
 pub mod lines;
 pub mod overlay;
 pub mod points;
+pub mod timing;
 
 // Re-export shared types
 pub use buffers::CameraUniforms;
@@ -21,4 +22,5 @@ pub use context::GpuContext;
 pub use gizmo::GizmoRenderer;
 pub use lines::{LineRenderer, LineVertex};
 pub use overlay::OverlayTargets;
+pub use timing::GpuTimer;
 pub use points::{Filter, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};

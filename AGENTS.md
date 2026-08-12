@@ -2038,6 +2038,39 @@ flags). The plumbing it needs is now all here. It should promise "same recipe",
 not "byte-identical across machines": GPU float non-associativity across
 vendors is a real caveat, though the chaos game itself is deterministic.
 
+## GPU timing, and the batch size that isn't
+
+`--gpu-timing` reports GPU-busy time per chaos dispatch (`src/gpu/timing.rs`).
+It is measurement, not a render setting, and it silently does nothing on a
+device without `Features::TIMESTAMP_QUERY` — which is requested when the
+adapter offers it and never required.
+
+It exists because it settled a question in the opposite direction to the one
+everyone expected, and that answer is worth not re-deriving:
+
+**Bigger chaos dispatches do not help. They are slower.** The reasoning that
+said they should is sound as far as it goes — `points_per_frame` is
+`buffer_capacity / 800`, a constant chosen for the *interactive* ring, and an
+offline job has no ring to cycle — and there really is ~0.031 ms of fixed
+per-dispatch overhead, 44-64% of each dispatch's wall clock at the interactive
+rate. But GPU-busy time turned out to be linear in the batch with **no fixed
+GPU-side term at all**, and slightly superlinear at that. Batching to a 2 ms GPU
+budget made the chaos fill **19% slower** end to end. Swept at 1920x1080 / 100M
+points / accumulate 16384: 1.47 s at the existing 114,688-point rate, rising
+monotonically to 1.78 s and flattening. The batching was reverted; the
+instrument that caught it was kept.
+
+The likely mechanism is locality: 16,384 walkers is a fixed amount of
+parallelism whatever the iteration count, so a longer dispatch exposes no more
+of it while the points it streams stop fitting in cache. Which points at the
+untested follow-on — if there is a lever here it is **more walkers**, not more
+iterations per walker. `num_workgroups` is a hardcoded 64. Changing it changes
+walker seeding and therefore the image, so it is not a free experiment.
+
+`RENDER-QUALITY-PLAN.md` calls dispatch batching "the real GPU-side lever".
+That was the right thing to test and the wrong answer; this is the note saying
+so.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

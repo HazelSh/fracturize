@@ -204,6 +204,9 @@ pub struct OfflineParams<'a> {
     /// CPU threads this job may use. One value for the whole job — the
     /// encoders read it, and the record reports it as information.
     pub threads: usize,
+    /// Measure and report GPU-busy time per chaos dispatch. Off by default:
+    /// it is an investigation, not part of a render.
+    pub gpu_timing: bool,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -349,9 +352,15 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
         max_buffer_size: adapter_limits.max_buffer_size,
         ..wgpu::Limits::default()
     };
+    // Asked for when the adapter has it, never required. It costs nothing when
+    // unused and is the only way to tell fixed dispatch overhead from
+    // proportional GPU time — but a device that cannot offer it must still
+    // render. See `gpu::timing`.
+    let required_features =
+        adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("fracturize_offline_device"),
-        required_features: wgpu::Features::empty(),
+        required_features,
         required_limits,
         memory_hints: wgpu::MemoryHints::Performance,
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -382,6 +391,7 @@ fn fill_points(
     scene: &Scene,
     accumulate: u32,
     control: Option<&JobControl>,
+    gpu_timing: bool,
 ) -> Result<(PointCompute, u32, Outcome), String> {
     let mut compute = PointCompute::new(
         device,
@@ -407,12 +417,18 @@ fn fill_points(
     }
     let mut point_count = 0;
     let mut outcome = Outcome::Complete;
+    // A sample of the first few hundred dispatches, which is plenty to
+    // characterize a loop that runs identically twelve thousand times. `None`
+    // unless asked for, and `None` anyway on a device without the feature.
+    let mut timer = gpu_timing
+        .then(|| crate::gpu::GpuTimer::new(device, queue, GPU_TIMING_SAMPLES))
+        .flatten();
     for i in 0..total_frames {
         point_count = compute.advance_frame(queue, 1.0 / 60.0);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("offline_compute_encoder"),
         });
-        compute.dispatch(&mut encoder);
+        compute.dispatch_timed(&mut encoder, timer.as_mut());
         queue.submit(std::iter::once(encoder.finish()));
         if i % 16 == 15 {
             // Let the queue drain so we don't buffer unbounded work
@@ -441,8 +457,33 @@ fn fill_points(
     if let Some(c) = control {
         c.progress(total_frames, total_frames);
     }
+    if let Some(t) = &timer {
+        let ms = t.read(device, queue);
+        // Per *dispatch*, and stated as such. The question this answers is
+        // whether a bigger batch would amortize anything: if the median is flat
+        // as `iterations_per_walker` grows, the loop is overhead-bound and the
+        // batch should grow; if it scales, the GPU was already the limit.
+        println!(
+            "{}",
+            crate::gpu::timing::summarize("GPU chaos dispatch", &ms)
+        );
+        println!(
+            "  {} walkers x {} iters = {} points/dispatch, {} dispatches",
+            compute.num_walkers,
+            compute.iterations_per_walker,
+            compute.num_walkers * compute.iterations_per_walker,
+            total_frames,
+        );
+    }
     Ok((compute, point_count, outcome))
 }
+
+/// How many chaos dispatches `--gpu-timing` measures.
+///
+/// A sample, not the whole run: the loop is identical every iteration, so a few
+/// hundred describe it, and a query set sized for all ~12,000 would be 200 KB
+/// of GPU memory to answer a question the first 256 already answer.
+const GPU_TIMING_SAMPLES: u32 = 256;
 
 /// The scene's infinite-zoom renormalization, if it asked for one.
 ///
@@ -1105,6 +1146,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         bit_depth,
         scene_path,
         threads,
+        gpu_timing,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1126,7 +1168,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let t_setup = Instant::now();
 
     let (compute, point_count, mut outcome) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing)?;
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
@@ -1334,6 +1376,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         bit_depth: _,
         scene_path,
         threads,
+        gpu_timing,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -1360,7 +1403,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let t_setup = Instant::now();
 
     let (compute, point_count, fill) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing)?;
     // See this function's doc comment: an animation has nothing to keep from a
     // half-filled cloud, so a cancel here is a cancel.
     if fill.is_partial() {
@@ -1586,8 +1629,12 @@ pub fn render_mutations(
         filter,
         filter_radius,
         bit_depth,
-        scene_path,
-        threads,
+        // Unused here: a sheet of many scenes gets no render record, so there
+        // is no `[source]` to name and no `[machine]` to report. See the
+        // `save_sheet(.., None)` call below.
+        scene_path: _,
+        threads: _,
+        gpu_timing,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1625,7 +1672,7 @@ pub fn render_mutations(
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
-    let (device, queue, adapter) = create_device()?;
+    let (device, queue, _adapter) = create_device()?;
     let t_setup = Instant::now();
 
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
@@ -1666,7 +1713,7 @@ pub fn render_mutations(
         let t0 = Instant::now();
         // Each variant is a different IFS: refill the point buffer
         let (compute, point_count, fill) =
-            fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
+            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing)?;
         // A tile cut off mid-fill is still a tile — sparser than its
         // neighbours, which is exactly what a sheet read tile-against-tile must
         // not hide, so the whole sheet is reported partial.
@@ -1774,8 +1821,12 @@ pub fn render_sweep(
         filter,
         filter_radius,
         bit_depth,
-        scene_path,
-        threads,
+        // Unused here: a sheet of many scenes gets no render record, so there
+        // is no `[source]` to name and no `[machine]` to report. See the
+        // `save_sheet(.., None)` call below.
+        scene_path: _,
+        threads: _,
+        gpu_timing,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1799,7 +1850,7 @@ pub fn render_sweep(
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
-    let (device, queue, adapter) = create_device()?;
+    let (device, queue, _adapter) = create_device()?;
     let t_setup = Instant::now();
 
     // One framing and one haze band for the whole sheet: a contact sheet is
@@ -1846,7 +1897,7 @@ pub fn render_sweep(
         }
         let t0 = Instant::now();
         let (compute, point_count, fill) =
-            fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
+            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing)?;
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count, sampling, filter,

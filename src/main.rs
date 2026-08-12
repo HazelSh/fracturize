@@ -340,6 +340,16 @@ struct Args {
     #[arg(long, value_enum, value_name = "BITS", help_heading = "Offline render")]
     bit_depth: Option<offline::BitDepth>,
 
+    /// Report GPU-busy time per chaos dispatch
+    ///
+    /// Measurement, not a render setting. Answers whether the chaos loop is
+    /// bound by per-dispatch overhead or by the GPU itself — if the median is
+    /// flat as the batch grows, bigger batches would amortize; if it scales,
+    /// there is nothing to win. Silently does nothing on a device without
+    /// TIMESTAMP_QUERY.
+    #[arg(long, help_heading = "Offline render")]
+    gpu_timing: bool,
+
     /// CPU threads for encoding [one less than this machine has]
     ///
     /// Describes the box, not the artwork: never scene or view data. The
@@ -1863,6 +1873,7 @@ fn main() {
                 .threads
                 .map(|n| n.max(1))
                 .unwrap_or_else(render_job::default_threads),
+            gpu_timing: args.gpu_timing,
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.

@@ -3207,6 +3207,8 @@ impl App {
                 bit_depth,
                 scene_path,
                 threads,
+                // A dialog render is not an investigation.
+                gpu_timing: false,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

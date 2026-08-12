@@ -515,9 +515,23 @@ impl PointCompute {
 
     /// Dispatch the compute shader
     pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.dispatch_timed(encoder, None);
+    }
+
+    /// The same, optionally measured.
+    ///
+    /// A separate entry point rather than a parameter on `dispatch` because
+    /// every live-window caller wants the unmeasured one and should not have to
+    /// say so — timing is an offline investigation, not part of the frame.
+    pub fn dispatch_timed(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timer: Option<&mut crate::gpu::GpuTimer>,
+    ) {
+        let timestamp_writes = timer.and_then(|t| t.compute_pass());
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("point_chaos_pass"),
-            timestamp_writes: None,
+            timestamp_writes,
         });
         compute_pass.set_pipeline(&self.pipeline);
         compute_pass.set_bind_group(0, &self.bind_group, &[]);
