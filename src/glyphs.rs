@@ -132,6 +132,16 @@ fn fits(text: &str, scale: u32, avail: u32) -> usize {
     n.min(text.chars().count())
 }
 
+/// An 8-bit channel value in the 16-bit buffer these labels are drawn into.
+///
+/// `v * 257` rather than `v << 8`: it maps 255 to 65535 rather than to 65280,
+/// so white is white, and it is **exactly reversible** by `/ 257`. That is what
+/// lets the contact sheet be 16 bits wide unconditionally while an 8-bit save
+/// still writes the same bytes it always did — see `offline::BitDepth`.
+const fn widen(v: u8) -> u16 {
+    v as u16 * 257
+}
+
 /// Draw `text` into an RGBA buffer at (`ox`, `oy`), on a dark plate so it stays
 /// legible over both a near-black background and a bright core.
 ///
@@ -140,7 +150,7 @@ fn fits(text: &str, scale: u32, avail: u32) -> usize {
 /// are written opaque, since an annotation that inherits the artwork's
 /// transparency would be unreadable in exactly the case it is needed.
 pub fn draw_label(
-    buf: &mut [u8],
+    buf: &mut [u16],
     buf_w: u32,
     buf_h: u32,
     ox: u32,
@@ -183,9 +193,9 @@ pub fn draw_label(
             }
             let i = ((y * buf_w + x) * 4) as usize;
             for c in 0..3 {
-                buf[i + c] = (buf[i + c] as u32 * 35 / 100) as u8;
+                buf[i + c] = (buf[i + c] as u32 * 35 / 100) as u16;
             }
-            buf[i + 3] = buf[i + 3].max(200);
+            buf[i + 3] = buf[i + 3].max(widen(200));
         }
     }
 
@@ -208,10 +218,10 @@ pub fn draw_label(
                             continue;
                         }
                         let i = ((y * buf_w + x) * 4) as usize;
-                        buf[i] = LABEL_RGB[0];
-                        buf[i + 1] = LABEL_RGB[1];
-                        buf[i + 2] = LABEL_RGB[2];
-                        buf[i + 3] = 255;
+                        buf[i] = widen(LABEL_RGB[0]);
+                        buf[i + 1] = widen(LABEL_RGB[1]);
+                        buf[i + 2] = widen(LABEL_RGB[2]);
+                        buf[i + 3] = u16::MAX;
                     }
                 }
             }
@@ -234,14 +244,29 @@ pub fn scale_for_tile(tile_w: u32) -> u32 {
 mod tests {
     use super::*;
 
-    fn blank(w: u32, h: u32) -> Vec<u8> {
-        vec![0u8; (w * h * 4) as usize]
+    fn blank(w: u32, h: u32) -> Vec<u16> {
+        vec![0u16; (w * h * 4) as usize]
     }
 
-    fn count_label_px(buf: &[u8]) -> usize {
+    fn count_label_px(buf: &[u16]) -> usize {
         buf.chunks(4)
-            .filter(|p| p[0] == LABEL_RGB[0] && p[1] == LABEL_RGB[1] && p[2] == LABEL_RGB[2])
+            .filter(|p| {
+                p[0] == widen(LABEL_RGB[0])
+                    && p[1] == widen(LABEL_RGB[1])
+                    && p[2] == widen(LABEL_RGB[2])
+            })
             .count()
+    }
+
+    /// The whole reason the sheet can be 16 bits wide without changing what an
+    /// 8-bit save writes.
+    #[test]
+    fn widening_a_channel_is_exactly_reversible() {
+        for v in 0u8..=255 {
+            assert_eq!((widen(v) / 257) as u8, v);
+        }
+        assert_eq!(widen(255), u16::MAX);
+        assert_eq!(widen(0), 0);
     }
 
     #[test]
@@ -330,11 +355,11 @@ mod tests {
     #[test]
     fn plate_darkens_existing_pixels_rather_than_erasing_them() {
         let (w, h) = (60, 20);
-        let mut buf = vec![200u8; (w * h * 4) as usize];
+        let mut buf = vec![widen(200); (w * h * 4) as usize];
         draw_label(&mut buf, w, h, 0, 0, " ", 1, w);
         // a plate pixel that isn't a glyph: darkened, not zeroed
         let i = 0;
-        assert!(buf[i] > 0 && buf[i] < 200, "got {}", buf[i]);
+        assert!(buf[i] > 0 && buf[i] < widen(200), "got {}", buf[i]);
     }
 
     #[test]

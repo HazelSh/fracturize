@@ -1949,11 +1949,34 @@ the supersampled height, which is N² larger. They cancel. Measured across
 Live window only ever runs at 1x. The point cloud's aliasing *is* the look
 there (see the MSAA note above), and N x supersampling costs N² fill.
 
-Not yet done from leg 1 of the plan: **16-bit PNG output**. It is not the
-one-liner it looks like — the offline render target is `Rgba8UnormSrgb` and the
-contact-sheet path is a `Vec<u8>` that `glyphs::draw_label` writes into, so it
-needs the target format changed to `Rgba16Float` with the sRGB encode moved to
-the CPU readback, and the sheet and label writer widened with it.
+### 16-bit PNG
+
+`--bit-depth 16` (and the dialog's checkbox) writes 16 bits per channel. Worth
+having because supersampling produces exactly what 8 bits bands: smooth wide
+gradients over a large area, where the step between adjacent codes shows as a
+contour. It is an **output-format** choice and not a quality one — the render is
+identical either way, only the quantization of the file differs — so the default
+stays at 8, since a 16-bit PNG is twice the size and most renders are a check on
+the framing rather than a keeper. Stills only; both video codecs take 8-bit
+frames.
+
+Three things make it work, and the first is the one that matters:
+
+- **8-bit keeps the `Rgba8UnormSrgb` target**, so the hardware still does the
+  sRGB encode on store and an 8-bit render is **byte-identical** to every render
+  made before this existed (verified against a pre-change binary). A float
+  target with a CPU encode everywhere would round differently in the last bit
+  and silently churn every image in the project. 16-bit renders into
+  `Rgba16Float` and `offline::linear_to_srgb` does the encode at readback —
+  measured to agree with the hardware to under one 8-bit code.
+- **The contact sheet is `Vec<u16>` unconditionally**, and `glyphs::draw_label`
+  writes into it. An 8-bit channel is widened by `* 257` — not `<< 8`, which
+  would map 255 to 65280 rather than to white — and that is exactly reversible
+  by `/ 257`, which is what lets one sheet type serve both depths without the
+  8-bit save writing anything different.
+- **`offline::f16_to_f32`** decodes the float target. Twelve lines rather than a
+  dependency, and tested against all 65536 inputs rather than a handful — which
+  is how its subnormal branch was caught being off by one exponent.
 
 ## View Files & Offline Rendering
 

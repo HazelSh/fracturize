@@ -175,6 +175,9 @@ pub struct JobParams {
     pub filter: crate::gpu::Filter,
     /// Kernel half-width in output pixels
     pub filter_radius: f32,
+    /// Bits per channel in the PNG. An output-format choice, not a quality
+    /// one — the render is identical either way.
+    pub bit_depth: crate::offline::BitDepth,
     /// CPU threads this job's encoders may use. A **machine** setting, not
     /// artwork: it describes the box, so it lives in prefs and on the command
     /// line and never in a scene or a view. A sidecar may record what was used,
@@ -403,6 +406,7 @@ mod tests {
             supersample: 1,
             filter: crate::gpu::Filter::Gaussian,
             filter_radius: 0.5,
+            bit_depth: crate::offline::BitDepth::Eight,
             threads: default_threads(),
         }
     }

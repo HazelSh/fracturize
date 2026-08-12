@@ -329,6 +329,16 @@ struct Args {
     #[arg(long, value_name = "PX", help_heading = "Offline render")]
     filter_radius: Option<f32>,
 
+    /// Bits per channel in a PNG render: 8 or 16 [8]
+    ///
+    /// The render is identical either way — this is only how finely the file
+    /// quantizes it. Worth 16 for a keeper, because supersampling produces
+    /// exactly what 8 bits bands: smooth wide gradients, where the step
+    /// between adjacent codes shows as a contour. Ignored for animation,
+    /// which is 8-bit by codec.
+    #[arg(long, value_enum, value_name = "BITS", help_heading = "Offline render")]
+    bit_depth: Option<offline::BitDepth>,
+
     /// CPU threads for encoding [one less than this machine has]
     ///
     /// Describes the box, not the artwork: never scene or view data. The
@@ -1843,6 +1853,7 @@ fn main() {
             filter_radius: args.filter_radius.unwrap_or(
                 crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS,
             ),
+            bit_depth: args.bit_depth.unwrap_or_default(),
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.

@@ -81,6 +81,8 @@ pub struct RenderJobForm {
     pub supersample: u32,
     pub filter: crate::gpu::Filter,
     pub filter_radius: f32,
+    /// Bits per channel in the PNG. Stills only — animation is 8-bit by codec.
+    pub bit_depth: crate::offline::BitDepth,
     pub fps: u32,
     pub seconds: f32,
     pub quality: u8,
@@ -126,6 +128,7 @@ impl Default for RenderJobForm {
             supersample: 2,
             filter: crate::gpu::Filter::Gaussian,
             filter_radius: crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS,
+            bit_depth: crate::offline::BitDepth::Eight,
             fps: 30,
             seconds: 8.0,
             quality: 60,
@@ -164,6 +167,7 @@ impl RenderJobForm {
             supersample: self.supersample,
             filter: self.filter,
             filter_radius: self.filter_radius,
+            bit_depth: self.bit_depth,
             threads: self.threads,
         }
     }
@@ -636,6 +640,35 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             }
         });
 
+    });
+
+    // Bit depth rides with transparency rather than with supersampling: both
+    // describe the *file* that leaves the app, not how the picture is drawn.
+    // Stills only — animation is 8-bit by codec, and a control that pretended
+    // otherwise would be offering something the encoder cannot take.
+    let still = app.ui_state.render_job.mode == Mode::Still;
+    ui.add_enabled_ui(still, |ui| {
+        let mut sixteen = app.ui_state.render_job.bit_depth == crate::offline::BitDepth::Sixteen;
+        let resp = ui.checkbox(&mut sixteen, "16-bit PNG");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if still {
+                "Twice the file, the same render — this is only how finely it quantizes. \
+                 Worth it for a keeper: supersampling produces smooth wide gradients, which \
+                 is exactly what 8 bits bands into visible contours."
+            } else {
+                "Stills only — both video codecs take 8-bit frames."
+            },
+            "click: toggle 16-bit PNG output",
+        );
+        if resp.changed() {
+            app.ui_state.render_job.bit_depth = if sixteen {
+                crate::offline::BitDepth::Sixteen
+            } else {
+                crate::offline::BitDepth::Eight
+            };
+        }
     });
 
     // Transparency gets its own row. It was sharing a line with `splat` and its

@@ -27,7 +27,99 @@ use crate::scene::Scene;
 use crate::render_job::{JobControl, Outcome, CANCELLED};
 use crate::view::View;
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// How many bits per channel the PNG gets.
+///
+/// This is an **output format** choice, not a render-quality one: the render is
+/// identical either way and only the quantization of the file differs. So the
+/// default stays at 8 — a 16-bit PNG is twice the size, and most renders are a
+/// check on the framing rather than a keeper.
+///
+/// It is worth having at all because supersampling produces exactly what 8 bits
+/// bands: smooth wide gradients across a large area, where the step between two
+/// adjacent codes is visible as a contour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum BitDepth {
+    #[default]
+    #[value(name = "8")]
+    Eight,
+    #[value(name = "16")]
+    Sixteen,
+}
+
+impl BitDepth {
+    /// The colour target this depth renders into.
+    ///
+    /// Eight keeps `Rgba8UnormSrgb`, where the hardware does the sRGB encode on
+    /// store — and keeping it is what makes an 8-bit render **byte-identical**
+    /// to every render made before this existed. A float target with a CPU
+    /// encode would round differently in the last bit and silently churn every
+    /// image in the project.
+    fn format(self) -> wgpu::TextureFormat {
+        match self {
+            BitDepth::Eight => wgpu::TextureFormat::Rgba8UnormSrgb,
+            // Linear, so the sRGB encode moves to the readback below.
+            BitDepth::Sixteen => wgpu::TextureFormat::Rgba16Float,
+        }
+    }
+
+    fn bytes_per_texel(self) -> u32 {
+        match self {
+            BitDepth::Eight => 4,
+            BitDepth::Sixteen => 8,
+        }
+    }
+}
+
+/// Decode an IEEE 754 binary16.
+///
+/// Twelve lines rather than a dependency, and exhaustively tested below — there
+/// are only 65536 inputs, so "tested" here means every one of them against the
+/// reference conversion rather than against a handful of samples.
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) as u32;
+    let exp = ((bits >> 10) & 0x1F) as u32;
+    let mant = (bits & 0x3FF) as u32;
+    let out = if exp == 0 {
+        if mant == 0 {
+            sign << 31 // ±0
+        } else {
+            // Subnormal: renormalize into an f32 normal. `e` counts the shifts
+            // needed to bring bit 10 up, and starts at 0 — a subnormal's value
+            // is `mant * 2^-24`, so shifting k times lands the exponent at
+            // `127 - 15 + 1 - k`.
+            let mut e = 0i32;
+            let mut m = mant;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            let m = m & 0x3FF;
+            (sign << 31) | (((127 - 15 + 1 + e) as u32) << 23) | (m << 13)
+        }
+    } else if exp == 0x1F {
+        (sign << 31) | (0xFF << 23) | (mant << 13) // inf / NaN
+    } else {
+        (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13)
+    };
+    f32::from_bits(out)
+}
+
+/// The sRGB transfer function (IEC 61966-2-1), linear -> encoded.
+///
+/// The `Rgba8UnormSrgb` target does this in hardware; a float target does not,
+/// so the 16-bit path does it here. Alpha is deliberately left linear, which is
+/// what sRGB targets do too — coverage is not a colour.
+fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    let out = if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    // Clamped on the way out as well as in, so a kernel with negative lobes
+    // upstream can't push a value out of range here.
+    out.clamp(0.0, 1.0)
+}
 
 /// Multi-view layouts. Grid tiles are laid out row-major.
 #[derive(Clone, Copy, Debug)]
@@ -94,6 +186,9 @@ pub struct OfflineParams<'a> {
     pub filter: Filter,
     /// Kernel half-width in *output* pixels
     pub filter_radius: f32,
+    /// Bits per channel in the PNG. Ignored for animation, which is 8-bit by
+    /// codec.
+    pub bit_depth: BitDepth,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -524,12 +619,13 @@ impl TileRenderer {
         sampling: Sampling,
         filter: Filter,
         filter_radius: f32,
+        depth: BitDepth,
         clear: wgpu::Color,
         transparent: bool,
     ) -> Self {
         if splat {
             let mut renderer = SplatRenderer::new(
-                device, FORMAT, &compute.point_buffer, &compute.colormap_buffer,
+                device, depth.format(), &compute.point_buffer, &compute.colormap_buffer,
             );
             renderer.set_supersample(device, queue, sampling.n, filter, filter_radius);
             renderer.upload_params(
@@ -543,7 +639,7 @@ impl TileRenderer {
             TileRenderer::Splat(renderer)
         } else {
             TileRenderer::Points(PointRenderer::new(
-                device, FORMAT, &compute.point_buffer, &compute.colormap_buffer,
+                device, depth.format(), &compute.point_buffer, &compute.colormap_buffer,
             ))
         }
     }
@@ -581,6 +677,8 @@ struct TileTarget {
     /// so an unsupersampled render allocates and encodes exactly what it
     /// always did.
     supersampled: Option<Supersampled>,
+    /// Which colour target was allocated, and so how the readback is decoded.
+    depth_bits: BitDepth,
 }
 
 struct Supersampled {
@@ -599,6 +697,7 @@ impl TileTarget {
         sampling: Sampling,
         filter: Filter,
         filter_radius: f32,
+        depth: BitDepth,
     ) -> Self {
         let make_color = |label, extra| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -611,7 +710,7 @@ impl TileTarget {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: FORMAT,
+                format: depth.format(),
                 usage: if extra {
                     // Read by the filter pass rather than copied out
                     wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
@@ -650,7 +749,7 @@ impl TileTarget {
             // The points renderer is depth-tested, so its depth buffer has to
             // match the surface it is rasterizing into, not the output.
             let ss_depth = make_depth("offline_depth_supersampled", sampling.n);
-            let downsampler = Downsampler::new(device, FORMAT);
+            let downsampler = Downsampler::new(device, depth.format());
             // The points target is sRGB with straight alpha: `textureLoad`
             // decodes to linear and the sRGB target re-encodes on store, so
             // the averaging happens in linear light for free, and the
@@ -670,7 +769,7 @@ impl TileTarget {
             }
         });
 
-        let padded_bytes_per_row = (width * 4 + 255) & !255;
+        let padded_bytes_per_row = (width * depth.bytes_per_texel() + 255) & !255;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("offline_readback"),
             size: (padded_bytes_per_row * height) as u64,
@@ -687,6 +786,7 @@ impl TileTarget {
             padded_bytes_per_row,
             clear,
             supersampled,
+            depth_bits: depth,
         }
     }
 
@@ -700,7 +800,7 @@ impl TileTarget {
         renderer: &mut TileRenderer,
         point_count: u32,
         use_point_primitives: bool,
-        sheet: &mut [u8],
+        sheet: &mut [u16],
         sheet_w: u32,
         col: u32,
         row: u32,
@@ -787,13 +887,35 @@ impl TileTarget {
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         {
             let data = slice.get_mapped_range();
-            let bytes_per_row = (self.width * 4) as usize;
             let x0 = (col * self.width * 4) as usize;
             let y0 = (row * self.height) as usize;
             for y in 0..self.height as usize {
                 let src = y * self.padded_bytes_per_row as usize;
                 let dst = (y0 + y) * (sheet_w * 4) as usize + x0;
-                sheet[dst..dst + bytes_per_row].copy_from_slice(&data[src..src + bytes_per_row]);
+                let row_out = &mut sheet[dst..dst + (self.width * 4) as usize];
+                match self.depth_bits {
+                    // The hardware already encoded sRGB into 8 bits; widening
+                    // by 257 is exactly reversible, so the sheet can be 16 bits
+                    // wide without an 8-bit save writing anything different.
+                    BitDepth::Eight => {
+                        let src_row = &data[src..src + (self.width * 4) as usize];
+                        for (o, &b) in row_out.iter_mut().zip(src_row) {
+                            *o = b as u16 * 257;
+                        }
+                    }
+                    // Linear f16 off a float target: encode sRGB here, and
+                    // leave alpha alone — coverage is not a colour, which is
+                    // also what an sRGB target does.
+                    BitDepth::Sixteen => {
+                        let src_row = &data[src..src + (self.width * 8) as usize];
+                        for (i, o) in row_out.iter_mut().enumerate() {
+                            let h = u16::from_le_bytes([src_row[i * 2], src_row[i * 2 + 1]]);
+                            let v = f16_to_f32(h);
+                            let v = if i % 4 == 3 { v.clamp(0.0, 1.0) } else { linear_to_srgb(v) };
+                            *o = (v * 65535.0 + 0.5) as u16;
+                        }
+                    }
+                }
             }
         }
         self.readback.unmap();
@@ -805,7 +927,7 @@ impl TileTarget {
 /// A contact sheet prints its per-tile mapping to stdout, which serves a human
 /// at a terminal and nothing that reads the PNG. Labelling the tile makes the
 /// sheet describe itself. Off with `--no-labels`.
-fn label_tile(sheet: &mut [u8], sheet_w: u32, sheet_h: u32, tile_w: u32, tile_h: u32,
+fn label_tile(sheet: &mut [u16], sheet_w: u32, sheet_h: u32, tile_w: u32, tile_h: u32,
               col: u32, row: u32, text: &str) {
     let scale = glyphs::scale_for_tile(tile_w);
     let inset = 2 * scale;
@@ -818,15 +940,36 @@ fn label_tile(sheet: &mut [u8], sheet_w: u32, sheet_h: u32, tile_w: u32, tile_h:
     glyphs::draw_label(sheet, sheet_w, sheet_h, ox, oy, text, scale, max_w);
 }
 
-fn save_sheet(out_path: &Path, sheet: &[u8], w: u32, h: u32) -> Result<(), String> {
+/// Write the finished sheet.
+///
+/// The sheet is always 16 bits per channel; an 8-bit save narrows it back by
+/// 257, which is exact for anything that came off an 8-bit target — so this
+/// writes the same bytes it wrote before 16-bit output existed.
+fn save_sheet(
+    out_path: &Path,
+    sheet: &[u16],
+    w: u32,
+    h: u32,
+    depth: BitDepth,
+) -> Result<(), String> {
     if let Some(dir) = out_path.parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
         }
     }
-    image::save_buffer(out_path, sheet, w, h, image::ColorType::Rgba8)
-        .map_err(|e| format!("Failed to save {}: {}", out_path.display(), e))
+    let err = |e| format!("Failed to save {}: {}", out_path.display(), e);
+    match depth {
+        BitDepth::Eight => {
+            let narrowed: Vec<u8> = sheet.iter().map(|&v| (v / 257) as u8).collect();
+            image::save_buffer(out_path, &narrowed, w, h, image::ColorType::Rgba8).map_err(err)
+        }
+        BitDepth::Sixteen => {
+            let img = image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(w, h, sheet.to_vec())
+                .ok_or_else(|| "sheet does not match its own dimensions".to_string())?;
+            img.save(out_path).map_err(err)
+        }
+    }
 }
 
 fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant) {
@@ -865,6 +1008,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         supersample,
         filter,
         filter_radius,
+        bit_depth,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -890,7 +1034,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
-        filter_radius, clear, transparent,
+        filter_radius, bit_depth, clear, transparent,
     );
     let t_fill = Instant::now();
 
@@ -908,11 +1052,11 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
 
     let target = TileTarget::new(
-        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
     let sheet_w = width * cols;
     let sheet_h = height * rows;
-    let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
+    let mut sheet = vec![0u16; (sheet_w * sheet_h * 4) as usize];
 
     if let Some(c) = &control {
         c.phase("rendering");
@@ -966,7 +1110,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     if let Some(c) = &control {
         c.phase("saving");
     }
-    save_sheet(out_path, &sheet, sheet_w, sheet_h)?;
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth)?;
     let t_done = Instant::now();
 
     println!(
@@ -1059,10 +1203,19 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         supersample,
         filter,
         filter_radius,
+        // Ignored: both codecs take 8-bit YUV, so the frame path is 8-bit
+        // whatever the caller asked for. Named below rather than here so the
+        // reason sits next to the frame buffer it governs.
+        bit_depth: _,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
+    // The frame path always renders 8-bit: both codecs take 8-bit 4:2:0 YUV, so
+    // a float target would buy nothing and cost an sRGB encode per frame.
+    // `render_tile` shares the 16-bit sheet type, so each frame is narrowed
+    // back on the way to the encoder — exactly, by 257.
+    let bit_depth = BitDepth::Eight;
     let t_start = Instant::now();
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
@@ -1089,7 +1242,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
-        filter_radius, clear, transparent,
+        filter_radius, bit_depth, clear, transparent,
     );
     let t_fill = Instant::now();
 
@@ -1126,9 +1279,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     println!("Encoding on {} thread{}", anim.threads, if anim.threads == 1 { "" } else { "s" });
     let aspect = width as f32 / height as f32;
     let target = TileTarget::new(
-        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
-    let mut frame_buf = vec![0u8; (width * height * 4) as usize];
+    let mut frame_buf = vec![0u16; (width * height * 4) as usize];
+    let mut frame_rgba8 = vec![0u8; (width * height * 4) as usize];
 
     if let Some(c) = &control {
         c.phase("rendering frames");
@@ -1207,7 +1361,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             &device, &queue, &mut renderer, point_count, use_point_primitives,
             &mut frame_buf, width, 0, 0,
         );
-        encoder.push_frame(&frame_buf)?;
+        for (o, &v) in frame_rgba8.iter_mut().zip(&frame_buf) {
+            *o = (v / 257) as u8;
+        }
+        encoder.push_frame(&frame_rgba8)?;
         rendered += 1;
     }
     let t_render = Instant::now();
@@ -1271,6 +1428,7 @@ pub fn render_mutations(
         supersample,
         filter,
         filter_radius,
+        bit_depth,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1334,11 +1492,11 @@ pub fn render_mutations(
     };
 
     let target = TileTarget::new(
-        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
     let sheet_w = width * cols;
     let sheet_h = height * rows;
-    let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
+    let mut sheet = vec![0u16; (sheet_w * sheet_h * 4) as usize];
 
     let out_stem = out_path.with_extension("");
     remove_stale_variants(&out_stem);
@@ -1357,7 +1515,7 @@ pub fn render_mutations(
         let mut renderer =
             TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
-        filter_radius, clear, transparent,
+        filter_radius, bit_depth, clear, transparent,
     );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
@@ -1395,7 +1553,7 @@ pub fn render_mutations(
     }
     let t_render = Instant::now();
 
-    save_sheet(out_path, &sheet, sheet_w, sheet_h)?;
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth)?;
     let t_done = Instant::now();
 
     println!(
@@ -1452,6 +1610,7 @@ pub fn render_sweep(
         supersample,
         filter,
         filter_radius,
+        bit_depth,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1499,11 +1658,11 @@ pub fn render_sweep(
     };
 
     let target = TileTarget::new(
-        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
     let sheet_w = width * cols;
     let sheet_h = height * rows;
-    let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
+    let mut sheet = vec![0u16; (sheet_w * sheet_h * 4) as usize];
 
     let mut fill_total = 0.0f32;
     let mut outcome = Outcome::Complete;
@@ -1526,7 +1685,7 @@ pub fn render_sweep(
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
-            filter_radius, clear, transparent,
+            filter_radius, bit_depth, clear, transparent,
         );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
@@ -1549,7 +1708,7 @@ pub fn render_sweep(
     if let Some(c) = &control {
         c.phase("saving");
     }
-    save_sheet(out_path, &sheet, sheet_w, sheet_h)?;
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth)?;
     let t_done = Instant::now();
 
     println!(
@@ -1567,4 +1726,91 @@ pub fn render_sweep(
         (t_done - t_start).as_secs_f32(),
     );
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exhaustive rather than sampled: there are only 65536 binary16 values, so
+    /// "tested" can mean every one of them. Checked against the same decode
+    /// expressed independently — build an f32 whose bit pattern comes from the
+    /// IEEE definition directly.
+    #[test]
+    fn f16_decodes_every_bit_pattern() {
+        for bits in 0u16..=u16::MAX {
+            let got = f16_to_f32(bits);
+            let want = reference_f16(bits);
+            if want.is_nan() {
+                assert!(got.is_nan(), "0x{:04x}: expected NaN, got {}", bits, got);
+            } else {
+                assert_eq!(got.to_bits(), want.to_bits(), "0x{:04x}", bits);
+            }
+        }
+    }
+
+    /// binary16 straight from its definition: sign, a biased 5-bit exponent and
+    /// a 10-bit significand, with the exponent extremes reserved.
+    fn reference_f16(bits: u16) -> f32 {
+        let sign = if bits >> 15 == 1 { -1.0f32 } else { 1.0 };
+        let exp = ((bits >> 10) & 0x1F) as i32;
+        let mant = (bits & 0x3FF) as f32;
+        match exp {
+            0 => sign * mant / 1024.0 * 2.0f32.powi(-14),
+            0x1F if mant == 0.0 => sign * f32::INFINITY,
+            0x1F => f32::NAN,
+            _ => sign * (1.0 + mant / 1024.0) * 2.0f32.powi(exp - 15),
+        }
+    }
+
+    /// The two constants of the sRGB piecewise curve, plus its endpoints. The
+    /// 8-bit path gets this from the hardware; the 16-bit path has to match it,
+    /// or the same render at two depths would not be the same picture.
+    #[test]
+    fn srgb_encode_matches_the_standard() {
+        assert_eq!(linear_to_srgb(0.0), 0.0);
+        // In f32 the curve comes to 0.99999994 at 1.0 rather than exactly 1.
+        // What matters is the code that reaches the file, so that is what is
+        // asserted: white is white, and black is black.
+        let code = |v: f32| (linear_to_srgb(v) * 65535.0 + 0.5) as u16;
+        assert_eq!(code(1.0), u16::MAX);
+        assert_eq!(code(0.0), 0);
+        assert_eq!(code(2.0), u16::MAX);
+        assert_eq!(code(-1.0), 0);
+        // The piece boundary is continuous
+        let lo = 0.0031308 * 12.92;
+        assert!((linear_to_srgb(0.0031308) - lo).abs() < 1e-6);
+        // Mid grey: 0.2140 linear is ~0.5 encoded
+        assert!((linear_to_srgb(0.2140) - 0.5).abs() < 2e-3, "{}", linear_to_srgb(0.2140));
+        // Out of range is clamped rather than producing a NaN from powf
+        assert_eq!(linear_to_srgb(-1.0), 0.0);
+        assert!(linear_to_srgb(2.0) <= 1.0);
+    }
+
+    /// A 16-bit sheet holding 8-bit data narrows back exactly, which is what
+    /// lets one sheet type serve both depths without changing 8-bit output.
+    #[test]
+    fn the_sheet_round_trips_eight_bit_data() {
+        for v in 0u8..=255 {
+            let wide = v as u16 * 257;
+            assert_eq!((wide / 257) as u8, v);
+        }
+    }
+
+    /// The three things measured in render-target pixels have to agree, and
+    /// `Sampling` is the single place that decides them.
+    #[test]
+    fn sampling_measures_everything_against_the_accumulation() {
+        let one = Sampling::new(1, 600);
+        let four = Sampling::new(4, 600);
+        assert_eq!(one.target_height(), 600.0);
+        assert_eq!(four.target_height(), 2400.0);
+        // A point subpixel at output but not at 4x accumulation resolution
+        // must leave the unfiltered 1px path — that is the whole feature.
+        let point_size = 1.5 / 600.0 * 0.9;
+        assert!(one.use_point_primitives(point_size, 1.0));
+        assert!(!four.use_point_primitives(point_size, 1.0));
+        // 0 is coerced to 1 rather than dividing by nothing
+        assert_eq!(Sampling::new(0, 600).target_height(), 600.0);
+    }
 }
