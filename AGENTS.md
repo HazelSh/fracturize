@@ -106,9 +106,12 @@ All GPU, three passes per frame:
      is subpixel (the common case), points are drawn as native 1px point
      primitives (~3x faster). Otherwise, 4-vertex instanced triangle-strip
      billboards with perspective sizing. Every point is full brightness.
-     Near-field growth is capped (12px in both modes) so points brushing
-     past the camera in volume-filling scenes render as motes, not
-     screen-eating squares/gaussian washes.
+     Near-field growth is capped at `CameraUniforms::max_point_pixels` — 12
+     *output* pixels, in both modes — so points brushing past the camera in
+     volume-filling scenes render as motes, not screen-eating squares/gaussian
+     washes. It is 12 render-target pixels only at 1x, which is what the live
+     window always is; an offline render scales it by the supersample factor,
+     for the reason in "Supersampling and the reconstruction filter" below.
    - **splat** (`points/splat.wgsl`): additive log-density accumulation,
      flame-style. Each point deposits ~1 unit of energy as a gaussian splat into
      an rgba16float HDR target (same subpixel fast path: 1px additive points);
@@ -1978,6 +1981,63 @@ Three things make it work, and the first is the one that matters:
   dependency, and tested against all 65536 inputs rather than a handful — which
   is how its subnormal branch was caught being off by one exponent.
 
+## Render records: what a picture was made from
+
+Every still and every animation now writes a **record** (`src/record.rs`) —
+twice, to two audiences:
+
+- **into the PNG**, as `iTXt` chunks, so the picture carries its own recipe
+  wherever it goes. `Software` (= `fracturize <version.txt>`), `Creation Time`,
+  `fracturize:scene` (the full scene TOML, verbatim), `fracturize:render` (the
+  same block as the sidecar) and `fracturize:scene_sha256`;
+- **beside it**, as `renders/<name>.render.toml`, following the pattern
+  `views/` established, so it can be read without a PNG parser. Animations get
+  the sidecar only — the muxer is hand-rolled and emits `ftyp`/`mdat`/`moov`,
+  and adding a `udta`/`meta` box is real work in a format this project already
+  treats gingerly for upload-pipeline compatibility.
+
+Five things about it are load-bearing:
+
+- **It never goes into the scene file.** `point_count` and its neighbours are
+  deliberately not scene data, precisely so a 100M batch and a 6M exploration
+  session can't clobber each other; a `[last_render]` block would put exactly
+  that back, as a second source of truth that disagrees with whichever render
+  actually ran last, plus git-diff noise and a race between concurrent
+  sessions. `renders/` is gitignored. A useful consequence is that
+  `Scene::save`'s comment-preserving `toml_edit` merge never has to learn about
+  render data, so there is no new way for scene round-tripping to drift.
+- **`iTXt`, not `tEXt`.** tEXt is Latin-1; the version string alone is `α-0.4`,
+  and scene and author names are UTF-8 in general. iTXt is the chunk PNG
+  defines for UTF-8.
+- **The scene is embedded as rendered, not as the file on disk.** By the time a
+  render runs the scene may have been through `-S` overrides, a `--palette`, a
+  mutation or a `--zoom` the file knows nothing about.
+  `Scene::to_toml_string` is what `Scene::save` already used internally, so
+  they can't drift. The sha256 is what tells "the scene as rendered" from "the
+  scene as it is now".
+- **The camera comes from `CameraOverride::describe`**, the one function that
+  knows when the yaw/pitch/roll chart can say a framing and when it has to fall
+  back to an exact `rotvec`. A second spelling would be a second thing to get
+  wrong at the poles.
+- **`[machine]` is informational and says so in the file.** Nothing in it
+  should ever be replayed — `threads = 16` is a fact about the desktop and
+  wrong advice on the T490. It explains a timing; it is not an input.
+
+Mutation and sweep sheets deliberately get **no** record: they are many
+different scenes, and a `fracturize:scene` chunk claiming one of them would be
+a confident lie about the other tiles. Their per-tile mapping is printed, and
+mutation variants are already written out as `<out>.mutN.toml`.
+
+Writing the record never fails a render. The picture exists either way, and
+reporting a successful render as failed because a receipt couldn't be filed is
+the wrong trade — it warns instead.
+
+Not built yet: **`--reproduce render.png`** (read the chunks back, write the
+scene to a *new* file — never into `scenes/` — and re-invoke with the recorded
+flags). The plumbing it needs is now all here. It should promise "same recipe",
+not "byte-identical across machines": GPU float non-associativity across
+vendors is a real caveat, though the chaos game itself is deterministic.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
@@ -2124,6 +2184,17 @@ encode+save | total`) to stdout so you can budget effort. Options:
   Exposure is capacity-normalized, so the same value looks the same at every
   effort level; raise it (1.5-3) to brighten thin filaments, lower it to
   recover detail in hot cores.
+- `--supersample N` (1-4, **default 2**), `--filter box|triangle|gaussian|mitchell|lanczos`
+  (default gaussian), `--filter-radius PX` (default 0.5) — render the histogram
+  N x larger and filter it down. The largest visible quality win here, and note
+  that the default is 2 rather than 1, so it changes what every `--render`
+  writes; `--supersample 1` is byte-identical to the old renderer. See
+  "Supersampling and the reconstruction filter".
+- `--bit-depth 8|16` (default 8) — bits per channel in the PNG. The render is
+  identical either way; only the file's quantization differs.
+- `--threads N` (default: one less than the machine has) — CPU threads for
+  encoding an animation. A machine setting, never scene or view data; see
+  "Threads are a machine setting" under Render Jobs.
 
 **Grid contact sheets** (for exploring 3D framing cheaply — the point cloud is
 filled once and re-rendered per tile, so 9 tiles cost barely more than 1):

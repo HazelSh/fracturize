@@ -47,6 +47,14 @@ half = { version = "2.4", features = ["bytemuck"] }
 
 # Image output
 image = "0.25"
+# Direct, for PNG text chunks: `image`'s convenience wrapper has no passthrough
+# for them, and the still-render path drives `png::Encoder` itself. Free — image
+# already pulls this exact version in transitively.
+png = "0.18"
+# Content fingerprint for the render record: tells "the scene as rendered" from
+# "the scene as it is now". Not hand-rolled — a hash function is precisely the
+# wrong place to save a dependency.
+sha2 = "0.10"
 # Animated AVIF encoding (already built for image's still-AVIF support via
 # ravif; keep default-features off + threading to share the same build)
 rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }

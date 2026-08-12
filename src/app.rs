@@ -3169,6 +3169,10 @@ impl App {
         let threads = params.threads;
         let (supersample, filter, filter_radius, bit_depth) =
             (params.supersample, params.filter, params.filter_radius, params.bit_depth);
+        // The scene as it is *in the app*, which is what the job renders — the
+        // path is only where it came from, and it may well have been edited
+        // since. The record embeds the scene itself, so the two can't disagree.
+        let scene_path = self.scene_path.clone().map(std::path::PathBuf::from);
 
         log::info!(
             "Render job started: {} ({}, {} points)",
@@ -3201,6 +3205,8 @@ impl App {
                 filter,
                 filter_radius,
                 bit_depth,
+                scene_path,
+                threads,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),
@@ -3212,7 +3218,6 @@ impl App {
                             seconds: Some(seconds),
                             quality,
                             format,
-                            threads,
                         },
                     )
                 }

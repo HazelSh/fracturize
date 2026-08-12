@@ -1855,15 +1855,26 @@ impl Scene {
     /// transform list — if transforms were added or removed, the whole
     /// [[transform]] array is rebuilt (per-transform comments are lost, but
     /// the header/meta/camera comments survive).
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+    /// This scene as a standalone TOML document.
+    ///
+    /// The scene *as it is now*, with no reference to whatever file it came
+    /// from — which is what a render record wants, since by the time a render
+    /// runs the scene may have been through `-S` overrides, a `--palette`, a
+    /// mutation or a `--zoom` that the file on disk knows nothing about.
+    ///
+    /// [`Self::save`] uses it as its fallback and as the transform-array donor
+    /// for the comment-preserving merge, so the two can't drift.
+    pub fn to_toml_string(&self) -> Result<String, String> {
         let file = self.to_scene_file();
-
-        // Fresh serialization: used for new files, and as the fallback (and
-        // transform-array donor) for the comment-preserving merge
         let fresh = toml::to_string(&file)
             .map_err(|e| format!("Failed to serialize scene: {}", e))?;
         let fresh = inline_variation_tables(&fresh).unwrap_or(fresh);
-        let fresh = rewrite_palette_table(&fresh, file.palette.as_ref()).unwrap_or(fresh);
+        Ok(rewrite_palette_table(&fresh, file.palette.as_ref()).unwrap_or(fresh))
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let file = self.to_scene_file();
+        let fresh = self.to_toml_string()?;
 
         let content = fs::read_to_string(path.as_ref())
             .ok()

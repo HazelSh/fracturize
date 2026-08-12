@@ -20,6 +20,7 @@ mod sweep;
 mod symmetry;
 mod glyphs;
 mod randomize;
+mod record;
 mod renorm;
 mod render_job;
 mod rot;
@@ -1854,6 +1855,14 @@ fn main() {
                 crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS,
             ),
             bit_depth: args.bit_depth.unwrap_or_default(),
+            scene_path: args.scene.as_ref().map(std::path::PathBuf::from),
+            // The CLI never reads prefs for render parameters — a headless
+            // render stays reproducible from flags plus scene — so this is the
+            // flag or the machine default, nothing else.
+            threads: args
+                .threads
+                .map(|n| n.max(1))
+                .unwrap_or_else(render_job::default_threads),
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.
@@ -1888,14 +1897,6 @@ fn main() {
                     seconds: args.seconds,
                     quality: args.quality,
                     format,
-                    // The CLI never reads prefs for render parameters — a
-                    // headless render stays reproducible from flags plus scene
-                    // — so this is the flag or the machine default, nothing
-                    // else.
-                    threads: args
-                        .threads
-                        .map(|n| n.max(1))
-                        .unwrap_or_else(render_job::default_threads),
                 },
             )
         } else {

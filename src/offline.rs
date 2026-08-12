@@ -23,6 +23,7 @@ use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
+use crate::record::RenderRecord;
 use crate::scene::Scene;
 use crate::render_job::{JobControl, Outcome, CANCELLED};
 use crate::view::View;
@@ -59,6 +60,14 @@ impl BitDepth {
             BitDepth::Eight => wgpu::TextureFormat::Rgba8UnormSrgb,
             // Linear, so the sRGB encode moves to the readback below.
             BitDepth::Sixteen => wgpu::TextureFormat::Rgba16Float,
+        }
+    }
+
+    /// Bits per channel, for a render record that a person will read.
+    pub fn bits(self) -> u32 {
+        match self {
+            BitDepth::Eight => 8,
+            BitDepth::Sixteen => 16,
         }
     }
 
@@ -189,6 +198,12 @@ pub struct OfflineParams<'a> {
     /// Bits per channel in the PNG. Ignored for animation, which is 8-bit by
     /// codec.
     pub bit_depth: BitDepth,
+    /// Where the scene came from, for the render record's `[source]` block.
+    /// `None` for a `--random` roll or a blank canvas, which have no file.
+    pub scene_path: Option<std::path::PathBuf>,
+    /// CPU threads this job may use. One value for the whole job — the
+    /// encoders read it, and the record reports it as information.
+    pub threads: usize,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -314,7 +329,7 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
 }
 
 /// Create a headless wgpu device with storage limits raised to adapter max
-fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
+fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -325,7 +340,8 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
         force_fallback_adapter: false,
     }))
     .map_err(|e| format!("No suitable GPU adapter: {}", e))?;
-    log::info!("Offline render using adapter: {:?}", adapter.get_info().name);
+    let adapter_name = adapter.get_info().name.clone();
+    log::info!("Offline render using adapter: {:?}", adapter_name);
 
     let adapter_limits = adapter.limits();
     let required_limits = wgpu::Limits {
@@ -333,7 +349,7 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
         max_buffer_size: adapter_limits.max_buffer_size,
         ..wgpu::Limits::default()
     };
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("fracturize_offline_device"),
         required_features: wgpu::Features::empty(),
         required_limits,
@@ -341,7 +357,8 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         trace: Default::default(),
     }))
-    .map_err(|e| format!("Failed to create device: {}", e))
+    .map_err(|e| format!("Failed to create device: {}", e))?;
+    Ok((device, queue, adapter_name))
 }
 
 /// Run the chaos game until the point buffer is full and then some. The long
@@ -940,17 +957,23 @@ fn label_tile(sheet: &mut [u16], sheet_w: u32, sheet_h: u32, tile_w: u32, tile_h
     glyphs::draw_label(sheet, sheet_w, sheet_h, ox, oy, text, scale, max_w);
 }
 
-/// Write the finished sheet.
+/// Write the finished sheet, with the render record embedded in it.
+///
+/// Drives `png::Encoder` directly rather than going through
+/// `image::save_buffer`: `image`'s convenience wrapper has no passthrough for
+/// text chunks, and carrying its own recipe is most of what makes a render
+/// findable a year later. See `src/record.rs`.
 ///
 /// The sheet is always 16 bits per channel; an 8-bit save narrows it back by
 /// 257, which is exact for anything that came off an 8-bit target — so this
-/// writes the same bytes it wrote before 16-bit output existed.
+/// writes the same pixels it wrote before 16-bit output existed.
 fn save_sheet(
     out_path: &Path,
     sheet: &[u16],
     w: u32,
     h: u32,
     depth: BitDepth,
+    record: Option<&RenderRecord>,
 ) -> Result<(), String> {
     if let Some(dir) = out_path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -958,18 +981,89 @@ fn save_sheet(
                 .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
         }
     }
-    let err = |e| format!("Failed to save {}: {}", out_path.display(), e);
+    let err = |e: std::io::Error| format!("Failed to save {}: {}", out_path.display(), e);
+    let file = std::fs::File::create(out_path).map_err(err)?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(match depth {
+        BitDepth::Eight => png::BitDepth::Eight,
+        BitDepth::Sixteen => png::BitDepth::Sixteen,
+    });
+
+    if let Some(r) = record {
+        for (keyword, text) in r.png_chunks() {
+            // `iTXt` throughout, not `tEXt`: tEXt is Latin-1, and a scene name
+            // or an author's name is UTF-8 in general — `α-0.4` alone would not
+            // survive it. iTXt is the chunk PNG defines for UTF-8, and it is
+            // compressed, which matters for the whole-scene chunk.
+            //
+            // Best-effort: a keyword the encoder rejects must not cost the
+            // render. The test in `record.rs` is what keeps that from being a
+            // silent loss, since it checks every keyword against the spec.
+            if let Err(e) = enc.add_itxt_chunk(keyword.clone(), text) {
+                log::warn!("PNG metadata chunk {:?} was not written: {}", keyword, e);
+            }
+        }
+    }
+
+    let mut writer = enc.write_header().map_err(|e| encode_err(out_path, e))?;
     match depth {
         BitDepth::Eight => {
             let narrowed: Vec<u8> = sheet.iter().map(|&v| (v / 257) as u8).collect();
-            image::save_buffer(out_path, &narrowed, w, h, image::ColorType::Rgba8).map_err(err)
+            writer.write_image_data(&narrowed).map_err(|e| encode_err(out_path, e))?;
         }
         BitDepth::Sixteen => {
-            let img = image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(w, h, sheet.to_vec())
-                .ok_or_else(|| "sheet does not match its own dimensions".to_string())?;
-            img.save(out_path).map_err(err)
+            // PNG is big-endian; the sheet is native. Written explicitly rather
+            // than transmuted, so this is correct on either endianness.
+            let mut bytes = Vec::with_capacity(sheet.len() * 2);
+            for &v in sheet {
+                bytes.extend_from_slice(&v.to_be_bytes());
+            }
+            writer.write_image_data(&bytes).map_err(|e| encode_err(out_path, e))?;
         }
     }
+    writer.finish().map_err(|e| encode_err(out_path, e))
+}
+
+fn encode_err(out_path: &Path, e: png::EncodingError) -> String {
+    format!("Failed to save {}: {}", out_path.display(), e)
+}
+
+/// Build the record for a finished render, and file the sidecar.
+///
+/// Failing to write the receipt never fails the render — the picture exists
+/// either way, and reporting a successful render as failed because a text file
+/// could not be written would be the wrong trade. It is logged and printed
+/// instead, so it is not silent either.
+#[allow(clippy::too_many_arguments)]
+fn make_record(
+    scene: &Scene,
+    scene_path: Option<&Path>,
+    camera: &OrbitCamera,
+    quality: crate::record::Quality,
+    threads: usize,
+    adapter: String,
+    elapsed: f32,
+) -> Option<RenderRecord> {
+    let scene_toml = match scene.to_toml_string() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("no render record: the scene would not serialize: {}", e);
+            return None;
+        }
+    };
+    Some(RenderRecord {
+        scene_path: scene_path.map(|p| p.to_path_buf()),
+        scene_toml,
+        camera: *camera,
+        quality,
+        machine: crate::record::Machine {
+            threads,
+            elapsed_seconds: elapsed,
+            adapter,
+        },
+        created: crate::record::timestamp_utc(),
+    })
 }
 
 fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant) {
@@ -1009,6 +1103,8 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         filter,
         filter_radius,
         bit_depth,
+        scene_path,
+        threads,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1026,7 +1122,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
-    let (device, queue) = create_device()?;
+    let (device, queue, adapter) = create_device()?;
     let t_setup = Instant::now();
 
     let (compute, point_count, mut outcome) =
@@ -1110,7 +1206,39 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     if let Some(c) = &control {
         c.phase("saving");
     }
-    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth)?;
+    // The camera in the record is the base framing. For a grid sheet that is
+    // the framing every tile is derived from, which is the honest answer to
+    // "what was this made from"; the per-tile mapping is already on stdout.
+    let record = make_record(
+        &scene,
+        scene_path.as_deref(),
+        &base_camera,
+        crate::record::Quality {
+            width,
+            height,
+            points: scene.point_count,
+            accumulate,
+            splat,
+            exposure,
+            transparent,
+            supersample: sampling.n,
+            filter,
+            filter_radius,
+            bit_depth,
+        },
+        threads,
+        adapter,
+        (t_render - t_start).as_secs_f32(),
+    );
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth, record.as_ref())?;
+    if let Some(r) = &record {
+        match r.write_sidecar(out_path) {
+            Ok(p) => println!("Render record: {}", p.display()),
+            // The picture exists; a receipt that could not be filed is worth
+            // saying out loud but is not a failed render.
+            Err(e) => eprintln!("warning: {}", e),
+        }
+    }
     let t_done = Instant::now();
 
     println!(
@@ -1166,9 +1294,6 @@ pub struct AnimParams {
     pub quality: u8,
     /// Which file to write, and so which codec encodes it
     pub format: crate::video::Format,
-    /// CPU threads the encoder may use. The job's one value, not the machine's
-    /// full core count — see `render_job::default_threads`.
-    pub threads: usize,
 }
 
 /// Render an animation: the camera flies the scene's [[camera.path]] spline
@@ -1207,6 +1332,8 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         // whatever the caller asked for. Named below rather than here so the
         // reason sits next to the frame buffer it governs.
         bit_depth: _,
+        scene_path,
+        threads,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -1229,7 +1356,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
-    let (device, queue) = create_device()?;
+    let (device, queue, adapter) = create_device()?;
     let t_setup = Instant::now();
 
     let (compute, point_count, fill) =
@@ -1274,9 +1401,9 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     println!("Encoding {} ({})", anim.format.codec_label(), anim.format.extension());
 
     let mut encoder = crate::video::AnimationEncoder::new(
-        anim.format, width, height, anim.fps, anim.quality, 8, anim.threads,
+        anim.format, width, height, anim.fps, anim.quality, 8, threads,
     )?;
-    println!("Encoding on {} thread{}", anim.threads, if anim.threads == 1 { "" } else { "s" });
+    println!("Encoding on {} thread{}", threads, if threads == 1 { "" } else { "s" });
     let aspect = width as f32 / height as f32;
     let target = TileTarget::new(
         &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
@@ -1381,6 +1508,36 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         });
     }
     encoder.finish(out_path)?;
+    // Sidecar only. The muxer here emits `ftyp`/`mdat`/`moov` and nothing else;
+    // adding a `udta`/`meta` box is real work in a format this project already
+    // treats gingerly for upload-pipeline compatibility, so an animation gets
+    // the same record beside it rather than inside it.
+    if let Some(r) = make_record(
+        &scene,
+        scene_path.as_deref(),
+        &base_camera,
+        crate::record::Quality {
+            width,
+            height,
+            points: scene.point_count,
+            accumulate,
+            splat,
+            exposure,
+            transparent,
+            supersample: sampling.n,
+            filter,
+            filter_radius,
+            bit_depth,
+        },
+        threads,
+        adapter,
+        (t_render - t_start).as_secs_f32(),
+    ) {
+        match r.write_sidecar(out_path) {
+            Ok(p) => println!("Render record: {}", p.display()),
+            Err(e) => eprintln!("warning: {}", e),
+        }
+    }
     let t_done = Instant::now();
 
     println!(
@@ -1429,6 +1586,8 @@ pub fn render_mutations(
         filter,
         filter_radius,
         bit_depth,
+        scene_path,
+        threads,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1466,7 +1625,7 @@ pub fn render_mutations(
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
-    let (device, queue) = create_device()?;
+    let (device, queue, adapter) = create_device()?;
     let t_setup = Instant::now();
 
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
@@ -1553,7 +1712,11 @@ pub fn render_mutations(
     }
     let t_render = Instant::now();
 
-    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth)?;
+    // No record: a mutation or sweep sheet is many different scenes, and a
+    // `fracturize:scene` chunk claiming one of them would be a confident lie
+    // about the other tiles. The per-tile mapping is printed, and mutation
+    // variants are already written out as `<out>.mutN.toml`.
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth, None)?;
     let t_done = Instant::now();
 
     println!(
@@ -1611,6 +1774,8 @@ pub fn render_sweep(
         filter,
         filter_radius,
         bit_depth,
+        scene_path,
+        threads,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1634,7 +1799,7 @@ pub fn render_sweep(
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
-    let (device, queue) = create_device()?;
+    let (device, queue, adapter) = create_device()?;
     let t_setup = Instant::now();
 
     // One framing and one haze band for the whole sheet: a contact sheet is
@@ -1708,7 +1873,11 @@ pub fn render_sweep(
     if let Some(c) = &control {
         c.phase("saving");
     }
-    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth)?;
+    // No record: a mutation or sweep sheet is many different scenes, and a
+    // `fracturize:scene` chunk claiming one of them would be a confident lie
+    // about the other tiles. The per-tile mapping is printed, and mutation
+    // variants are already written out as `<out>.mutN.toml`.
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth, None)?;
     let t_done = Instant::now();
 
     println!(
@@ -1731,6 +1900,7 @@ pub fn render_sweep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
 
     /// Exhaustive rather than sampled: there are only 65536 binary16 values, so
     /// "tested" can mean every one of them. Checked against the same decode
@@ -1795,6 +1965,77 @@ mod tests {
             let wide = v as u16 * 257;
             assert_eq!((wide / 257) as u8, v);
         }
+    }
+
+    /// The record is only worth writing if it can be read back. Writes a real
+    /// PNG through the real encoder and decodes it with the real decoder —
+    /// nothing here is mocked, because what this guards is the interaction
+    /// between the two.
+    #[test]
+    fn a_saved_png_carries_its_record_and_still_decodes() {
+        let dir = std::env::temp_dir().join(format!("fracturize-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.png");
+        let (w, h) = (3u32, 2u32);
+        let sheet = vec![0u16; (w * h * 4) as usize];
+
+        let record = RenderRecord {
+            scene_path: Some(std::path::PathBuf::from("scenes/x.toml")),
+            // Non-ASCII on purpose: `tEXt` is Latin-1 and would mangle this,
+            // which is why the chunks are `iTXt`.
+            scene_toml: "[meta]\nname = \"Ωmega — α\"\n".to_string(),
+            camera: OrbitCamera::from_chart(0.1, 0.2, 0.0, 3.0, Vec3::ZERO),
+            quality: crate::record::Quality {
+                width: w,
+                height: h,
+                points: 1000,
+                accumulate: 4,
+                splat: true,
+                exposure: 1.0,
+                transparent: false,
+                supersample: 2,
+                filter: Filter::Gaussian,
+                filter_radius: 0.5,
+                bit_depth: BitDepth::Eight,
+            },
+            machine: Default::default(),
+            created: "2026-08-12T00:00:00Z".to_string(),
+        };
+        save_sheet(&path, &sheet, w, h, BitDepth::Eight, Some(&record)).unwrap();
+
+        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        // The picture is intact: metadata must not cost the image.
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (w, h));
+
+        let text = &reader.info().utf8_text;
+        let get = |k: &str| {
+            text.iter()
+                .find(|c| c.keyword == k)
+                .map(|c| {
+                    let mut c = c.clone();
+                    c.decompress_text().unwrap();
+                    c.get_text().unwrap()
+                })
+                .unwrap_or_else(|| panic!("chunk {:?} missing", k))
+        };
+        assert_eq!(get(crate::record::KEY_SCENE), record.scene_toml);
+        assert_eq!(get(crate::record::KEY_SCENE_SHA), record.scene_sha256());
+        assert!(get("Software").contains(crate::version::VERSION));
+        // The record parses as TOML straight out of the file
+        let v: toml::Value = toml::from_str(&get(crate::record::KEY_RENDER)).unwrap();
+        assert_eq!(v["render"]["supersample"].as_integer(), Some(2));
+
+        // And a render with no record still writes a perfectly good PNG
+        let plain = dir.join("plain.png");
+        save_sheet(&plain, &sheet, w, h, BitDepth::Eight, None).unwrap();
+        let mut r2 = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&plain).unwrap())).read_info().unwrap();
+        let mut b2 = vec![0; r2.output_buffer_size().unwrap()];
+        assert_eq!(r2.next_frame(&mut b2).unwrap().width, w);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The three things measured in render-target pixels have to agree, and
