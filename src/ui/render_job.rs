@@ -77,6 +77,10 @@ pub struct RenderJobForm {
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
+    /// Render at N x and filter down. Job-scoped like the point count.
+    pub supersample: u32,
+    pub filter: crate::gpu::Filter,
+    pub filter_radius: f32,
     pub fps: u32,
     pub seconds: f32,
     pub quality: u8,
@@ -116,6 +120,12 @@ impl Default for RenderJobForm {
             splat: false,
             exposure: 1.0,
             transparent: false,
+            // Same default as `--render`: a filtered 2x image is simply a
+            // better picture than a native one of the same scene, and the
+            // 4x-fill cost is the one worth paying by default.
+            supersample: 2,
+            filter: crate::gpu::Filter::Gaussian,
+            filter_radius: crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS,
             fps: 30,
             seconds: 8.0,
             quality: 60,
@@ -151,6 +161,9 @@ impl RenderJobForm {
             splat: self.splat,
             exposure: self.exposure,
             transparent: self.transparent,
+            supersample: self.supersample,
+            filter: self.filter,
+            filter_radius: self.filter_radius,
             threads: self.threads,
         }
     }
@@ -522,6 +535,74 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
     if resp.changed() {
         app.ui_state.render_job.accumulate = accum;
     }
+
+    // Supersampling sits with `points` and `accumulate` because all three are
+    // cost/quality at fixed artistic intent — nothing here changes what the
+    // picture *is*. It is the one of the three that buys the most, though, so
+    // the hint says what it is rather than only what it costs.
+    ui.horizontal(|ui| {
+        let max = crate::gpu::points::downsample::MAX_SUPERSAMPLE;
+        let mut ss = app.ui_state.render_job.supersample;
+        let resp = ui.add(
+            egui::DragValue::new(&mut ss).range(1..=max).prefix("supersample ").suffix("x"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Render the histogram this many times larger in each axis and filter it down. \
+             The largest visible quality win here — an unfiltered render's remaining \
+             harshness is aliasing, not noise, so this beats simply adding points. Costs \
+             roughly N² fill and N² memory. 1 turns it off.",
+            "drag: supersampling factor",
+        );
+        if resp.changed() {
+            app.ui_state.render_job.supersample = ss;
+        }
+
+        // Greyed rather than hidden at 1x, so the kernel choice can still say
+        // it exists — and `hinted` is what makes a disabled widget explain
+        // itself, since egui drops `on_hover_text` on one.
+        ui.add_enabled_ui(ss > 1, |ui| {
+            let mut filter = app.ui_state.render_job.filter;
+            egui::ComboBox::from_id_salt("render_job_filter")
+                .selected_text(filter.label())
+                .show_ui(ui, |ui| {
+                    use clap::ValueEnum;
+                    for f in crate::gpu::Filter::value_variants() {
+                        ui.selectable_value(&mut filter, *f, f.label());
+                    }
+                });
+            if filter != app.ui_state.render_job.filter {
+                app.ui_state.render_job.filter = filter;
+            }
+
+            let mut radius = app.ui_state.render_job.filter_radius;
+            let resp = ui.add(
+                egui::DragValue::new(&mut radius)
+                    .speed(0.05)
+                    .range(
+                        crate::gpu::points::downsample::MIN_FILTER_RADIUS
+                            ..=crate::gpu::points::downsample::MAX_FILTER_RADIUS,
+                    )
+                    .prefix("r "),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                if ss > 1 {
+                    "Filter half-width in output pixels. At 0.5 with the box kernel this is \
+                     exactly an N x N block average; wider trades detail for smoothness \
+                     uniformly across the whole picture."
+                } else {
+                    "Needs supersampling above 1x — there is nothing to filter down at 1x."
+                },
+                "drag: filter radius",
+            );
+            if resp.changed() {
+                app.ui_state.render_job.filter_radius = radius;
+            }
+        });
+    });
 
     ui.horizontal(|ui| {
         let mut splat = app.ui_state.render_job.splat;

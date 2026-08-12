@@ -44,7 +44,7 @@ struct CameraUniforms {
     guard_z: f32,
     guard_ln_near: f32,
     guard_inv_ln_width: f32,
-    _pad0: f32,
+    max_point_pixels: f32,
 }
 
 struct SplatParams {
@@ -174,13 +174,26 @@ fn vs_splat(
 
     let ndc = clip.xyz / clip.w;
 
-    // Perspective splat radius in pixels, clamped so subpixel points still
-    // deposit their energy and huge near-camera splats stay bounded. The
-    // 12px cap keeps points brushing past the camera from smearing into
-    // screen-sized gaussian blobs in volume-filling scenes (their unit of
-    // energy still lands, just concentrated — a bright mote, not a wash).
+    // Perspective splat radius in pixels of the *render target*, clamped so
+    // subpixel points still deposit their energy and huge near-camera splats
+    // stay bounded. The cap keeps points brushing past the camera from
+    // smearing into screen-sized gaussian blobs in volume-filling scenes
+    // (their unit of energy still lands, just concentrated — a bright mote,
+    // not a wash).
+    //
+    // The cap arrives already scaled for supersampling (`max_point_pixels`,
+    // 12 x N) because it means 12 *output* pixels; a literal 12 here would
+    // tighten to 12/N output pixels and shrink close motes as quality went up.
+    //
+    // The floor stays at one target pixel, and deliberately does **not**
+    // scale. One accumulation texel is the finest thing the target can
+    // represent, and letting a splat be that small is exactly what
+    // supersampling buys: at 4x a point a quarter of an output pixel across
+    // now stays a quarter of an output pixel instead of being inflated to a
+    // whole one. Scaling this bound with N would undo the feature for the
+    // smallest material in the picture.
     let base_radius = 0.5 * camera.point_size * camera.screen_height / depth;
-    let radius_px = clamp(base_radius, 1.0, 12.0);
+    let radius_px = clamp(base_radius, 1.0, camera.max_point_pixels);
 
     let ndc_size_y = radius_px / camera.screen_height * 2.0;
     let ndc_size_x = ndc_size_y / camera.aspect_ratio;

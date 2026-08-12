@@ -20,7 +20,7 @@ struct CameraUniforms {
     // Tail of `CameraUniforms` in gpu/buffers.rs: the colour mode and the
     // infinite-zoom edge guard, none of which this pass reads. Every pass
     // shares one buffer, so the struct still has to be the same size.
-    _pad0: f32,
+    max_point_pixels: f32,
     _pad1: f32,
     _pad2: f32,
     _pad3: f32,

@@ -21,4 +21,4 @@ pub use context::GpuContext;
 pub use gizmo::GizmoRenderer;
 pub use lines::{LineRenderer, LineVertex};
 pub use overlay::OverlayTargets;
-pub use points::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+pub use points::{Filter, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};

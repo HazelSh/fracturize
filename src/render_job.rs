@@ -167,6 +167,14 @@ pub struct JobParams {
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
+    /// Render the histogram at `N x` output resolution and filter down. A
+    /// cost/quality knob at fixed artistic intent, so it belongs to the job
+    /// alongside `points` — not to the scene.
+    pub supersample: u32,
+    /// Reconstruction kernel for that downsample
+    pub filter: crate::gpu::Filter,
+    /// Kernel half-width in output pixels
+    pub filter_radius: f32,
     /// CPU threads this job's encoders may use. A **machine** setting, not
     /// artwork: it describes the box, so it lives in prefs and on the command
     /// line and never in a scene or a view. A sidecar may record what was used,
@@ -190,12 +198,29 @@ impl JobParams {
     /// render target and its readback staging copy, both `width * height * 4`.
     /// The splat renderer adds an rgba16float accumulation target at 8 bytes
     /// per pixel.
+    ///
+    /// Supersampling multiplies the per-pixel surfaces by N² and is the term
+    /// that grows fastest, so it is counted rather than assumed small: at 4K
+    /// and 4x it is over a gigabyte, which is the difference between a job that
+    /// runs and one that doesn't.
     pub fn total_bytes(&self) -> u64 {
         let (w, h) = self.kind.size();
         let pixels = w as u64 * h as u64;
+        let n2 = (self.supersample.max(1) as u64).pow(2);
+        // Output-sized colour target + its readback staging copy
         let target = pixels * 4 * 2;
-        let accum = if self.splat { pixels * 8 } else { 0 };
-        self.point_buffer_bytes() + target + accum
+        let extra = if self.splat {
+            // rgba16float accumulation at N x, plus the output-sized resolved
+            // copy the tonemap reads when the filter is on
+            pixels * 8 * n2 + if n2 > 1 { pixels * 8 } else { 0 }
+        } else if n2 > 1 {
+            // The points path rasterizes into an N x colour surface with a
+            // matching depth buffer, both 4 bytes per texel
+            pixels * 8 * n2
+        } else {
+            0
+        };
+        self.point_buffer_bytes() + target + extra
     }
 
     /// Why this job can't run, if it can't. Checked before anything is
@@ -375,8 +400,29 @@ mod tests {
             splat: false,
             exposure: 1.0,
             transparent: false,
+            supersample: 1,
+            filter: crate::gpu::Filter::Gaussian,
+            filter_radius: 0.5,
             threads: default_threads(),
         }
+    }
+
+    /// Supersampling is the fastest-growing term in a job's footprint, and the
+    /// estimate is checked against the device limit *before* anything
+    /// allocates — so it has to be in there.
+    #[test]
+    fn supersampling_is_counted_against_the_memory_budget() {
+        // Compared against the *point buffer*, which is the same in both and
+        // would otherwise swamp the term under test.
+        let one = JobParams { splat: true, ..still(1_000_000, 100, 100) };
+        let four = JobParams { supersample: 4, ..one.clone() };
+        let px = 100u64 * 100;
+        // The N x accumulation is 16x the 1x one, and the resolved copy is new
+        assert_eq!(four.total_bytes() - one.total_bytes(), px * 8 * 15 + px * 8);
+        // The points renderer pays for an N x colour surface *and* its depth
+        let flat = JobParams { splat: false, ..one.clone() };
+        let flat2 = JobParams { supersample: 2, ..flat.clone() };
+        assert_eq!(flat2.total_bytes() - flat.total_bytes(), px * 8 * 4);
     }
 
     /// The default holds a core back for the rest of the desktop, and never

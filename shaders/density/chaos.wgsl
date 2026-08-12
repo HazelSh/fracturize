@@ -33,7 +33,7 @@ struct Transform {
 
 struct WalkerState {
     current_pos: vec3<f32>,
-    _pad0: f32,
+    max_point_pixels: f32,
     current_color: f32,
     _pad1: f32,
     _pad2: f32,

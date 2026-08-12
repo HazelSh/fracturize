@@ -1881,6 +1881,80 @@ rendering).
 
 The CLI paths pass `control: None` and are unchanged.
 
+## Supersampling and the reconstruction filter
+
+Offline renders accumulate at `N x` output resolution and filter down
+(`--supersample N`, 1–4, **default 2**; `--filter box|triangle|gaussian|mitchell|lanczos`,
+default gaussian; `--filter-radius PX` in output pixels, default 0.5). This is
+flam3's `oversample` + `filter_radius`, and it is the largest visible quality
+win this renderer has.
+
+**Why it beats simply adding points.** Every point was deposited into exactly
+one pixel with no kernel, so the image was a raw histogram read out through a
+log curve. Measured: past ~33 samples/pixel it stops getting visibly better,
+and what remains is *not* shot noise — it is pixel quantization. Rendering 4x
+and filtering down beat native rendering at the **same total sample count**,
+decisively, for +40% wall clock. More samples fix noise; filtering fixes
+aliasing, and only one of those was missing. See `RENDER-QUALITY-BASELINE.md`.
+
+Default 2 rather than 1 is a deliberate change to what every `--render` writes.
+`--supersample 1` restores the old behaviour, and is byte-identical to it.
+
+**The filter runs on linear values, before any log tonemap.** For splat that
+means between accumulate and tonemap, on the `(colour*weight, weight)`
+accumulation — `SplatRenderer` owns its own supersampling for exactly that
+reason, since nothing outside it can reach that point in the pipeline. For the
+points renderer it is an sRGB texture, where `textureLoad`'s decode and the
+render target's encode put the averaging in linear light for free (and straight
+alpha is premultiplied across the filter and unpremultiplied after). Filtering
+after the log would blur in a perceptually compressed space and muddy bright
+cores.
+
+Gaussian is the default; **not lanczos**, whose negative lobes ring around
+exactly the small bright cores a flame image is made of. The downsample shader
+clamps filtered density at zero for the same reason — a negative density is a
+NaN once the tonemap takes its log, not a darker pixel.
+
+**Three things are measured in render-target pixels and must agree**, which is
+what `offline::Sampling` exists to guarantee:
+
+- the camera's `screen_height`, which is the *accumulation* height;
+- `CameraUniforms::max_point_pixels`, the near-field size cap. It means 12
+  *output* pixels, so it scales with N. It was the literal `12.0` in both point
+  shaders, which was right only while the render target was always the output;
+  left alone, close motes silently shrink to 12/N output pixels as quality goes
+  up. It occupies what used to be the struct's tail padding, so every WGSL
+  mirror of `CameraUniforms` names it;
+- `use_point_primitives`, the subpixel test. **This is the one that would make
+  the feature look like it did nothing.** Compared against output height, a
+  point that is subpixel at output but not at accumulation resolution keeps
+  taking the unfiltered 1px path — which is precisely the finest, most
+  alias-prone material in the picture.
+
+The size *floors* deliberately do **not** scale with N (the splat radius's
+`1.0`, and `min_point_pixels`). One accumulation texel is the finest thing the
+target can represent, and letting a splat be that small is what supersampling
+buys: at 4x, a point a quarter of an output pixel across stays a quarter of an
+output pixel instead of being inflated to a whole one. Scaling the floors would
+undo the feature for the smallest material there is. (`RENDER-QUALITY-PLAN.md`
+says to scale both bounds; that is right for the cap and wrong for the floor.)
+
+**Brightness is invariant to the factor**, and the arithmetic is exact rather
+than approximate. The filter takes a weighted *mean* over each N x N block,
+which divides density by N²; `exposure_scale` is `∝ screen_height²` and gets
+the supersampled height, which is N² larger. They cancel. Measured across
+1x/2x/4x on `nautilus`: mean 60.7 / 60.9 / 60.3. Passing the *output* height to
+`upload_params` would darken every supersampled render by N².
+
+Live window only ever runs at 1x. The point cloud's aliasing *is* the look
+there (see the MSAA note above), and N x supersampling costs N² fill.
+
+Not yet done from leg 1 of the plan: **16-bit PNG output**. It is not the
+one-liner it looks like — the offline render target is `Rgba8UnormSrgb` and the
+contact-sheet path is a `Vec<u8>` that `glyphs::draw_label` writes into, so it
+needs the target format changed to `Rgba16Float` with the sRGB encode moved to
+the CPU readback, and the sheet and label writer widened with it.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

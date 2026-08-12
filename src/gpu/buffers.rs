@@ -249,8 +249,24 @@ pub struct CameraUniforms {
     /// `1 / ln(ρ_end / ρ_start)`. **Zero disables the guard**, which is what
     /// an ordinary scene (and a zoom scene with `edge_guard = 0`) gets.
     pub guard_inv_ln_width: f32, // 4 bytes
-    pub _pad: f32,          // 4 bytes - struct size must be a multiple of 16
+    /// Near-field cap on a point's screen size, in **render-target** pixels.
+    ///
+    /// Points brushing past the camera would otherwise smear into
+    /// screen-eating squares (or gaussian washes) in volume-filling scenes;
+    /// this holds them to motes. It used to be the literal `12.0` in both
+    /// shaders, which was fine while the render target was always the output.
+    /// Under N x supersampling it is not: a cap of 12 target pixels is a cap of
+    /// 12/N *output* pixels, so close motes silently shrank as quality went up.
+    /// See [`Self::with_supersample`], and note the *floor* deliberately does
+    /// not scale — a finer floor is precisely what supersampling buys.
+    ///
+    /// It also uses up what was tail padding, so the struct is the same size.
+    pub max_point_pixels: f32, // 4 bytes
 }
+
+/// The near-field cap at 1x, in output pixels. Both point renderers agree on
+/// it, and it is quoted in AGENTS.md as "12px in both modes".
+pub const MAX_POINT_PIXELS: f32 = 12.0;
 
 impl CameraUniforms {
     pub fn new(
@@ -286,8 +302,20 @@ impl CameraUniforms {
             guard_center: [0.0; 3],
             guard_ln_near: 0.0,
             guard_inv_ln_width: 0.0,
-            _pad: 0.0,
+            // 1x until someone says otherwise; see `with_supersample`.
+            max_point_pixels: MAX_POINT_PIXELS,
         }
+    }
+
+    /// Scale the caps that are expressed in render-target pixels for an
+    /// `n` x supersampled render.
+    ///
+    /// Call it wherever `screen_height` was given the accumulation height
+    /// rather than the output height — the two describe the same target and
+    /// disagreeing about it is the bug this exists to prevent.
+    pub fn with_supersample(mut self, n: u32) -> Self {
+        self.max_point_pixels = MAX_POINT_PIXELS * n.max(1) as f32;
+        self
     }
 
     /// Arm the infinite-zoom edge guard for a camera whose eye is at `eye`.

@@ -31,7 +31,7 @@ struct CameraUniforms {
     guard_z: f32,
     guard_ln_near: f32,
     guard_inv_ln_width: f32,
-    _pad0: f32,
+    max_point_pixels: f32,
 }
 
 struct VertexOutput {
@@ -115,8 +115,13 @@ fn vs_main(
     // points right next to the camera from ballooning into giant squares
     // that occlude the scene (volume-filling scenes put points arbitrarily
     // close to the eye when zoomed in) — near-field dots stay dots.
+    //
+    // Both bounds are in *render-target* pixels. The cap arrives already
+    // scaled for supersampling (`max_point_pixels`, 12 x N) because it means
+    // 12 output pixels; the floor deliberately does not scale, since a finer
+    // floor is what supersampling is for. See `CameraUniforms`.
     let base_size = camera.point_size * camera.screen_height / depth;
-    let size_pixels = clamp(base_size, camera.min_point_pixels, 12.0);
+    let size_pixels = clamp(base_size, camera.min_point_pixels, camera.max_point_pixels);
 
     // Convert to NDC size
     let ndc_size_y = size_pixels / camera.screen_height * 2.0;

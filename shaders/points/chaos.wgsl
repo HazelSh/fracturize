@@ -51,7 +51,7 @@ struct Transform {
 // on a renderer whose entire constraint is VRAM.
 struct WalkerState {
     current_pos: vec3<f32>,
-    _pad0: f32,
+    max_point_pixels: f32,
     current_color: f32,
     current_rgb_r: f32,
     current_rgb_g: f32,

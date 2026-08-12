@@ -20,6 +20,7 @@ use rand::SeedableRng;
 use crate::camera::{CameraOverride, OrbitCamera};
 use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
+use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
 use crate::scene::Scene;
@@ -85,6 +86,50 @@ pub struct OfflineParams<'a> {
     pub labels: bool,
     /// Camera flags (`--yaw` etc.), applied over the scene and any view
     pub camera: CameraOverride,
+    /// Supersampling: render the histogram at `N x` output resolution and
+    /// filter down. 1 is off. The single biggest visible quality win here —
+    /// see `gpu::points::downsample`.
+    pub supersample: u32,
+    /// Reconstruction kernel for the downsample
+    pub filter: Filter,
+    /// Kernel half-width in *output* pixels
+    pub filter_radius: f32,
+}
+
+/// Everything about a render that is measured in render-target pixels.
+///
+/// One value, derived once, because the failure mode of supersampling is
+/// **disagreement**: the camera's `screen_height`, the near-field size cap and
+/// the subpixel `use_point_primitives` test all describe the same target, and
+/// any one of them left on the output size silently cancels the feature for
+/// part of the picture. `use_point_primitives` is the worst of the three —
+/// points that are subpixel at output but not at accumulation resolution would
+/// keep taking the unfiltered 1px path, which is exactly the finest, most
+/// alias-prone material there is, and the result looks like the feature did
+/// nothing at all.
+#[derive(Clone, Copy)]
+struct Sampling {
+    /// Supersample factor N, at least 1
+    n: u32,
+    /// Output height in pixels
+    height: u32,
+}
+
+impl Sampling {
+    fn new(supersample: u32, height: u32) -> Self {
+        Self { n: supersample.max(1), height }
+    }
+
+    /// Height of the surface actually being rasterized into.
+    fn target_height(&self) -> f32 {
+        (self.height * self.n) as f32
+    }
+
+    /// Whether points are small enough for the native 1px point-primitive
+    /// path. Measured against the *target* height, not the output height.
+    fn use_point_primitives(&self, point_size: f32, distance: f32) -> bool {
+        point_size * self.target_height() / distance <= 1.5
+    }
 }
 
 /// Evenly spaced values in [-1, 1] (a single sample sits at 0)
@@ -459,9 +504,15 @@ enum TileRenderer {
 }
 
 impl TileRenderer {
-    /// Build the requested renderer over a filled point buffer. For splat,
-    /// exposure is normalized against the buffer's point count and tile
-    /// height, matching the interactive renderer.
+    /// Build the requested renderer over a filled point buffer.
+    ///
+    /// For splat, exposure is normalized against the buffer's point count and
+    /// the **accumulation** height, matching the interactive renderer. That the
+    /// height is the supersampled one is what keeps brightness invariant to the
+    /// factor: the filter takes a weighted *mean* over each N x N block, which
+    /// divides density by N², and `exposure_scale` carries an N²-larger
+    /// height² that cancels it exactly. Passing the output height here would
+    /// darken every supersampled render by N².
     #[allow(clippy::too_many_arguments)]
     fn new(
         device: &wgpu::Device,
@@ -470,15 +521,25 @@ impl TileRenderer {
         splat: bool,
         exposure: f32,
         point_count: u32,
-        height: u32,
+        sampling: Sampling,
+        filter: Filter,
+        filter_radius: f32,
         clear: wgpu::Color,
         transparent: bool,
     ) -> Self {
         if splat {
-            let renderer = SplatRenderer::new(
+            let mut renderer = SplatRenderer::new(
                 device, FORMAT, &compute.point_buffer, &compute.colormap_buffer,
             );
-            renderer.upload_params(queue, exposure, point_count, height as f32, clear, transparent);
+            renderer.set_supersample(device, queue, sampling.n, filter, filter_radius);
+            renderer.upload_params(
+                queue,
+                exposure,
+                point_count,
+                sampling.target_height(),
+                clear,
+                transparent,
+            );
             TileRenderer::Splat(renderer)
         } else {
             TileRenderer::Points(PointRenderer::new(
@@ -495,43 +556,120 @@ impl TileRenderer {
     }
 }
 
-/// Reusable offscreen tile target: color + depth textures and a readback
-/// buffer, rendered per tile and blitted into the CPU-side contact sheet
+/// Reusable offscreen tile target: colour + depth textures and a readback
+/// buffer, rendered per tile and blitted into the CPU-side contact sheet.
+///
+/// Under `N x` supersampling this owns two colour surfaces rather than one: an
+/// `N·W x N·H` one that gets rasterized into, and the output-sized one that
+/// gets read back, with the reconstruction filter between them. Only the
+/// **points** renderer uses that pair — the splat renderer supersamples
+/// internally, because its filter has to run on the linear accumulation
+/// *before* the log tonemap, which is a place only it can reach.
 struct TileTarget {
     color_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
     color_texture: wgpu::Texture,
     readback: wgpu::Buffer,
+    /// Output size — what lands in the sheet
     width: u32,
     height: u32,
     padded_bytes_per_row: u32,
     /// What the point pass clears to — the scene's background, with alpha 0
     /// for a transparent render.
     clear: wgpu::Color,
+    /// The supersampled surfaces and the filter, when `n > 1`. `None` at 1x,
+    /// so an unsupersampled render allocates and encodes exactly what it
+    /// always did.
+    supersampled: Option<Supersampled>,
+}
+
+struct Supersampled {
+    color_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    downsampler: Downsampler,
 }
 
 impl TileTarget {
-    fn new(device: &wgpu::Device, width: u32, height: u32, clear: wgpu::Color) -> Self {
-        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offline_color"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        clear: wgpu::Color,
+        sampling: Sampling,
+        filter: Filter,
+        filter_radius: f32,
+    ) -> Self {
+        let make_color = |label, extra| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: width * if extra { sampling.n } else { 1 },
+                    height: height * if extra { sampling.n } else { 1 },
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: if extra {
+                    // Read by the filter pass rather than copied out
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+                } else {
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+                },
+                view_formats: &[],
+            })
+        };
+        let make_depth = |label, n: u32| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: width * n,
+                        height: height * n,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: DEPTH_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+
+        let color_texture = make_color("offline_color", false);
+        // Output-sized: the splat tonemap pass clears it, and a colour
+        // attachment and a depth attachment in one pass must agree on size.
+        let depth_view = make_depth("offline_depth", 1);
+
+        let supersampled = (sampling.n > 1).then(|| {
+            let ss_color = make_color("offline_color_supersampled", true);
+            // The points renderer is depth-tested, so its depth buffer has to
+            // match the surface it is rasterizing into, not the output.
+            let ss_depth = make_depth("offline_depth_supersampled", sampling.n);
+            let downsampler = Downsampler::new(device, FORMAT);
+            // The points target is sRGB with straight alpha: `textureLoad`
+            // decodes to linear and the sRGB target re-encodes on store, so
+            // the averaging happens in linear light for free, and the
+            // premultiply/unpremultiply keeps a transparent render's dusty
+            // edges from darkening the colour they sit next to.
+            downsampler.upload_params(
+                queue,
+                sampling.n,
+                filter,
+                filter_radius,
+                FilterSource::StraightAlpha,
+            );
+            Supersampled {
+                color_view: ss_color.create_view(&wgpu::TextureViewDescriptor::default()),
+                depth_view: ss_depth,
+                downsampler,
+            }
         });
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offline_depth"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+
         let padded_bytes_per_row = (width * 4 + 255) & !255;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("offline_readback"),
@@ -541,13 +679,14 @@ impl TileTarget {
         });
         Self {
             color_view: color_texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            depth_view: depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            depth_view,
             color_texture,
             readback,
             width,
             height,
             padded_bytes_per_row,
             clear,
+            supersampled,
         }
     }
 
@@ -571,32 +710,47 @@ impl TileTarget {
         });
         match renderer {
             TileRenderer::Points(renderer) => {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("offline_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.color_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(self.clear),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                renderer.draw(&mut pass, point_count, use_point_primitives);
+                // Draw into the supersampled surface when there is one, then
+                // filter down into the output-sized one the readback copies.
+                let (color, depth) = match &self.supersampled {
+                    Some(ss) => (&ss.color_view, &ss.depth_view),
+                    None => (&self.color_view, &self.depth_view),
+                };
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("offline_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: color,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(self.clear),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachment {
+                                view: depth,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0),
+                                    store: wgpu::StoreOp::Discard,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    renderer.draw(&mut pass, point_count, use_point_primitives);
+                }
+                if let Some(ss) = &self.supersampled {
+                    ss.downsampler.pass(device, &mut encoder, &ss.color_view, &self.color_view);
+                }
             }
             TileRenderer::Splat(renderer) => {
+                // Output size: the splat renderer sizes its own accumulation
+                // from the factor it was given.
                 renderer.render(
                     device,
                     &mut encoder,
@@ -708,7 +862,11 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         control,
         camera: camera_over,
         labels,
+        supersample,
+        filter,
+        filter_radius,
     } = params;
+    let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
     // A view can override the scene's color parameters. Falloff feeds the
@@ -731,7 +889,8 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
     let mut renderer =
         TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+        &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+        filter_radius, clear, transparent,
     );
     let t_fill = Instant::now();
 
@@ -746,9 +905,11 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
     let (cols, rows) = grid.tile_count();
-    let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
 
-    let target = TileTarget::new(&device, width, height, clear);
+    let target = TileTarget::new(
+        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+    );
     let sheet_w = width * cols;
     let sheet_h = height * rows;
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
@@ -775,14 +936,17 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // same in each. Grid tiles only re-aim the camera anyway.
         let (haze_near, haze_far) = haze.band(base_camera.distance);
         let camera = CameraUniforms::new(
-            tile.view_proj, height as f32, point_size, aspect, 1.0,
+            tile.view_proj, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
         )
         // One guard for the whole sheet, off the base framing, for the same
         // reason as the haze band above: grid tiles only re-aim the camera.
-        .with_zoom_guard(zoom.as_ref(), base_camera.eye());
+        .with_zoom_guard(zoom.as_ref(), base_camera.eye())
+        // The near-field size cap is in target pixels and means 12 *output*
+        // pixels, so it scales with N alongside `target_height` above.
+        .with_supersample(sampling.n);
         renderer.upload_camera(&queue, &camera);
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
@@ -892,9 +1056,13 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         camera: camera_over,
         // animation writes frames, not a sheet: nothing to label
         labels: _,
+        supersample,
+        filter,
+        filter_radius,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
+    let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
@@ -920,7 +1088,8 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     }
     let mut renderer =
         TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+        &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+        filter_radius, clear, transparent,
     );
     let t_fill = Instant::now();
 
@@ -956,7 +1125,9 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     )?;
     println!("Encoding on {} thread{}", anim.threads, if anim.threads == 1 { "" } else { "s" });
     let aspect = width as f32 / height as f32;
-    let target = TileTarget::new(&device, width, height, clear);
+    let target = TileTarget::new(
+        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+    );
     let mut frame_buf = vec![0u8; (width * height * 4) as usize];
 
     if let Some(c) = &control {
@@ -1020,7 +1191,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         // scene's authored distance.
         let (haze_near, haze_far) = haze.band(cam.distance);
         let camera = CameraUniforms::new(
-            cam.view_proj(aspect), height as f32, point_size, aspect, 1.0,
+            cam.view_proj(aspect), sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
@@ -1028,9 +1199,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         // After the wrap too, and for the same reason: the guard is a ramp in
         // multiples of the eye distance, so it has to be rebuilt from the
         // camera that actually renders this frame.
-        .with_zoom_guard(zoom.as_ref(), cam.eye());
+        .with_zoom_guard(zoom.as_ref(), cam.eye())
+        .with_supersample(sampling.n);
         renderer.upload_camera(&queue, &camera);
-        let use_point_primitives = point_size * height as f32 / cam.distance <= 1.5;
+        let use_point_primitives = sampling.use_point_primitives(point_size, cam.distance);
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
             &mut frame_buf, width, 0, 0,
@@ -1096,7 +1268,11 @@ pub fn render_mutations(
         control,
         camera: camera_over,
         labels,
+        supersample,
+        filter,
+        filter_radius,
     } = params;
+    let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
@@ -1138,7 +1314,7 @@ pub fn render_mutations(
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
-    let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
     let (haze_near, haze_far) = haze.band(base_camera.distance);
     // One framing and one haze band for every tile; only the edge guard is
     // per-variant, because mutating the transforms moves the zoom's fixed
@@ -1148,15 +1324,18 @@ pub fn render_mutations(
     // one tile is.
     let camera = |zoom: Option<&crate::renorm::Renorm>| {
         CameraUniforms::new(
-            view_proj, height as f32, point_size, aspect, 1.0,
+            view_proj, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
         )
         .with_zoom_guard(zoom, base_camera.eye())
+        .with_supersample(sampling.n)
     };
 
-    let target = TileTarget::new(&device, width, height, clear);
+    let target = TileTarget::new(
+        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+    );
     let sheet_w = width * cols;
     let sheet_h = height * rows;
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
@@ -1177,7 +1356,8 @@ pub fn render_mutations(
         outcome = outcome.and(fill);
         let mut renderer =
             TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+        &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+        filter_radius, clear, transparent,
     );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
@@ -1269,7 +1449,11 @@ pub fn render_sweep(
         control,
         camera: camera_over,
         labels,
+        supersample,
+        filter,
+        filter_radius,
     } = params;
+    let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
@@ -1299,21 +1483,24 @@ pub fn render_sweep(
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
-    let use_point_primitives = point_size * height as f32 / base_camera.distance <= 1.5;
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
     let (haze_near, haze_far) = haze.band(base_camera.distance);
     // Per-variant edge guard: a sweep may be sweeping a zoom parameter, or
     // anything that moves the renormalizing map's fixed point.
     let camera = |zoom: Option<&crate::renorm::Renorm>| {
         CameraUniforms::new(
-            view_proj, height as f32, point_size, aspect, 1.0,
+            view_proj, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
         )
         .with_zoom_guard(zoom, base_camera.eye())
+        .with_supersample(sampling.n)
     };
 
-    let target = TileTarget::new(&device, width, height, clear);
+    let target = TileTarget::new(
+        &device, &queue, width, height, clear, sampling, filter, filter_radius,
+    );
     let sheet_w = width * cols;
     let sheet_h = height * rows;
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
@@ -1338,7 +1525,8 @@ pub fn render_sweep(
             fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
-            &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
+            &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+            filter_radius, clear, transparent,
         );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();

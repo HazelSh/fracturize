@@ -11,6 +11,7 @@
 use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFormat};
 
 use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
+use crate::gpu::points::downsample::{Downsampler, Filter, Source};
 use crate::gpu::points::renderer::DEPTH_FORMAT;
 
 /// HDR accumulation format. rgba16float is the widest format with
@@ -50,6 +51,29 @@ pub struct SplatRenderer {
     /// Accumulation target + matching tonemap bind group, recreated when
     /// the render size changes (window resize, screenshots)
     accum: Option<AccumTarget>,
+    /// Supersampling, for offline renders. `None` is 1x: the accumulation is
+    /// the output size and the tonemap reads it directly, byte for byte as
+    /// before this existed.
+    ///
+    /// The filter runs on the **linear** accumulation, between accumulate and
+    /// tonemap. That position is the whole design: filtering after the log
+    /// would blur in a perceptually compressed space and muddy bright cores.
+    supersample: Option<Supersample>,
+}
+
+/// What supersampling adds: the factor, the kernel, and the output-sized
+/// linear texture the filter resolves into for the tonemap to read.
+struct Supersample {
+    factor: u32,
+    downsampler: Downsampler,
+    resolved: Option<Resolved>,
+}
+
+struct Resolved {
+    view: wgpu::TextureView,
+    tonemap_bind_group: BindGroup,
+    width: u32,
+    height: u32,
 }
 
 struct AccumTarget {
@@ -287,8 +311,41 @@ impl SplatRenderer {
             camera_buffer,
             params_buffer,
             accum: None,
+            supersample: None,
         }
     }
+
+    /// Turn on supersampling for this renderer. Offline only — see
+    /// `gpu::points::downsample` for why the live window doesn't want it.
+    ///
+    /// A factor of 1 leaves the renderer exactly as it was, rather than
+    /// installing a filter pass that would be an identity with rounding.
+    pub fn set_supersample(
+        &mut self,
+        device: &Device,
+        queue: &wgpu::Queue,
+        factor: u32,
+        filter: Filter,
+        radius: f32,
+    ) {
+        if factor <= 1 {
+            self.supersample = None;
+            return;
+        }
+        let downsampler = Downsampler::new(device, ACCUM_FORMAT);
+        // The splat accumulation is additive `(colour*weight, weight)`, so it
+        // filters channel by channel and the tonemap's `rgb / a` still
+        // recovers the density-weighted mean.
+        downsampler.upload_params(queue, factor, filter, radius, Source::Additive);
+        self.supersample = Some(Supersample { factor, downsampler, resolved: None });
+    }
+
+    /// The factor in force, 1 when off. Callers need it to size the
+    /// accumulation and to scale anything measured in target pixels.
+    pub fn supersample(&self) -> u32 {
+        self.supersample.as_ref().map_or(1, |s| s.factor)
+    }
+
 
     pub fn upload_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
@@ -361,9 +418,21 @@ impl SplatRenderer {
         self.accum = Some(AccumTarget { view, tonemap_bind_group, width, height });
     }
 
-    /// Splat the points and tonemap into `target`. Encodes two passes:
-    /// accumulate (own HDR texture) and tonemap (into `target`, clearing
-    /// `depth` so later overlay passes can Load it as usual).
+    /// Splat the points and tonemap into `target`.
+    ///
+    /// `width` and `height` are the **output** size. Under N x supersampling
+    /// the accumulation is N times larger in each axis and three passes are
+    /// encoded rather than two: accumulate (N x, own HDR texture), filter down
+    /// to output size (still linear, still HDR), tonemap into `target`
+    /// (clearing `depth` so later overlay passes can Load it as usual).
+    ///
+    /// Callers must size everything measured in target pixels — the camera's
+    /// `screen_height`, and the subpixel `use_point_primitives` decision —
+    /// against the *accumulation*, not the output. Getting the second one
+    /// wrong is the failure that makes this feature look like it did nothing:
+    /// points that are subpixel at output but not at accumulation resolution
+    /// would keep taking the unfiltered 1px path, which is exactly the finest,
+    /// most alias-prone material in the picture.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -376,7 +445,18 @@ impl SplatRenderer {
         point_count: u32,
         use_point_primitives: bool,
     ) {
-        self.ensure_accum(device, width, height);
+        let n = self.supersample();
+        self.ensure_accum(device, width * n, height * n);
+        if n > 1 {
+            Self::ensure_resolved(
+                self.supersample.as_mut().expect("n > 1 means it is set"),
+                device,
+                &self.tonemap_layout,
+                &self.params_buffer,
+                width,
+                height,
+            );
+        }
         let accum = self.accum.as_ref().unwrap();
 
         {
@@ -408,6 +488,17 @@ impl SplatRenderer {
             }
         }
 
+        // Whichever texture holds output-sized linear density: the resolved
+        // one under supersampling, the accumulation itself otherwise.
+        let tonemap_bind_group = match self.supersample.as_ref() {
+            Some(ss) => {
+                let resolved = ss.resolved.as_ref().expect("ensured above");
+                ss.downsampler.pass(device, encoder, &accum.view, &resolved.view);
+                &resolved.tonemap_bind_group
+            }
+            None => &accum.tonemap_bind_group,
+        };
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("splat_tonemap_pass"),
@@ -434,8 +525,57 @@ impl SplatRenderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.tonemap_pipeline);
-            pass.set_bind_group(0, &accum.tonemap_bind_group, &[]);
+            pass.set_bind_group(0, tonemap_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    /// (Re)create the output-sized linear texture the filter resolves into,
+    /// and the tonemap bind group that reads it.
+    ///
+    /// An associated function taking its pieces rather than a `&mut self`
+    /// method, because it needs `self.supersample` mutably and the tonemap
+    /// layout and params buffer immutably at the same time.
+    fn ensure_resolved(
+        ss: &mut Supersample,
+        device: &Device,
+        tonemap_layout: &BindGroupLayout,
+        params_buffer: &Buffer,
+        width: u32,
+        height: u32,
+    ) {
+        if let Some(r) = &ss.resolved {
+            if r.width == width && r.height == height {
+                return;
+            }
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("splat_resolved_texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Still the HDR accumulation format: this holds filtered *linear
+            // density*, not a picture. The log tonemap has not run yet.
+            format: ACCUM_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let tonemap_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat_resolved_tonemap_bind_group"),
+            layout: tonemap_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        ss.resolved = Some(Resolved { view, tonemap_bind_group, width, height });
     }
 }

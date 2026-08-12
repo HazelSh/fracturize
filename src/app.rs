@@ -3167,6 +3167,8 @@ impl App {
         let (splat, exposure, transparent, accumulate) =
             (params.splat, params.exposure, params.transparent, params.accumulate);
         let threads = params.threads;
+        let (supersample, filter, filter_radius) =
+            (params.supersample, params.filter, params.filter_radius);
 
         log::info!(
             "Render job started: {} ({}, {} points)",
@@ -3195,6 +3197,9 @@ impl App {
                 camera: Default::default(),
                 // A render job produces one image or one animation.
                 labels: false,
+                supersample,
+                filter,
+                filter_radius,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

@@ -305,6 +305,30 @@ struct Args {
     #[arg(long, value_name = "FRAMES", help_heading = "Offline render")]
     accumulate: Option<u32>,
 
+    /// Supersampling factor, 1-4 [2]
+    ///
+    /// Render the histogram at N x output resolution and filter down. The
+    /// single biggest visible quality win available: at equal sample count a
+    /// supersampled render beats a native one decisively, because what is
+    /// wrong with an unfiltered histogram is aliasing rather than noise. Costs
+    /// roughly N² fill. 1 turns it off.
+    #[arg(long, value_name = "N", help_heading = "Offline render")]
+    supersample: Option<u32>,
+
+    /// Reconstruction kernel for the downsample [gaussian]
+    ///
+    /// Not lanczos by default: its negative lobes ring around small bright
+    /// cores, which is what a flame image is full of.
+    #[arg(long, value_enum, value_name = "KERNEL", hide_possible_values = true, help_heading = "Offline render")]
+    filter: Option<crate::gpu::Filter>,
+
+    /// Filter half-width in output pixels, 0.5-2.0 [0.5]
+    ///
+    /// At 0.5 with --filter box this is exactly an N x N block average. The
+    /// tap radius in accumulation pixels is this times --supersample.
+    #[arg(long, value_name = "PX", help_heading = "Offline render")]
+    filter_radius: Option<f32>,
+
     /// CPU threads for encoding [one less than this machine has]
     ///
     /// Describes the box, not the artwork: never scene or view data. The
@@ -1036,6 +1060,17 @@ fn random_scene(seed: Option<u64>) -> (Scene, u64) {
     log::info!("Random flame seed: {} (reproduce with --random --seed {})", seed, seed);
     (scene, seed)
 }
+
+/// Supersampling for an offline render when nobody said otherwise.
+///
+/// 2 rather than 1, deliberately, and it changes what every `--render` writes:
+/// the measurements say an unfiltered histogram's remaining harshness is
+/// aliasing, not shot noise, so a filtered 2x render is simply a better picture
+/// than a native one of the same scene at the same sample count. 2 rather than
+/// 4 because it costs 4x fill instead of 16x, and the step from 1 to 2 is the
+/// one you can see across the board. `--supersample 1` restores the old
+/// behaviour exactly.
+const DEFAULT_SUPERSAMPLE: u32 = 2;
 
 /// Named effort presets for offline rendering: (points, accumulate frames).
 /// draft is for fast composition checks, ultra for final frames on a real GPU.
@@ -1800,6 +1835,14 @@ fn main() {
             camera: args.camera_override(),
             // A single tile has nothing to be told apart from.
             labels: !args.no_labels,
+            supersample: args
+                .supersample
+                .unwrap_or(DEFAULT_SUPERSAMPLE)
+                .clamp(1, crate::gpu::points::downsample::MAX_SUPERSAMPLE),
+            filter: args.filter.unwrap_or_default(),
+            filter_radius: args.filter_radius.unwrap_or(
+                crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS,
+            ),
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.
