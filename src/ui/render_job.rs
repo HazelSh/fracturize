@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::app::App;
 use crate::render_job::{
-    format_duration, format_estimate, human_bytes, JobKind, JobParams,
+    format_duration, format_estimate, human_bytes, JobKind, JobParams, Outcome,
 };
 
 use super::hints::hinted;
@@ -83,6 +83,10 @@ pub struct RenderJobForm {
     /// Which animation file to write. Only read when `mode` is `Animation`,
     /// but kept across a switch to Still and back so the choice sticks.
     pub format: crate::video::Format,
+    /// CPU threads the encoder may use. Seeded from prefs in [`open`] and
+    /// written back when it changes: a machine setting, so it follows the
+    /// person across scenes rather than living with the job's artwork.
+    pub threads: usize,
     /// A snapshot of the job launched from this form, if `Start` has been
     /// clicked and the launch wasn't rejected. See `StartedJob`.
     pub started: Option<StartedJob>,
@@ -116,6 +120,7 @@ impl Default for RenderJobForm {
             seconds: 8.0,
             quality: 60,
             format: crate::video::Format::Avif,
+            threads: crate::render_job::default_threads(),
             started: None,
         }
     }
@@ -146,6 +151,7 @@ impl RenderJobForm {
             splat: self.splat,
             exposure: self.exposure,
             transparent: self.transparent,
+            threads: self.threads,
         }
     }
 }
@@ -164,6 +170,7 @@ pub fn open(app: &mut App) {
     }
     let mut form = RenderJobForm {
         open: true,
+        threads: app.render_threads(),
         splat: app.render_mode == crate::app::RenderMode::Splat,
         exposure: app.exposure,
         transparent: app.transparent_render,
@@ -257,7 +264,7 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
         ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
     } else if let Some(done) = app.job_done().cloned() {
         match done {
-            Ok(path) => draw_done_panel(ui, app, &path),
+            Ok((path, outcome)) => draw_done_panel(ui, app, &path, outcome),
             Err(e) if e == crate::render_job::CANCELLED => {
                 ui.label(
                     egui::RichText::new("Cancelled — nothing was written.")
@@ -612,6 +619,37 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
                 app.ui_state.render_job.quality = quality;
             }
         });
+
+        // A machine setting sitting among job settings, so it says so. It is
+        // in the animation block because encoding is the only thing it steers
+        // today — a still's PNG deflate is one short single-threaded pass, and
+        // a control that claimed to spread it would be describing work that
+        // isn't there.
+        ui.horizontal(|ui| {
+            let max = crate::app::App::max_render_threads();
+            let mut threads = app.ui_state.render_job.threads;
+            let resp = ui.add(
+                egui::DragValue::new(&mut threads)
+                    .range(1..=max)
+                    .prefix("threads "),
+            );
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                format!(
+                    "CPU threads for encoding, out of this machine's {}. The default holds \
+                     one back so the desktop stays usable while a long encode runs — the AV1 \
+                     flush alone is ~75x the cost of rendering a frame. Follows you across \
+                     scenes, saved to prefs; never written to a scene file.",
+                    max
+                ),
+                "drag: CPU threads for encoding",
+            );
+            if resp.changed() {
+                app.ui_state.render_job.threads = threads;
+                app.set_render_threads(threads);
+            }
+        });
     }
 }
 
@@ -702,22 +740,57 @@ fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
 /// warning is a fact about the filesystem and is unchanged by this; this
 /// panel is a fact about what this session just did, and only appears when
 /// that's true.
-fn draw_done_panel(ui: &mut egui::Ui, app: &mut App, path: &std::path::Path) {
+/// The finished-job summary.
+///
+/// `outcome` is not decoration. A job stopped partway still writes a file, and
+/// the whole reason [`Outcome`] exists is that a noisier-than-asked-for render
+/// must not be presented in the same green panel as a finished one — you would
+/// come back to it a week later with no way to tell. So a partial render gets
+/// the warning colour, its own heading, and no check mark: the mark means
+/// *done*, and this isn't.
+///
+/// [`Outcome`]: crate::render_job::Outcome
+fn draw_done_panel(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    path: &std::path::Path,
+    outcome: Outcome,
+) {
     let started = app.ui_state.render_job.started.clone();
     let is_view = matches!(started.as_ref().map(|s| s.kind), Some(JobKind::ViewDescriptor));
-    let heading = if is_view { "View saved" } else { "Render done" };
+    let partial = outcome.is_partial();
+    let accent = if partial { ui.visuals().warn_fg_color } else { DONE_GREEN };
+    let heading = match (partial, is_view) {
+        (true, _) => "Stopped early",
+        (false, true) => "View saved",
+        (false, false) => "Render done",
+    };
 
     egui::Frame::NONE
-        .fill(DONE_GREEN.gamma_multiply(0.10))
-        .stroke(egui::Stroke::new(1.0, DONE_GREEN.gamma_multiply(0.6)))
+        .fill(accent.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.6)))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                check_mark(ui, DONE_GREEN);
-                ui.label(egui::RichText::new(heading).color(DONE_GREEN).strong());
+                if !partial {
+                    check_mark(ui, accent);
+                }
+                ui.label(egui::RichText::new(heading).color(accent).strong());
             });
             ui.label(egui::RichText::new(format!("Wrote {}", path.display())).small());
+            if partial {
+                // Say what it *is*, not only that it was interrupted: the file
+                // is usable, and "run it again" is the whole of the fix.
+                ui.label(
+                    egui::RichText::new(
+                        "This is what had accumulated when you stopped it — the same picture, \
+                         noisier. Run the job again to get the full one.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
 
             // Everything past here is a bonus, shown only when it's actually
             // known — see `StartedJob`'s doc for why frame count and elapsed
@@ -728,8 +801,12 @@ fn draw_done_panel(ui: &mut egui::Ui, app: &mut App, path: &std::path::Path) {
             if let Some(s) = &started {
                 if !is_view {
                     details.push(s.kind.label().to_string());
+                    // `kind.frames()` is what was *asked for*, which a partial
+                    // clip does not have — quoting it here would be the one
+                    // number in this panel that lies. The job log carries the
+                    // real count.
                     let frames = s.kind.frames();
-                    if frames > 1 {
+                    if frames > 1 && !partial {
                         details.push(format!("{} frames", frames));
                     }
                 }

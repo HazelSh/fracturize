@@ -63,6 +63,26 @@ pub const H264_SECS_PER_PIXEL: f32 = 6.0e-8;
 /// that it only shows up on very large stills.
 pub const PNG_SECS_PER_PIXEL: f32 = 2.0e-8;
 
+/// CPU threads a job may use, when nobody said otherwise: **one less than the
+/// machine has**.
+///
+/// Both video encoders used to call `available_parallelism()` themselves and
+/// hand the whole answer to the codec. On the reference desktop — an i5-6600,
+/// four cores and no SMT — that is every core, with nothing held back for the
+/// desktop the render is running behind. It has not bitten yet only because
+/// renders finish in under a second; the AV1 flush is ~75x the cost of
+/// rendering a frame, so a long animation job would spend the majority of its
+/// wall clock fully saturated.
+///
+/// Held to at least 1, since a zero-thread encoder is not a lighter one.
+pub fn default_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .saturating_sub(1)
+        .max(1)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum JobKind {
     Still { width: u32, height: u32 },
@@ -147,6 +167,15 @@ pub struct JobParams {
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
+    /// CPU threads this job's encoders may use. A **machine** setting, not
+    /// artwork: it describes the box, so it lives in prefs and on the command
+    /// line and never in a scene or a view. A sidecar may record what was used,
+    /// as information, but nothing should ever *replay* it — `threads = 16` is
+    /// actively wrong advice on the laptop.
+    ///
+    /// One value per job, read by every CPU-side thing the job spawns, so
+    /// there is no second place to forget. See [`default_threads`].
+    pub threads: usize,
 }
 
 impl JobParams {
@@ -210,7 +239,10 @@ pub enum JobEvent {
     Phase(&'static str),
     Progress { done: u32, total: u32 },
     Log(String),
-    Done(Result<PathBuf, String>),
+    /// Finished: where the file went and whether the job ran to its target, or
+    /// why it failed. See [`Outcome`] — a job stopped early usually still
+    /// writes something, and must never be announced as a completed one.
+    Done(Result<(PathBuf, Outcome), String>),
 }
 
 /// The job's half of the connection: where to report, and the two flags it
@@ -251,9 +283,49 @@ impl JobControl {
     }
 }
 
-/// Sentinel error a cancelled job returns, so callers can tell "you stopped
-/// this" apart from "this broke" and skip the failure reporting.
+/// Sentinel error a cancelled job returns **when there was nothing worth
+/// keeping**, so callers can tell "you stopped this" apart from "this broke"
+/// and skip the failure reporting.
+///
+/// Most cancellations no longer reach this: see [`Outcome::Partial`].
 pub const CANCELLED: &str = "cancelled";
+
+/// How a render ended.
+///
+/// The chaos game is an **anytime algorithm** — a buffer stopped at 60% is the
+/// same picture as one stopped at 100%, just noisier — so cancelling used to
+/// throw away something genuinely usable. `fill_points` returned
+/// `Err(CANCELLED)`, that propagated through `render()`'s `?`, and stopping a
+/// job at 99% got you nothing at all. Tolerable when a render took 0.35s;
+/// not once renders are long, which is the whole direction of the render
+/// quality work.
+///
+/// An enum rather than a bool or a second string sentinel because every
+/// reporting site has to handle both arms, and the compiler is what makes sure
+/// a partial render is never announced as a finished one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    /// Ran to the requested target.
+    Complete,
+    /// Stopped early. The file *was* written, from whatever had accumulated by
+    /// then — noisier than asked for, and never silently passed off as
+    /// finished.
+    Partial,
+}
+
+impl Outcome {
+    /// Once anything has been cut short, the whole job is partial.
+    pub fn and(self, other: Outcome) -> Outcome {
+        match (self, other) {
+            (Outcome::Complete, Outcome::Complete) => Outcome::Complete,
+            _ => Outcome::Partial,
+        }
+    }
+
+    pub fn is_partial(self) -> bool {
+        self == Outcome::Partial
+    }
+}
 
 /// Bytes as something a person can compare against a GPU spec sheet.
 pub fn human_bytes(bytes: u64) -> String {
@@ -303,7 +375,17 @@ mod tests {
             splat: false,
             exposure: 1.0,
             transparent: false,
+            threads: default_threads(),
         }
+    }
+
+    /// The default holds a core back for the rest of the desktop, and never
+    /// reaches zero however few cores the machine reports.
+    #[test]
+    fn the_default_thread_count_leaves_a_core_for_the_desktop() {
+        let all = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        assert!(default_threads() >= 1);
+        assert!(default_threads() < all.max(2), "must hold something back");
     }
 
     #[test]

@@ -66,12 +66,18 @@ pub struct H264Encoder {
 impl H264Encoder {
     /// `quality` is 0-100 (higher = better). Size and fps are validated by
     /// `video::AnimationEncoder::new` before this is reached.
-    pub fn new(width: u32, height: u32, fps: u32, quality: u8) -> Result<Self, String> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        quality: u8,
+        threads: usize,
+    ) -> Result<Self, String> {
         // 0-100 (higher better) onto H.264's QP (0-51, lower better). Kept off
         // 0 at the top: QP 0 is near-lossless and produces files far larger
         // than anything the slider's wording promises.
         let qp = (51 - (quality.min(100) as u32 * 50) / 100).clamp(1, 51) as u8;
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let threads = threads.clamp(1, u16::MAX as usize);
 
         // Left on the default `CameraVideoRealTime` usage type deliberately.
         // The non-realtime one looks like the right choice for an offline
@@ -281,7 +287,7 @@ mod tests {
         // every setting and the differences vanish into the noise floor.
         let (w, h) = (128u32, 96u32);
         let encoded = |quality: u8| {
-            let mut enc = H264Encoder::new(w, h, 24, quality).unwrap();
+            let mut enc = H264Encoder::new(w, h, 24, quality, 1).unwrap();
             let mut seed = 12345u32;
             for _ in 0..15 {
                 let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -308,7 +314,7 @@ mod tests {
     #[test]
     fn mp4_roundtrip() {
         let (w, h, fps, frames) = (64u32, 48u32, 10u32, 12u32);
-        let mut enc = H264Encoder::new(w, h, fps, 60).unwrap();
+        let mut enc = H264Encoder::new(w, h, fps, 60, 1).unwrap();
         for f in 0..frames {
             let mut rgba = vec![0u8; (w * h * 4) as usize];
             for y in 0..h {

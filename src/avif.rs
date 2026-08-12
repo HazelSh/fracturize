@@ -33,7 +33,14 @@ impl Av1Encoder {
     /// `quality` is 0-100 (higher = better; ~60 is a good default), `speed` is
     /// rav1e's 0-10 preset (higher = faster). Size and fps are validated by
     /// `video::AnimationEncoder::new` before this is reached.
-    pub fn new(width: u32, height: u32, fps: u32, quality: u8, speed: u8) -> Result<Self, String> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        quality: u8,
+        speed: u8,
+        threads: usize,
+    ) -> Result<Self, String> {
         let enc = EncoderConfig {
             width: width as usize,
             height: height as usize,
@@ -55,10 +62,9 @@ impl Av1Encoder {
             speed_settings: SpeedSettings::from_preset(speed.min(10)),
             ..Default::default()
         };
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let ctx = Config::new()
             .with_encoder_config(enc)
-            .with_threads(threads)
+            .with_threads(threads.max(1))
             .new_context::<u8>()
             .map_err(|e| format!("rav1e config rejected: {}", e))?;
         Ok(Self { ctx, width, height, fps, samples: Vec::new(), frames_sent: 0 })
@@ -191,7 +197,7 @@ mod tests {
     #[test]
     fn animated_avif_roundtrip() {
         let (w, h, fps, frames) = (64u32, 48u32, 10u32, 12u32);
-        let mut enc = Av1Encoder::new(w, h, fps, 60, 10).unwrap();
+        let mut enc = Av1Encoder::new(w, h, fps, 60, 10, 1).unwrap();
         for f in 0..frames {
             let mut rgba = vec![0u8; (w * h * 4) as usize];
             for y in 0..h {

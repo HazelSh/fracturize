@@ -24,6 +24,7 @@ mod renorm;
 mod render_job;
 mod rot;
 mod ui;
+mod version;
 mod video;
 mod view;
 
@@ -303,6 +304,14 @@ struct Args {
     /// Extra chaos-game frames after the buffer fills [--effort, else 32]
     #[arg(long, value_name = "FRAMES", help_heading = "Offline render")]
     accumulate: Option<u32>,
+
+    /// CPU threads for encoding [one less than this machine has]
+    ///
+    /// Describes the box, not the artwork: never scene or view data. The
+    /// default holds a core back so the desktop stays usable while a long
+    /// animation encodes.
+    #[arg(long, value_name = "N", help_heading = "Offline render")]
+    threads: Option<usize>,
 
     /// Use the splat renderer: additive log-density accumulation
     ///
@@ -915,7 +924,7 @@ fn run_sweep(
     args: &Args,
     grid: offline::GridMode,
     effort_points: Option<usize>,
-) -> Result<(), String> {
+) -> Result<render_job::Outcome, String> {
     if !matches!(grid, offline::GridMode::Single) {
         eprintln!("--sweep cannot be combined with --orbit-grid/--move-grid");
         std::process::exit(1);
@@ -1825,6 +1834,14 @@ fn main() {
                     seconds: args.seconds,
                     quality: args.quality,
                     format,
+                    // The CLI never reads prefs for render parameters — a
+                    // headless render stays reproducible from flags plus scene
+                    // — so this is the flag or the machine default, nothing
+                    // else.
+                    threads: args
+                        .threads
+                        .map(|n| n.max(1))
+                        .unwrap_or_else(render_job::default_threads),
                 },
             )
         } else {

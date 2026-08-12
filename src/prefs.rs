@@ -79,6 +79,13 @@ pub struct Prefs {
     /// explicit `--points`. `None` = never set one, defer to the scene.
     #[serde(default)]
     pub point_count: Option<usize>,
+    /// CPU threads a render job's encoders may use. Describes the box, not the
+    /// artwork, so it lives here and on the command line and is never scene or
+    /// view data — `threads = 16` is actively wrong advice on the laptop, so
+    /// nothing should ever *replay* one. `None` = never set one, take
+    /// [`crate::render_job::default_threads`] (one less than the machine has).
+    #[serde(default)]
+    pub threads: Option<usize>,
     /// Where each panel window was left, keyed by its `ui::WindowKey` name:
     /// `[x, y, width, height]` in egui points. Panels you've arranged stay
     /// arranged across launches; anything absent falls back to the
@@ -97,6 +104,7 @@ impl Default for Prefs {
             ui_scale: default_ui_scale(),
             author: None,
             point_count: None,
+            threads: None,
             window_geometry: BTreeMap::new(),
         }
     }

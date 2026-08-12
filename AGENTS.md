@@ -1841,8 +1841,39 @@ rendering).
   the `fill_points` accumulation frames, the per-tile loop, and the animation
   frame loop. Pause is a sleep loop — crude but correct, since the work is
   already chunked and the job's device is its own. Cancel takes two clicks
-  (armed for 4s), returns `Err(CANCELLED)`, and leaves no partial file, since
-  both writers only touch the output at the end.
+  (armed for 4s).
+- **Cancelling keeps the work.** The chaos game is an *anytime* algorithm: a
+  buffer stopped at 60% is the same picture as one stopped at 100%, just
+  noisier. So stopping a job renders and saves what it has, and every render
+  entry point returns `render_job::Outcome` — `Complete` or `Partial` — which
+  rides on `JobEvent::Done` and into `App::job_done`. It used to return
+  `Err(CANCELLED)` from `fill_points` and propagate through `render()`'s `?`,
+  so stopping at 99% got you nothing at all.
+
+  `Outcome` is an enum rather than a bool or a second string sentinel because
+  **every display site must handle both arms**: a partial render gets the
+  warning colour, its own heading, no check mark, and no frame count (the one
+  the job asked for is not the one it produced). A noisier-than-asked-for file
+  presented in the green "Render done" panel is indistinguishable, a week
+  later, from the render you meant to make.
+
+  Two paths deliberately differ. An **animation cancelled during the fill**
+  writes nothing and still returns `Err(CANCELLED)`: a sparse cloud drawn
+  across every frame is a full-cost job at reduced quality, not a partial
+  result. Cancelled during the *frame* loop it muxes what has been encoded — a
+  shorter clip is a real partial result — provided at least two frames landed,
+  since the sample table cannot describe a clip with fewer.
+- **Threads are a machine setting.** One job-scoped value (`JobParams.threads`),
+  defaulting to `render_job::default_threads()` = one less than the machine
+  has, exposed as `--threads N` and as a control in the dialog's animation
+  block. Both encoders read *that* value; they used to call
+  `available_parallelism()` each and hand the codec every core, which on the
+  4-core no-SMT desktop left nothing for the desktop itself. It lives in prefs
+  and on the command line and **never** in a scene or view — a sidecar may
+  record what was used, as information, but nothing should replay it, because
+  `threads = 16` is wrong advice on the T490. The dialog's control sits in the
+  animation block because encoding is the only thing it steers today; a still's
+  PNG deflate is one short single-threaded pass.
 - The time estimate runs on *working* time, not wall clock: pauses are
   subtracted, or the projected remaining time climbs while progress is frozen,
   which is a countdown that goes up.

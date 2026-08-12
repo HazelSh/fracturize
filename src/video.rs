@@ -141,6 +141,12 @@ impl AnimationEncoder {
     /// `quality` is 0-100 (higher = better; ~60 is a good default). `speed` is
     /// rav1e's 0-10 preset, and is ignored for H.264, which has its own
     /// complexity setting.
+    ///
+    /// `threads` is the job's one CPU-thread budget, passed down rather than
+    /// each backend asking the machine itself. Both used to call
+    /// `available_parallelism()` independently and hand over every core, which
+    /// is two places to forget the same thing — see
+    /// [`crate::render_job::default_threads`].
     pub fn new(
         format: Format,
         width: u32,
@@ -148,6 +154,7 @@ impl AnimationEncoder {
         fps: u32,
         quality: u8,
         speed: u8,
+        threads: usize,
     ) -> Result<Self, String> {
         // Checked here rather than in each backend: both need it, and the
         // caller's fix ("render an even size") is the same either way.
@@ -162,11 +169,11 @@ impl AnimationEncoder {
         }
         Ok(match format {
             Format::Avif => AnimationEncoder::Av1(crate::avif::Av1Encoder::new(
-                width, height, fps, quality, speed,
+                width, height, fps, quality, speed, threads,
             )?),
-            Format::Mp4 => {
-                AnimationEncoder::H264(crate::h264::H264Encoder::new(width, height, fps, quality)?)
-            }
+            Format::Mp4 => AnimationEncoder::H264(crate::h264::H264Encoder::new(
+                width, height, fps, quality, threads,
+            )?),
         })
     }
 
@@ -569,9 +576,9 @@ pub(crate) mod tests {
 
     #[test]
     fn odd_sizes_are_refused_before_anything_encodes() {
-        let e = AnimationEncoder::new(Format::Mp4, 65, 48, 24, 60, 8);
+        let e = AnimationEncoder::new(Format::Mp4, 65, 48, 24, 60, 8, 1);
         assert!(e.err().is_some_and(|m| m.contains("even")));
-        let e = AnimationEncoder::new(Format::Avif, 64, 48, 0, 60, 8);
+        let e = AnimationEncoder::new(Format::Avif, 64, 48, 0, 60, 8, 1);
         assert!(e.err().is_some_and(|m| m.contains("fps")));
     }
 }

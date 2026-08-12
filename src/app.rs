@@ -736,7 +736,11 @@ pub struct App {
     job: Option<JobHandle>,
     /// The last finished job's outcome, kept so the dialog can report it
     /// after the handle is gone.
-    job_done: Option<Result<std::path::PathBuf, String>>,
+    /// The last finished job: where it was written and whether it ran to the
+    /// target, or why it failed. Carrying [`crate::render_job::Outcome`]
+    /// rather than a bare path is what stops a render stopped at 40% being
+    /// reported as a finished one — every display site has to say which it was.
+    job_done: Option<Result<(std::path::PathBuf, crate::render_job::Outcome), String>>,
     /// Why the last launch was refused (memory limit, bad size) — set instead
     /// of starting, so the dialog can say why rather than doing nothing.
     job_error: Option<String>,
@@ -3120,10 +3124,11 @@ impl App {
             let view = self.current_view();
             let result = view
                 .save(&params.out_path)
-                .map(|()| params.out_path.clone())
+                // Nothing was rendered, so nothing could have been cut short.
+                .map(|()| (params.out_path.clone(), crate::render_job::Outcome::Complete))
                 .map_err(|e| e.to_string());
             match &result {
-                Ok(p) => log::info!("View descriptor written: {}", p.display()),
+                Ok((p, _)) => log::info!("View descriptor written: {}", p.display()),
                 Err(e) => log::error!("View descriptor failed: {}", e),
             }
             self.job_done = Some(result);
@@ -3161,6 +3166,7 @@ impl App {
         let kind = params.kind;
         let (splat, exposure, transparent, accumulate) =
             (params.splat, params.exposure, params.transparent, params.accumulate);
+        let threads = params.threads;
 
         log::info!(
             "Render job started: {} ({}, {} points)",
@@ -3200,13 +3206,16 @@ impl App {
                             seconds: Some(seconds),
                             quality,
                             format,
+                            threads,
                         },
                     )
                 }
-                JobKind::ViewDescriptor => Ok(()), // handled inline above
+                // Handled inline above, and it writes a file with no render
+                // in it, so there is nothing to have been cut short.
+                JobKind::ViewDescriptor => Ok(crate::render_job::Outcome::Complete),
             };
             let _ = control.events.send(JobEvent::Done(
-                result.map(|()| out.clone()).map_err(|e| e.to_string()),
+                result.map(|outcome| (out.clone(), outcome)).map_err(|e| e.to_string()),
             ));
         });
 
@@ -3216,7 +3225,7 @@ impl App {
     /// Drain the running job's event queue into the handle the dialog reads.
     /// Called once per frame from `update`.
     fn poll_job(&mut self) {
-        use crate::render_job::{JobEvent, CANCELLED};
+        use crate::render_job::{JobEvent, Outcome, CANCELLED};
         let Some(job) = &mut self.job else { return };
         let mut finished = None;
         while let Ok(event) = job.events.try_recv() {
@@ -3243,8 +3252,11 @@ impl App {
         }
         if let Some(result) = finished {
             match &result {
-                Ok(p) => log::info!("Render job finished: {}", p.display()),
-                Err(e) if e == CANCELLED => log::info!("Render job cancelled"),
+                Ok((p, Outcome::Complete)) => log::info!("Render job finished: {}", p.display()),
+                Ok((p, Outcome::Partial)) => {
+                    log::info!("Render job stopped early; partial result written: {}", p.display())
+                }
+                Err(e) if e == CANCELLED => log::info!("Render job cancelled, nothing written"),
                 Err(e) => log::error!("Render job failed: {}", e),
             }
             self.job = None;
@@ -3262,7 +3274,9 @@ impl App {
     }
 
     /// The last finished job's outcome, shown until the next one starts.
-    pub fn job_done(&self) -> Option<&Result<std::path::PathBuf, String>> {
+    pub fn job_done(
+        &self,
+    ) -> Option<&Result<(std::path::PathBuf, crate::render_job::Outcome), String>> {
         self.job_done.as_ref()
     }
 
@@ -4540,6 +4554,36 @@ impl App {
         log::info!("Point buffer capacity: {} (restarting warmup)", count);
         self.rebuild_pipelines();
         self.prefs.point_count = Some(count as usize);
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// CPU threads a render job may use — the preference, or one less than the
+    /// machine has if nothing has been chosen.
+    ///
+    /// A machine setting, so prefs and never scene or view data: what is right
+    /// here is a fact about this box, and replaying it somewhere else would be
+    /// wrong advice rather than a faithful reproduction.
+    pub fn render_threads(&self) -> usize {
+        self.prefs
+            .threads
+            .map(|n| n.clamp(1, Self::max_render_threads()))
+            .unwrap_or_else(crate::render_job::default_threads)
+    }
+
+    /// Everything the machine has. The ceiling on the control, not its default
+    /// — the default deliberately holds one back.
+    pub fn max_render_threads() -> usize {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    }
+
+    /// Remember a thread count. Deferred write, like every other slider-driven
+    /// pref, so dragging doesn't rewrite prefs.toml every frame.
+    pub fn set_render_threads(&mut self, n: usize) {
+        let n = n.clamp(1, Self::max_render_threads());
+        if self.prefs.threads == Some(n) {
+            return;
+        }
+        self.prefs.threads = Some(n);
         self.prefs_dirty_since = Some(std::time::Instant::now());
     }
 

@@ -23,7 +23,7 @@ use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
 use crate::scene::Scene;
-use crate::render_job::{JobControl, CANCELLED};
+use crate::render_job::{JobControl, Outcome, CANCELLED};
 use crate::view::View;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -204,18 +204,28 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
     .map_err(|e| format!("Failed to create device: {}", e))
 }
 
-/// Run the chaos game until the point buffer is full plus `accumulate`
-/// frames. Returns the compute pipeline and the valid point count.
 /// Run the chaos game until the point buffer is full and then some. The long
 /// phase of any job, and the first of the three places a job can be paused or
-/// cancelled — `Err(CANCELLED)` means the caller should clean up and stop.
+/// cancelled.
+///
+/// Returns the compute pipeline, the valid point count, and whether it got all
+/// the way there. Cancelling **stops the fill but does not fail it**: the
+/// chaos game is an anytime algorithm, so a buffer abandoned at 60% is the same
+/// picture as one abandoned at 100%, just noisier, and the downstream save path
+/// already works from a smaller-than-target point count — a mid-warmup buffer
+/// is exactly that. It used to return `Err(CANCELLED)`, which propagated
+/// through `render()`'s `?` and meant stopping at 99% got you nothing.
+///
+/// Callers decide what a partial fill is worth to them: a still writes it, an
+/// animation doesn't (a sparse cloud drawn across every frame is a full-cost
+/// job at reduced quality, not a partial result).
 fn fill_points(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     scene: &Scene,
     accumulate: u32,
     control: Option<&JobControl>,
-) -> Result<(PointCompute, u32), String> {
+) -> Result<(PointCompute, u32, Outcome), String> {
     let mut compute = PointCompute::new(
         device,
         &scene.transforms,
@@ -239,6 +249,7 @@ fn fill_points(
         ));
     }
     let mut point_count = 0;
+    let mut outcome = Outcome::Complete;
     for i in 0..total_frames {
         point_count = compute.advance_frame(queue, 1.0 / 60.0);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -255,16 +266,25 @@ fn fill_points(
             if let Some(c) = control {
                 c.progress(i + 1, total_frames);
                 if c.should_stop() {
-                    return Err(CANCELLED.to_string());
+                    c.log(format!(
+                        "stopped at frame {} of {} — keeping the {} points accumulated so far",
+                        i + 1,
+                        total_frames,
+                        point_count
+                    ));
+                    outcome = Outcome::Partial;
+                    break;
                 }
             }
         }
     }
+    // Unconditional, and it has to be: on the cancel path there is submitted
+    // work in flight that the readback would otherwise race.
     let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     if let Some(c) = control {
         c.progress(total_frames, total_frames);
     }
-    Ok((compute, point_count))
+    Ok((compute, point_count, outcome))
 }
 
 /// The scene's infinite-zoom renormalization, if it asked for one.
@@ -667,7 +687,12 @@ fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant)
     );
 }
 
-pub fn render(params: OfflineParams) -> Result<(), String> {
+/// Render a still, or a contact sheet of tiles sharing one point cloud.
+///
+/// Cancelling does not throw the work away: whatever the buffer holds is
+/// rendered and saved, and the return says [`Outcome::Partial`] so no caller
+/// can report it as a finished render.
+pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let OfflineParams {
         mut scene,
         view,
@@ -702,7 +727,8 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
+    let (compute, point_count, mut outcome) =
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
@@ -732,13 +758,16 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     }
     for (idx, tile) in tiles.iter().enumerate() {
         // Second cancel point. A grid sheet is many tiles; a single still is
-        // one, and cancelling then falls through to the fill-points check
-        // having already done the expensive part — which is the honest
-        // outcome, not something to pretend around.
+        // one, and by here the expensive part is already done, so stopping
+        // saves what there is: the tiles rendered so far, with the rest of the
+        // sheet left at the clear colour. Partial either way — the caller says
+        // so rather than passing it off as the sheet that was asked for.
         if let Some(c) = &control {
             c.progress(idx as u32, tiles.len() as u32);
             if c.should_stop() {
-                return Err(CANCELLED.to_string());
+                c.log(format!("stopped after {} of {} tiles", idx, tiles.len()));
+                outcome = Outcome::Partial;
+                break;
             }
         }
         // One band for the whole sheet, off the base framing: a contact sheet
@@ -777,13 +806,14 @@ pub fn render(params: OfflineParams) -> Result<(), String> {
     let t_done = Instant::now();
 
     println!(
-        "Rendered {}x{} ({} tile{} of {}x{}, {} points) -> {}",
+        "{} {}x{} ({} tile{} of {}x{}, {} points) -> {}",
+        if outcome.is_partial() { "Stopped, partial render" } else { "Rendered" },
         sheet_w, sheet_h,
         tiles.len(), if tiles.len() == 1 { "" } else { "s" },
         width, height, point_count, out_path.display(),
     );
     print_timing(t_start, t_setup, t_fill, t_render, t_done);
-    Ok(())
+    Ok(outcome)
 }
 
 /// Delete `<stem>.mutN.toml` leftovers from previous runs at the same out
@@ -828,6 +858,9 @@ pub struct AnimParams {
     pub quality: u8,
     /// Which file to write, and so which codec encodes it
     pub format: crate::video::Format,
+    /// CPU threads the encoder may use. The job's one value, not the machine's
+    /// full core count — see `render_job::default_threads`.
+    pub threads: usize,
 }
 
 /// Render an animation: the camera flies the scene's [[camera.path]] spline
@@ -835,7 +868,14 @@ pub struct AnimParams {
 /// cloud stays fixed — one chaos fill, one cheap render pass per frame, frames
 /// streamed straight into the encoder `anim.format` selects (AV1 for .avif,
 /// H.264 for .mp4).
-pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), String> {
+///
+/// Cancelling behaves differently here than for a still, deliberately. Stopping
+/// during the **fill** writes nothing: a sparse point cloud drawn across every
+/// frame is a full-cost job at reduced quality, not a partial result, and
+/// nobody who hit cancel wanted the remaining minutes spent. Stopping during
+/// the **frame loop** keeps what has been encoded — a shorter clip is a real
+/// partial result — provided there are at least two frames to mux.
+pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outcome, String> {
     let OfflineParams {
         mut scene,
         view,
@@ -871,7 +911,13 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     let (device, queue) = create_device()?;
     let t_setup = Instant::now();
 
-    let (compute, point_count) = fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
+    let (compute, point_count, fill) =
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref())?;
+    // See this function's doc comment: an animation has nothing to keep from a
+    // half-filled cloud, so a cancel here is a cancel.
+    if fill.is_partial() {
+        return Err(CANCELLED.to_string());
+    }
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
@@ -906,8 +952,9 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     println!("Encoding {} ({})", anim.format.codec_label(), anim.format.extension());
 
     let mut encoder = crate::video::AnimationEncoder::new(
-        anim.format, width, height, anim.fps, anim.quality, 8,
+        anim.format, width, height, anim.fps, anim.quality, 8, anim.threads,
     )?;
+    println!("Encoding on {} thread{}", anim.threads, if anim.threads == 1 { "" } else { "s" });
     let aspect = width as f32 / height as f32;
     let target = TileTarget::new(&device, width, height, clear);
     let mut frame_buf = vec![0u8; (width * height * 4) as usize];
@@ -918,13 +965,28 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     }
     // Fold depth the point buffer has been carried to; see the wrap below.
     let mut carried: Option<i32> = None;
+    let mut rendered = 0u32;
+    let mut outcome = Outcome::Complete;
     for i in 0..frames {
         // Third cancel point, and the one that matters most: an animation is
-        // minutes of work and every frame is a natural place to stop.
+        // minutes of work and every frame is a natural place to stop. What has
+        // been pushed to the encoder is a shorter clip, which is worth keeping
+        // — but only if there is enough of it to mux, and the sample table
+        // needs more than a single frame to describe a clip at all.
         if let Some(c) = &control {
             c.progress(i, frames);
             if c.should_stop() {
-                return Err(CANCELLED.to_string());
+                if rendered < 2 {
+                    return Err(CANCELLED.to_string());
+                }
+                c.log(format!(
+                    "stopped after {} of {} frames — muxing the {:.1}s that rendered",
+                    rendered,
+                    frames,
+                    rendered as f32 / anim.fps as f32,
+                ));
+                outcome = Outcome::Partial;
+                break;
             }
         }
         // Closed paths exclude t=1 so the loop wraps without a repeated frame
@@ -974,6 +1036,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
             &mut frame_buf, width, 0, 0,
         );
         encoder.push_frame(&frame_buf)?;
+        rendered += 1;
     }
     let t_render = Instant::now();
 
@@ -992,8 +1055,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
     let t_done = Instant::now();
 
     println!(
-        "Rendered {}x{} {} animation ({} frames, {} points) -> {}",
-        width, height, anim.format.codec_label(), frames, point_count, out_path.display(),
+        "{} {}x{} {} animation ({} of {} frames, {} points) -> {}",
+        if outcome.is_partial() { "Stopped, partial" } else { "Rendered" },
+        width, height, anim.format.codec_label(), rendered, frames, point_count,
+        out_path.display(),
     );
     println!(
         "Timing: setup {:.2}s | chaos fill {:.2}s | render+encode {:.2}s | flush+mux {:.2}s | total {:.2}s",
@@ -1003,7 +1068,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<(), S
         (t_done - t_render).as_secs_f32(),
         (t_done - t_start).as_secs_f32(),
     );
-    Ok(())
+    Ok(outcome)
 }
 
 /// Render a mutation contact sheet: tile 0 is the unmutated scene, tiles
@@ -1015,7 +1080,7 @@ pub fn render_mutations(
     count: u32,
     strength: f32,
     seed: Option<u64>,
-) -> Result<(), String> {
+) -> Result<Outcome, String> {
     let OfflineParams {
         mut scene,
         view,
@@ -1099,11 +1164,17 @@ pub fn render_mutations(
     let out_stem = out_path.with_extension("");
     remove_stale_variants(&out_stem);
     let mut fill_total = 0.0f32;
+    let mut outcome = Outcome::Complete;
+    let mut done = 0usize;
     for (idx, (variant, label)) in variants.iter().enumerate() {
         let t0 = Instant::now();
         // Each variant is a different IFS: refill the point buffer
-        let (compute, point_count) =
+        let (compute, point_count, fill) =
             fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
+        // A tile cut off mid-fill is still a tile — sparser than its
+        // neighbours, which is exactly what a sheet read tile-against-tile must
+        // not hide, so the whole sheet is reported partial.
+        outcome = outcome.and(fill);
         let mut renderer =
             TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
@@ -1130,6 +1201,17 @@ pub fn render_mutations(
             let text = if idx == 0 { "ORIGINAL" } else { label.as_str() };
             label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, text);
         }
+        done += 1;
+        // Every tile is its own fill, so this is where a mutation sheet is
+        // stopped. The tiles already drawn are worth keeping; the rest of the
+        // sheet stays at the clear colour.
+        if let Some(c) = &control {
+            if c.should_stop() {
+                c.log(format!("stopped after {} of {} tiles", done, n));
+                outcome = Outcome::Partial;
+                break;
+            }
+        }
     }
     let t_render = Instant::now();
 
@@ -1137,8 +1219,9 @@ pub fn render_mutations(
     let t_done = Instant::now();
 
     println!(
-        "Rendered {}x{} ({} mutation tiles of {}x{}) -> {}",
-        sheet_w, sheet_h, n, width, height, out_path.display(),
+        "{} {}x{} ({} of {} mutation tiles of {}x{}) -> {}",
+        if outcome.is_partial() { "Stopped, partial sheet" } else { "Rendered" },
+        sheet_w, sheet_h, done, n, width, height, out_path.display(),
     );
     // Fill and render interleave per tile here; report fill separately
     println!(
@@ -1150,7 +1233,7 @@ pub fn render_mutations(
         (t_done - t_render).as_secs_f32(),
         (t_done - t_start).as_secs_f32(),
     );
-    Ok(())
+    Ok(outcome)
 }
 
 /// Render a parameter sweep as a labelled contact sheet.
@@ -1170,7 +1253,7 @@ pub fn render_sweep(
     cols: u32,
     rows: u32,
     build: &dyn Fn(&[String]) -> Result<Scene, String>,
-) -> Result<(), String> {
+) -> Result<Outcome, String> {
     let OfflineParams {
         scene,
         view,
@@ -1236,16 +1319,24 @@ pub fn render_sweep(
     let mut sheet = vec![0u8; (sheet_w * sheet_h * 4) as usize];
 
     let mut fill_total = 0.0f32;
+    let mut outcome = Outcome::Complete;
+    let mut done = 0usize;
     for (idx, (variant, tile)) in variants.iter().zip(tiles).enumerate() {
+        // Every tile is its own fill, so this is where a sweep is stopped —
+        // and the tiles already drawn are worth keeping. The rest of the sheet
+        // stays at the clear colour, and the sheet is reported partial.
         if let Some(c) = &control {
             c.progress(idx as u32, tiles.len() as u32);
             if c.should_stop() {
-                return Err(CANCELLED.to_string());
+                c.log(format!("stopped after {} of {} tiles", done, tiles.len()));
+                outcome = Outcome::Partial;
+                break;
             }
         }
         let t0 = Instant::now();
-        let (compute, point_count) =
+        let (compute, point_count, fill) =
             fill_points(&device, &queue, variant, accumulate, control.as_ref())?;
+        outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count, height, clear, transparent,
         );
@@ -1263,6 +1354,7 @@ pub fn render_sweep(
         // The tile is fully described by one flag, so print that rather than
         // writing a variant file: it is copy-pasteable to reproduce or adopt.
         println!("tile [row {}, col {}]: {}", row, col, tile.description);
+        done += 1;
     }
     let t_render = Instant::now();
 
@@ -1273,8 +1365,9 @@ pub fn render_sweep(
     let t_done = Instant::now();
 
     println!(
-        "Rendered {}x{} ({} sweep tiles of {}x{}) -> {}",
-        sheet_w, sheet_h, tiles.len(), width, height, out_path.display(),
+        "{} {}x{} ({} of {} sweep tiles of {}x{}) -> {}",
+        if outcome.is_partial() { "Stopped, partial sheet" } else { "Rendered" },
+        sheet_w, sheet_h, done, tiles.len(), width, height, out_path.display(),
     );
     println!(
         "Timing: setup {:.2}s | fills {:.2}s ({} tiles) | render+readback {:.2}s | encode+save {:.2}s | total {:.2}s",
@@ -1285,5 +1378,5 @@ pub fn render_sweep(
         (t_done - t_render).as_secs_f32(),
         (t_done - t_start).as_secs_f32(),
     );
-    Ok(())
+    Ok(outcome)
 }

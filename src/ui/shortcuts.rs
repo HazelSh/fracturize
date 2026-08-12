@@ -19,10 +19,7 @@ use super::hints::hinted;
 /// informational, e.g. mouse gestures that have no keyboard equivalent).
 type Row = (&'static str, &'static str, Option<HelpAction>);
 
-/// The release name, baked in from the repo's `version.txt` at compile time so
-/// there's exactly one place to bump it and no file to find at runtime.
-/// Trailing newline included, hence the `trim` at every use.
-const VERSION: &str = include_str!("../../version.txt");
+use crate::version::VERSION;
 
 /// Side of the reserved logo square, in points.
 const LOGO_SIDE: f32 = 44.0;
@@ -54,7 +51,7 @@ fn draw_about(ui: &mut egui::Ui, app: &mut App) {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Fracturize").heading());
-                ui.label(egui::RichText::new(VERSION.trim()).small().weak());
+                ui.label(egui::RichText::new(VERSION).small().weak());
             });
             ui.label(egui::RichText::new("3D IFS fractal renderer").small().weak());
             // `CARGO_PKG_REPOSITORY` rather than a literal: the URL is
