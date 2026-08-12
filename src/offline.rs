@@ -207,6 +207,10 @@ pub struct OfflineParams<'a> {
     /// Measure and report GPU-busy time per chaos dispatch. Off by default:
     /// it is an investigation, not part of a render.
     pub gpu_timing: bool,
+    /// Seeds the chaos game's walkers. The default reproduces every render
+    /// made before this existed; any other value is an independent deal of the
+    /// same attractor.
+    pub chaos_seed: u64,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -392,6 +396,7 @@ fn fill_points(
     accumulate: u32,
     control: Option<&JobControl>,
     gpu_timing: bool,
+    chaos_seed: u64,
 ) -> Result<(PointCompute, u32, Outcome), String> {
     let mut compute = PointCompute::new(
         device,
@@ -399,6 +404,7 @@ fn fill_points(
         &scene.colors,
         &scene.colormap,
         scene.point_count as u32,
+        chaos_seed,
     );
     compute.zoom = scene_zoom(scene)?;
     let total_frames = compute.warmup_frames + accumulate.max(1);
@@ -1147,6 +1153,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         scene_path,
         threads,
         gpu_timing,
+        chaos_seed,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1168,7 +1175,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let t_setup = Instant::now();
 
     let (compute, point_count, mut outcome) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing)?;
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed)?;
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
@@ -1377,6 +1384,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         scene_path,
         threads,
         gpu_timing,
+        chaos_seed,
     } = params;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
@@ -1403,7 +1411,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let t_setup = Instant::now();
 
     let (compute, point_count, fill) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing)?;
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed)?;
     // See this function's doc comment: an animation has nothing to keep from a
     // half-filled cloud, so a cancel here is a cancel.
     if fill.is_partial() {
@@ -1635,6 +1643,7 @@ pub fn render_mutations(
         scene_path: _,
         threads: _,
         gpu_timing,
+        chaos_seed,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1713,7 +1722,7 @@ pub fn render_mutations(
         let t0 = Instant::now();
         // Each variant is a different IFS: refill the point buffer
         let (compute, point_count, fill) =
-            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing)?;
+            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed)?;
         // A tile cut off mid-fill is still a tile — sparser than its
         // neighbours, which is exactly what a sheet read tile-against-tile must
         // not hide, so the whole sheet is reported partial.
@@ -1827,6 +1836,7 @@ pub fn render_sweep(
         scene_path: _,
         threads: _,
         gpu_timing,
+        chaos_seed,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1897,7 +1907,7 @@ pub fn render_sweep(
         }
         let t0 = Instant::now();
         let (compute, point_count, fill) =
-            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing)?;
+            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed)?;
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count, sampling, filter,

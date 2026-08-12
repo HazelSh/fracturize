@@ -52,6 +52,35 @@ impl WalkerState {
     }
 }
 
+/// The chaos game's default seed.
+///
+/// Until this existed, `WalkerState::new` derived every walker's RNG state from
+/// its **index alone** — no clock, no entropy, no user seed — so two runs of
+/// the same command produced byte-identical PNGs. That is good for
+/// reproducibility and was never a bug, but it meant there was no way to ask
+/// for an *independent* sample stream at all: a second pass over the same scene
+/// replays the identical walker trajectory and re-counts the same samples, so
+/// the picture gets **brighter, not better**.
+///
+/// Zero, and that is load-bearing rather than arbitrary: at seed 0 the mixing
+/// in [`walker_seed`] collapses to exactly the expression that was there
+/// before, so every render made before this parameter existed is reproduced
+/// byte for byte. Verified, not assumed.
+pub const DEFAULT_SEED: u64 = 0;
+
+/// Golden-ratio odd constant, which is what the implicit per-walker seed
+/// already multiplied the index by.
+const WALKER_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Per-walker seed: the index's own stride, xored with a mixed user seed.
+///
+/// Xor rather than addition so that [`DEFAULT_SEED`] contributes nothing at
+/// all, and the multiply so that seeds 1 and 2 give unrelated streams rather
+/// than two that differ in one bit.
+fn walker_seed(seed: u64, i: u32) -> u64 {
+    (i as u64).wrapping_mul(WALKER_STRIDE) ^ seed.wrapping_mul(0xD6E8_FEB8_6659_FD93)
+}
+
 /// Simple chaos game compute pipeline
 /// Writes points directly to a circular buffer
 pub struct PointCompute {
@@ -82,6 +111,9 @@ pub struct PointCompute {
     /// Infinite-zoom renormalization applied to every emitted point, if the
     /// scene asked for one (see `renorm.rs`). Rebuilt on transform edits.
     pub zoom: Option<crate::renorm::Renorm>,
+    /// What the walkers were seeded from. Kept so `reset` restarts the same
+    /// stream rather than silently falling back to the default.
+    pub seed: u64,
 }
 
 /// A transform's colour, or white if the parallel `colors` array is short.
@@ -178,6 +210,9 @@ impl PointCompute {
         colors: &[glam::Vec3],
         colormap: &[[f32; 4]; 256],
         buffer_capacity: u32,
+        // Seeds the walkers. `DEFAULT_SEED` reproduces every render made before
+        // this parameter existed.
+        seed: u64,
     ) -> Self {
         // Calculate parallelism - aim for ~0.125% of buffer per frame (full cycle every 800 frames)
         let points_per_frame = (buffer_capacity / 800).max(1000);
@@ -235,9 +270,8 @@ impl PointCompute {
         });
 
         // Initialize walker states with different seeds
-        let walker_states: Vec<WalkerState> = (0..num_walkers)
-            .map(|i| WalkerState::new((i as u64).wrapping_mul(0x9E3779B97F4A7C15)))
-            .collect();
+        let walker_states: Vec<WalkerState> =
+            (0..num_walkers).map(|i| WalkerState::new(walker_seed(seed, i))).collect();
 
         let walker_states_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("walker_states_buffer"),
@@ -403,6 +437,7 @@ impl PointCompute {
             warmup_frames,
             current_frame: 0,
             zoom: None,
+            seed,
         }
     }
 
@@ -592,11 +627,56 @@ impl PointCompute {
         self.write_offset = 0;
         self.current_frame = 0;
 
-        // Re-initialize walker states
-        let walker_states: Vec<WalkerState> = (0..self.num_walkers)
-            .map(|i| WalkerState::new((i as u64).wrapping_mul(0x9E3779B97F4A7C15)))
-            .collect();
+        // Re-initialize walker states, from the same seed: a reset restarts
+        // the *same* stream, which is what makes a rebuild reproducible.
+        let walker_states: Vec<WalkerState> =
+            (0..self.num_walkers).map(|i| WalkerState::new(walker_seed(self.seed, i))).collect();
         queue.write_buffer(&self.walker_states_buffer, 0, bytemuck::cast_slice(&walker_states));
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    /// The default has to be a no-op, or every render in the project changes
+    /// the day a seed parameter is added.
+    #[test]
+    fn the_default_seed_reproduces_the_implicit_one() {
+        for i in [0u32, 1, 7, 16383, 65535] {
+            assert_eq!(
+                walker_seed(DEFAULT_SEED, i),
+                (i as u64).wrapping_mul(0x9E3779B97F4A7C15),
+                "walker {}",
+                i
+            );
+        }
+    }
+
+    /// And a non-default seed has to actually be a different stream — the
+    /// whole point is that re-running with the same seed re-counts the same
+    /// samples, making the picture brighter rather than better.
+    #[test]
+    fn different_seeds_give_different_streams() {
+        let a: Vec<u64> = (0..64).map(|i| walker_seed(1, i)).collect();
+        let b: Vec<u64> = (0..64).map(|i| walker_seed(2, i)).collect();
+        let d: Vec<u64> = (0..64).map(|i| walker_seed(DEFAULT_SEED, i)).collect();
+        assert_ne!(a, b);
+        assert_ne!(a, d);
+        // Adjacent seeds must not merely shift the same sequence along
+        assert!(a.iter().all(|x| !b.contains(x)), "seeds 1 and 2 share walker states");
+    }
+
+    /// A walker whose RNG words are all zero never advances. The seeding must
+    /// not be able to produce one, whatever seed it is handed.
+    #[test]
+    fn no_seed_produces_a_dead_walker() {
+        for seed in [0u64, 1, u64::MAX, 0x9E3779B97F4A7C15] {
+            for i in [0u32, 1, 12345] {
+                let w = WalkerState::new(walker_seed(seed, i));
+                assert!(w.rng_state.iter().any(|&s| s != 0), "seed {} walker {}", seed, i);
+            }
+        }
     }
 }
 

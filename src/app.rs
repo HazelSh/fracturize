@@ -890,6 +890,7 @@ impl App {
             &scene.colors,
             &scene.colormap,
             buffer_capacity,
+            crate::gpu::points::compute::DEFAULT_SEED,
         );
 
         // Create point renderer
@@ -3209,6 +3210,10 @@ impl App {
                 threads,
                 // A dialog render is not an investigation.
                 gpu_timing: false,
+                // The dialog has no control for an independent stream yet;
+                // there is nothing here that would use one until accumulation
+                // lands, and a knob with no effect is worse than none.
+                chaos_seed: crate::gpu::points::compute::DEFAULT_SEED,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),
@@ -4093,6 +4098,7 @@ impl App {
             &self.scene.colors,
             &self.scene.colormap,
             self.buffer_capacity,
+            crate::gpu::points::compute::DEFAULT_SEED,
         );
         self.point_renderer = PointRenderer::new(
             &self.gpu.device,

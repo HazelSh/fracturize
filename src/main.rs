@@ -340,6 +340,16 @@ struct Args {
     #[arg(long, value_enum, value_name = "BITS", help_heading = "Offline render")]
     bit_depth: Option<offline::BitDepth>,
 
+    /// Chaos-game seed — a different sample stream [0]
+    ///
+    /// The chaos game is deterministic: the same command has always produced
+    /// byte-identical output, because every walker was seeded from its index
+    /// alone. This is how to ask for an *independent* deal of the same
+    /// attractor — the same picture, sampled differently. Distinct from
+    /// `--seed`, which seeds mutation and `--random`.
+    #[arg(long, value_name = "N", help_heading = "Offline render")]
+    chaos_seed: Option<u64>,
+
     /// Report GPU-busy time per chaos dispatch
     ///
     /// Measurement, not a render setting. Answers whether the chaos loop is
@@ -1874,6 +1884,7 @@ fn main() {
                 .map(|n| n.max(1))
                 .unwrap_or_else(render_job::default_threads),
             gpu_timing: args.gpu_timing,
+            chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.
