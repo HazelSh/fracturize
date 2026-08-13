@@ -57,7 +57,16 @@ struct SplatParams {
     /// 1.0 = write straight-alpha coverage instead of compositing over
     /// `background` (transparent PNG output)
     transparent: f32,
-    _pad0: f32,
+    /// **1/gamma**, pre-inverted on the CPU so the shader never divides.
+    /// 1.0 is off and reproduces every render made before this existed.
+    gamma_inv: f32,
+    /// Coverage below which the gamma curve is blended toward a straight line.
+    /// 0 disables the toe. See `gamma_curve`.
+    gamma_threshold: f32,
+    /// 1 = gamma reaches the picture through coverage alone (hue untouched),
+    /// 0 = through each colour channel (highlights roll off toward white).
+    vibrancy: f32,
+    _pad0: vec2<f32>,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -293,12 +302,62 @@ fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
     // two. On the near-black default background the difference from the old
     // formula is bounded by the background itself (~2% of full scale), so
     // existing scenes are visually unchanged.
-    let coverage = clamp(brightness, 0.0, 1.0);
+    let raw = clamp(brightness, 0.0, 1.0);
+    let gi = params.gamma_inv;
+    let th = params.gamma_threshold;
+
+    // Gamma reaches the picture by two routes, and `vibrancy` picks between
+    // them. Through *coverage* the hue is untouched, so a bright core keeps
+    // its colour and stays saturated. Through each *channel* of the emitted
+    // colour, the dim channels of a bright pixel get lifted further than the
+    // strong one — which is a highlight rolling off toward white, the way film
+    // does it. flam3 calls the blend vibrancy and so does this.
+    let coverage = gamma_curve(raw, gi, th);
+    let vibrant = mean_color * coverage;
+    let desaturated = vec3<f32>(
+        gamma_curve(mean_color.r * raw, gi, th),
+        gamma_curve(mean_color.g * raw, gi, th),
+        gamma_curve(mean_color.b * raw, gi, th),
+    );
+    // Premultiplied by coverage, which is what makes the two branches below
+    // one compositing model rather than two.
+    let emitted = mix(desaturated, vibrant, params.vibrancy);
+
     if transparent {
         // Straight (non-premultiplied) alpha, which is what PNG stores:
         // colour is the palette hue, coverage is the log density, so the
         // dusty edges stay dusty instead of turning into a cutout.
-        return vec4<f32>(mean_color, coverage);
+        return vec4<f32>(emitted / max(coverage, 1e-6), coverage);
     }
-    return vec4<f32>(mix(params.background.rgb, mean_color, coverage), 1.0);
+    return vec4<f32>(params.background.rgb * (1.0 - coverage) + emitted, 1.0);
+}
+
+/// Gamma with a linear toe: `x^(1/gamma)`, blended toward a straight line
+/// below `threshold`.
+///
+/// This is flam3's `flam3_calc_alpha` applied to *coverage* rather than to raw
+/// density, which is the same curve in the place this renderer keeps the
+/// equivalent quantity. One consequence worth knowing before copying a number
+/// out of Apophysis: the threshold is in **post-log coverage**, so its whole
+/// scale is 0-1 and the useful range is 0.05-0.5, not flam3's density-unit
+/// range. Gamma and vibrancy mean the same thing in both.
+///
+/// The toe is the whole reason `gamma_threshold` exists. Gamma > 1 lifts dim
+/// values hard — that is what it is for — but the dimmest thing in a flame
+/// image is not detail, it is the single-sample speckle scattered across the
+/// background. Lifting *that* turns a black field into a grey veil with grain
+/// in it. Below the threshold the curve becomes the straight line through the
+/// origin that meets it at the threshold, so near-zero coverage stays
+/// near-zero and everything above is graded normally.
+fn gamma_curve(x: f32, gamma_inv: f32, threshold: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if threshold > 0.0 && x < threshold {
+        let frac = x / threshold;
+        // Slope of the line from the origin to the curve at `threshold`.
+        let slope = pow(threshold, gamma_inv) / threshold;
+        return (1.0 - frac) * x * slope + frac * pow(x, gamma_inv);
+    }
+    return pow(x, gamma_inv);
 }

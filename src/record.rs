@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::camera::{CameraOverride, OrbitCamera};
+use crate::gpu::points::splat::Grade;
 use crate::gpu::Filter;
 use crate::offline::BitDepth;
 use crate::version::VERSION;
@@ -70,6 +71,11 @@ pub struct Quality {
     pub spp: Option<f32>,
     pub splat: bool,
     pub exposure: f32,
+    /// Tonemap grade. Written only when it is not the neutral one, so every
+    /// record made before grading existed is byte-identical — and an absent
+    /// block reads as "the tonemap this program has always had", which is
+    /// exactly what it means.
+    pub grade: Grade,
     pub transparent: bool,
     pub supersample: u32,
     pub filter: Filter,
@@ -155,6 +161,11 @@ impl RenderRecord {
             let _ = writeln!(s, "spp = {}", num(spp));
         }
         let _ = writeln!(s, "exposure = {}", num(q.exposure));
+        if !q.grade.is_neutral() {
+            let _ = writeln!(s, "gamma = {}", num(q.grade.gamma));
+            let _ = writeln!(s, "gamma_threshold = {}", num(q.grade.gamma_threshold));
+            let _ = writeln!(s, "vibrancy = {}", num(q.grade.vibrancy));
+        }
         let _ = writeln!(s, "transparent = {}", q.transparent);
         let _ = writeln!(s, "supersample = {}", q.supersample);
         let _ = writeln!(s, "filter = {}", toml_str(q.filter.label()));
@@ -321,6 +332,7 @@ mod tests {
                 points: 100_000_000,
                 accumulate: 256,
                 spp: None,
+                grade: Grade::NEUTRAL,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

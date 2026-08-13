@@ -21,6 +21,7 @@ use crate::camera::{CameraOverride, OrbitCamera};
 use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::points::accumulate::Accumulator;
+use crate::gpu::points::splat::Grade;
 use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
@@ -227,6 +228,10 @@ pub struct OfflineParams<'a> {
     /// user-facing quality dial, and it should not silently multiply by N²
     /// when you turn on supersampling.
     pub spp: Option<u32>,
+    /// Tonemap grade: gamma, its toe, and vibrancy. [`Grade::NEUTRAL`] is the
+    /// tonemap that existed before these knobs did, so an unspecified grade
+    /// leaves every earlier render byte-identical.
+    pub grade: Grade,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -728,6 +733,7 @@ impl TileRenderer {
         depth: BitDepth,
         clear: wgpu::Color,
         transparent: bool,
+        grade: Grade,
     ) -> Self {
         if splat {
             let mut renderer = SplatRenderer::new(
@@ -741,6 +747,7 @@ impl TileRenderer {
                 sampling.target_height(),
                 clear,
                 transparent,
+                grade,
             );
             TileRenderer::Splat(renderer)
         } else {
@@ -1218,6 +1225,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         chaos_seed,
         // `Some` took the accumulating path at the top of this function.
         spp: _,
+        grade,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1244,7 +1252,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
-        filter_radius, bit_depth, clear, transparent,
+        filter_radius, bit_depth, clear, transparent, grade,
     );
     let t_fill = Instant::now();
 
@@ -1334,6 +1342,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             accumulate,
             // No histogram: the sample count is `points`.
             spp: None,
+            grade,
             splat,
             exposure,
             transparent,
@@ -1446,6 +1455,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         gpu_timing,
         chaos_seed,
         spp,
+        grade,
     } = params;
     let spp = spp.expect("only called with a sample target");
     if !splat {
@@ -1619,6 +1629,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         sampling.target_height(),
         clear,
         transparent,
+        grade,
     );
 
     let mut sheet = vec![0u16; (width * height * 4) as usize];
@@ -1651,6 +1662,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             points: scene.point_count,
             accumulate,
             spp: Some(achieved_spp),
+            grade,
             splat,
             exposure,
             transparent,
@@ -1771,6 +1783,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         gpu_timing,
         chaos_seed,
         spp,
+        grade,
     } = params;
     reject_spp(spp, "an animation")?;
     // 4:2:0 chroma needs even dimensions
@@ -1808,7 +1821,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
-        filter_radius, bit_depth, clear, transparent,
+        filter_radius, bit_depth, clear, transparent, grade,
     );
     let t_fill = Instant::now();
 
@@ -1962,6 +1975,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             accumulate,
             // No histogram: the sample count is `points`.
             spp: None,
+            grade,
             splat,
             exposure,
             transparent,
@@ -2035,6 +2049,7 @@ pub fn render_mutations(
         gpu_timing,
         chaos_seed,
         spp,
+        grade,
     } = params;
     reject_spp(spp, "a variant sheet")?;
     let sampling = Sampling::new(supersample, height);
@@ -2123,7 +2138,7 @@ pub fn render_mutations(
         let mut renderer =
             TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
-        filter_radius, bit_depth, clear, transparent,
+        filter_radius, bit_depth, clear, transparent, grade,
     );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
@@ -2231,6 +2246,7 @@ pub fn render_sweep(
         gpu_timing,
         chaos_seed,
         spp,
+        grade,
     } = params;
     reject_spp(spp, "a sweep sheet")?;
     let sampling = Sampling::new(supersample, height);
@@ -2307,7 +2323,7 @@ pub fn render_sweep(
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
-            filter_radius, bit_depth, clear, transparent,
+            filter_radius, bit_depth, clear, transparent, grade,
         );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
         fill_total += t0.elapsed().as_secs_f32();
@@ -2448,6 +2464,7 @@ mod tests {
                 points: 1000,
                 accumulate: 4,
                 spp: None,
+                grade: Grade::NEUTRAL,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

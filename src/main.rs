@@ -308,6 +308,34 @@ struct Args {
     #[arg(long, value_name = "FRAMES", help_heading = "Offline render")]
     accumulate: Option<u32>,
 
+    /// Tonemap gamma, >1 lifts the dim end [1 = off]
+    ///
+    /// There is no gamma curve at all without this — just the log and a fixed
+    /// gain — and gamma is most of what people mean by the Apophysis look.
+    /// Pair it with --gamma-threshold: lifting the dim end also lifts the
+    /// single-sample speckle in the background, and the threshold is what
+    /// stops that becoming a grey veil.
+    #[arg(long, value_name = "G", help_heading = "Offline render")]
+    gamma: Option<f32>,
+
+    /// Coverage below which gamma flattens to a straight line [0 = off]
+    ///
+    /// The toe that keeps --gamma from lifting background speckle into a veil.
+    ///
+    /// Measured useful range is 0.05-0.5, which is *not* flam3's range for the
+    /// nominally same knob: flam3's threshold is in raw density units, this one
+    /// is in post-log coverage, where the whole scale is 0-1. On blossom at
+    /// --gamma 2.5, threshold 0.5 recovers 80% of the lifted background for 5%
+    /// of the bright detail.
+    #[arg(long, value_name = "T", help_heading = "Offline render")]
+    gamma_threshold: Option<f32>,
+
+    /// How gamma reaches colour: 1 keeps hue, 0 rolls highlights to white [1]
+    ///
+    /// Inert at --gamma 1, because there is then no curve to route.
+    #[arg(long, value_name = "V", help_heading = "Offline render")]
+    vibrancy: Option<f32>,
+
     /// Target samples per output pixel, accumulated without a ceiling
     ///
     /// The ordinary render splats the point buffer once, so its sample count is
@@ -1872,6 +1900,15 @@ fn main() {
         let accumulate =
             args.accumulate.or(effort_accumulate).unwrap_or(offline::DEFAULT_ACCUMULATE);
         let spp = args.spp.or(effort_spp);
+        // Anything unspecified stays at NEUTRAL, which is the tonemap that
+        // existed before these knobs did — so a render made without them is
+        // byte-identical to one made before they were added.
+        let neutral = gpu::points::splat::Grade::NEUTRAL;
+        let grade = gpu::points::splat::Grade {
+            gamma: args.gamma.unwrap_or(neutral.gamma),
+            gamma_threshold: args.gamma_threshold.unwrap_or(neutral.gamma_threshold),
+            vibrancy: args.vibrancy.unwrap_or(neutral.vibrancy),
+        };
 
         let view = args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
@@ -1946,6 +1983,7 @@ fn main() {
             gpu_timing: args.gpu_timing,
             chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
             spp,
+            grade,
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.

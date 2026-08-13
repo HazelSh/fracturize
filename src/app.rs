@@ -3218,6 +3218,8 @@ impl App {
                 // a CLI dial for now — it changes what a render *costs* by
                 // orders of magnitude, and the dialog's other controls do not.
                 spp: None,
+                // No grade control in the dialog yet; slice 6a is CLI-side.
+                grade: crate::gpu::points::splat::Grade::NEUTRAL,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),
@@ -5186,6 +5188,10 @@ impl App {
                     SCREENSHOT_HEIGHT as f32,
                     crate::scene::clear_color(self.scene.background, alpha),
                     self.transparent_render,
+                    // The window has no grade control yet; slice 6a is a CLI
+                    // and render-record feature. NEUTRAL is the tonemap the
+                    // window has always had.
+                    crate::gpu::points::splat::Grade::NEUTRAL,
                 );
                 self.splat_renderer.render(
                     &self.gpu.device,
@@ -5477,6 +5483,7 @@ impl App {
                     height as f32,
                     crate::scene::clear_color(self.scene.background, 1.0),
                     false,
+                    crate::gpu::points::splat::Grade::NEUTRAL,
                 );
                 self.splat_renderer.render(
                     &self.gpu.device,

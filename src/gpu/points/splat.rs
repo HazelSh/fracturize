@@ -26,7 +26,7 @@ const EXPOSURE_K: f32 = 2.0;
 /// Output gain applied after the log
 const GAIN: f32 = 0.25;
 
-/// Tonemap uniforms (32 bytes), must match SplatParams in splat.wgsl
+/// Tonemap uniforms (48 bytes), must match SplatParams in splat.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct SplatParams {
@@ -37,7 +37,57 @@ struct SplatParams {
     /// `background`. Takes one of the two pad slots, so the uniform's size
     /// and alignment are unchanged.
     transparent: f32,
-    _pad: f32,
+    /// `1/gamma`, inverted here so the shader never divides.
+    gamma_inv: f32,
+    gamma_threshold: f32,
+    vibrancy: f32,
+    _pad: [f32; 2],
+}
+
+/// The tonemap grade, as the CLI and the record speak about it.
+///
+/// A struct rather than three loose floats because they are one decision —
+/// "how does density become a picture" — and because the defaults have to
+/// travel together: [`Grade::NEUTRAL`] is exactly the tonemap that existed
+/// before any of this, so an unspecified grade cannot change an old render.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Grade {
+    /// > 1 lifts the dim end. 1 is off.
+    pub gamma: f32,
+    /// Coverage below which gamma is blended toward a straight line, so the
+    /// background speckle is not lifted into a grey veil. 0 is off.
+    pub gamma_threshold: f32,
+    /// 1 keeps hue through the gamma; 0 rolls highlights toward white.
+    pub vibrancy: f32,
+}
+
+impl Grade {
+    /// The identity grade — and it really is the identity, not merely close.
+    ///
+    /// At `gamma = 1` the curve is `x^1`, so both of the shader's vibrancy
+    /// routes collapse to `mean_color * coverage` and the blend between them
+    /// is inert whatever `vibrancy` says. Which makes this the same arithmetic
+    /// the tonemap did before it had a grade at all, and is what a test pins.
+    pub const NEUTRAL: Grade = Grade { gamma: 1.0, gamma_threshold: 0.0, vibrancy: 1.0 };
+
+    /// Bounds, so a typo cannot produce a black frame after a long render.
+    pub fn clamped(self) -> Grade {
+        Grade {
+            gamma: self.gamma.clamp(0.1, 10.0),
+            gamma_threshold: self.gamma_threshold.clamp(0.0, 1.0),
+            vibrancy: self.vibrancy.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn is_neutral(self) -> bool {
+        self == Grade::NEUTRAL
+    }
+}
+
+impl Default for Grade {
+    fn default() -> Self {
+        Grade::NEUTRAL
+    }
 }
 
 pub struct SplatRenderer {
@@ -368,7 +418,9 @@ impl SplatRenderer {
         screen_height: f32,
         background: wgpu::Color,
         transparent: bool,
+        grade: Grade,
     ) {
+        let grade = grade.clamped();
         let exposure_scale = if samples > 0.0 {
             (exposure as f64 * EXPOSURE_K as f64 * screen_height as f64 * screen_height as f64
                 / samples) as f32
@@ -385,7 +437,10 @@ impl SplatRenderer {
             exposure_scale,
             gain: GAIN,
             transparent: transparent as u32 as f32,
-            _pad: 0.0,
+            gamma_inv: 1.0 / grade.gamma,
+            gamma_threshold: grade.gamma_threshold,
+            vibrancy: grade.vibrancy,
+            _pad: [0.0; 2],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
     }
@@ -660,5 +715,61 @@ impl SplatRenderer {
             ],
         });
         ss.resolved = Some(Resolved { view, tonemap_bind_group, width, height });
+    }
+}
+
+#[cfg(test)]
+mod grade_tests {
+    use super::*;
+
+    /// The whole safety property of slice 6a in one assertion: an unspecified
+    /// grade is the tonemap that existed before grading did.
+    ///
+    /// The shader's two vibrancy routes are `mean*gamma(coverage)` and
+    /// `gamma(mean*coverage)`. At `gamma = 1` the curve is the identity, so
+    /// both are `mean*coverage` and the blend between them cannot matter —
+    /// which is why the neutral vibrancy can be 1 without that being a choice.
+    #[test]
+    fn the_neutral_grade_is_the_old_tonemap() {
+        let g = Grade::NEUTRAL;
+        assert_eq!(g.gamma, 1.0, "gamma 1 makes the curve the identity");
+        assert_eq!(g.gamma_threshold, 0.0, "no toe means no piecewise branch");
+        assert!(g.is_neutral());
+        assert!(Grade::default().is_neutral());
+        // And clamping must not perturb it, or the default would drift.
+        assert_eq!(g.clamped(), g);
+    }
+
+    /// The shader reads `1/gamma`; the CPU is where that inversion happens, so
+    /// the floor has to keep it finite.
+    #[test]
+    fn clamping_keeps_the_gamma_inversion_finite() {
+        for gamma in [0.0, -1.0, f32::MIN_POSITIVE, 1e9] {
+            let c = Grade { gamma, ..Grade::NEUTRAL }.clamped();
+            let inv = 1.0 / c.gamma;
+            assert!(inv.is_finite() && inv > 0.0, "gamma {} gave 1/g = {}", gamma, inv);
+        }
+    }
+
+    /// Vibrancy and the threshold are blend factors the shader uses raw.
+    #[test]
+    fn clamping_keeps_the_blend_factors_in_range() {
+        let wild = Grade { gamma: 2.0, gamma_threshold: 9.0, vibrancy: -3.0 }.clamped();
+        assert!((0.0..=1.0).contains(&wild.gamma_threshold));
+        assert!((0.0..=1.0).contains(&wild.vibrancy));
+    }
+
+    /// The uniform's size is a contract with WGSL that the compiler cannot see.
+    #[test]
+    fn the_tonemap_uniform_matches_the_shader() {
+        assert_eq!(
+            std::mem::size_of::<SplatParams>(),
+            48,
+            "SplatParams must be 48 bytes to match splat.wgsl"
+        );
+        let wgsl = include_str!("../../../shaders/points/splat.wgsl");
+        for field in ["gamma_inv", "gamma_threshold", "vibrancy"] {
+            assert!(wgsl.contains(field), "splat.wgsl must declare `{}`", field);
+        }
     }
 }

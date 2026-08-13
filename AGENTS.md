@@ -2149,6 +2149,48 @@ user never typed:
   dispatch with the row stride in `ComputeParams::rewrap_stride`, which took a
   word of existing padding and so costs nothing.
 
+## The tonemap grade: `--gamma`, `--gamma-threshold`, `--vibrancy`
+
+Before these, the tonemap had exactly two knobs: exposure, and a hardcoded
+`GAIN = 0.25`. There was no gamma curve at all, and gamma is most of what
+people mean by the Apophysis look.
+
+```
+fracturize -s scenes/blossom.toml --splat --gamma 2.5 --gamma-threshold 0.35 -r out.png
+```
+
+**The neutral grade is the exact identity, not merely close.** At `gamma = 1`
+the curve is `x^1`, so both of the shader's vibrancy routes collapse to
+`mean_color * coverage` and the blend between them is inert whatever
+`vibrancy` says — which is why the neutral vibrancy can be 1 without that
+being a choice. A render with no grade flags is byte-identical to one from
+before grading existed, and `grade_tests` pins it.
+
+* **`--gamma`** lifts the dim end. It also lifts the single-sample speckle
+  scattered over the background, which is what the threshold is for.
+* **`--gamma-threshold`** blends the curve toward a straight line below the
+  threshold, so near-zero coverage stays near-zero. **Its units are not
+  flam3's.** flam3's `linrange` is in raw density; this one is in post-log
+  *coverage*, whose whole scale is 0-1. Measured useful range **0.05-0.5**.
+  On blossom at `--gamma 2.5`, threshold 0.5 recovers 80% of the lifted
+  background for 5% of the bright detail. Gamma and vibrancy do mean the same
+  thing in both programs; only the threshold's scale differs.
+* **`--vibrancy`** picks how gamma reaches colour. At 1 it goes through
+  coverage, so hue is untouched and bright cores stay saturated. At 0 it goes
+  through each channel of the emitted colour, lifting a bright pixel's dim
+  channels further than its strong one — a highlight rolling off toward white,
+  the way film does it.
+
+Recorded in the sidecar and the PNG only when non-neutral, so every record
+made before grading existed is byte-identical and an absent block reads as
+"the tonemap this program has always had".
+
+**Scope (slice 6a):** CLI, shader, and render record. *Not* yet in scene
+files, view files, or the GUI — so a grade you like is reproducible from the
+record but does not persist into a `Ctrl+S`. That is deliberate: the values
+worth persisting are not known until they have been looked at, which is what
+slice 5 (retonemapping) is for.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
