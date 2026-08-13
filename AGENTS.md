@@ -1835,9 +1835,12 @@ happened: `main` had absorbed the feature branch at one commit and taken laptop
 work on top, so the tree showed that commit's version of every file. Nothing
 was lost, and the commit was safe throughout because it had been pushed.
 
-**Push early.** A commit that exists only in the desktop checkout is invisible
-to the laptop and to every other session, and that is what makes syncing a
-nuisance. Pushes are cheap; take them.
+**Push agent work when it lands.** Not for an audience — the GitHub repo is
+public but has no users yet, and Hazel has left it unpushed for long stretches
+because it is only doing cross-device sync. The reason here is narrower: a
+commit that exists only in the desktop checkout is invisible to the laptop and
+to every other session, and it is the only copy. Pushing is what made today's
+apparent revert a non-event. Cheap, so take it — but it is sync, not release.
 
 If a branch does exist, keep it a *superset* of `main` — merge `main` into it
 whenever `main` moves, so the merge back is a fast-forward and never conflicts.
