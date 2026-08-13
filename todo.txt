@@ -476,6 +476,14 @@ slight delay on the pointcount ramp-up after editing?
 ---- spots in bg on mp4 renders?
  -- check on .avif as well?
 
+---- should be able to put views onto a camera path, extract views from path points, etc.
+ -- need CLI support to sample a camera path, do renders at selected points, etc
+
+---- icons on the right-click menu
+
+---- can't rename views
+
+
 ---- naming 
 🕮⊞◌⃘⁂
 not Fracturize.
@@ -490,4 +498,4 @@ and pay ~nothing to have it in a water deck, or to use it
 
 "Lacunarity Guide"
 
-
+-- todo: rename whole project, including folders on both dev boxes, and the github

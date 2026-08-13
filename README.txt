@@ -42,7 +42,8 @@ From the start, I wanted 3D, in that same gritty style.
 ---- Full, real 3d, right from the start. 3D native transform variations, no hacks.
  - Fun tweakable UI that represents IFS flames to the user cleanly. Original gizmo design for IFS transforms. 
  - Camera pathing for flybys and fly-throughs, smoothed for easy motion, visualized in the scene.
- - performant, hard realtime design. Even low end systems can run hundreds of thousands of points while editing.
+ - performant, realtime interactivity. Even low end systems can run hundreds of thousands of points while editing.
+ - 9 or so variations are 'native 3d' with the rest doing functional passthrough-Z
 
 ---- Grainy, gritty, sandy, dusty renders with plenty of spots and noise. Pre-fuzzed for your viewing pleasure.
  - (yes I like the Apophysis house style)
@@ -61,11 +62,10 @@ From the start, I wanted 3D, in that same gritty style.
 ---- complex scene metrics
  - realtime calculation of fractal-dimension, contraction, and lacunarity for authoring guidance
 
-
 -------- endnote
 
 Anyway. I think it's fun. If you're reading this, you can try it out too. Make something neat!
 
-Hazel, partially on behalf of assorted Claudes
+Hazel (partially on behalf of assorted Claudes)
 
 
