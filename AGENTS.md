@@ -2071,6 +2071,26 @@ walker seeding and therefore the image, so it is not a free experiment.
 That was the right thing to test and the wrong answer; this is the note saying
 so.
 
+## Size tiers: `--effort tiny|small|medium|large|huge`
+
+Named for **size and nothing else**. The tiers used to be `draft`/`ultra` plus
+an accumulating one that wanted calling `overnight` or `converged`, and both of
+those are promises the program cannot keep: a duration depends on the machine
+(this runs on a GTX 1080 *and* a T490), and "converged" asserts an outcome the
+user may have their own reasons to push past.
+
+A tier sets **target samples per output pixel** — 1, 10, 100, 1000, 10000, four
+orders of magnitude across five names. Samples *per pixel* because it is
+resolution-independent: the same tier means the same density at 720p and 4K,
+which a raw point count cannot do. `--spp` goes past `huge`.
+
+For `--splat` a tier **accumulates**, because that is the only way to actually
+deliver a sample density. The points renderer has no histogram, so there a tier
+degrades to the nearest point buffer and says so on stderr rather than quietly
+under-rendering. Note one lap of the ring is the granularity, so small tiers
+overshoot — `--effort tiny` at 400x300 reports 8 spp, not 1, and reports it
+truthfully.
+
 ## Accumulation: `--spp`, and the sample ceiling it removes
 
 The ordinary render splats the point ring **once**, so the distinct samples in
@@ -2136,6 +2156,39 @@ not need a night. `--spp` is there for anyone who wants to spend one anyway.
   is a compute pass over every texel of the accumulation, so it wants
   amortizing over a whole buffer of points rather than an eightieth of one.
 
+### The fp16 stall, and why the accumulation format is per-device
+
+**This was a real correctness bug in the first cut of slice 4b.** `Rgba16Float`
+carries 11 bits of integer precision, so a texel that reaches **2048** in one
+pass stops registering unit increments — a hard stall, not a rounding error.
+In the ring-buffer path that only flattens the very hottest cores. Under
+accumulation it was much worse: *each lap's batch* clipped at 2048, so the
+finished picture's brightest material depended on how many laps the ring took.
+
+Measured on blossom at a fixed ~65M samples, varying only `--points`:
+
+| ring | laps | peak density |
+|---|---|---|
+| 1M | 62 | 126,976 |
+| 4M | 16 | 32,768 |
+| 20M | 4 | 8,192 |
+
+Exactly `2048 x laps` every time. `--points` was silently changing the picture,
+which it must never do.
+
+Fixed by accumulating into `Rgba32Float` wherever the device will blend into it
+(`Features::FLOAT32_BLENDABLE`, requested when offered and never required).
+After the fix, peak density per sample is 0.01735 / 0.01736 / 0.01734 across
+those three ring sizes — a scene property again. `accumulation_is_exact()`
+reports which format a device got, because on hardware without the feature the
+old behaviour still applies and a caller that says nothing leaves the user
+comparing renders that were never comparable.
+
+The shader change that had to come with it: `u32(x * scale)` overflows once `x`
+passes 65536, which an fp32 batch reaches easily. `accumulate.wgsl` now splits
+the scaled value across the word boundary instead of clamping at the fp16
+ceiling — that clamp was only ever safe because the batch had already stalled.
+
 ### Two panics fixed on the way
 
 Both predate accumulation and both used to die inside wgpu quoting a number the
@@ -2143,7 +2196,9 @@ user never typed:
 
 * `--supersample 4` at 4K wants a 15360 px texture against a limit of 8192.
   Now `Sampling::check_fits`, called after `create_device` in all five offline
-  entry points.
+  entry points. The 8192 was `wgpu::Limits::default()`, not the hardware — the
+  GTX 1080 reports 32768 — so `create_device` now asks for the adapter's
+  `max_texture_dimension_2d` and 4x at 4K works.
 * `--effort ultra` on a **zoom scene** dispatched 390,625 workgroups against a
   limit of 65,535, because `rewrap` runs one thread per point in 1D. Now a 2D
   dispatch with the row stride in `ComputeParams::rewrap_stride`, which took a
@@ -2274,6 +2329,53 @@ checkpoint is slice 5b and opt-in.
 * `GradeAxis`'s CLI name and its `label()` differ on purpose: clap kebab-cases
   to match the `--gamma-threshold` flag, `label()` is the TOML key. A test
   checks they agree modulo the separator.
+
+## Settling decision 5: `tools/exposure_survey.py`
+
+Decision 5 is whether exposure should be normalized per image from that image's
+own density (Apophysis-style) or stay the scene-independent constant it is
+today. A gamma sweep cannot answer it — the question is about whether
+*different scenes* land comfortably under **one** exposure.
+
+```
+tools/exposure_survey.py                       # four contrasting scenes
+tools/exposure_survey.py --effort medium scenes/a.toml scenes/b.toml
+```
+
+It renders each scene with `--grade-out`, reads the linear density straight
+out of the `.fgrade`, and asks what exposure would put each scene's material at
+a target coverage — under **several anchoring rules**, because which part of
+the histogram you anchor to turns out to matter more than the scenes do.
+
+Measured on blossom / galaxy / fern_3d / glasshouse at `--effort medium`:
+
+| anchoring rule | spread across the four scenes |
+|---|---|
+| p99.5 | 63.8x |
+| p99 | 46.3x |
+| p95 | 17.8x |
+| **median lit** | **2.4x** |
+| mean over all | 14.4x |
+
+**The reading: keep exposure fixed.** The scenes agree about typical
+brightness to within 2.4x and disagree about *peaks* by 64x. That is a
+difference in dynamic range, not in exposure — and dynamic range is what
+`--gamma` and `--gamma-threshold` are for. An adaptive exposure anchored on
+peaks would make a large correction with the wrong tool, and the sheet shows
+it: every scene comes out darker, blossom nearly vanishing.
+
+Two things worth knowing before re-running it:
+
+* The spread is **independent of `--target`**. The `(2^(target/gain) - 1)`
+  factor is common to every scene and cancels out of the ratio. Only the
+  *anchor* moves it, which is why the tool sweeps anchors and not targets.
+* It reads `EXPOSURE_K` and `GAIN` out of `splat.rs` rather than restating
+  them, so it cannot quietly describe a tonemap that no longer exists.
+
+The first run of this survey was **wrong**, and usefully so: it reported 48.9x
+at one tier and 13.0x at another, which is what exposed the fp16 stall above.
+A number that moves when it shouldn't is worth more than a number that looks
+plausible.
 
 ## View Files & Offline Rendering
 

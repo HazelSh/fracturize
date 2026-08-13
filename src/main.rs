@@ -73,7 +73,7 @@ Examples:
   fracturize --scene scenes/blossom.toml --info
 
   # A still, at a quality preset (-r is short for --render)
-  fracturize -s scenes/blossom.toml -r out.png --effort high
+  fracturize -s scenes/blossom.toml -r out.png --effort large
 
   # Endless zoom about a transform, named or numbered as --info lists them
   fracturize -s scenes/rimefall.toml --zoom descent --zoom-levels 18 -r deep.png
@@ -289,12 +289,18 @@ struct Args {
     #[arg(long, default_value = "1080", value_name = "PX", help_heading = "Offline render")]
     height: u32,
 
-    /// Effort preset: draft, low, medium, high, ultra or converged [the scene's]
+    /// Size tier: tiny, small, medium, large or huge [the scene's point count]
     ///
-    /// draft is for fast composition checks, ultra for final frames on a real
-    /// GPU, converged for an accumulated render whose sampling noise is ~100x
-    /// below one 8-bit code (it implies --spp and so needs --splat). Explicit
-    /// --points / --accumulate / --spp override it.
+    /// Target samples per output pixel: 1, 10, 100, 1000, 10000. Named for
+    /// size only — a duration would depend on the machine and an outcome
+    /// ("converged") would assume you have no reason to go further. Since a
+    /// sample density is resolution-independent, the same tier means the same
+    /// thing at 720p and 4K.
+    ///
+    /// For --splat this accumulates, which is the only way to actually deliver
+    /// a density; --spp goes past `huge`. The points renderer has no histogram,
+    /// so there a tier degrades to the nearest point buffer and says so.
+    /// Explicit --points / --spp override it.
     #[arg(long, value_enum, value_name = "PRESET", hide_possible_values = true, help_heading = "Offline render")]
     effort: Option<Effort>,
 
@@ -530,7 +536,7 @@ struct Args {
     /// never read as a range). Give it twice and the first varies across
     /// columns, the second down rows. Composes with --set, which sets the
     /// base every tile starts from. Needs --scene, and each tile refills the
-    /// point buffer, so prefer --effort draft/low.
+    /// point buffer, so prefer --effort tiny/small.
     #[arg(long, value_name = "PATH=A:B|A,B,C", help_heading = "Contact sheets")]
     sweep: Vec<String>,
 
@@ -1183,68 +1189,66 @@ fn random_scene(seed: Option<u64>) -> (Scene, u64) {
 /// behaviour exactly.
 const DEFAULT_SUPERSAMPLE: u32 = 2;
 
-/// Named effort presets for offline rendering: (points, accumulate frames,
-/// samples per output pixel). draft is for fast composition checks, ultra for
-/// final frames on a real GPU.
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+/// Size tiers for offline rendering.
+///
+/// Named for **size and nothing else**. The previous ladder had `draft` and
+/// `ultra` and then an accumulating tier that wanted calling `overnight` or
+/// `converged`, and both of those names were promises the program cannot keep:
+/// a duration depends on the machine (this runs on a GTX 1080 *and* a T490),
+/// and "converged" asserts an outcome the user might have their own reasons to
+/// push past. A size says what you asked for and nothing about what you get.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum Effort {
-    Draft,
-    Low,
+    Tiny,
+    Small,
     Medium,
-    High,
-    Ultra,
-    Converged,
+    Large,
+    Huge,
 }
 
 impl Effort {
-    /// `(point buffer capacity, extra chaos frames, samples per output pixel)`.
+    /// Target **samples per output pixel** — the tier's actual meaning.
     ///
-    /// The first five tiers set a *buffer size*, and that is what caps their
-    /// quality: they splat the ring once, so the samples in the image are the
-    /// capacity, and `ultra` is the largest buffer worth allocating rather than
-    /// the best picture the renderer can make. `converged` is the first tier
-    /// that sets a **sample target** instead, which the accumulating path can
-    /// meet from a modest buffer given time — so its point count is *lower*
-    /// than ultra's on purpose. Under accumulation the buffer is a working set
-    /// whose only job is to keep the GPU busy between folds, and a smaller one
-    /// leaves the memory for the histogram, which is the resource that decides
-    /// whether a large supersampled render runs at all.
+    /// Round decades from 1 to 10,000: four orders of magnitude across five
+    /// tiers. `--spp` goes further for anything past `huge`, deliberately,
+    /// because past here the right number is a judgement about a particular
+    /// picture rather than a tier anyone can name.
     ///
-    /// ## Why 8000, and why the tier is not called "overnight"
-    ///
-    /// Measured on the reference desktop, blossom at 960x540 and `--supersample
-    /// 2`, comparing two renders that differ only in `--chaos-seed` — which is
-    /// sampling noise and nothing else, since everything deterministic cancels:
-    ///
-    /// | spp  | mean abs. difference, 16-bit |
-    /// |------|------------------------------|
-    /// | 100  | 2.9e-4                       |
-    /// | 500  | 1.4e-4                       |
-    /// | 2000 | 7.0e-5                       |
-    /// | 8000 | 3.5e-5                       |
-    ///
-    /// Textbook 1/sqrt(N): every 4x in samples halves the noise, with no
-    /// plateau anywhere in range. The renderer really is sample-limited, and
-    /// the accumulator really does deliver — but it also means "enough" is a
-    /// judgement rather than a discoverable limit, so the tier has to name one.
-    ///
-    /// 8000 puts the noise ~100x below one 8-bit code (1/255 = 3.9e-3), which
-    /// is converged for any output this program writes. It costs ~35 s at 1080p
-    /// on the reference desktop — so an "overnight" tier would have been a name
-    /// promising something the hardware does not need. `--spp` is there for
-    /// anyone who wants to spend the night anyway.
-    ///
-    /// One scene, one framing. A deep zoom with a wider dynamic range will
-    /// converge slower.
-    fn preset(self) -> (usize, u32, Option<u32>) {
+    /// Samples *per pixel* rather than a raw point count because it is
+    /// resolution-independent: the same tier means the same density at 720p and
+    /// at 4K, which a point count cannot do. Apophysis users think this way too.
+    fn spp(self) -> u32 {
         match self {
-            Effort::Draft => (1_000_000, 4, None),
-            Effort::Low => (4_000_000, 16, None),
-            Effort::Medium => (12_000_000, 48, None),
-            Effort::High => (40_000_000, 128, None),
-            Effort::Ultra => (100_000_000, 256, None),
-            Effort::Converged => (20_000_000, 256, Some(8000)),
+            Effort::Tiny => 1,
+            Effort::Small => 10,
+            Effort::Medium => 100,
+            Effort::Large => 1_000,
+            Effort::Huge => 10_000,
         }
+    }
+
+    /// The point buffer to back that target with.
+    ///
+    /// Two different jobs, so two different answers:
+    ///
+    /// * **Accumulating**, the ring is a *working set* whose only job is keeping
+    ///   the GPU busy between folds. Bigger is not better past a point, and the
+    ///   memory is worth more to the histogram (32 bytes a texel), which is what
+    ///   decides whether a large supersampled render runs at all. Capped at 20M.
+    /// * **Ring path**, the buffer *is* the sample count, so it has to hold the
+    ///   whole target — and it caps at 100M, which is the ceiling slice 4b
+    ///   exists to remove. Above `small` at 1080p the cap bites and the tier
+    ///   cannot be delivered without accumulating; `--effort` says so out loud
+    ///   rather than quietly under-rendering.
+    fn points(self, pixels: u64, accumulating: bool) -> usize {
+        let want = self.spp() as u64 * pixels;
+        let cap = if accumulating { 20_000_000 } else { 100_000_000 };
+        want.clamp(1_000_000, cap) as usize
+    }
+
+    /// Whether the ring path can actually reach this tier at this size.
+    fn reachable_without_accumulating(self, pixels: u64) -> bool {
+        self.spp() as u64 * pixels <= 100_000_000
     }
 }
 
@@ -1984,22 +1988,34 @@ fn main() {
         apply_palette_args(&mut scene, &args, true);
 
         // Effort presets set points + accumulation; explicit flags win
-        let (effort_points, effort_accumulate, effort_spp) = match args.effort {
-            Some(e) => {
-                let (p, a, s) = e.preset();
-                (Some(p), Some(a), s)
+        // A tier names a sample density; accumulating is the only way to
+        // actually deliver one, so `--effort` implies it for splat renders. The
+        // points renderer has no histogram to accumulate into, so there the
+        // tier degrades to the buffer that best approximates it.
+        let pixels = args.width as u64 * args.height as u64;
+        let splat_render = args.splat
+            || args.view.as_ref().is_some_and(|p| {
+                View::load(p).map(|v| v.is_splat()).unwrap_or(false)
+            });
+        let accumulating = args.spp.is_some() || (args.effort.is_some() && splat_render);
+        let effort_points = args.effort.map(|e| e.points(pixels, accumulating));
+        let effort_spp = args.effort.and_then(|e| splat_render.then(|| e.spp()));
+        if let Some(e) = args.effort {
+            if !splat_render && !e.reachable_without_accumulating(pixels) {
+                eprintln!(
+                    "note: --effort {:?} is {} samples/px, which at {}x{} needs a {}M point \
+                     buffer — past the {}M cap. The points renderer has no histogram to \
+                     accumulate into, so this renders at the cap. Use --splat for the real tier.",
+                    e, e.spp(), args.width, args.height,
+                    e.spp() as u64 * pixels / 1_000_000, 100,
+                );
             }
-            None => (None, None, None),
-        };
+        }
         if let Some(n) = args.points.or(effort_points) {
             scene.point_count = n;
         }
-        let accumulate =
-            args.accumulate.or(effort_accumulate).unwrap_or(offline::DEFAULT_ACCUMULATE);
+        let accumulate = args.accumulate.unwrap_or(offline::DEFAULT_ACCUMULATE);
         let spp = args.spp.or(effort_spp);
-        // Anything unspecified stays at NEUTRAL, which is the tonemap that
-        // existed before these knobs did — so a render made without them is
-        // byte-identical to one made before they were added.
 
         let view = args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))

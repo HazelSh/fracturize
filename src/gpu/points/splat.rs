@@ -14,11 +14,34 @@ use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source};
 use crate::gpu::points::renderer::DEPTH_FORMAT;
 
-/// HDR accumulation format. rgba16float is the widest format with
-/// guaranteed blending support (float32 blending is not exposed by wgpu);
-/// its precision fades for tiny increments into large sums, which after
-/// the log tonemap only flattens the very hottest cores.
-const ACCUM_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// HDR accumulation format, chosen per device.
+///
+/// `Rgba16Float` is the widest format with *guaranteed* blending support, and
+/// it was the only option here until this became a measured problem. fp16
+/// carries 11 bits of integer precision, so a texel that reaches **2048** in
+/// one pass stops registering unit increments altogether — not a rounding
+/// error but a hard stall, at a value a bright core passes easily.
+///
+/// In the ordinary ring-buffer path that stall only flattens the very hottest
+/// cores, which is what the old comment here said and it was true. Under
+/// **accumulation** it is far worse: each lap's batch clips at 2048, so the
+/// finished image's brightest material is a function of *how many laps* the
+/// ring happened to take. Measured on blossom at a fixed ~65M samples, the
+/// peak density came out at exactly `2048 x laps` every time — 8,192 with a
+/// 20M ring, 126,976 with a 1M one. `--points` was silently changing the
+/// picture, which it must never do.
+///
+/// So: `Rgba32Float` wherever the device will blend into it, which is what
+/// `Features::FLOAT32_BLENDABLE` reports. Not universal — it is an optional
+/// feature and integrated parts often lack it — so fp16 remains the fallback
+/// and `accumulation_is_exact` tells a caller which one it got.
+fn accum_format(device: &Device) -> TextureFormat {
+    if device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+        TextureFormat::Rgba32Float
+    } else {
+        TextureFormat::Rgba16Float
+    }
+}
 
 /// Calibration so exposure 1.0 gives a sensible image: multiplies the
 /// resolution/count-normalized density before the log
@@ -91,6 +114,8 @@ impl Default for Grade {
 }
 
 pub struct SplatRenderer {
+    /// The accumulation format this device got. See `accum_format`.
+    accum_format: TextureFormat,
     quad_pipeline: RenderPipeline,
     point_pipeline: RenderPipeline,
     tonemap_pipeline: RenderPipeline,
@@ -142,6 +167,7 @@ impl SplatRenderer {
         point_buffer: &Buffer,
         colormap_buffer: &Buffer,
     ) -> Self {
+        let accum_format = accum_format(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("splat_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/points/splat.wgsl").into()),
@@ -219,7 +245,7 @@ impl SplatRenderer {
                     module: &shader,
                     entry_point: Some("fs_splat"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: ACCUM_FORMAT,
+                        format: accum_format,
                         blend: Some(additive),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -355,6 +381,7 @@ impl SplatRenderer {
         });
 
         Self {
+            accum_format,
             quad_pipeline,
             point_pipeline,
             tonemap_pipeline,
@@ -384,12 +411,23 @@ impl SplatRenderer {
             self.supersample = None;
             return;
         }
-        let downsampler = Downsampler::new(device, ACCUM_FORMAT);
+        let downsampler = Downsampler::new(device, self.accum_format);
         // The splat accumulation is additive `(colour*weight, weight)`, so it
         // filters channel by channel and the tonemap's `rgb / a` still
         // recovers the density-weighted mean.
         downsampler.upload_params(queue, factor, filter, radius, Source::Additive);
         self.supersample = Some(Supersample { factor, downsampler, resolved: None });
+    }
+
+    /// Whether this device accumulates into fp32, and so whether a bright core
+    /// is counted faithfully or stalls at 2048 per pass.
+    ///
+    /// Worth reporting rather than hiding: on a device without
+    /// `FLOAT32_BLENDABLE` an accumulating render's peak density still depends
+    /// on how many laps the ring took, and a caller that says nothing leaves
+    /// the user comparing two renders that were never comparable.
+    pub fn accumulation_is_exact(&self) -> bool {
+        self.accum_format == TextureFormat::Rgba32Float
     }
 
     /// The factor in force, 1 when off. Callers need it to size the
@@ -460,7 +498,7 @@ impl SplatRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: ACCUM_FORMAT,
+            format: self.accum_format,
             // COPY_SRC so the grade buffer can be read back: this texture is
             // exactly the tonemap's input, which is what re-grading needs.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -519,6 +557,7 @@ impl SplatRenderer {
             Self::ensure_resolved(
                 self.supersample.as_mut().expect("n > 1 means it is set"),
                 device,
+                self.accum_format,
                 &self.tonemap_layout,
                 &self.params_buffer,
                 width,
@@ -697,6 +736,7 @@ impl SplatRenderer {
     fn ensure_resolved(
         ss: &mut Supersample,
         device: &Device,
+        format: TextureFormat,
         tonemap_layout: &BindGroupLayout,
         params_buffer: &Buffer,
         width: u32,
@@ -715,7 +755,7 @@ impl SplatRenderer {
             dimension: wgpu::TextureDimension::D2,
             // Still the HDR accumulation format: this holds filtered *linear
             // density*, not a picture. The log tonemap has not run yet.
-            format: ACCUM_FORMAT,
+            format,
             // COPY_SRC so the grade buffer can be read back: this texture is
             // exactly the tonemap's input, which is what re-grading needs.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT

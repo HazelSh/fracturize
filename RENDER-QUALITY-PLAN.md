@@ -604,7 +604,23 @@ design for it now. Hazel's standing ask stands, though: if there is genuinely pa
 work for the spare cores, use them — see leg 6 for the list (encoding, checkpoints,
 progress), which is real but small.
 
-**5. Adaptive per-image exposure normalization — STILL OPEN, leaning Apophysis-compatible.**
+**5. Adaptive per-image exposure normalization — MEASURED 2026-08-14, leans KEEP IT FIXED.**
+
+`tools/exposure_survey.py` settles the empirical half. Across four deliberately
+contrasting scenes at `--effort medium`, the exposure each scene "wants" spreads by
+**63.8x** if you anchor on the p99.5 density — but only **2.4x** if you anchor on the
+median lit density. The scenes agree about typical brightness and disagree about peaks.
+
+That is a difference in *dynamic range*, which `--gamma` and `--gamma-threshold` (slice
+6a) address directly, and not one in exposure. Anchoring an adaptive exposure on peaks
+makes a large correction with the wrong tool, and the comparison sheet shows it plainly:
+every scene comes out darker, blossom nearly vanishing. **Recommendation: keep the
+scene-independent invariant.** Hazel's call to make; the evidence is in AGENTS.md under
+"Settling decision 5".
+
+The original text follows.
+
+
 
 Hazel's instinct is to just do what Apophysis does, with the caveat that *either* way it
 is hard to predict the effect before committing to a big render.

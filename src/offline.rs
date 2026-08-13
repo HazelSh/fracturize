@@ -401,14 +401,23 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
     let required_limits = wgpu::Limits {
         max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
         max_buffer_size: adapter_limits.max_buffer_size,
+        // The default is 8192 whatever the adapter can do, and this one reports
+        // 32768 — which is the difference between `--supersample 4` working at
+        // 4K and dying inside wgpu. Asked for, never required: `check_fits`
+        // reads back whatever was granted.
+        max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
         ..wgpu::Limits::default()
     };
     // Asked for when the adapter has it, never required. It costs nothing when
     // unused and is the only way to tell fixed dispatch overhead from
     // proportional GPU time — but a device that cannot offer it must still
     // render. See `gpu::timing`.
-    let required_features =
-        adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+    // Both optional, both requested only when offered, neither required.
+    // FLOAT32_BLENDABLE is what lets the splat accumulate into fp32 instead of
+    // fp16, whose 11-bit integer precision stalls a hot texel at 2048 — see
+    // `gpu::points::splat::accum_format`.
+    let required_features = adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::FLOAT32_BLENDABLE);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("fracturize_offline_device"),
         required_features,
@@ -2970,5 +2979,44 @@ mod tests {
         assert!(!four.use_point_primitives(point_size, 1.0));
         // 0 is coerced to 1 rather than dividing by nothing
         assert_eq!(Sampling::new(0, 600).target_height(), 600.0);
+    }
+}
+
+#[cfg(test)]
+mod adapter_probe {
+    /// What this GPU will actually do, for decisions that depend on it.
+    ///
+    /// `#[ignore]` because it needs a GPU and the suite must run without one.
+    /// Run it with `cargo test -- --ignored --nocapture adapter_capabilities`.
+    ///
+    /// It exists because the splat accumulation's format is a *forced* choice,
+    /// not a preference: `Rgba16Float` has 11 bits of integer precision, so a
+    /// texel that reaches 2048 in one pass stops counting unit increments
+    /// entirely. Whether `Rgba32Float` can be blended into instead is the
+    /// question, and it is per-adapter.
+    #[test]
+    #[ignore]
+    fn adapter_capabilities() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        ))
+        .expect("an adapter");
+        let f = adapter.features();
+        println!("adapter: {}", adapter.get_info().name);
+        println!("  FLOAT32_BLENDABLE: {}", f.contains(wgpu::Features::FLOAT32_BLENDABLE));
+        println!("  TIMESTAMP_QUERY:   {}", f.contains(wgpu::Features::TIMESTAMP_QUERY));
+        println!("  max_texture_dim_2d: {}", adapter.limits().max_texture_dimension_2d);
+        println!(
+            "  max_storage_buffer_binding_size: {:.2} GB",
+            adapter.limits().max_storage_buffer_binding_size as f64 / 1e9
+        );
     }
 }

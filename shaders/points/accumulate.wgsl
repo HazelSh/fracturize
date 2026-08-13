@@ -67,26 +67,40 @@ fn accumulate(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base = i * WORDS_PER_TEXEL;
 
     for (var c = 0u; c < 4u; c = c + 1u) {
-        // Clamped to the batch texture's own fp16 ceiling. A single texel
-        // taking more than this in ONE batch means a collapsed attractor —
-        // every point in the frame landing on one pixel — and in that state
-        // the fp16 batch texture has already lost the count before this pass
-        // sees it. Clamping here keeps the conversion in range rather than
-        // pretending the value is trustworthy.
-        let x = clamp(v[c], 0.0, 65504.0);
+        let x = max(v[c], 0.0);
+        // Scaled into fixed point, then split across the word boundary.
+        //
+        // The split is not optional. `u32(x * scale)` overflows silently once
+        // `x` passes 65536 at a scale of 65536, and an fp32 batch texture
+        // reaches that easily — a bright core takes tens of thousands of
+        // samples in one pass. The earlier version clamped at the fp16 ceiling
+        // instead, which was only ever safe because the batch texture *was*
+        // fp16 and had already stalled long before.
+        //
+        // f32 has 24 mantissa bits, so `scaled` loses its low bits once it
+        // passes 2^24. That is fine and is not the failure this replaced: the
+        // lost bits are a *relative* error on a large per-batch value, whereas
+        // the fp16 stall was an absolute ceiling that discarded everything
+        // above it.
+        let scaled = x * params.scale;
+        let hi_add = u32(floor(scaled / TWO_32));
         // Round to nearest, not truncate: truncation is a *biased* error, and
         // a bias repeated over millions of batches is a systematic darkening
         // of exactly the dim regions where each batch's contribution is small.
-        let add = u32(x * params.scale + 0.5);
+        let lo_add = u32(scaled - f32(hi_add) * TWO_32 + 0.5);
 
         let lo_index = base + c * 2u;
         let lo = accum[lo_index];
-        let sum = lo + add;
+        let sum = lo + lo_add;
         accum[lo_index] = sum;
         // Unsigned wraparound is defined, so a carry is just "the sum came out
         // smaller than what it started from".
+        var carry = hi_add;
         if sum < lo {
-            accum[lo_index + 1u] = accum[lo_index + 1u] + 1u;
+            carry = carry + 1u;
+        }
+        if carry != 0u {
+            accum[lo_index + 1u] = accum[lo_index + 1u] + carry;
         }
     }
 }
