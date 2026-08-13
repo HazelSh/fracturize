@@ -2,6 +2,7 @@ mod app;
 mod avif;
 mod camera;
 mod haze;
+mod grade_file;
 mod info;
 mod gpu;
 mod h264;
@@ -307,6 +308,41 @@ struct Args {
     /// Extra chaos-game frames after the buffer fills [--effort, else 32]
     #[arg(long, value_name = "FRAMES", help_heading = "Offline render")]
     accumulate: Option<u32>,
+
+    /// Save the pre-tonemap linear density beside the render [none]
+    ///
+    /// The tonemap is a pure function of this buffer plus a few scalars, so a
+    /// saved one can be re-graded with --retonemap in milliseconds instead of
+    /// re-rendering. 16 bytes a pixel: 33 MB at 1080p, regardless of how long
+    /// the render took or how much supersampling it used. Splat, single tile.
+    ///
+    /// Pass a path, or bare `--grade-out` with no value to write `<render>.fgrade`.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "",
+          help_heading = "Offline render")]
+    grade_out: Option<String>,
+
+    /// Re-grade a saved .fgrade buffer instead of rendering [none]
+    ///
+    /// Applies --exposure / --gamma / --gamma-threshold / --vibrancy to an
+    /// existing linear buffer and writes the PNG named by --render. No scene,
+    /// no GPU work beyond one fullscreen pass. This is how a tonemap question
+    /// gets answered by looking rather than by arguing: render once, grade
+    /// sixteen times.
+    #[arg(long, value_name = "FILE", help_heading = "Offline render")]
+    retonemap: Option<String>,
+
+    /// With --retonemap, walk one knob across a contact sheet
+    ///
+    /// `--grade-sweep gamma --grade-range 1:4 --sweep-steps 9` grades the same
+    /// buffer nine ways into one sheet. This is how a tonemap question gets
+    /// settled by looking: the whole sheet costs one device creation and nine
+    /// fullscreen passes.
+    #[arg(long, value_enum, value_name = "AXIS", help_heading = "Offline render")]
+    grade_sweep: Option<offline::GradeAxis>,
+
+    /// Range for --grade-sweep, as FROM:TO [depends on the axis]
+    #[arg(long, value_name = "FROM:TO", help_heading = "Offline render")]
+    grade_range: Option<String>,
 
     /// Tonemap gamma, >1 lifts the dim end [1 = off]
     ///
@@ -1212,6 +1248,28 @@ impl Effort {
     }
 }
 
+/// Parse `--grade-range FROM:TO`, defaulting per axis.
+///
+/// The defaults are the measured useful ranges rather than the clamp bounds:
+/// a sweep is for looking at the part of the range where something happens,
+/// and `--gamma-threshold` in particular has a range that is *not* flam3's
+/// (it is in post-log coverage here). See AGENTS.md.
+fn parse_grade_range(axis: offline::GradeAxis, spec: Option<&str>) -> Result<(f32, f32), String> {
+    let default = match axis {
+        offline::GradeAxis::Exposure => (0.5, 3.0),
+        offline::GradeAxis::Gamma => (1.0, 4.0),
+        offline::GradeAxis::GammaThreshold => (0.0, 0.5),
+        offline::GradeAxis::Vibrancy => (0.0, 1.0),
+    };
+    let Some(spec) = spec else { return Ok(default) };
+    let (a, b) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("Invalid --grade-range '{}': expected FROM:TO, e.g. 1:4", spec))?;
+    let from: f32 = a.trim().parse().map_err(|_| format!("Invalid range start '{}'", a))?;
+    let to: f32 = b.trim().parse().map_err(|_| format!("Invalid range end '{}'", b))?;
+    Ok((from, to))
+}
+
 /// Parse a "COLSxROWS" grid spec like "4x2"
 fn parse_grid(spec: &str) -> Result<(u32, u32), String> {
     let (c, r) = spec
@@ -1880,6 +1938,45 @@ fn main() {
         return;
     }
 
+    // Re-grading needs no scene, so it comes before any scene is loaded.
+    if let Some(src) = &args.retonemap {
+        let Some(out) = &args.render else {
+            eprintln!("--retonemap needs --render to say where the PNG goes");
+            std::process::exit(1);
+        };
+        match offline::retonemap(
+            std::path::Path::new(src),
+            std::path::Path::new(out),
+            args.exposure,
+            args.gamma,
+            args.gamma_threshold,
+            args.vibrancy,
+            args.bit_depth.unwrap_or_default(),
+            match args.grade_sweep {
+                Some(axis) => match parse_grade_range(axis, args.grade_range.as_deref()) {
+                    Ok((from, to)) => Some(offline::GradeSweep {
+                        axis,
+                        from,
+                        to,
+                        steps: args.sweep_steps.max(1),
+                    }),
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            },
+            !args.no_labels,
+        ) {
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("Re-grade failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Headless render mode: no window, no event loop
     if let Some(out) = &args.render {
         let mut scene = load_scene(&args);
@@ -1984,6 +2081,14 @@ fn main() {
             chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
             spp,
             grade,
+            grade_out: args.grade_out.as_ref().map(|p| {
+                // Bare `--grade-out` means "beside the render".
+                if p.is_empty() {
+                    crate::grade_file::GradeBuffer::path_for(std::path::Path::new(out))
+                } else {
+                    std::path::PathBuf::from(p)
+                }
+            }),
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.

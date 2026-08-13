@@ -3220,6 +3220,8 @@ impl App {
                 spp: None,
                 // No grade control in the dialog yet; slice 6a is CLI-side.
                 grade: crate::gpu::points::splat::Grade::NEUTRAL,
+                // No re-grading from the dialog yet; slice 5a is CLI-side.
+                grade_out: None,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

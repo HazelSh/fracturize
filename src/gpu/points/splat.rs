@@ -120,6 +120,7 @@ struct Supersample {
 }
 
 struct Resolved {
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     tonemap_bind_group: BindGroup,
     width: u32,
@@ -127,6 +128,7 @@ struct Resolved {
 }
 
 struct AccumTarget {
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     tonemap_bind_group: BindGroup,
     width: u32,
@@ -459,7 +461,11 @@ impl SplatRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: ACCUM_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC so the grade buffer can be read back: this texture is
+            // exactly the tonemap's input, which is what re-grading needs.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -477,7 +483,7 @@ impl SplatRenderer {
                 },
             ],
         });
-        self.accum = Some(AccumTarget { view, tonemap_bind_group, width, height });
+        self.accum = Some(AccumTarget { texture, view, tonemap_bind_group, width, height });
     }
 
     /// Splat the points and tonemap into `target`.
@@ -601,6 +607,20 @@ impl SplatRenderer {
         (&accum.view, accum.width, accum.height)
     }
 
+    /// The output-sized linear density the tonemap reads: the filter's
+    /// resolve under supersampling, the accumulation itself otherwise.
+    ///
+    /// `None` before the first `render`, which is what allocates them. This is
+    /// what the grade buffer is read back from — it is bit-for-bit the
+    /// tonemap's input, which is what makes re-grading exact rather than an
+    /// approximation of a re-render.
+    pub fn output_texture(&self) -> Option<&wgpu::Texture> {
+        match self.supersample.as_ref() {
+            Some(ss) => ss.resolved.as_ref().map(|r| &r.texture),
+            None => self.accum.as_ref().map(|a| &a.texture),
+        }
+    }
+
     /// A tonemap bind group over an arbitrary output-sized linear texture —
     /// the accumulating path's resolved histogram, rather than either of the
     /// two textures this renderer owns.
@@ -696,7 +716,11 @@ impl SplatRenderer {
             // Still the HDR accumulation format: this holds filtered *linear
             // density*, not a picture. The log tonemap has not run yet.
             format: ACCUM_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC so the grade buffer can be read back: this texture is
+            // exactly the tonemap's input, which is what re-grading needs.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -714,7 +738,7 @@ impl SplatRenderer {
                 },
             ],
         });
-        ss.resolved = Some(Resolved { view, tonemap_bind_group, width, height });
+        ss.resolved = Some(Resolved { texture, view, tonemap_bind_group, width, height });
     }
 }
 

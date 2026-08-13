@@ -2191,6 +2191,66 @@ record but does not persist into a `Ctrl+S`. That is deliberate: the values
 worth persisting are not known until they have been looked at, which is what
 slice 5 (retonemapping) is for.
 
+## Re-grading: `--grade-out`, `--retonemap`, `--grade-sweep`
+
+The tonemap is a **pure function** of one texture plus a few scalars: it reads
+output-sized linear density and writes pixels. It runs *after* the
+reconstruction filter, so that filtered buffer is exactly its input — and
+saving it means the grade can be redone without re-rendering.
+
+```
+# render once, keeping the linear buffer (bare --grade-out writes <render>.fgrade)
+fracturize -s scenes/blossom.toml --splat --spp 500 --grade-out -r out.png
+
+# grade it nine ways into one contact sheet
+fracturize --retonemap out.fgrade --grade-sweep gamma --grade-range 1:4 \
+           --sweep-steps 9 -r sheet.png
+
+# or a single re-grade
+fracturize --retonemap out.fgrade --gamma 2.5 --gamma-threshold 0.35 -r graded.png
+```
+
+Measured: a 1080p `--spp 500` render is **3.05 s**; re-grading it is **0.33 s**,
+most of which is GPU device creation. Nine tiles of a 320x200 sweep is 0.21 s
+*total*. That is the difference between answering a tonemap question by
+looking and answering it by arguing, which is what this slice is for.
+
+**Re-grading is exact, not an approximation of a re-render.** `--retonemap`
+with no overrides reproduces the source render **byte for byte** — verified
+across all three paths (1x, `--supersample 2`, and accumulating with a
+non-neutral gamma carried forward). The buffer's own exposure and grade are
+the starting point, so a bare re-grade is a no-op by construction.
+
+### Sizes, and why not the histogram
+
+| Artifact | 1080p @ 2x | Buys you |
+|---|---|---|
+| `.fgrade` (this) | **32 MB** | exposure, gamma, threshold, vibrancy, background |
+| histogram checkpoint | 265 MB | also re-filter, re-supersample, resume accumulating |
+
+16 bytes a pixel regardless of how long the render took or how much
+supersampling it used — the buffer is always *output*-sized. The histogram
+checkpoint is slice 5b and opt-in.
+
+### Things that will bite
+
+* **Two float formats reach the readback and they are not interchangeable.**
+  The accumulating path resolves into `Rgba32Float`; the ordinary ring-buffer
+  path's accumulation is `Rgba16Float`. Reading fp16 pairs as f32 produces
+  confident garbage, which is what it did the first time — `read_float_texture`
+  now branches on `texture.format()` and panics on anything else rather than
+  guessing.
+* **Splat, single tile.** A contact sheet has a different linear buffer behind
+  every tile and there is no honest single file to write, so `--grade-out` says
+  so instead of silently writing whichever tile was last. Animations, variant
+  sheets and sweep sheets reject it outright.
+* **The `.fgrade` carries the whole render record** in its TOML header, so
+  provenance survives. The re-graded PNG does **not** yet carry those chunks
+  forward — a natural follow-up, not done.
+* `GradeAxis`'s CLI name and its `label()` differ on purpose: clap kebab-cases
+  to match the `--gamma-threshold` flag, `label()` is the TOML key. A test
+  checks they agree modulo the separator.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

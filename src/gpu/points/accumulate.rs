@@ -60,6 +60,7 @@ pub struct Accumulator {
     add_layout: BindGroupLayout,
     resolve_pipeline: RenderPipeline,
     resolve_bind_group: BindGroup,
+    resolved_texture: wgpu::Texture,
     resolved_view: wgpu::TextureView,
     /// The reconstruction filter and the output-sized texture it writes, when
     /// supersampling is on. `None` at 1x, where the resolve is already the
@@ -79,6 +80,7 @@ pub struct Accumulator {
 
 struct Filtered {
     downsampler: Downsampler,
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
@@ -279,10 +281,11 @@ impl Accumulator {
                     dimension: wgpu::TextureDimension::D2,
                     format: RESOLVED_FORMAT,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        // So the grade buffer can be read back off it.
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 })
-                .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let resolved = make_float_target("accum_resolved_texture", width, height);
         let filtered = (n > 1).then(|| {
@@ -291,9 +294,11 @@ impl Accumulator {
             // summed over every batch, so it filters channel by channel and the
             // tonemap's `rgb / a` still recovers the density-weighted mean.
             downsampler.upload_params(queue, n, filter, filter_radius, Source::Additive);
+            let texture = make_float_target("accum_filtered_texture", out_width, out_height);
             Filtered {
                 downsampler,
-                view: make_float_target("accum_filtered_texture", out_width, out_height),
+                view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                texture,
             }
         });
 
@@ -304,7 +309,8 @@ impl Accumulator {
             add_layout,
             resolve_pipeline,
             resolve_bind_group,
-            resolved_view: resolved,
+            resolved_view: resolved.create_view(&wgpu::TextureViewDescriptor::default()),
+            resolved_texture: resolved,
             filtered,
             width,
             height,
@@ -384,6 +390,15 @@ impl Accumulator {
                 &f.view
             }
             None => &self.resolved_view,
+        }
+    }
+
+    /// The texture `resolve` last wrote — output-sized linear density, and
+    /// exactly the tonemap's input. What the grade buffer is read back from.
+    pub fn output_texture(&self) -> &wgpu::Texture {
+        match &self.filtered {
+            Some(f) => &f.texture,
+            None => &self.resolved_texture,
         }
     }
 

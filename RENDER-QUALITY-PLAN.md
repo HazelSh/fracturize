@@ -7,7 +7,7 @@ the numbers attached.
 
 ## Status
 
-**Slices 0 through 4 are implemented**, on branch `render-quality`, untested by Hazel.
+**Slices 0 through 6a are implemented**, on branch `render-quality`, untested by Hazel.
 
 - **Slice 0** (`5fdec96`) — encoder thread cap + `--threads` and a dialog control;
   partial-result-on-cancel via a `render_job::Outcome` enum; the shared const-trimmed
@@ -20,8 +20,12 @@ the numbers attached.
   batching is a 19% regression. Reverted; the instrument was kept.
 - **Slice 4a** (`6a0ebeb`) — `--chaos-seed`, with `DEFAULT_SEED = 0` reproducing every
   earlier render byte for byte.
-- **Slice 4b** — the persistent accumulation histogram: `--spp`, `--effort converged`,
-  `src/gpu/points/accumulate.rs` and `shaders/points/accumulate.wgsl`.
+- **Slice 4b** (`104cefd`) — the persistent accumulation histogram: `--spp`, `--effort
+  converged`, `src/gpu/points/accumulate.rs` and `shaders/points/accumulate.wgsl`.
+- **Slice 6a** (`87cfe7c`) — `--gamma`, `--gamma-threshold`, `--vibrancy`. Built *before*
+  slice 5 on purpose; see deviation 6.
+- **Slice 5a** — re-grading: `--grade-out`, `--retonemap`, `--grade-sweep`, and
+  `src/grade_file.rs`.
 
 Deviations from what is written below, all deliberate and all argued at the point
 they occur:
@@ -57,7 +61,21 @@ inside wgpu quoting a number the user never typed: `--supersample 4` at 4K excee
 8192px texture limit, and `--effort ultra` on a **zoom scene** dispatching 390,625
 workgroups against a limit of 65,535.
 
-Remaining: slices 5–7 below. Decision 5 is still open by design — it is meant to be
+6. **Slice 6 came before slice 5, and Hazel approved the swap.** The plan sequences
+   retonemapping first, but the tonemap had exactly two knobs — exposure and a hardcoded
+   gain — so a retonemap tool could only have varied exposure, which is the one question
+   already answerable by rendering twice. Building the gamma/threshold/vibrancy maths
+   first gave retonemapping something worth looking at.
+7. **The re-grade checkpoint is the post-filter buffer, not the histogram.** The tonemap
+   runs *after* the reconstruction filter, so its input is the output-sized buffer — 32 MB
+   at 1080p against 265 MB for the histogram behind it, and exact rather than approximate.
+   The histogram checkpoint (slice 5b) stays opt-in, for resuming rather than re-grading.
+
+Remaining: **slice 5b** (histogram checkpoint + resume, `--checkpoint`, committed to disk
+on abort), **slice 7** (density estimation), and the GUI/scene/view persistence for the
+grade that slice 6a deliberately left out. Decision 5 is now answerable by looking —
+`--grade-sweep exposure` over a saved buffer is the experiment it was waiting for — but
+still open — it is meant to be
 settled by looking, once slice 5 exists.
 
 ---

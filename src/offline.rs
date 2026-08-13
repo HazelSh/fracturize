@@ -232,6 +232,9 @@ pub struct OfflineParams<'a> {
     /// tonemap that existed before these knobs did, so an unspecified grade
     /// leaves every earlier render byte-identical.
     pub grade: Grade,
+    /// Save the pre-tonemap linear density beside the PNG, so the grade can be
+    /// redone without re-rendering. See `grade_file`.
+    pub grade_out: Option<std::path::PathBuf>,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -1179,6 +1182,335 @@ fn make_record(
     })
 }
 
+/// Read an `Rgba32Float` texture back to CPU floats.
+///
+/// Used for the grade buffer, whose whole premise is that these values are
+/// *exactly* the tonemap's input — so this copies the texture verbatim rather
+/// than going anywhere near the tonemap or the 8/16-bit output path.
+/// Both float formats in this pipeline appear here, and getting that wrong is
+/// not a subtle error: the two splat paths differ in it. The accumulating path
+/// resolves its histogram into `Rgba32Float`, while the ordinary ring-buffer
+/// path's accumulation is `Rgba16Float` — the widest format with guaranteed
+/// blending support. Reading fp16 pairs as f32 produces confident garbage,
+/// which is exactly what it did the first time.
+fn read_float_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<f32> {
+    let half = match texture.format() {
+        wgpu::TextureFormat::Rgba16Float => true,
+        wgpu::TextureFormat::Rgba32Float => false,
+        other => panic!("grade buffer readback does not know {:?}", other),
+    };
+    let bytes_per_texel: u32 = if half { 8 } else { 16 };
+    let padded = (width * bytes_per_texel).div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grade_readback"),
+        size: (padded * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("grade_readback_encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    {
+        let data = slice.get_mapped_range();
+        for y in 0..height as usize {
+            let row = y * padded as usize;
+            for i in 0..(width * 4) as usize {
+                if half {
+                    let o = row + i * 2;
+                    out.push(f16_to_f32(u16::from_le_bytes([data[o], data[o + 1]])));
+                } else {
+                    let o = row + i * 4;
+                    out.push(f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+                }
+            }
+        }
+    }
+    readback.unmap();
+    out
+}
+
+/// Which tonemap knob a `--grade-sweep` walks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum GradeAxis {
+    Exposure,
+    Gamma,
+    GammaThreshold,
+    Vibrancy,
+}
+
+impl GradeAxis {
+    fn label(self) -> &'static str {
+        match self {
+            GradeAxis::Exposure => "exposure",
+            GradeAxis::Gamma => "gamma",
+            GradeAxis::GammaThreshold => "gamma_threshold",
+            GradeAxis::Vibrancy => "vibrancy",
+        }
+    }
+
+    fn apply(self, v: f32, exposure: &mut f32, grade: &mut Grade) {
+        match self {
+            GradeAxis::Exposure => *exposure = v,
+            GradeAxis::Gamma => grade.gamma = v,
+            GradeAxis::GammaThreshold => grade.gamma_threshold = v,
+            GradeAxis::Vibrancy => grade.vibrancy = v,
+        }
+    }
+}
+
+/// A tonemap sweep: one axis, walked across a contact sheet.
+///
+/// This is what slice 5 is *for*. Every tonemap question in the plan —
+/// which gamma, how much toe, whether adaptive exposure normalization is worth
+/// having — was previously answerable only by re-rendering per guess. From one
+/// saved buffer the whole sheet costs one device creation and N fullscreen
+/// passes, so the answer arrives as a picture instead of an argument.
+#[derive(Clone, Copy, Debug)]
+pub struct GradeSweep {
+    pub axis: GradeAxis,
+    pub from: f32,
+    pub to: f32,
+    pub steps: usize,
+}
+
+/// Re-grade a saved linear buffer: upload it, run the tonemap, save a PNG.
+///
+/// No scene, no chaos game, no point buffer — the tonemap never needed any of
+/// those, and that is the whole point. What used to cost a whole render now
+/// costs one fullscreen pass, which is what turns "which gamma?" from an
+/// argument into a thing you look at.
+///
+/// The buffer's own exposure and grade are the starting point; `exposure` and
+/// `grade` here override them. So `--retonemap x.fgrade -r out.png` with no
+/// other flags reproduces the render it came from.
+pub fn retonemap(
+    path: &Path,
+    out_path: &Path,
+    exposure: Option<f32>,
+    gamma: Option<f32>,
+    gamma_threshold: Option<f32>,
+    vibrancy: Option<f32>,
+    bit_depth: BitDepth,
+    sweep: Option<GradeSweep>,
+    labels: bool,
+) -> Result<Outcome, String> {
+    let t_start = Instant::now();
+    let buf = crate::grade_file::GradeBuffer::read(path)?;
+    let (width, height) = (buf.width, buf.height);
+    let exposure = exposure.unwrap_or(buf.exposure);
+    let grade = Grade {
+        gamma: gamma.unwrap_or(buf.grade.gamma),
+        gamma_threshold: gamma_threshold.unwrap_or(buf.grade.gamma_threshold),
+        vibrancy: vibrancy.unwrap_or(buf.grade.vibrancy),
+    };
+
+    let (device, queue, _adapter) = create_device()?;
+    let t_setup = Instant::now();
+
+    // Upload the linear density as a texture the tonemap can read. Same format
+    // the accumulator resolves into, because that is what it is.
+    let linear = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("retonemap_linear"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: crate::gpu::points::accumulate::RESOLVED_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut bytes = Vec::with_capacity(buf.pixels.len() * 4);
+    for v in &buf.pixels {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &linear,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 16),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    let linear_view = linear.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // A splat renderer with no points behind it: only its tonemap pipeline and
+    // params buffer are used, which is exactly the pure function this re-runs.
+    let empty = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("retonemap_unused_points"),
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let renderer = SplatRenderer::new(&device, bit_depth.format(), &empty, &empty);
+    let clear = wgpu::Color {
+        r: buf.background[0] as f64,
+        g: buf.background[1] as f64,
+        b: buf.background[2] as f64,
+        a: if buf.transparent { 0.0 } else { 1.0 },
+    };
+    renderer.upload_params(
+        &queue,
+        exposure,
+        buf.samples,
+        buf.screen_height,
+        clear,
+        buf.transparent,
+        grade,
+    );
+
+    // 1x: the buffer is already output-sized and already filtered.
+    let sampling = Sampling::new(1, height);
+    let target = TileTarget::new(
+        &device, &queue, width, height, clear, sampling, Filter::default(),
+        crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS, bit_depth,
+    );
+
+    // One tile, or a contact sheet walking one knob. Same loop: the sweep is
+    // just N of the thing the single case does once, which is the point of the
+    // buffer existing at all.
+    let steps = sweep.map_or(1, |s| s.steps.max(1));
+    let (cols, rows) = grid_shape(steps);
+    let (sheet_w, sheet_h) = (width * cols, height * rows);
+    let mut sheet = vec![0u16; (sheet_w * sheet_h * 4) as usize];
+    let bind_group = renderer.tonemap_bind_group(&device, &linear_view);
+
+    for i in 0..steps {
+        let (mut e, mut g) = (exposure, grade);
+        let label = match sweep {
+            Some(sw) => {
+                // Inclusive of both ends, so a sweep says what it was asked
+                // for: `1:4` in 4 steps is 1, 2, 3, 4 and not 1, 1.75, 2.5, 3.25.
+                let t = if steps == 1 { 0.0 } else { i as f32 / (steps - 1) as f32 };
+                let v = sw.from + (sw.to - sw.from) * t;
+                sw.axis.apply(v, &mut e, &mut g);
+                format!("{} {:.4}", sw.axis.label(), v)
+            }
+            None => String::new(),
+        };
+        renderer.upload_params(
+            &queue, e, buf.samples, buf.screen_height, clear, buf.transparent, g,
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("retonemap_encoder"),
+        });
+        renderer.tonemap_pass(&mut encoder, &target.color_view, &target.depth_view, &bind_group);
+        target.copy_out(&mut encoder);
+        queue.submit(std::iter::once(encoder.finish()));
+        let (col, row) = (i as u32 % cols, i as u32 / cols);
+        target.read_into_sheet(&device, &mut sheet, sheet_w, col, row);
+        if sweep.is_some() {
+            println!("tile [row {}, col {}]: {}", row, col, label);
+            if labels {
+                label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, &label);
+            }
+        }
+    }
+    let t_render = Instant::now();
+
+    save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth, None)?;
+    let t_done = Instant::now();
+    match sweep {
+        Some(sw) => println!(
+            "Re-graded {} tiles of {}x{}, {} from {} to {} -> {}",
+            steps, width, height, sw.axis.label(), sw.from, sw.to, out_path.display(),
+        ),
+        None => println!(
+            "Re-graded {}x{} (exposure {}, gamma {}, threshold {}, vibrancy {}) -> {}",
+            width, height, exposure, grade.gamma, grade.gamma_threshold, grade.vibrancy,
+            out_path.display(),
+        ),
+    }
+    print_timing(t_start, t_setup, t_setup, t_render, t_done);
+    Ok(Outcome::Complete)
+}
+
+/// The tidiest grid for `n` tiles: as square as possible, wider than tall.
+///
+/// A sweep has no natural two-dimensional shape the way an orbit grid does, so
+/// this picks one rather than making the caller say.
+fn grid_shape(n: usize) -> (u32, u32) {
+    let cols = (n as f64).sqrt().ceil().max(1.0) as u32;
+    (cols, (n as u32).div_ceil(cols))
+}
+
+/// Save the pre-tonemap linear density, if asked for.
+///
+/// Best-effort in the same sense the sidecar is: the picture exists, and a
+/// checkpoint that could not be filed is worth saying out loud but is not a
+/// failed render.
+#[allow(clippy::too_many_arguments)]
+fn save_grade_buffer(
+    path: &Path,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    samples: f64,
+    screen_height: f32,
+    clear: wgpu::Color,
+    transparent: bool,
+    exposure: f32,
+    grade: Grade,
+    record: Option<&RenderRecord>,
+) {
+    let buf = crate::grade_file::GradeBuffer {
+        width,
+        height,
+        samples,
+        screen_height,
+        background: [clear.r as f32, clear.g as f32, clear.b as f32],
+        transparent,
+        exposure,
+        grade,
+        pixels: read_float_texture(device, queue, texture, width, height),
+    };
+    match buf.write(path, record) {
+        Ok(()) => println!(
+            "Grade buffer: {} ({:.0} MB) — re-grade with --retonemap",
+            path.display(),
+            (width as f64 * height as f64 * 16.0) / 1e6
+        ),
+        Err(e) => eprintln!("warning: {}", e),
+    }
+}
+
 fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant) {
     let secs = |a: Instant, b: Instant| (b - a).as_secs_f32();
     println!(
@@ -1226,6 +1558,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // `Some` took the accumulating path at the top of this function.
         spp: _,
         grade,
+        grade_out,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1323,6 +1656,29 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             }
         }
     }
+    let grade_save = |record: Option<&RenderRecord>| if let Some(p) = &grade_out {
+        // One tile only: a contact sheet has a different linear buffer behind
+        // every tile, and there is no honest single file to write. Said out
+        // loud rather than silently writing whichever tile happened to be last.
+        match &renderer {
+            TileRenderer::Splat(r) if tiles.len() == 1 => {
+                if let Some(tex) = r.output_texture() {
+                    save_grade_buffer(
+                        p, &device, &queue, tex, width, height, point_count as f64,
+                        sampling.target_height(), clear, transparent, exposure, grade, record,
+                    );
+                }
+            }
+            TileRenderer::Splat(_) => eprintln!(
+                "warning: --grade-out needs a single tile; a contact sheet has one linear \
+                 buffer per tile. Not written."
+            ),
+            TileRenderer::Points(_) => eprintln!(
+                "warning: --grade-out is a splat-renderer feature (there is no linear density \
+                 behind the points renderer). Not written."
+            ),
+        }
+    };
     let t_render = Instant::now();
 
     if let Some(c) = &control {
@@ -1355,6 +1711,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         adapter,
         (t_render - t_start).as_secs_f32(),
     );
+    grade_save(record.as_ref());
     save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth, record.as_ref())?;
     if let Some(r) = &record {
         match r.write_sidecar(out_path) {
@@ -1386,6 +1743,17 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
 /// here is cost, not principle — a 600-frame flight at `--spp 500` is 600
 /// accumulated stills. It wants its own budget in frames, not a flag inherited
 /// from the still path.
+fn reject_grade_out(grade_out: Option<std::path::PathBuf>, what: &str) -> Result<(), String> {
+    match grade_out {
+        None => Ok(()),
+        Some(_) => Err(format!(
+            "--grade-out saves one still's linear density; {} would need one buffer per frame. \
+             Render the frames separately.",
+            what
+        )),
+    }
+}
+
 fn reject_spp(spp: Option<u32>, what: &str) -> Result<(), String> {
     match spp {
         None => Ok(()),
@@ -1456,6 +1824,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         chaos_seed,
         spp,
         grade,
+        grade_out,
     } = params;
     let spp = spp.expect("only called with a sample target");
     if !splat {
@@ -1675,6 +2044,12 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         adapter,
         (t_render - t_start).as_secs_f32(),
     );
+    if let Some(p) = &grade_out {
+        save_grade_buffer(
+            p, &device, &queue, histogram.output_texture(), width, height, accumulated,
+            sampling.target_height(), clear, transparent, exposure, grade, record.as_ref(),
+        );
+    }
     save_sheet(out_path, &sheet, width, height, bit_depth, record.as_ref())?;
     if let Some(r) = &record {
         match r.write_sidecar(out_path) {
@@ -1784,8 +2159,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         chaos_seed,
         spp,
         grade,
+        grade_out,
     } = params;
     reject_spp(spp, "an animation")?;
+    reject_grade_out(grade_out, "an animation")?;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
@@ -2050,8 +2427,10 @@ pub fn render_mutations(
         chaos_seed,
         spp,
         grade,
+        grade_out,
     } = params;
     reject_spp(spp, "a variant sheet")?;
+    reject_grade_out(grade_out, "a variant sheet")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -2247,8 +2626,10 @@ pub fn render_sweep(
         chaos_seed,
         spp,
         grade,
+        grade_out,
     } = params;
     reject_spp(spp, "a sweep sheet")?;
+    reject_grade_out(grade_out, "a sweep sheet")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -2516,6 +2897,67 @@ mod tests {
     /// The three things measured in render-target pixels have to agree, and
     /// `Sampling` is the single place that decides them.
     #[test]
+    /// A sweep says what it was asked for: both ends land on the sheet.
+    ///
+    /// The alternative — `from + range * i/steps` — puts the last tile short
+    /// of `to`, so `1:4` in four steps would top out at 3.25 and the sheet
+    /// would quietly not contain the value in its own filename.
+    #[test]
+    fn a_sweep_includes_both_ends() {
+        let (from, to, steps) = (1.0f32, 4.0f32, 4usize);
+        let at = |i: usize| from + (to - from) * (i as f32 / (steps - 1) as f32);
+        assert_eq!(at(0), 1.0);
+        assert_eq!(at(steps - 1), 4.0);
+    }
+
+    /// One tile is one tile, and n tiles get as square a sheet as they can.
+    #[test]
+    fn the_sweep_sheet_is_as_square_as_it_can_be() {
+        assert_eq!(grid_shape(1), (1, 1));
+        assert_eq!(grid_shape(4), (2, 2));
+        assert_eq!(grid_shape(9), (3, 3));
+        // Never fewer cells than tiles, or a tile would have nowhere to go.
+        for n in 1..40usize {
+            let (c, r) = grid_shape(n);
+            assert!((c * r) as usize >= n, "{} tiles do not fit {}x{}", n, c, r);
+        }
+    }
+
+    /// Each axis has to move its own knob and nothing else — the sweep loop
+    /// reuses one `Grade` per tile, so a stray write would leak across tiles.
+    #[test]
+    fn each_grade_axis_moves_only_its_own_knob() {
+        use crate::gpu::points::splat::Grade;
+        for axis in [
+            GradeAxis::Exposure,
+            GradeAxis::Gamma,
+            GradeAxis::GammaThreshold,
+            GradeAxis::Vibrancy,
+        ] {
+            let (mut e, mut g) = (1.0f32, Grade::NEUTRAL);
+            axis.apply(0.5, &mut e, &mut g);
+            let moved = (e != 1.0) as u8
+                + (g.gamma != Grade::NEUTRAL.gamma) as u8
+                + (g.gamma_threshold != Grade::NEUTRAL.gamma_threshold) as u8
+                + (g.vibrancy != Grade::NEUTRAL.vibrancy) as u8;
+            assert_eq!(moved, 1, "{:?} moved {} knobs, not 1", axis, moved);
+        }
+    }
+
+    /// Every axis is named on the command line and printed back onto the
+    /// sheet's tiles, and the two spellings differ on purpose: clap kebab-cases
+    /// to match the `--gamma-threshold` flag, while `label` is the TOML key the
+    /// record uses. So this checks they agree *modulo the separator*, which
+    /// still catches a typo in either without forcing a false unification.
+    #[test]
+    fn grade_axis_labels_match_their_cli_names() {
+        use clap::ValueEnum;
+        for a in GradeAxis::value_variants() {
+            let cli = a.to_possible_value().unwrap().get_name().replace('-', "_");
+            assert_eq!(cli, a.label(), "{:?}", a);
+        }
+    }
+
     fn sampling_measures_everything_against_the_accumulation() {
         let one = Sampling::new(1, 600);
         let four = Sampling::new(4, 600);
