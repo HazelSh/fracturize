@@ -1814,6 +1814,40 @@ fracturize --scene scenes/wellspiral.toml --render well.avif \
 - **Point size** is world-space and the band spans many scales, so a scene will
   look grittier here than its `point_size` suggests; judge it inside the band.
 
+## Two machines, one repo: the branch model
+
+Hazel works on a desktop (GTX 1080) and a T490, and agents work in the desktop
+checkout **at the same time she does**. Two things follow, and both have
+already bitten:
+
+**The working tree can change under you.** If files you committed appear to
+have reverted, check `git log --oneline -1` and `git branch -vv` *before*
+concluding anything was lost — a branch checkout makes your own commits look
+rolled back, because the other branch legitimately predates them. This
+happened: `main` had absorbed this branch at one commit and taken laptop work
+on top, so the tree showed that commit's version of every file. Nothing was
+lost, and the commit was safe the whole time because it was already pushed.
+
+**Push early.** A commit that exists only in the desktop checkout is invisible
+to the laptop and to any other session, and is the thing that makes syncing a
+nuisance. Feature-branch pushes are cheap; take them.
+
+The shape that keeps merges trivial:
+
+* Laptop work (scenes, notes, README) lands on `main`.
+* Long agent work sits on a feature branch off `main`.
+* **Merge `main` into the feature branch** whenever `main` moves, so the branch
+  stays a *superset*. Then the merge back is a fast-forward and never conflicts.
+  The file sets barely overlap anyway — scenes and notes on one side,
+  `src/`, `shaders/`, `tools/` and docs on the other.
+
+Check with `git log --oneline <branch>..main | wc -l`: zero means `main` can
+fast-forward and there is nothing to reconcile.
+
+Note `renders/` is gitignored, so survey sheets and test renders never need
+cleaning up — but the repo *root* is not, and `-r out.png` from the root leaves
+`out.png`, `out.fgrade` and `out.render.toml` behind. Render into `renders/`.
+
 ## Render Jobs
 
 `P`, and the Camera window's "Render job…", open the dialog

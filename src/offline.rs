@@ -1900,6 +1900,24 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // and *its* filter in between.
     renderer.set_supersample(&device, &queue, sampling.n, filter, filter_radius);
 
+    // The one thing about this path that is not the same on every machine.
+    // Without fp32 blending each lap's batch stalls at 2048 per texel, so the
+    // peak brightness depends on how many laps the ring took — which makes
+    // `--points` change the picture. Said once, plainly, rather than leaving
+    // someone to compare two renders that were never comparable.
+    if !renderer.accumulation_is_exact() {
+        eprintln!(
+            "warning: this GPU lacks FLOAT32_BLENDABLE, so accumulation runs in fp16 and \
+             each pass stalls at 2048 per texel. Bright cores will be under-counted, and \
+             the amount depends on --points. Lower --points for more, smaller laps."
+        );
+        if let Some(c) = &control {
+            c.log(String::from(
+                "fp16 accumulation: bright cores under-counted (no FLOAT32_BLENDABLE)",
+            ));
+        }
+    }
+
     let (haze_near, haze_far) = haze.band(base_camera.distance);
     let camera = CameraUniforms::new(
         base_camera.view_proj(aspect),
