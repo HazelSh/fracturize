@@ -2894,9 +2894,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The three things measured in render-target pixels have to agree, and
-    /// `Sampling` is the single place that decides them.
-    #[test]
     /// A sweep says what it was asked for: both ends land on the sheet.
     ///
     /// The alternative — `from + range * i/steps` — puts the last tile short
@@ -2958,6 +2955,9 @@ mod tests {
         }
     }
 
+    /// The three things measured in render-target pixels have to agree, and
+    /// `Sampling` is the single place that decides them.
+    #[test]
     fn sampling_measures_everything_against_the_accumulation() {
         let one = Sampling::new(1, 600);
         let four = Sampling::new(4, 600);

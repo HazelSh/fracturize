@@ -2185,11 +2185,35 @@ Recorded in the sidecar and the PNG only when non-neutral, so every record
 made before grading existed is byte-identical and an absent block reads as
 "the tonemap this program has always had".
 
-**Scope (slice 6a):** CLI, shader, and render record. *Not* yet in scene
-files, view files, or the GUI — so a grade you like is reproducible from the
-record but does not persist into a `Ctrl+S`. That is deliberate: the values
-worth persisting are not known until they have been looked at, which is what
-slice 5 (retonemapping) is for.
+### A grade belongs to a view, not a scene
+
+`gamma`, `gamma_threshold` and `vibrancy` are **view** keys, alongside
+`exposure`. A scene is the three-dimensional thing you explore; a view is
+"save the state I want this re-rendered from", and a grade is exactly that
+kind of state — it changes nothing about what the attractor *is*, only how its
+density becomes a picture. Keeping it out of the scene also means a grade
+found while rendering can never clobber a scene file mid-exploration.
+
+```toml
+# views/whatever.toml
+renderer = "splat"
+exposure = 1.0
+gamma = 2.5
+gamma_threshold = 0.35
+```
+
+Resolution is **flags over view over neutral, field by field** — the same
+ladder `exposure` uses, and per-field so a view setting only `gamma` gets the
+neutral threshold and vibrancy rather than being treated as ungraded.
+Verified byte-identical either route.
+
+A view with no grade keys loads as neutral, and saving an ungraded view writes
+no grade keys, so every view already on disk round-trips unchanged. Three
+tests pin that.
+
+**Still to do:** the GUI has no grade controls, so `current_view()` writes
+`None` for all three and a `V`-key save carries no grade. That is deferred to
+a renderer-dialog pass once the rest of the render-quality work is done.
 
 ## Re-grading: `--grade-out`, `--retonemap`, `--grade-sweep`
 

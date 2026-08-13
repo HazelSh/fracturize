@@ -1701,6 +1701,13 @@ impl App {
                 RenderMode::Points => None,
                 RenderMode::Splat => Some(self.exposure),
             },
+            // The window has no grade controls yet — that is the renderer-dialog
+            // pass — so a view saved from here carries none and loads neutral.
+            // Written by hand or by a future dialog, they work already: the
+            // offline path reads them (see `View::grade`).
+            gamma: None,
+            gamma_threshold: None,
+            vibrancy: None,
         }
     }
 

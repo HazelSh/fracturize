@@ -78,6 +78,23 @@ pub struct View {
     /// Splat-renderer exposure (only meaningful with renderer = "splat")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<f32>,
+    /// Tonemap grade, alongside `exposure` and for the same reason.
+    ///
+    /// These live on the **view** and not on the scene deliberately. A scene is
+    /// the three-dimensional thing you explore; a view is "save the state I
+    /// want this re-rendered from", and a grade is exactly that kind of state —
+    /// it changes nothing about what the attractor *is*, only how its density
+    /// becomes a picture. Putting it in the scene would also mean a grade
+    /// found while rendering could clobber a scene file mid-exploration.
+    ///
+    /// `None` means "unset", which resolves to [`Grade::NEUTRAL`] — so every
+    /// view already on disk keeps rendering exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gamma: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gamma_threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vibrancy: Option<f32>,
 }
 
 fn default_view_point_size() -> f32 {
@@ -105,6 +122,20 @@ impl View {
     pub fn is_splat(&self) -> bool {
         self.renderer.as_deref() == Some("splat")
     }
+
+    /// The grade this view asks for, field by field, falling back to neutral.
+    ///
+    /// Per field rather than all-or-nothing: a hand-written view that sets only
+    /// `gamma` should get the neutral threshold and vibrancy, not be treated as
+    /// having no grade at all.
+    pub fn grade(&self) -> crate::gpu::points::splat::Grade {
+        let n = crate::gpu::points::splat::Grade::NEUTRAL;
+        crate::gpu::points::splat::Grade {
+            gamma: self.gamma.unwrap_or(n.gamma),
+            gamma_threshold: self.gamma_threshold.unwrap_or(n.gamma_threshold),
+            vibrancy: self.vibrancy.unwrap_or(n.vibrancy),
+        }
+    }
 }
 
 impl View {
@@ -131,6 +162,40 @@ impl View {
 mod tests {
     use super::*;
 
+    /// A view with no grade keys must load as neutral, not as anything else:
+    /// every view already on disk predates grading, and they have to keep
+    /// rendering exactly as they did.
+    #[test]
+    fn a_view_without_a_grade_is_neutral() {
+        let bare = "rotation = 1.0\ndistance = 3.0\nfocus = [0.0, 0.0, 0.0]\n";
+        let v: View = toml::from_str(bare).expect("a four-line view is valid");
+        assert_eq!(v.grade(), crate::gpu::points::splat::Grade::NEUTRAL);
+    }
+
+    /// Per-field fallback: setting one knob by hand must not drag the others
+    /// away from neutral.
+    #[test]
+    fn a_partial_grade_fills_the_rest_from_neutral() {
+        let one = "rotation = 1.0\ndistance = 3.0\nfocus = [0.0, 0.0, 0.0]\ngamma = 2.5\n";
+        let v: View = toml::from_str(one).expect("valid");
+        let n = crate::gpu::points::splat::Grade::NEUTRAL;
+        assert_eq!(v.grade().gamma, 2.5);
+        assert_eq!(v.grade().gamma_threshold, n.gamma_threshold);
+        assert_eq!(v.grade().vibrancy, n.vibrancy);
+    }
+
+    /// An ungraded view must not gain grade keys when it is saved, or every
+    /// existing view file would grow three lines on its next round trip.
+    #[test]
+    fn saving_an_ungraded_view_writes_no_grade_keys() {
+        let bare = "rotation = 1.0\ndistance = 3.0\nfocus = [0.0, 0.0, 0.0]\n";
+        let v: View = toml::from_str(bare).unwrap();
+        let out = toml::to_string_pretty(&v).unwrap();
+        for key in ["gamma", "gamma_threshold", "vibrancy"] {
+            assert!(!out.contains(key), "`{}` leaked into an ungraded view:\n{}", key, out);
+        }
+    }
+
     #[test]
     fn test_view_roundtrip() {
         let view = View {
@@ -152,6 +217,9 @@ mod tests {
             color_contrast: Some(2.0),
             renderer: Some("splat".to_string()),
             exposure: Some(1.5),
+            gamma: Some(2.5),
+            gamma_threshold: Some(0.35),
+            vibrancy: Some(0.8),
         };
         let dir = std::env::temp_dir().join("fracturize_view_test");
         let path = dir.join("roundtrip.toml");

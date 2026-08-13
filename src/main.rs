@@ -2000,16 +2000,20 @@ fn main() {
         // Anything unspecified stays at NEUTRAL, which is the tonemap that
         // existed before these knobs did — so a render made without them is
         // byte-identical to one made before they were added.
-        let neutral = gpu::points::splat::Grade::NEUTRAL;
-        let grade = gpu::points::splat::Grade {
-            gamma: args.gamma.unwrap_or(neutral.gamma),
-            gamma_threshold: args.gamma_threshold.unwrap_or(neutral.gamma_threshold),
-            vibrancy: args.vibrancy.unwrap_or(neutral.vibrancy),
-        };
 
         let view = args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
         });
+
+        // Flags over the view over neutral, field by field — the same ladder
+        // `exposure` above uses, and per-field so a view that sets only gamma
+        // does not drag the other two along with it.
+        let from_view = view.as_ref().map(|v| v.grade()).unwrap_or_default();
+        let grade = gpu::points::splat::Grade {
+            gamma: args.gamma.unwrap_or(from_view.gamma),
+            gamma_threshold: args.gamma_threshold.unwrap_or(from_view.gamma_threshold),
+            vibrancy: args.vibrancy.unwrap_or(from_view.vibrancy),
+        };
 
         let grid = match (&args.orbit_grid, &args.move_grid) {
             (Some(_), Some(_)) => {

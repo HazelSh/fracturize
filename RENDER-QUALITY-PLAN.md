@@ -72,8 +72,11 @@ workgroups against a limit of 65,535.
    The histogram checkpoint (slice 5b) stays opt-in, for resuming rather than re-grading.
 
 Remaining: **slice 5b** (histogram checkpoint + resume, `--checkpoint`, committed to disk
-on abort), **slice 7** (density estimation), and the GUI/scene/view persistence for the
-grade that slice 6a deliberately left out. Decision 5 is now answerable by looking —
+on abort), **slice 7** (density estimation), and the **GUI** controls for the grade.
+Hazel's call on where a grade lives, 2026-08-13: **view files, not scene
+files** — a scene is the 3D thing you explore, a view is saved state for
+re-rendering, and a grade is the latter. Implemented; the GUI half is deferred
+to a renderer-dialog pass once everything else is done. Decision 5 is now answerable by looking —
 `--grade-sweep exposure` over a saved buffer is the experiment it was waiting for — but
 still open — it is meant to be
 settled by looking, once slice 5 exists.

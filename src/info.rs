@@ -1479,6 +1479,9 @@ mod tests {
             color_contrast: None,
             renderer: None,
             exposure: None,
+            gamma: None,
+            gamma_threshold: None,
+            vibrancy: None,
         }
     }
 
