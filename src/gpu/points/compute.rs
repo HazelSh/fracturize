@@ -12,6 +12,10 @@ use crate::scene::TransformSpec;
 /// Number of threads per workgroup (must match shader)
 const WORKGROUP_SIZE: u32 = 256;
 
+/// `wgpu::Limits::max_compute_workgroups_per_dimension`'s guaranteed floor.
+/// Anything wider than this has to spill into a second dispatch dimension.
+const MAX_WORKGROUPS_PER_DIM: u32 = 65_535;
+
 /// Per-walker state (48 bytes, one per parallel walker)
 /// Must match WGSL WalkerState struct
 #[repr(C)]
@@ -472,7 +476,21 @@ impl PointCompute {
             let target = self.iterations_per_walker as f32 * (dt * 60.0);
             (target.round() as u32).clamp(1, self.warmup_iterations_per_walker)
         };
+        self.advance_with_iters(queue, current_iters)
+    }
 
+    /// Advance one dispatch at the *fill* rate — the one warmup uses — however
+    /// many frames have gone by.
+    ///
+    /// The interactive rate exists to make the ring churn at a watchable speed;
+    /// an accumulating render has no such constraint and wants throughput, so
+    /// it stays at the fill rate forever. Ten times the points per dispatch,
+    /// and `frames_per_lap` counts in these.
+    pub fn advance_fill(&mut self, queue: &wgpu::Queue) -> u32 {
+        self.advance_with_iters(queue, self.warmup_iterations_per_walker)
+    }
+
+    fn advance_with_iters(&mut self, queue: &wgpu::Queue, current_iters: u32) -> u32 {
         // Upload params with current write offset and iteration count
         let params = PointComputeParams {
             num_transforms: self.num_transforms,
@@ -491,6 +509,18 @@ impl PointCompute {
         self.current_frame += 1;
 
         self.valid_point_count()
+    }
+
+    /// Dispatches needed to replace every point in the ring once, at the fill
+    /// rate `advance_frame` uses during warmup.
+    ///
+    /// This is the accumulating render's batch: it folds the histogram once per
+    /// *lap* of the ring rather than once per dispatch, so each sample is
+    /// counted exactly once and the cost of the fold — a compute pass over every
+    /// texel of the accumulation — is amortized over a whole buffer of points
+    /// instead of a eightieth of one.
+    pub fn frames_per_lap(&self) -> u32 {
+        self.warmup_frames.max(1)
     }
 
     /// Carry the whole point buffer through `levels` zoom periods, so the
@@ -526,10 +556,18 @@ impl PointCompute {
         if levels == 0 || self.zoom.is_none() {
             return;
         }
+        // One thread per point, dispatched as a 2D grid. A dispatch dimension
+        // stops at 65,535 workgroups, and a 100M point buffer is 390,625 of
+        // them — so `--effort ultra` on a zoom scene used to die inside wgpu
+        // with a number the user never typed.
+        let groups = self.buffer_capacity.div_ceil(WORKGROUP_SIZE);
+        let groups_x = groups.min(MAX_WORKGROUPS_PER_DIM);
+        let groups_y = groups.div_ceil(groups_x);
         let params = PointComputeParams {
             num_transforms: self.num_transforms,
             num_walkers: self.num_walkers,
             buffer_capacity: self.buffer_capacity,
+            rewrap_stride: groups_x * WORKGROUP_SIZE,
             ..PointComputeParams::zeroed()
         }
         .with_zoom(self.zoom.as_ref());
@@ -545,7 +583,7 @@ impl PointCompute {
         });
         pass.set_pipeline(&self.rewrap_pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.dispatch_workgroups(self.buffer_capacity.div_ceil(WORKGROUP_SIZE), 1, 1);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
     }
 
     /// Dispatch the compute shader

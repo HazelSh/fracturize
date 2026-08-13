@@ -397,16 +397,20 @@ pub struct PointComputeParams {
     /// entry point. Always 0 for the chaos pass: that one places new points
     /// and must never move ones already placed.
     pub zoom_rewrap: f32,
+    /// Threads per row of the `rewrap` dispatch, which has to be 2D: a 100M
+    /// point buffer is 390,625 workgroups of 256, and a dispatch dimension
+    /// stops at 65,535. Read only by that entry point.
+    pub rewrap_stride: u32,
     /// std140 pads the scalar run out to the following vec4's alignment.
-    /// **Twelve scalars, so this is four words, not one** — get it wrong and
+    /// **Thirteen scalars, so this is three words, not one** — get it wrong and
     /// the `vec4`s below land somewhere else and the zoom silently renders
     /// from garbage rather than failing to compile.
     ///
-    /// Five rather than three since the outer-edge taper left: the edge is
+    /// Four rather than two since the outer-edge taper left: the edge is
     /// guarded at render time now (`CameraUniforms::guard_*`), because the
     /// deal cannot depend on the camera — this buffer is filled over ~800
     /// frames and would mix that many camera positions into one image.
-    pub _pad: [u32; 4],
+    pub _pad: [u32; 3],
     /// xyz = the map's fixed point, w = target radius
     pub zoom_fixed: [f32; 4],
     /// xyz = the rotation axis of `A`, w = its angle
@@ -479,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_point_compute_params_size() {
-        // std140: 11 scalars + 5 pad (64) + two vec4 (32) + two mat3x3 as
+        // std140: 12 scalars + 4 pad (64) + two vec4 (32) + two mat3x3 as
         // padded columns (48 each)
         assert_eq!(
             std::mem::size_of::<PointComputeParams>(),
@@ -493,6 +497,14 @@ mod tests {
             std::mem::offset_of!(PointComputeParams, zoom_fixed),
             64,
             "the scalar run must pad out to a 16-byte boundary"
+        );
+        // `rewrap_stride` took the first of the pad words rather than being
+        // appended, so every render made before it existed is unaffected. Size
+        // alone would not catch a reordering that stayed 192 bytes.
+        assert_eq!(
+            std::mem::offset_of!(PointComputeParams, rewrap_stride),
+            48,
+            "rewrap_stride must sit where the first pad word was"
         );
     }
 

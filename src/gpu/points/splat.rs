@@ -351,20 +351,27 @@ impl SplatRenderer {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
     }
 
-    /// Upload tonemap parameters. `point_capacity` (not the currently valid
-    /// count) normalizes exposure, so points keep constant brightness while
-    /// the buffer refills — matching how the plain renderer sparsens.
+    /// Upload tonemap parameters. `samples` normalizes exposure: it is the
+    /// buffer's *capacity* (not the currently valid count) in the ring-buffer
+    /// modes, so points keep constant brightness while the buffer refills —
+    /// matching how the plain renderer sparsens — and the total accumulated
+    /// sample count when there is a persistent histogram behind the tonemap.
+    ///
+    /// `f64` because that total is unbounded: an accumulating render passes
+    /// 2^32 samples in minutes, and a `u32` here would wrap a long render's
+    /// exposure to something arbitrary.
     pub fn upload_params(
         &self,
         queue: &wgpu::Queue,
         exposure: f32,
-        point_capacity: u32,
+        samples: f64,
         screen_height: f32,
         background: wgpu::Color,
         transparent: bool,
     ) {
-        let exposure_scale = if point_capacity > 0 {
-            exposure * EXPOSURE_K * screen_height * screen_height / point_capacity as f32
+        let exposure_scale = if samples > 0.0 {
+            (exposure as f64 * EXPOSURE_K as f64 * screen_height as f64 * screen_height as f64
+                / samples) as f32
         } else {
             0.0
         };
@@ -457,37 +464,9 @@ impl SplatRenderer {
                 height,
             );
         }
+        self.splat_pass(encoder, 0..point_count, use_point_primitives);
+
         let accum = self.accum.as_ref().unwrap();
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("splat_accum_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &accum.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if point_count > 0 {
-                pass.set_bind_group(0, &self.accum_bind_group, &[]);
-                if use_point_primitives {
-                    pass.set_pipeline(&self.point_pipeline);
-                    pass.draw(0..point_count, 0..1);
-                } else {
-                    pass.set_pipeline(&self.quad_pipeline);
-                    pass.draw(0..4, 0..point_count);
-                }
-            }
-        }
-
         // Whichever texture holds output-sized linear density: the resolved
         // one under supersampling, the accumulation itself otherwise.
         let tonemap_bind_group = match self.supersample.as_ref() {
@@ -498,36 +477,140 @@ impl SplatRenderer {
             }
             None => &accum.tonemap_bind_group,
         };
+        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group);
+    }
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("splat_tonemap_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // Fullscreen overwrite; the clear value is irrelevant
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.tonemap_pipeline);
-            pass.set_bind_group(0, tonemap_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+    /// Splat `points` — a half-open range of point-buffer indices — into the
+    /// accumulation texture, clearing it first.
+    ///
+    /// The clear is what makes this usable as a *batch*: the accumulating
+    /// renderer wants each pass to hold one batch's contribution and nothing
+    /// else, because the persistent histogram behind it is where sums live.
+    /// The ordinary path passes the whole buffer and gets what it always got.
+    ///
+    /// The caller must have ensured the accumulation target (`render` does, and
+    /// `ensure_accum` is what does it).
+    pub fn splat_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        points: std::ops::Range<u32>,
+        use_point_primitives: bool,
+    ) {
+        let accum = self.accum.as_ref().expect("accumulation target must be ensured first");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("splat_accum_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &accum.view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if !points.is_empty() {
+            pass.set_bind_group(0, &self.accum_bind_group, &[]);
+            // Both entry points read the point index straight off a builtin
+            // (`vertex_index` for points, `instance_index` for quads), and
+            // WebGPU includes the draw's first index in both — so a range is a
+            // range either way.
+            if use_point_primitives {
+                pass.set_pipeline(&self.point_pipeline);
+                pass.draw(points, 0..1);
+            } else {
+                pass.set_pipeline(&self.quad_pipeline);
+                pass.draw(0..4, points);
+            }
         }
+    }
+
+    /// Size the accumulation target for an output of `width x height`, and
+    /// return the view a caller can read the raw batch out of.
+    ///
+    /// The returned size is the *accumulation* size: N times larger per axis
+    /// under supersampling.
+    pub fn prepare_accum(
+        &mut self,
+        device: &Device,
+        width: u32,
+        height: u32,
+    ) -> (&wgpu::TextureView, u32, u32) {
+        let n = self.supersample();
+        self.ensure_accum(device, width * n, height * n);
+        let accum = self.accum.as_ref().expect("just ensured");
+        (&accum.view, accum.width, accum.height)
+    }
+
+    /// A tonemap bind group over an arbitrary output-sized linear texture —
+    /// the accumulating path's resolved histogram, rather than either of the
+    /// two textures this renderer owns.
+    pub fn tonemap_bind_group(&self, device: &Device, view: &wgpu::TextureView) -> BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat_external_tonemap_bind_group"),
+            layout: &self.tonemap_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Encode the log tonemap from `bind_group` into `target`.
+    pub fn tonemap_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        bind_group: &BindGroup,
+    ) {
+        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, bind_group);
+    }
+
+    fn encode_tonemap(
+        pipeline: &RenderPipeline,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        bind_group: &BindGroup,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("splat_tonemap_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Fullscreen overwrite; the clear value is irrelevant
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// (Re)create the output-sized linear texture the filter resolves into,

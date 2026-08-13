@@ -5,6 +5,7 @@
 //! 2. Render points as billboard quads
 //! 3. Use circular buffer updates for temporal stability
 
+pub mod accumulate;
 pub mod compute;
 pub mod downsample;
 pub mod renderer;

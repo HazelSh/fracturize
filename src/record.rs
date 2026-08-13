@@ -61,6 +61,13 @@ pub struct Quality {
     pub height: u32,
     pub points: usize,
     pub accumulate: u32,
+    /// Samples per output pixel actually accumulated, when the render used the
+    /// persistent histogram. `None` for a ring-buffer render, where the sample
+    /// count is `points` and there is nothing extra to say.
+    ///
+    /// The *achieved* figure, not the requested one: a render stopped early
+    /// records what it got, so the receipt describes the picture on disk.
+    pub spp: Option<f32>,
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
@@ -144,6 +151,9 @@ impl RenderRecord {
         let _ = writeln!(s, "renderer = {}", if q.splat { "\"splat\"" } else { "\"points\"" });
         let _ = writeln!(s, "points = {}", q.points);
         let _ = writeln!(s, "accumulate = {}", q.accumulate);
+        if let Some(spp) = q.spp {
+            let _ = writeln!(s, "spp = {}", num(spp));
+        }
         let _ = writeln!(s, "exposure = {}", num(q.exposure));
         let _ = writeln!(s, "transparent = {}", q.transparent);
         let _ = writeln!(s, "supersample = {}", q.supersample);
@@ -310,6 +320,7 @@ mod tests {
                 height: 1080,
                 points: 100_000_000,
                 accumulate: 256,
+                spp: None,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

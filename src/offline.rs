@@ -20,6 +20,7 @@ use rand::SeedableRng;
 use crate::camera::{CameraOverride, OrbitCamera};
 use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
+use crate::gpu::points::accumulate::Accumulator;
 use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
@@ -27,6 +28,13 @@ use crate::record::RenderRecord;
 use crate::scene::Scene;
 use crate::render_job::{JobControl, Outcome, CANCELLED};
 use crate::view::View;
+
+/// Extra chaos-game frames after the ring fills, when nothing says otherwise.
+///
+/// Named so the accumulating path can tell "the user asked for extra churn"
+/// from "nobody mentioned it" — under `--spp` the flag has no meaning and
+/// saying so is only worth it when it was actually set.
+pub const DEFAULT_ACCUMULATE: u32 = 32;
 
 /// How many bits per channel the PNG gets.
 ///
@@ -211,6 +219,14 @@ pub struct OfflineParams<'a> {
     /// made before this existed; any other value is an independent deal of the
     /// same attractor.
     pub chaos_seed: u64,
+    /// Target samples per **output** pixel, accumulated into a persistent
+    /// histogram. `None` is the ring-buffer render this program has always
+    /// done, where the sample count is the buffer's capacity and nothing more.
+    ///
+    /// Per *output* pixel deliberately, not per accumulation texel: it is the
+    /// user-facing quality dial, and it should not silently multiply by N²
+    /// when you turn on supersampling.
+    pub spp: Option<u32>,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -238,6 +254,29 @@ impl Sampling {
     }
 
     /// Height of the surface actually being rasterized into.
+    /// Refuse a factor whose accumulation would not fit in a texture.
+    ///
+    /// Supersampling multiplies both axes, and 4x at 4K wants 15360 px against
+    /// a common limit of 8192 — which arrives, without this, as a wgpu
+    /// validation panic naming a number the user never typed. Checked against
+    /// the device rather than a constant because the limit is the adapter's.
+    ///
+    /// Every entry point that builds a supersampled target has to call this;
+    /// there is no type that can force it, so the five call sites sit directly
+    /// after `create_device` where they can be read off together.
+    fn check_fits(&self, device: &wgpu::Device, width: u32, height: u32) -> Result<(), String> {
+        let max = device.limits().max_texture_dimension_2d;
+        let (w, h) = (width * self.n, height * self.n);
+        if w > max || h > max {
+            return Err(format!(
+                "--supersample {} makes a {}x{} accumulation, past this GPU's {}px texture limit \
+                 — render smaller, or lower --supersample",
+                self.n, w, h, max
+            ));
+        }
+        Ok(())
+    }
+
     fn target_height(&self) -> f32 {
         (self.height * self.n) as f32
     }
@@ -679,7 +718,10 @@ impl TileRenderer {
         compute: &PointCompute,
         splat: bool,
         exposure: f32,
-        point_count: u32,
+        // What exposure is normalized against: the ring's point count in the
+        // ordinary path, the total accumulated sample count when there is a
+        // persistent histogram behind the tonemap.
+        samples: f64,
         sampling: Sampling,
         filter: Filter,
         filter_radius: f32,
@@ -695,7 +737,7 @@ impl TileRenderer {
             renderer.upload_params(
                 queue,
                 exposure,
-                point_count,
+                samples,
                 sampling.target_height(),
                 clear,
                 transparent,
@@ -927,6 +969,13 @@ impl TileTarget {
                 );
             }
         }
+        self.copy_out(&mut encoder);
+        queue.submit(std::iter::once(encoder.finish()));
+        self.read_into_sheet(device, sheet, sheet_w, col, row);
+    }
+
+    /// Queue the colour target's copy into the readback buffer.
+    fn copy_out(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.color_texture,
@@ -944,8 +993,18 @@ impl TileTarget {
             },
             wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
         );
-        queue.submit(std::iter::once(encoder.finish()));
+    }
 
+    /// Map the readback, decode it to 16-bit sRGB, and blit it into the sheet
+    /// at tile position `(col, row)`. The copy must already have been submitted.
+    fn read_into_sheet(
+        &self,
+        device: &wgpu::Device,
+        sheet: &mut [u16],
+        sheet_w: u32,
+        col: u32,
+        row: u32,
+    ) {
         let slice = self.readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
@@ -1131,6 +1190,9 @@ fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant)
 /// rendered and saved, and the return says [`Outcome::Partial`] so no caller
 /// can report it as a finished render.
 pub fn render(params: OfflineParams) -> Result<Outcome, String> {
+    if params.spp.is_some() {
+        return render_accumulated(params);
+    }
     let OfflineParams {
         mut scene,
         view,
@@ -1154,6 +1216,8 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         threads,
         gpu_timing,
         chaos_seed,
+        // `Some` took the accumulating path at the top of this function.
+        spp: _,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1172,13 +1236,14 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
     let (device, queue, adapter) = create_device()?;
+    sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
     let (compute, point_count, mut outcome) =
         fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed)?;
     let mut renderer =
         TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+        &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
         filter_radius, bit_depth, clear, transparent,
     );
     let t_fill = Instant::now();
@@ -1267,6 +1332,8 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             height,
             points: scene.point_count,
             accumulate,
+            // No histogram: the sample count is `points`.
+            spp: None,
             splat,
             exposure,
             transparent,
@@ -1296,6 +1363,324 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         sheet_w, sheet_h,
         tiles.len(), if tiles.len() == 1 { "" } else { "s" },
         width, height, point_count, out_path.display(),
+    );
+    print_timing(t_start, t_setup, t_fill, t_render, t_done);
+    Ok(outcome)
+}
+
+/// `--spp` is a still's dial. Every other entry point says so rather than
+/// silently rendering at the ring-buffer sample count and letting the flag
+/// read as if it had worked.
+///
+/// An animation is the interesting case: accumulating each frame to a fixed
+/// sample count is a perfectly sensible thing to want, and the reason it is not
+/// here is cost, not principle — a 600-frame flight at `--spp 500` is 600
+/// accumulated stills. It wants its own budget in frames, not a flag inherited
+/// from the still path.
+fn reject_spp(spp: Option<u32>, what: &str) -> Result<(), String> {
+    match spp {
+        None => Ok(()),
+        Some(_) => Err(format!(
+            "--spp accumulates one still into a persistent histogram; {} would be one full \
+             accumulation run per frame. Render the frames separately.",
+            what
+        )),
+    }
+}
+
+/// Render a still through the persistent accumulation histogram: the path with
+/// no sample ceiling.
+///
+/// The ordinary path splats the point ring once, so the distinct samples in the
+/// image are exactly the ring's capacity however long the chaos game ran. Here
+/// the ring is a streaming working set. Each time the chaos game has replaced
+/// every point in it — one *lap* — the whole buffer is splatted into a transient
+/// texture and folded into a 64-bit fixed-point histogram that outlives it, and
+/// the samples are then free to be overwritten. Quality is `--spp`, and the only
+/// thing that limits it is time.
+///
+/// Splatting a whole lap rather than each dispatch's delta is what makes this
+/// affordable: the fold is a compute pass over every texel of the accumulation,
+/// so it wants to be amortized over a full buffer of points, not over an
+/// eightieth of one.
+///
+/// Deliberately narrower than `render`, and it says so rather than quietly
+/// doing something else:
+///
+/// * **Splat only.** The histogram accumulates linear density for a log
+///   tonemap. The plain points renderer is depth-tested and opaque — averaging
+///   its output over time is a different operation with a different meaning.
+/// * **Single tile only.** Each tile of a contact sheet would need its own full
+///   accumulation run, so a 4x2 sheet at `--spp 500` is eight `--spp 500`
+///   renders. That is a fine thing to want and a terrible thing to get by
+///   accident.
+///
+/// Cancelling keeps the work: the histogram at lap 400 of 1000 is the same
+/// picture as at lap 1000, noisier, and exposure is normalized by the laps
+/// actually completed so the brightness is right either way. This is the
+/// strongest form of the anytime property this renderer has.
+fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
+    let OfflineParams {
+        mut scene,
+        view,
+        width,
+        height,
+        out_path,
+        accumulate,
+        haze_enabled,
+        grid,
+        splat,
+        exposure,
+        transparent,
+        control,
+        camera: camera_over,
+        // Nothing to label: a single tile is never labelled, and this path
+        // renders exactly one.
+        labels: _,
+        supersample,
+        filter,
+        filter_radius,
+        bit_depth,
+        scene_path,
+        threads,
+        gpu_timing,
+        chaos_seed,
+        spp,
+    } = params;
+    let spp = spp.expect("only called with a sample target");
+    if !splat {
+        return Err(
+            "--spp accumulates linear density for the log tonemap, so it needs --splat".into()
+        );
+    }
+    if !matches!(grid, GridMode::Single) {
+        return Err(
+            "--spp renders one accumulated still; a contact sheet would be one full accumulation \
+             run per tile. Render the tiles separately."
+                .into(),
+        );
+    }
+    let sampling = Sampling::new(supersample, height);
+    let t_start = Instant::now();
+
+    if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
+        scene.color_falloff = f;
+        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+    }
+    let color_contrast =
+        view.as_ref().and_then(|v| v.color_contrast).unwrap_or(scene.color_contrast);
+    let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
+
+    let (device, queue, adapter) = create_device()?;
+    sampling.check_fits(&device, width, height)?;
+    let t_setup = Instant::now();
+
+    let mut compute = PointCompute::new(
+        &device,
+        &scene.transforms,
+        &scene.colors,
+        &scene.colormap,
+        scene.point_count as u32,
+        chaos_seed,
+    );
+    compute.zoom = scene_zoom(&scene)?;
+    let capacity = compute.buffer_capacity;
+
+    // Laps to reach the target. `--spp` counts against *output* pixels, so
+    // turning on supersampling costs N² more fill per lap but does not silently
+    // demand N² more laps.
+    let target_samples = spp as f64 * width as f64 * height as f64;
+    let laps = (target_samples / capacity as f64).ceil().max(1.0) as u32;
+
+    let (base_camera, point_size, haze, folded) =
+        base_setup(&view, &scene, haze_enabled, camera_over);
+    let zoom = scene_zoom(&scene)?;
+    compute.rewrap(&device, &queue, folded);
+
+    let aspect = width as f32 / height as f32;
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
+
+    let mut renderer = SplatRenderer::new(
+        &device,
+        bit_depth.format(),
+        &compute.point_buffer,
+        &compute.colormap_buffer,
+    );
+    // The batch texture has to be the supersampled size, so the renderer is told
+    // the factor — but its own filter/tonemap chain is never used here. This
+    // path calls `splat_pass` and `tonemap_pass` directly, with the histogram
+    // and *its* filter in between.
+    renderer.set_supersample(&device, &queue, sampling.n, filter, filter_radius);
+
+    let (haze_near, haze_far) = haze.band(base_camera.distance);
+    let camera = CameraUniforms::new(
+        base_camera.view_proj(aspect),
+        sampling.target_height(),
+        point_size,
+        aspect,
+        1.0,
+        haze_near,
+        haze_far,
+        haze.transmittance,
+        haze.saturation,
+        color_contrast,
+        scene.background.to_array(),
+        transparent,
+        scene.color_mode.packs_rgb(),
+    )
+    .with_zoom_guard(zoom.as_ref(), base_camera.eye())
+    .with_supersample(sampling.n);
+    renderer.upload_camera(&queue, &camera);
+
+    let target = TileTarget::new(
+        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
+    );
+    // Sizes the batch texture and hands back the view the histogram reads.
+    let (batch_view, accum_w, accum_h) = renderer.prepare_accum(&device, width, height);
+    let batch_view = batch_view.clone();
+    let histogram =
+        Accumulator::new(&device, &queue, width, height, sampling.n, filter, filter_radius)?;
+    let batch_bind_group = histogram.bind_batch(&device, &batch_view);
+    {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("accum_clear_encoder"),
+        });
+        histogram.clear(&mut encoder);
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    let frames_per_lap = compute.frames_per_lap();
+    println!(
+        "Accumulating {} laps x {} points ({} samples/px target) into a {}x{} histogram",
+        laps, capacity, spp, accum_w, accum_h,
+    );
+    if accumulate != DEFAULT_ACCUMULATE {
+        println!("  (--accumulate is ignored here: --spp sets how long the chaos game runs)");
+    }
+    if let Some(c) = &control {
+        c.phase("accumulating");
+        c.log(format!("{} laps of {} points, target {} samples/px", laps, capacity, spp));
+    }
+
+    let mut done_laps: u32 = 0;
+    let mut outcome = Outcome::Complete;
+    let mut timer = gpu_timing
+        .then(|| crate::gpu::GpuTimer::new(&device, &queue, GPU_TIMING_SAMPLES))
+        .flatten();
+    for lap in 0..laps {
+        for _ in 0..frames_per_lap {
+            compute.advance_fill(&queue);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("accum_chaos_encoder"),
+            });
+            compute.dispatch_timed(&mut encoder, timer.as_mut());
+            queue.submit(std::iter::once(encoder.finish()));
+        }
+        // Splat the whole ring and fold it in. Both passes go in one encoder:
+        // the fold reads exactly what the splat wrote, and queue order inside a
+        // submission gives that ordering.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("accum_fold_encoder"),
+        });
+        renderer.splat_pass(&mut encoder, 0..capacity, use_point_primitives);
+        histogram.add(&mut encoder, &batch_bind_group);
+        queue.submit(std::iter::once(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        done_laps += 1;
+
+        if let Some(c) = &control {
+            c.progress(lap + 1, laps);
+            if c.should_stop() {
+                c.log(format!(
+                    "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
+                    done_laps,
+                    laps,
+                    done_laps as f64 * capacity as f64 / (width as f64 * height as f64),
+                ));
+                outcome = Outcome::Partial;
+                break;
+            }
+        }
+    }
+    let t_fill = Instant::now();
+    if let Some(t) = &timer {
+        println!("{}", crate::gpu::timing::summarize("GPU chaos dispatch", &t.read(&device, &queue)));
+    }
+
+    // Exposure is normalized by the samples actually accumulated, not the ones
+    // asked for. That is what makes a cancelled render come out at the right
+    // brightness rather than dark in proportion to how early it stopped — and
+    // what makes `--spp` a quality dial rather than an exposure dial.
+    let accumulated = done_laps as f64 * capacity as f64;
+    renderer.upload_params(
+        &queue,
+        exposure,
+        accumulated,
+        sampling.target_height(),
+        clear,
+        transparent,
+    );
+
+    let mut sheet = vec![0u16; (width * height * 4) as usize];
+    {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("accum_resolve_encoder"),
+        });
+        // Resolve to output-sized linear density (filtering on the way when
+        // supersampling is on), then the ordinary log tonemap.
+        let resolved = histogram.resolve(&device, &mut encoder);
+        let bind_group = renderer.tonemap_bind_group(&device, resolved);
+        renderer.tonemap_pass(&mut encoder, &target.color_view, &target.depth_view, &bind_group);
+        target.copy_out(&mut encoder);
+        queue.submit(std::iter::once(encoder.finish()));
+        target.read_into_sheet(&device, &mut sheet, width, 0, 0);
+    }
+    let t_render = Instant::now();
+
+    if let Some(c) = &control {
+        c.phase("saving");
+    }
+    let achieved_spp = (accumulated / (width as f64 * height as f64)) as f32;
+    let record = make_record(
+        &scene,
+        scene_path.as_deref(),
+        &base_camera,
+        crate::record::Quality {
+            width,
+            height,
+            points: scene.point_count,
+            accumulate,
+            spp: Some(achieved_spp),
+            splat,
+            exposure,
+            transparent,
+            supersample: sampling.n,
+            filter,
+            filter_radius,
+            bit_depth,
+        },
+        threads,
+        adapter,
+        (t_render - t_start).as_secs_f32(),
+    );
+    save_sheet(out_path, &sheet, width, height, bit_depth, record.as_ref())?;
+    if let Some(r) = &record {
+        match r.write_sidecar(out_path) {
+            Ok(p) => println!("Render record: {}", p.display()),
+            Err(e) => eprintln!("warning: {}", e),
+        }
+    }
+    let t_done = Instant::now();
+
+    println!(
+        "{} {}x{} ({:.0} samples/px from {} laps of {} points) -> {}",
+        if outcome.is_partial() { "Stopped, partial render" } else { "Rendered" },
+        width,
+        height,
+        achieved_spp,
+        done_laps,
+        capacity,
+        out_path.display(),
     );
     print_timing(t_start, t_setup, t_fill, t_render, t_done);
     Ok(outcome)
@@ -1385,7 +1770,9 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         threads,
         gpu_timing,
         chaos_seed,
+        spp,
     } = params;
+    reject_spp(spp, "an animation")?;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
@@ -1408,6 +1795,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
     let (device, queue, adapter) = create_device()?;
+    sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
     let (compute, point_count, fill) =
@@ -1419,7 +1807,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     }
     let mut renderer =
         TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+        &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
         filter_radius, bit_depth, clear, transparent,
     );
     let t_fill = Instant::now();
@@ -1572,6 +1960,8 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             height,
             points: scene.point_count,
             accumulate,
+            // No histogram: the sample count is `points`.
+            spp: None,
             splat,
             exposure,
             transparent,
@@ -1644,7 +2034,9 @@ pub fn render_mutations(
         threads: _,
         gpu_timing,
         chaos_seed,
+        spp,
     } = params;
+    reject_spp(spp, "a variant sheet")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -1682,6 +2074,7 @@ pub fn render_mutations(
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
     let (device, queue, _adapter) = create_device()?;
+    sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
@@ -1729,7 +2122,7 @@ pub fn render_mutations(
         outcome = outcome.and(fill);
         let mut renderer =
             TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+        &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
         filter_radius, bit_depth, clear, transparent,
     );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
@@ -1837,7 +2230,9 @@ pub fn render_sweep(
         threads: _,
         gpu_timing,
         chaos_seed,
+        spp,
     } = params;
+    reject_spp(spp, "a sweep sheet")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -1861,6 +2256,7 @@ pub fn render_sweep(
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
     let (device, queue, _adapter) = create_device()?;
+    sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
     // One framing and one haze band for the whole sheet: a contact sheet is
@@ -1910,7 +2306,7 @@ pub fn render_sweep(
             fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed)?;
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
-            &device, &queue, &compute, splat, exposure, point_count, sampling, filter,
+            &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
             filter_radius, bit_depth, clear, transparent,
         );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
@@ -2051,6 +2447,7 @@ mod tests {
                 height: h,
                 points: 1000,
                 accumulate: 4,
+                spp: None,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

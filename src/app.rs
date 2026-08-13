@@ -3214,6 +3214,10 @@ impl App {
                 // there is nothing here that would use one until accumulation
                 // lands, and a knob with no effect is worse than none.
                 chaos_seed: crate::gpu::points::compute::DEFAULT_SEED,
+                // The dialog has no sample-target control yet. Accumulation is
+                // a CLI dial for now — it changes what a render *costs* by
+                // orders of magnitude, and the dialog's other controls do not.
+                spp: None,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),
@@ -5178,7 +5182,7 @@ impl App {
                 self.splat_renderer.upload_params(
                     &self.gpu.queue,
                     self.exposure,
-                    self.buffer_capacity,
+                    self.buffer_capacity as f64,
                     SCREENSHOT_HEIGHT as f32,
                     crate::scene::clear_color(self.scene.background, alpha),
                     self.transparent_render,
@@ -5469,7 +5473,7 @@ impl App {
                     // `drawn_points`) doesn't change how bright the result is.
                     // During warmup this is below capacity too, which is the
                     // brightness ramp that has always been there.
-                    self.buffer_capacity.min(point_count.max(1)),
+                    self.buffer_capacity.min(point_count.max(1)) as f64,
                     height as f32,
                     crate::scene::clear_color(self.scene.background, 1.0),
                     false,

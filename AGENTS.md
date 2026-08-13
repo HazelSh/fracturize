@@ -2071,6 +2071,84 @@ walker seeding and therefore the image, so it is not a free experiment.
 That was the right thing to test and the wrong answer; this is the note saying
 so.
 
+## Accumulation: `--spp`, and the sample ceiling it removes
+
+The ordinary render splats the point ring **once**, so the distinct samples in
+a finished image equal the ring's capacity and nothing more. `--accumulate`
+changes *which* samples survive, never how many. That is the ceiling: a 1.45 s
+run generates 2.1e9 samples and throws away 95% of them, and `--effort ultra`
+is the largest buffer worth allocating rather than the best picture this
+renderer can make.
+
+`--spp N` (splat only, stills only) turns the ring into a streaming working
+set. Each time the chaos game has replaced every point in it — one **lap** —
+the whole buffer is splatted into a transient texture and folded into a
+persistent 64-bit fixed-point histogram, and the samples are then free to be
+overwritten. Quality is bounded by time, not by VRAM.
+
+```
+fracturize -s scenes/blossom.toml --splat --effort converged -r out.png
+fracturize -s scenes/blossom.toml --splat --spp 20000 -r out.png
+```
+
+**It works, and here is the evidence.** Two renders differing only in
+`--chaos-seed` differ by sampling noise and nothing else, since everything
+deterministic cancels. blossom, 960x540, `--supersample 2`, 16-bit:
+
+| spp  | mean abs. difference |
+|------|----------------------|
+| 100  | 2.9e-4               |
+| 500  | 1.4e-4               |
+| 2000 | 7.0e-5               |
+| 8000 | 3.5e-5               |
+
+Textbook 1/sqrt(N) — every 4x in samples halves the noise, with no plateau
+anywhere in range. `--effort converged` is 8000 spp for that reason: ~100x
+below one 8-bit code (1/255 = 3.9e-3), ~35 s at 1080p on the reference desktop.
+The tier is **not** called "overnight"; the measurement says the hardware does
+not need a night. `--spp` is there for anyone who wants to spend one anyway.
+
+### Things that will bite
+
+* **`--spp` counts against *output* pixels**, not accumulation texels, so
+  turning on `--supersample` costs N² more fill per lap but does not silently
+  demand N² more laps.
+* **Exposure is normalized by the laps actually completed**, not the ones
+  asked for. That is what makes cancelling produce the same picture, noisier,
+  rather than one darkened in proportion to how early it stopped. It is also
+  why `upload_params` takes `f64`: an accumulating render passes 2^32 samples
+  in minutes.
+* **`--points` no longer sets quality here, it sets *batch size*.** Under
+  accumulation the buffer's only job is keeping the GPU busy between folds, so
+  `converged` deliberately uses a *smaller* buffer than `ultra` — the memory is
+  better spent on the histogram, which is 32 bytes a texel and is what decides
+  whether a large supersampled render runs at all.
+* **Splat only, stills only, and it says so** rather than quietly rendering at
+  the ring-buffer sample count. A contact sheet or an animation would be one
+  full accumulation run per tile or frame, which is a fine thing to want and a
+  terrible thing to get by accident.
+* The histogram is **64-bit fixed point** and the reasons are in
+  `src/gpu/points/accumulate.rs`. Briefly: f32 *stalls* — once a hot texel's
+  running sum exceeds an increment by 2^24 the increment stops registering, and
+  the sum-to-increment ratio is just the lap count — while 32 bits cannot
+  simultaneously resolve a large gaussian's faint tail and hold a bright core.
+* Folding **per lap, not per dispatch**, is what makes it affordable: the fold
+  is a compute pass over every texel of the accumulation, so it wants
+  amortizing over a whole buffer of points rather than an eightieth of one.
+
+### Two panics fixed on the way
+
+Both predate accumulation and both used to die inside wgpu quoting a number the
+user never typed:
+
+* `--supersample 4` at 4K wants a 15360 px texture against a limit of 8192.
+  Now `Sampling::check_fits`, called after `create_device` in all five offline
+  entry points.
+* `--effort ultra` on a **zoom scene** dispatched 390,625 workgroups against a
+  limit of 65,535, because `rewrap` runs one thread per point in 1D. Now a 2D
+  dispatch with the row stride in `ComputeParams::rewrap_stride`, which took a
+  word of existing padding and so costs nothing.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

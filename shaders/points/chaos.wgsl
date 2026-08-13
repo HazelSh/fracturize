@@ -77,12 +77,15 @@ struct ComputeParams {
     // Periods to carry the buffer through, read only by `rewrap` (0 for the
     // chaos pass, which must never move a point that is already placed).
     zoom_rewrap: f32,
-    // Twelve scalars, so four words of padding before the vec4s. The band's
+    // Threads per row of the `rewrap` dispatch, so it can be 2D. A 100M point
+    // buffer is 390,625 workgroups of 256, and a dispatch dimension stops at
+    // 65,535 — see `rewrap_in`. Read by nothing else.
+    rewrap_stride: u32,
+    // Thirteen scalars, so three words of padding before the vec4s. The band's
     // outer edge is faded at *render* time now (see guard_weight() in
     // points/splat.wgsl); it cannot be done here, because this buffer is
     // filled over ~800 frames and a camera-dependent deal would mix that many
     // camera positions into one image.
-    _pad0: u32,
     _pad1: u32,
     _pad2: u32,
     _pad3: u32,
@@ -443,7 +446,7 @@ fn renormalize(pos: vec3<f32>, rng: ptr<function, vec4<u32>>) -> vec3<f32> {
 // points/splat.wgsl). Everything the picture is actually made of holds still.
 @compute @workgroup_size(256)
 fn rewrap(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+    let idx = global_id.y * params.rewrap_stride + global_id.x;
     if idx >= params.buffer_capacity || params.zoom_enabled == 0u {
         return;
     }

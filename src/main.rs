@@ -288,10 +288,12 @@ struct Args {
     #[arg(long, default_value = "1080", value_name = "PX", help_heading = "Offline render")]
     height: u32,
 
-    /// Effort preset: draft, low, medium, high or ultra [the scene's]
+    /// Effort preset: draft, low, medium, high, ultra or converged [the scene's]
     ///
     /// draft is for fast composition checks, ultra for final frames on a real
-    /// GPU. Explicit --points / --accumulate override it.
+    /// GPU, converged for an accumulated render whose sampling noise is ~100x
+    /// below one 8-bit code (it implies --spp and so needs --splat). Explicit
+    /// --points / --accumulate / --spp override it.
     #[arg(long, value_enum, value_name = "PRESET", hide_possible_values = true, help_heading = "Offline render")]
     effort: Option<Effort>,
 
@@ -305,6 +307,20 @@ struct Args {
     /// Extra chaos-game frames after the buffer fills [--effort, else 32]
     #[arg(long, value_name = "FRAMES", help_heading = "Offline render")]
     accumulate: Option<u32>,
+
+    /// Target samples per output pixel, accumulated without a ceiling
+    ///
+    /// The ordinary render splats the point buffer once, so its sample count is
+    /// that buffer's capacity and no amount of extra time changes it. With
+    /// --spp the buffer becomes a working set: it is refilled and folded into a
+    /// persistent histogram until the target is met, so quality is bounded by
+    /// time rather than by memory. Needs --splat, and renders one still —
+    /// contact sheets and animations would be one accumulation run per tile.
+    ///
+    /// Cancelling keeps the work: exposure is normalized by what was actually
+    /// accumulated, so a run stopped at 40% is the same picture, noisier.
+    #[arg(long, value_name = "N", help_heading = "Offline render")]
+    spp: Option<u32>,
 
     /// Supersampling factor, 1-4 [2]
     ///
@@ -1103,8 +1119,9 @@ fn random_scene(seed: Option<u64>) -> (Scene, u64) {
 /// behaviour exactly.
 const DEFAULT_SUPERSAMPLE: u32 = 2;
 
-/// Named effort presets for offline rendering: (points, accumulate frames).
-/// draft is for fast composition checks, ultra for final frames on a real GPU.
+/// Named effort presets for offline rendering: (points, accumulate frames,
+/// samples per output pixel). draft is for fast composition checks, ultra for
+/// final frames on a real GPU.
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum Effort {
     Draft,
@@ -1112,16 +1129,57 @@ enum Effort {
     Medium,
     High,
     Ultra,
+    Converged,
 }
 
 impl Effort {
-    fn preset(self) -> (usize, u32) {
+    /// `(point buffer capacity, extra chaos frames, samples per output pixel)`.
+    ///
+    /// The first five tiers set a *buffer size*, and that is what caps their
+    /// quality: they splat the ring once, so the samples in the image are the
+    /// capacity, and `ultra` is the largest buffer worth allocating rather than
+    /// the best picture the renderer can make. `converged` is the first tier
+    /// that sets a **sample target** instead, which the accumulating path can
+    /// meet from a modest buffer given time — so its point count is *lower*
+    /// than ultra's on purpose. Under accumulation the buffer is a working set
+    /// whose only job is to keep the GPU busy between folds, and a smaller one
+    /// leaves the memory for the histogram, which is the resource that decides
+    /// whether a large supersampled render runs at all.
+    ///
+    /// ## Why 8000, and why the tier is not called "overnight"
+    ///
+    /// Measured on the reference desktop, blossom at 960x540 and `--supersample
+    /// 2`, comparing two renders that differ only in `--chaos-seed` — which is
+    /// sampling noise and nothing else, since everything deterministic cancels:
+    ///
+    /// | spp  | mean abs. difference, 16-bit |
+    /// |------|------------------------------|
+    /// | 100  | 2.9e-4                       |
+    /// | 500  | 1.4e-4                       |
+    /// | 2000 | 7.0e-5                       |
+    /// | 8000 | 3.5e-5                       |
+    ///
+    /// Textbook 1/sqrt(N): every 4x in samples halves the noise, with no
+    /// plateau anywhere in range. The renderer really is sample-limited, and
+    /// the accumulator really does deliver — but it also means "enough" is a
+    /// judgement rather than a discoverable limit, so the tier has to name one.
+    ///
+    /// 8000 puts the noise ~100x below one 8-bit code (1/255 = 3.9e-3), which
+    /// is converged for any output this program writes. It costs ~35 s at 1080p
+    /// on the reference desktop — so an "overnight" tier would have been a name
+    /// promising something the hardware does not need. `--spp` is there for
+    /// anyone who wants to spend the night anyway.
+    ///
+    /// One scene, one framing. A deep zoom with a wider dynamic range will
+    /// converge slower.
+    fn preset(self) -> (usize, u32, Option<u32>) {
         match self {
-            Effort::Draft => (1_000_000, 4),
-            Effort::Low => (4_000_000, 16),
-            Effort::Medium => (12_000_000, 48),
-            Effort::High => (40_000_000, 128),
-            Effort::Ultra => (100_000_000, 256),
+            Effort::Draft => (1_000_000, 4, None),
+            Effort::Low => (4_000_000, 16, None),
+            Effort::Medium => (12_000_000, 48, None),
+            Effort::High => (40_000_000, 128, None),
+            Effort::Ultra => (100_000_000, 256, None),
+            Effort::Converged => (20_000_000, 256, Some(8000)),
         }
     }
 }
@@ -1801,17 +1859,19 @@ fn main() {
         apply_palette_args(&mut scene, &args, true);
 
         // Effort presets set points + accumulation; explicit flags win
-        let (effort_points, effort_accumulate) = match args.effort {
+        let (effort_points, effort_accumulate, effort_spp) = match args.effort {
             Some(e) => {
-                let (p, a) = e.preset();
-                (Some(p), Some(a))
+                let (p, a, s) = e.preset();
+                (Some(p), Some(a), s)
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         if let Some(n) = args.points.or(effort_points) {
             scene.point_count = n;
         }
-        let accumulate = args.accumulate.or(effort_accumulate).unwrap_or(32);
+        let accumulate =
+            args.accumulate.or(effort_accumulate).unwrap_or(offline::DEFAULT_ACCUMULATE);
+        let spp = args.spp.or(effort_spp);
 
         let view = args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
@@ -1885,6 +1945,7 @@ fn main() {
                 .unwrap_or_else(render_job::default_threads),
             gpu_timing: args.gpu_timing,
             chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
+            spp,
         };
         // The extension picks the codec as well as the container: .avif is
         // AV1, .mp4 is H.264. Anything else is a still.

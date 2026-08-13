@@ -7,16 +7,24 @@ the numbers attached.
 
 ## Status
 
-**Slices 0 and 1 are implemented**, on branch `render-quality`, untested by Hazel.
+**Slices 0 through 4 are implemented**, on branch `render-quality`, untested by Hazel.
 
 - **Slice 0** (`5fdec96`) — encoder thread cap + `--threads` and a dialog control;
   partial-result-on-cancel via a `render_job::Outcome` enum; the shared const-trimmed
   `VERSION` in `src/version.rs`.
 - **Slice 1** (`2c3f86b`, `874866b`) — `--supersample`, `--filter`, `--filter-radius`,
   the two clamp/threshold fixes, and `--bit-depth 16`.
+- **Slice 2** (`93782a1`) — render records: `fracturize:scene` / `fracturize:render`
+  PNG chunks and a `.render.toml` sidecar.
+- **Slice 3** (`2f5b80d`) — `--gpu-timing`, and the *negative* result that dispatch
+  batching is a 19% regression. Reverted; the instrument was kept.
+- **Slice 4a** (`6a0ebeb`) — `--chaos-seed`, with `DEFAULT_SEED = 0` reproducing every
+  earlier render byte for byte.
+- **Slice 4b** — the persistent accumulation histogram: `--spp`, `--effort converged`,
+  `src/gpu/points/accumulate.rs` and `shaders/points/accumulate.wgsl`.
 
-Two deviations from what is written below, both deliberate and both argued at the
-point they occur:
+Deviations from what is written below, all deliberate and all argued at the point
+they occur:
 
 1. **The size *floors* do not scale with N.** The text below says both bounds of the
    splat radius clamp need scaling; that is right for the 12px cap and wrong for the
@@ -27,11 +35,29 @@ point they occur:
    `Rgba16Float` with the sRGB encode moved to the CPU readback, and the contact sheet
    and `glyphs::draw_label` widened to `u16`. Done, and 8-bit output is byte-identical
    to before — but it is a slice of its own, not a line.
+3. **Dispatch batching, called "the real GPU-side lever" below, is a regression.**
+   Measured 19% slower end to end. See AGENTS.md, "GPU timing, and the batch size that
+   isn't", for the sweep and the likely mechanism.
+4. **Slice 4b folds per *lap*, not per dispatch.** The plan describes splatting each
+   dispatch's delta into a batch texture via a changed draw range. Folding is a compute
+   pass over every texel of the accumulation, so it wants amortizing over a whole ring
+   of points rather than an eightieth of one — and splatting a full lap needs no delta
+   tracking and no wrapped draw range at all. Simpler *and* faster.
+5. **The tier is `converged` (8000 spp), not `overnight`.** Measured convergence is
+   textbook 1/sqrt(N) with no plateau, and 8000 spp puts sampling noise ~100x below one
+   8-bit code at ~35 s per 1080p frame on the reference desktop. An "overnight" tier
+   would have promised something the hardware does not need. The table is in AGENTS.md
+   and in `Effort::preset`.
 
 Also note **`--supersample` defaults to 2**, so every `--render` writes a different
 (better) image than it did. `--supersample 1` is byte-identical to the old renderer.
 
-Remaining: slices 2–7 below. Decision 5 is still open by design — it is meant to be
+Two panics that predate all of this were fixed on the way, both of which used to die
+inside wgpu quoting a number the user never typed: `--supersample 4` at 4K exceeding the
+8192px texture limit, and `--effort ultra` on a **zoom scene** dispatching 390,625
+workgroups against a limit of 65,535.
+
+Remaining: slices 5–7 below. Decision 5 is still open by design — it is meant to be
 settled by looking, once slice 5 exists.
 
 ---
