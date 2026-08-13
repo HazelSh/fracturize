@@ -1,30 +1,44 @@
 [meta]
 name = "Taking A Line For An Orbit"
 author = ""
-point_size = 0.0015
+point_size = 0.0003
 points_per_frame = 100000
 decay = 0.8
 color_speed = 0.5
 color_falloff = 0.0
 color_contrast = 1.0
-background = [0.02, 0.02, 0.05]
+background = [0.0144, 0.0121, 0.0112]
 haze = 0.0
-exposure = 1.0
+exposure = 3.5
 
 [camera]
-focus = [-0.2416, -0.0909, 0.0696]
-distance = 2.225
-yaw = -3.0052
-pitch = -0.0058
-roll = 1.0308
+focus = [0.6836, 0.6776, 0.0064]
+distance = 0.1294
+yaw = 1.8286
+pitch = 0.8096
+roll = 0.1721
+
+[[camera.path]]
+yaw = -3.1085
+pitch = -0.0729
+distance = 2.747
+focus = [-1.2229, -0.9848, 0.4583]
+roll = 0.7702
 
 [[transform]]
 translation = [0.5, 0.5, 0.0]
 scale = 0.5
 rotation = [0.0, 0.0, 0.0]
 color = [0.9, 0.5, 0.25]
-weight = 1.0
+weight = 0.9
 color_value = 0.0
+
+[[camera.path]]
+yaw = -3.5722
+pitch = 0.3494
+distance = 2.747
+focus = [0.6804, 0.8747, 0.2594]
+roll = 0.706
 
 [[transform]]
 translation = [-0.5, -0.5, 0.0]
@@ -34,11 +48,33 @@ color = [0.25, 0.6, 0.9]
 weight = 1.0
 color_value = 0.72
 
+[[camera.path]]
+yaw = -3.9256
+pitch = 0.6147
+distance = 0.7758
+focus = [0.7261, 0.7115, 0.1648]
+roll = 0.5406
+
 [[transform]]
 translation = [0.195, 0.2167, 0.438]
 scale = 0.5
 rotation = [0.0, 0.0, 0.0]
 color = [0.5804, 0.0, 0.0]
-weight = 0.32
+weight = 0.11
 color_value = 1.0
-variations = { diamond = 0.35, julia = -0.9 }
+variations = { diamond = 0.3, julia = -0.9 }
+
+[[camera.path]]
+yaw = -4.4546
+pitch = 0.8096
+distance = 0.1294
+focus = [0.6836, 0.6776, 0.0064]
+roll = 0.1721
+
+[palette]
+enabled = false
+stops = [
+    { at = 0.0, color = "#f3bc89" },
+    { at = 0.3333, color = "#89cbf3" },
+    { at = 0.6667, color = "#c80000" }
+]

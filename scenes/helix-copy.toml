@@ -1,0 +1,49 @@
+[meta]
+name = "Helix Copy"
+author = "Gemini (via gemini-cli)"
+point_size = 0.0004
+points_per_frame = 5000
+decay = 0.8
+color_speed = 0.5
+color_falloff = 0.0
+color_contrast = 1.0
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.7
+
+[camera]
+focus = [0.0009, 0.9992, -0.0436]
+distance = 2.2006
+yaw = -0.0359
+pitch = -1.5505
+roll = 0.4314
+
+[[transform]]
+name = "Spine"
+translation = [0.0, 0.15, 0.0]
+scale = 0.95
+rotation = [0.0, 30.0, 0.0]
+color = [1.0, 0.0, 0.8]
+weight = 11.8186
+color_value = 0.0
+color_speed = 0.1
+
+[[transform]]
+name = "Cyan Rib"
+translation = [0.8, 0.0, 0.0]
+scale = 0.3
+rotation = [0.0, 0.0, 45.0]
+color = [0.0, 1.0, 1.0]
+weight = 1.0
+color_value = 0.5
+color_speed = 0.9
+
+[[transform]]
+name = "Yellow Rib"
+translation = [-0.6, 0.2, 0.0]
+scale = 0.3
+rotation = [90.0, 0.0, 0.0]
+color = [1.0, 1.0, 0.0]
+weight = 1.0
+color_value = 1.0
+color_speed = 0.9

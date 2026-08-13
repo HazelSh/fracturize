@@ -483,6 +483,20 @@ slight delay on the pointcount ramp-up after editing?
 
 ---- can't rename views
 
+---- ui note: Color value for palette -- get value in-line with the "color value" label, drop slide in favor of slide on-palette instead. 
+
+---- needs to reset camera-path timer on scene load, so scenes play from the start
+
+---- ui bug: at high zoom, gizmo camera-axis-rotate dashed-circle renders over the UI
+ -- how can this bug be possible? 
+
+---- ui issue: eye/disable does full-on 'remove this transform from the scene'
+ -- would like 'this transform contributes no pixels' which Apophysis does, but what does it mean in the chaosgame?
+
+---- render job testing notes
+
+-- would like kernel-size on the filter to go under 0.5, probably down to 0.1 or so. 
+
 
 ---- naming 
 🕮⊞◌⃘⁂
