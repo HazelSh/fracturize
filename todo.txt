@@ -476,6 +476,28 @@ slight delay on the pointcount ramp-up after editing?
 ---- spots in bg on mp4 renders?
  -- check on .avif as well?
 
+---- should be able to put views onto a camera path, extract views from path points, etc.
+ -- need CLI support to sample a camera path, do renders at selected points, etc
+
+---- icons on the right-click menu
+
+---- can't rename views
+
+---- ui note: Color value for palette -- get value in-line with the "color value" label, drop slide in favor of slide on-palette instead. 
+
+---- needs to reset camera-path timer on scene load, so scenes play from the start
+
+---- ui bug: at high zoom, gizmo camera-axis-rotate dashed-circle renders over the UI
+ -- how can this bug be possible? 
+
+---- ui issue: eye/disable does full-on 'remove this transform from the scene'
+ -- would like 'this transform contributes no pixels' which Apophysis does, but what does it mean in the chaosgame?
+
+---- render job testing notes
+
+-- would like kernel-size on the filter to go under 0.5, probably down to 0.1 or so. 
+
+
 ---- naming 
 🕮⊞◌⃘⁂
 not Fracturize.
@@ -490,4 +512,4 @@ and pay ~nothing to have it in a water deck, or to use it
 
 "Lacunarity Guide"
 
-
+-- todo: rename whole project, including folders on both dev boxes, and the github
