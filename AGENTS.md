@@ -2357,12 +2357,28 @@ Measured on blossom / galaxy / fern_3d / glasshouse at `--effort medium`:
 | **median lit** | **2.4x** |
 | mean over all | 14.4x |
 
-**The reading: keep exposure fixed.** The scenes agree about typical
-brightness to within 2.4x and disagree about *peaks* by 64x. That is a
-difference in dynamic range, not in exposure — and dynamic range is what
-`--gamma` and `--gamma-threshold` are for. An adaptive exposure anchored on
-peaks would make a large correction with the wrong tool, and the sheet shows
-it: every scene comes out darker, blossom nearly vanishing.
+**Settled 2026-08-14: exposure stays fixed and scene-independent.** Hazel's
+call, on this table plus the comparison sheet.
+
+The scenes agree about typical brightness to within 2.4x and disagree about
+*peaks* by 64x. That is a difference in dynamic range, not in exposure — and
+dynamic range is what `--gamma` and `--gamma-threshold` are for.
+
+The 2.4x is the whole case on its own: if the per-scene correction is that
+small, an "adaptive" exposure is a **global constant** plus noise, and a global
+constant is what the fixed default already is. You would be changing the
+default, not adapting to anything.
+
+Both anchors also look wrong, in opposite directions, which is what the sheet
+showed:
+
+* **median-lit** wants exposure 9.7–22.8 against a fixed 1.0, and **blows out**
+  most of the scenes.
+* **p99.5** wants 0.016–1.04 and goes dark, blossom nearly vanishing.
+
+The absolute level there is a `--target` artifact rather than evidence about
+per-scene adaptation — only the *spread* was ever that. But it does mean
+neither anchor is a tonemap anyone would ship unattended.
 
 Two things worth knowing before re-running it:
 

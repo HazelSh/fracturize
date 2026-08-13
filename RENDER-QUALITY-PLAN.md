@@ -71,6 +71,8 @@ workgroups against a limit of 65,535.
    at 1080p against 265 MB for the histogram behind it, and exact rather than approximate.
    The histogram checkpoint (slice 5b) stays opt-in, for resuming rather than re-grading.
 
+**All five decisions are now settled.**
+
 Remaining: **slice 5b** (histogram checkpoint + resume, `--checkpoint`, committed to disk
 on abort), **slice 7** (density estimation), and the **GUI** controls for the grade.
 Hazel's call on where a grade lives, 2026-08-13: **view files, not scene
@@ -604,7 +606,13 @@ design for it now. Hazel's standing ask stands, though: if there is genuinely pa
 work for the spare cores, use them — see leg 6 for the list (encoding, checkpoints,
 progress), which is real but small.
 
-**5. Adaptive per-image exposure normalization — MEASURED 2026-08-14, leans KEEP IT FIXED.**
+**5. Adaptive per-image exposure normalization — SETTLED 2026-08-14. Exposure stays
+fixed and scene-independent; adaptive normalization is not being built.**
+
+Hazel's call, on the survey below plus the comparison sheet: the adaptive column blew out
+several scenes. Both candidate anchors are wrong in opposite directions — median-lit
+overexposes, p99.5 darkens — and the per-scene component of the correction is only 2.4x,
+which is a global constant rather than an adaptation.
 
 `tools/exposure_survey.py` settles the empirical half. Across four deliberately
 contrasting scenes at `--effort medium`, the exposure each scene "wants" spreads by
