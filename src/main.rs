@@ -2214,9 +2214,22 @@ fn main() {
                 (true, None) => offline::render(params),
             }
         };
-        if let Err(e) = result {
-            eprintln!("Offline render failed: {}", e);
-            std::process::exit(1);
+        match result {
+            Err(e) => {
+                eprintln!("Offline render failed: {}", e);
+                std::process::exit(1);
+            }
+            // A partial render is a real file and a useful one, so this is not
+            // a failure — but it is not what was asked for either, and a shell
+            // has no other way to tell. Exiting 0 would let
+            // `fracturize ... && upload out.png` publish a render that was
+            // interrupted at 3% as though it had finished.
+            //
+            // 130 is the conventional "terminated by SIGINT" status (128 + 2),
+            // which is what a script that cares will already be testing for.
+            // The files are written before this point either way.
+            Ok(render_job::Outcome::Partial) => std::process::exit(130),
+            Ok(render_job::Outcome::Complete) => {}
         }
         return;
     }

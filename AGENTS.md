@@ -2453,6 +2453,13 @@ Before this, `--checkpoint`'s promise of writing on abort was only reachable
 from the render-job dialog — from a terminal the process died first, which is
 precisely the case the feature exists for.
 
+**An interrupted render exits 130**, the conventional "terminated by SIGINT"
+status; a completed one exits 0. The files are written either way, before the
+status is decided. This is the only signal a shell gets: the partial PNG is a
+real, useful file and says nothing about its own completeness, so without a
+distinct status `fracturize ... && upload out.png` would publish a render that
+was interrupted at 3% as though it had finished.
+
 **`--spp` is a total, not an increment.** Resuming to a figure you already have
 does nothing rather than doubling it. A bare `--resume` with no `--spp` runs one
 more lap.
