@@ -39,7 +39,14 @@ struct DeParams {
     target_density: f32,
     /// Highest pyramid level that exists, so the lerp cannot read past it.
     max_level: f32,
-    _pad: f32,
+    /// Strength, 0-1: how far to blend the estimate over the original.
+    ///
+    /// A mix rather than a scale on `target_density` / `max_radius`, which is
+    /// what it was first. See the note on `DensityEstimation` in density.rs:
+    /// scaling those fought the neighbourhood probe below, because a bigger
+    /// target widened the probe and the wider probe cancelled the bigger
+    /// radius. The knob was flat past 0.2.
+    amount: f32,
 }
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -203,5 +210,10 @@ fn fs_estimate(in: VsOut) -> @location(0) vec4<f32> {
     // is stored premultiplied by density (`colour * weight, weight`), so
     // blurring the channels independently of the weight would drift the hue
     // wherever the radius varies.
-    return blurred;
+    //
+    // The strength is applied here, at the end, so it cannot feed back into the
+    // radius that produced `blurred`. Mixing premultiplied colour against
+    // premultiplied colour is linear in both channels and weight together, so
+    // a partial amount is a real partial blur and not a hue shift.
+    return mix(here, blurred, params.amount);
 }

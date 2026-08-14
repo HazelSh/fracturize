@@ -337,9 +337,11 @@ struct Args {
     /// samples -- more samples improve the whole image proportionally, while
     /// this targets exactly the regions still noisy at a finite budget.
     ///
-    /// One amount with the internals derived, the way --fog works. Needs
-    /// --splat and an accumulating render (--spp or an --effort tier). Try 0.3
-    /// before 1.0; it is a strong effect.
+    /// One amount with the internals derived, the way --fog works: the kernel
+    /// is the same at every setting and this is how far it is blended over the
+    /// unsmoothed image, so 0.3 is three tenths of the effect and the scale is
+    /// linear end to end. Needs --splat and an accumulating render (--spp or an
+    /// --effort tier).
     #[arg(long, value_name = "AMOUNT", help_heading = "Offline render")]
     density_estimation: Option<f32>,
 

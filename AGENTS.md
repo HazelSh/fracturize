@@ -2500,7 +2500,12 @@ One amount, 0-1, with the internals derived — the `haze.rs` precedent. Needs
 `--splat` and an accumulating render; the ring path has no
 accumulate → filter → tonemap chain for it to sit in and says so.
 
-### Three things that were wrong before they were right
+The amount is a **strength mix**, not a radius scale: the kernel is identical
+at every setting and the amount is how far the estimate is blended over the
+unsmoothed image. So 0.3 is three tenths of the effect, and the control is
+linear from end to end.
+
+### Four things that were wrong before they were right
 
 **A summed-area table does not survive f32.** The plan proposes one: 4 taps for
 any radius. The arithmetic is right and the precision is not — a SAT
@@ -2529,6 +2534,30 @@ extra tap fixes it — take a second density reading from the neighbourhood at
 the scale the first guess would have blurred over, and use whichever is denser.
 Effect now falls **13.6x** across that range (0.396 → 0.029), which is what
 "DE retreats as a render converges" has to look like.
+
+**The amount fought the probe, and the probe won.** Found by live-testing the
+finished feature rather than by any test: `amount` originally scaled both
+`TARGET_DENSITY` and `MAX_RADIUS_PX`, which reads like the obvious meaning of
+"more DE". But the probe's level is derived from the first radius guess, which
+comes from the target — so a bigger amount widened the probe, the wider probe
+found more structure, and the radius collapsed back to about where it started.
+Raising the amount mostly bought a better reason *not* to blur.
+
+Mean luminance on ammonite at 10 spp, against the amount:
+
+| amount | 0 | 0.2 | 0.4 | 0.6 | 0.8 | 1.0 |
+|---|---|---|---|---|---|---|
+| scaled | 48.0 | 51.4 | 52.0 | 51.7 | 52.2 | 51.8 |
+| mix | 48.0 | 49.1 | 49.9 | 50.7 | 51.3 | 51.8 |
+
+The scaled row is flat past 0.2 and not even monotonic — a 0-1 control with one
+usable position on it, while the help text promised "try 0.3 before 1.0, it is
+a strong effect". Disabling the probe restored monotonicity, which is what
+identified the cancellation rather than some other cause. The fix is to leave
+the internals at their calibrated values and apply the amount as a final mix.
+Note where the rows meet: at 1.0 they are the same render, because full
+strength was always the calibrated kernel. Nothing about DE at full strength
+changed — everything below it became reachable.
 
 ### The radius law
 

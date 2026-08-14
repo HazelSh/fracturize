@@ -21,13 +21,13 @@ use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFo
 /// picture, not smooth it.
 const MAX_LEVELS: u32 = 7;
 
-/// Largest DE radius at `amount = 1`, in **output** pixels.
+/// Largest DE radius, in **output** pixels.
 ///
 /// Output rather than accumulation pixels so the control means the same thing
 /// at every supersample factor: the caller multiplies by N.
 pub const MAX_RADIUS_PX: f32 = 6.0;
 
-/// Samples per accumulation texel treated as "enough" at `amount = 1`.
+/// Samples per accumulation texel treated as "enough".
 ///
 /// The radius law is `sqrt(target / density)` (see the shader), so this is the
 /// density at which DE switches off entirely.
@@ -50,7 +50,7 @@ struct DeParams {
     max_radius: f32,
     target_density: f32,
     max_level: f32,
-    _pad: f32,
+    amount: f32,
 }
 
 /// How much density estimation to apply, as one 0-1 amount.
@@ -60,6 +60,40 @@ struct DeParams {
 /// `estimator_curve`, `estimator_minimum` — and two of them have one sensible
 /// value each; a user turning DE on wants "more" or "less", not a curve
 /// exponent.
+///
+/// ## Why the amount is a mix and not a radius scale
+///
+/// It was a radius scale first — `amount` multiplied both `TARGET_DENSITY` and
+/// `MAX_RADIUS_PX`, so a bigger amount meant "blur more texels, further". That
+/// reads well and it does not work, because it fights the neighbourhood probe.
+///
+/// The probe (see the shader) takes a second opinion on the density at the
+/// scale the first guess would blur over, and uses whichever is denser. Its
+/// level comes from that first guess, which comes from the target — so raising
+/// the amount widened the probe, the wider probe found more structure, and the
+/// radius collapsed back to about where it started. Raising the amount was
+/// mostly buying a better reason not to blur.
+///
+/// Measured on ammonite at 10 spp, mean luminance against the amount:
+///
+/// | amount | 0    | 0.2  | 0.4  | 0.6  | 0.8  | 1.0  |
+/// |--------|------|------|------|------|------|------|
+/// | scaled | 48.0 | 51.4 | 52.0 | 51.7 | 52.2 | 51.8 |
+/// | mix    | 48.0 | 49.1 | 49.9 | 50.7 | 51.3 | 51.8 |
+///
+/// The scaled row is flat past 0.2, and not even monotonic: a 0-1 control with
+/// one usable position on it, while the docs promised "try 0.3 before 1.0".
+/// Disabling the probe made that row monotonic again, which is what identified
+/// the cancellation rather than some other cause.
+///
+/// So the internals now stay at their calibrated values and the amount blends
+/// the estimate against the original. That is monotonic by construction, and
+/// `0.3` means three tenths of the effect rather than a point on a curve that
+/// happened to have flattened.
+///
+/// Note where the two rows meet: at `1.0` they are the same render, because
+/// full strength was always the calibrated kernel. This changed nothing about
+/// what DE does at full strength — it made everything below it reachable.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct DensityEstimation {
     /// 0 is off, and off means *not built* — no pyramid, no passes, and a
@@ -77,8 +111,11 @@ impl DensityEstimation {
     }
 
     /// Largest radius in accumulation texels, given the supersample factor.
+    ///
+    /// Independent of `amount` on purpose: see the type's note on why the
+    /// amount is a mix rather than a radius scale.
     fn max_radius(self, supersample: u32) -> f32 {
-        self.clamped().amount * MAX_RADIUS_PX * supersample.max(1) as f32
+        MAX_RADIUS_PX * supersample.max(1) as f32
     }
 }
 
@@ -249,9 +286,9 @@ impl DensityEstimator {
             0,
             bytemuck::bytes_of(&DeParams {
                 max_radius: de.max_radius(supersample),
-                target_density: de.clamped().amount * TARGET_DENSITY,
+                target_density: TARGET_DENSITY,
                 max_level: (levels - 1) as f32,
-                _pad: 0.0,
+                amount: de.clamped().amount,
             }),
         );
 
@@ -365,14 +402,36 @@ mod tests {
         assert!(!DensityEstimation { amount: 0.01 }.is_off());
     }
 
-    /// The amount is in *output* pixels, so the same control has to mean the
-    /// same blur at every supersample factor.
+    /// The radius is in *output* pixels, so DE has to mean the same blur at
+    /// every supersample factor.
     #[test]
     fn the_radius_scales_with_supersampling() {
         let de = DensityEstimation { amount: 1.0 };
         assert_eq!(de.max_radius(1), MAX_RADIUS_PX);
         assert_eq!(de.max_radius(2), MAX_RADIUS_PX * 2.0);
         assert_eq!(de.max_radius(4), MAX_RADIUS_PX * 4.0);
+    }
+
+    /// The amount must not touch the radius law.
+    ///
+    /// This is the bug this pins: when `amount` scaled the target and the
+    /// radius, it fought the neighbourhood probe and the control went flat past
+    /// 0.2. The strength is a mix applied after the estimate instead, so every
+    /// amount sees the same calibrated kernel.
+    #[test]
+    fn the_amount_does_not_move_the_radius() {
+        for amount in [0.05, 0.3, 0.7, 1.0] {
+            assert_eq!(
+                DensityEstimation { amount }.max_radius(2),
+                MAX_RADIUS_PX * 2.0,
+                "amount {amount} must not rescale the kernel"
+            );
+        }
+        let wgsl = include_str!("../../../shaders/points/density_estimate.wgsl");
+        assert!(
+            wgsl.contains("return mix(here, blurred, params.amount);"),
+            "the strength must be a final mix, after the radius is chosen"
+        );
     }
 
     #[test]
@@ -417,14 +476,16 @@ mod tests {
     }
 
     /// A pyramid deeper than the largest radius is wasted passes and memory.
+    ///
+    /// Depth follows the *supersample* factor now, not the amount: the kernel
+    /// is the same at every strength, so a low amount no longer buys a shallow
+    /// pyramid. It buys a weaker mix instead.
     #[test]
     fn the_pyramid_is_only_as_deep_as_the_radius_needs() {
-        let small = DensityEstimation { amount: 0.05 };
-        let big = DensityEstimation { amount: 1.0 };
-        let depth = |de: DensityEstimation, n: u32| {
-            (de.max_radius(n).max(2.0).log2().ceil() as u32 + 1).max(1)
-        };
-        assert!(depth(small, 1) < depth(big, 4), "a tiny radius must not build a deep pyramid");
-        assert!(depth(big, 4) <= MAX_LEVELS + 4, "sanity");
+        let de = DensityEstimation { amount: 1.0 };
+        let depth =
+            |de: DensityEstimation, n: u32| (de.max_radius(n).max(2.0).log2().ceil() as u32 + 1).max(1);
+        assert!(depth(de, 1) < depth(de, 4), "a wider kernel must build a deeper pyramid");
+        assert!(depth(de, 4) <= MAX_LEVELS + 4, "sanity");
     }
 }
