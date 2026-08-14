@@ -2484,6 +2484,80 @@ so `check_compatible` refuses by name rather than producing a quiet mess:
 * **different `--supersample`** — the histogram is stored at the *supersampled*
   size, so the two cannot be added at all.
 
+## Density estimation: `--density-estimation`
+
+The variable-width blur — wide kernels where the histogram is sparse and noisy,
+narrow where it is dense and detailed. The plan calls it the thing that most
+distinguishes an Apophysis render, and it is **not substitutable by more
+samples**: more samples improve the whole image proportionally, while this
+targets exactly the regions still noisy at a finite budget.
+
+```
+fracturize -s scenes/blossom.toml --splat --spp 300 --density-estimation 0.5 -r out.png
+```
+
+One amount, 0-1, with the internals derived — the `haze.rs` precedent. Needs
+`--splat` and an accumulating render; the ring path has no
+accumulate → filter → tonemap chain for it to sit in and says so.
+
+### Three things that were wrong before they were right
+
+**A summed-area table does not survive f32.** The plan proposes one: 4 taps for
+any radius. The arithmetic is right and the precision is not — a SAT
+accumulates the whole image into its far corner and a box query is the
+*difference* of two large nearly-equal sums. At 1600x1200 with mean density
+~2e4 the corner reaches ~4e10, where f32 resolves steps of ~2.3e3, against tail
+texels worth ~3. **715x the signal**, worst exactly where DE matters. A mip
+pyramid avoids the problem instead of paying for it: every level is an
+*average*, so magnitudes stay bounded.
+
+**A 2x2 box reduction looks square.** Repeated box reduction keeps the kernel
+square, and at level 3 whole flowers came out as visible rectangles. The
+reduction is a 4x4 binomial tent (1-3-3-1 per axis), one step of a gaussian
+approximation, so stacking levels converges toward round.
+
+**The radius must ask its neighbourhood, or DE is just bloom.** flam3's DE is a
+*scatter*: each bucket spreads with a width set by its own density, so a dense
+filament has a narrow kernel and stays put. A GPU gather inverts that — an
+empty texel beside a bright filament has near-zero density, takes the widest
+radius on offer, and reaches *in*, dragging the filament outward.
+
+The symptom was unmistakable once measured: **DE's effect did not diminish at
+all between 30 and 3000 samples per pixel** (3.166 → 3.044), because empty
+texels stay empty however long you render and they surround everything. One
+extra tap fixes it — take a second density reading from the neighbourhood at
+the scale the first guess would have blurred over, and use whichever is denser.
+Effect now falls **13.6x** across that range (0.396 → 0.029), which is what
+"DE retreats as a render converges" has to look like.
+
+### The radius law
+
+`radius = sqrt(target / density)`, derived rather than tuned. Sampling noise
+falls as 1/sqrt(N), so bringing a texel holding `density` samples up to the
+quality of one holding `target` means averaging over `target / density` texels
+— an area, so the radius is its square root. Anything already past `target`
+gets a radius below 1 and is returned **bit-identical**.
+
+Fixing the exponent at what the noise model implies is what lets this be one
+control instead of flam3's three. The first attempt used flam3's free
+`estimator_curve` of 0.4 and blurred filaments and voids nearly equally — the
+exponent was doing the work, and it was the wrong exponent.
+
+`TARGET_DENSITY = 16` is calibrated against measured densities, not guessed:
+blossom's lit accumulation texels run p50 ≈ 7.9, p90 ≈ 162, p99 ≈ 2284. A first
+try at 256 put the median lit texel at a 2.4-texel radius and smeared the
+structure along with the noise.
+
+### Interactions
+
+* Runs **between the histogram resolve and the reconstruction filter** — on
+  linear density, at accumulation resolution, before the log.
+* A **checkpoint stores the un-estimated histogram**, so DE is applied fresh on
+  each resolve. You can change `--density-estimation` on a `--resume` freely.
+* A **`.fgrade` is post-DE**, so `--retonemap` cannot change it. That is the
+  line between the two files: grade buffers re-grade, checkpoints re-render.
+* Recorded in the sidecar only when non-zero, so earlier records are unchanged.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

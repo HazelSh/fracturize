@@ -7,6 +7,7 @@
 
 pub mod accumulate;
 pub mod compute;
+pub mod density;
 pub mod downsample;
 pub mod renderer;
 pub mod splat;

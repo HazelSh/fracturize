@@ -23,6 +23,7 @@
 
 use wgpu::{BindGroup, BindGroupLayout, Buffer, ComputePipeline, Device, RenderPipeline};
 
+use crate::gpu::points::density::{DensityEstimation, DensityEstimator};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source};
 
 /// Bytes of accumulator per texel: four channels x 64 bits.
@@ -73,6 +74,11 @@ pub struct Accumulator {
     /// under summation the way the histogram is, and every batch would pay
     /// the filter's tap count.
     filtered: Option<Filtered>,
+    /// Density estimation, when asked for. Runs between the resolve and the
+    /// filter: on linear density, at accumulation resolution, before the log.
+    /// `None` when the amount is zero, so an ordinary render allocates no
+    /// pyramid and encodes no extra passes.
+    de: Option<DensityEstimator>,
     /// Accumulation size — the *supersampled* size when supersampling is on.
     width: u32,
     height: u32,
@@ -101,6 +107,7 @@ impl Accumulator {
         supersample: u32,
         filter: Filter,
         filter_radius: f32,
+        de: DensityEstimation,
     ) -> Result<Self, String> {
         let n = supersample.max(1);
         let (width, height) = (out_width * n, out_height * n);
@@ -307,6 +314,10 @@ impl Accumulator {
             }
         });
 
+        let de = (!de.is_off()).then(|| {
+            DensityEstimator::new(device, queue, width, height, RESOLVED_FORMAT, de, n)
+        });
+
         Ok(Self {
             accum,
             params_buffer,
@@ -317,6 +328,7 @@ impl Accumulator {
             resolved_view: resolved.create_view(&wgpu::TextureViewDescriptor::default()),
             resolved_texture: resolved,
             filtered,
+            de,
             width,
             height,
         })
@@ -389,21 +401,33 @@ impl Accumulator {
             pass.set_bind_group(0, &self.resolve_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+        // Density estimation first, then the reconstruction filter. Both are
+        // blurs and the order is not arbitrary: DE varies its width from the
+        // *unblurred* density, so it has to see the histogram as accumulated,
+        // and the filter's job — resolving N x supersampling down to output
+        // pixels — is the same either way.
+        let density = match &self.de {
+            Some(de) => de.pass_over(device, encoder, &self.resolved_view),
+            None => &self.resolved_view,
+        };
         match &self.filtered {
             Some(f) => {
-                f.downsampler.pass(device, encoder, &self.resolved_view, &f.view);
+                f.downsampler.pass(device, encoder, density, &f.view);
                 &f.view
             }
-            None => &self.resolved_view,
+            None => density,
         }
     }
 
     /// The texture `resolve` last wrote — output-sized linear density, and
     /// exactly the tonemap's input. What the grade buffer is read back from.
     pub fn output_texture(&self) -> &wgpu::Texture {
-        match &self.filtered {
-            Some(f) => &f.texture,
-            None => &self.resolved_texture,
+        match (&self.filtered, &self.de) {
+            (Some(f), _) => &f.texture,
+            // No filter, so whatever the last pass wrote is the output — which
+            // is DE's own target when DE ran.
+            (None, Some(de)) => de.output_texture(),
+            (None, None) => &self.resolved_texture,
         }
     }
 

@@ -3231,6 +3231,8 @@ impl App {
                 grade_out: None,
                 checkpoint_out: None,
                 resume_from: None,
+                // No DE control in the dialog yet; slice 7 is CLI-side.
+                density_estimation: Default::default(),
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

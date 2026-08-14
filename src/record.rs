@@ -90,6 +90,9 @@ pub struct Quality {
     /// block reads as "the tonemap this program has always had", which is
     /// exactly what it means.
     pub grade: Grade,
+    /// Density estimation amount. Written only when non-zero, so records made
+    /// before it existed are byte-identical and an absent key means "off".
+    pub density_estimation: f32,
     pub transparent: bool,
     pub supersample: u32,
     pub filter: Filter,
@@ -170,6 +173,9 @@ impl RenderRecord {
             let _ = writeln!(s, "spp = {}", num(spp));
         }
         let _ = writeln!(s, "exposure = {}", num(q.exposure));
+        if q.density_estimation > 0.0 {
+            let _ = writeln!(s, "density_estimation = {}", num(q.density_estimation));
+        }
         if !q.grade.is_neutral() {
             let _ = writeln!(s, "gamma = {}", num(q.grade.gamma));
             let _ = writeln!(s, "gamma_threshold = {}", num(q.grade.gamma_threshold));
@@ -342,6 +348,7 @@ mod tests {
                 accumulate: 256,
                 spp: None,
                 grade: Grade::NEUTRAL,
+                density_estimation: 0.0,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

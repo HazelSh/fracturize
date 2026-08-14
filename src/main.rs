@@ -329,6 +329,20 @@ struct Args {
           help_heading = "Offline render")]
     grade_out: Option<String>,
 
+    /// Density estimation amount, 0-1 [0 = off]
+    ///
+    /// The variable-width blur: wide kernels where the histogram is sparse and
+    /// noisy, narrow where it is dense and detailed. This is what most
+    /// distinguishes an Apophysis render, and it is not substitutable by more
+    /// samples -- more samples improve the whole image proportionally, while
+    /// this targets exactly the regions still noisy at a finite budget.
+    ///
+    /// One amount with the internals derived, the way --fog works. Needs
+    /// --splat and an accumulating render (--spp or an --effort tier). Try 0.3
+    /// before 1.0; it is a strong effect.
+    #[arg(long, value_name = "AMOUNT", help_heading = "Offline render")]
+    density_estimation: Option<f32>,
+
     /// Save the accumulation histogram, so the render can be resumed [none]
     ///
     /// Written however the run ends, cancellation included -- an interrupted
@@ -2134,6 +2148,9 @@ fn main() {
                 }
             }),
             resume_from: args.resume.as_ref().map(std::path::PathBuf::from),
+            density_estimation: gpu::points::density::DensityEstimation {
+                amount: args.density_estimation.unwrap_or(0.0),
+            },
             grade_out: args.grade_out.as_ref().map(|p| {
                 // Bare `--grade-out` means "beside the render".
                 if p.is_empty() {

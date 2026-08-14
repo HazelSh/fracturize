@@ -241,6 +241,8 @@ pub struct OfflineParams<'a> {
     pub checkpoint_out: Option<std::path::PathBuf>,
     /// Load a histogram and keep accumulating on top of it.
     pub resume_from: Option<std::path::PathBuf>,
+    /// Density estimation amount, 0-1. 0 is off and allocates nothing.
+    pub density_estimation: crate::gpu::points::density::DensityEstimation,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -1554,6 +1556,11 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         params.resume_from.clone(),
         "a ring-buffer render (add --spp)",
     )?;
+    reject_density_estimation(
+        params.density_estimation,
+        "a ring-buffer render",
+        "Add --spp or an --effort tier to accumulate.",
+    )?;
     let OfflineParams {
         mut scene,
         view,
@@ -1585,6 +1592,9 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // or continue, and `render_accumulated` took every case that does.
         checkpoint_out: _,
         resume_from: _,
+        // The ring path has no accumulate->filter->tonemap chain for DE to sit
+        // in; refused above alongside the checkpoint flags.
+        density_estimation: _,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1725,6 +1735,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             // No histogram: the sample count is `points`.
             spp: None,
             grade,
+            density_estimation: 0.0,
             splat,
             exposure,
             transparent,
@@ -1769,6 +1780,21 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
 /// here is cost, not principle — a 600-frame flight at `--spp 500` is 600
 /// accumulated stills. It wants its own budget in frames, not a flag inherited
 /// from the still path.
+fn reject_density_estimation(
+    de: crate::gpu::points::density::DensityEstimation,
+    what: &str,
+    fix: &str,
+) -> Result<(), String> {
+    if de.is_off() {
+        return Ok(());
+    }
+    Err(format!(
+        "--density-estimation runs inside one still's accumulate->filter->tonemap chain; \
+         {} does not have one. {}",
+        what, fix
+    ))
+}
+
 fn reject_checkpoint(
     checkpoint_out: Option<std::path::PathBuf>,
     resume_from: Option<std::path::PathBuf>,
@@ -1868,6 +1894,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         grade_out,
         checkpoint_out,
         resume_from,
+        density_estimation,
     } = params;
     // `--resume` alone is legal and means "reach the target this checkpoint was
     // already heading for", so the sample target is optional here even though
@@ -2013,7 +2040,10 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let (batch_view, accum_w, accum_h) = renderer.prepare_accum(&device, width, height);
     let batch_view = batch_view.clone();
     let histogram =
-        Accumulator::new(&device, &queue, width, height, sampling.n, filter, filter_radius)?;
+        Accumulator::new(
+            &device, &queue, width, height, sampling.n, filter, filter_radius,
+            density_estimation,
+        )?;
     let batch_bind_group = histogram.bind_batch(&device, &batch_view);
 
     // Whatever the run starts from: an empty histogram, or the saved one read
@@ -2167,6 +2197,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             accumulate,
             spp: Some(achieved_spp),
             grade,
+            density_estimation: density_estimation.clamped().amount,
             splat,
             exposure,
             transparent,
@@ -2324,10 +2355,12 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         grade_out,
         checkpoint_out,
         resume_from,
+        density_estimation,
     } = params;
     reject_spp(spp, "an animation")?;
     reject_grade_out(grade_out, "an animation")?;
     reject_checkpoint(checkpoint_out, resume_from, "an animation")?;
+    reject_density_estimation(density_estimation, "an animation", "Render the frames separately.")?;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
@@ -2518,6 +2551,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             // No histogram: the sample count is `points`.
             spp: None,
             grade,
+            density_estimation: 0.0,
             splat,
             exposure,
             transparent,
@@ -2595,10 +2629,12 @@ pub fn render_mutations(
         grade_out,
         checkpoint_out,
         resume_from,
+        density_estimation,
     } = params;
     reject_spp(spp, "a variant sheet")?;
     reject_grade_out(grade_out, "a variant sheet")?;
     reject_checkpoint(checkpoint_out, resume_from, "a variant sheet")?;
+    reject_density_estimation(density_estimation, "a variant sheet", "Render the frames separately.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -2797,10 +2833,12 @@ pub fn render_sweep(
         grade_out,
         checkpoint_out,
         resume_from,
+        density_estimation,
     } = params;
     reject_spp(spp, "a sweep sheet")?;
     reject_grade_out(grade_out, "a sweep sheet")?;
     reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet")?;
+    reject_density_estimation(density_estimation, "a sweep sheet", "Render the frames separately.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -3017,6 +3055,7 @@ mod tests {
                 accumulate: 4,
                 spp: None,
                 grade: Grade::NEUTRAL,
+                density_estimation: 0.0,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,
