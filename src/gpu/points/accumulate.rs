@@ -129,7 +129,12 @@ impl Accumulator {
         let accum = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("accum_histogram"),
             size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            // COPY_SRC as well, so a run can be checkpointed: this buffer *is*
+            // the accumulated state, and reading it out is what makes a long
+            // render resumable rather than restartable.
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -400,6 +405,62 @@ impl Accumulator {
             Some(f) => &f.texture,
             None => &self.resolved_texture,
         }
+    }
+
+    /// The accumulation grid, which is the *supersampled* size.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Read the histogram out to CPU words, for a checkpoint.
+    ///
+    /// Blocking and not cheap — 265 MB at 1080p / 2x — so it happens once, at
+    /// the end of a run. That is also the only time it is meaningful: the
+    /// buffer is only a coherent picture between folds.
+    pub fn read_back(&self, device: &Device, queue: &wgpu::Queue) -> Vec<u32> {
+        let size = self.width as u64 * self.height as u64 * BYTES_PER_TEXEL;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("accum_checkpoint_readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("accum_checkpoint_encoder"),
+        });
+        encoder.copy_buffer_to_buffer(&self.accum, 0, &staging, 0, size);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let out = {
+            let data = slice.get_mapped_range();
+            bytemuck::cast_slice::<u8, u32>(&data).to_vec()
+        };
+        staging.unmap();
+        out
+    }
+
+    /// Load a saved histogram back in, replacing whatever is there.
+    ///
+    /// The caller has already checked the geometry matches (see
+    /// `Checkpoint::check_compatible`); this only guards the raw length, which
+    /// would otherwise be a partial write leaving half the image stale.
+    pub fn restore(&self, queue: &wgpu::Queue, words: &[u32]) -> Result<(), String> {
+        let expected = self.width as usize * self.height as usize
+            * (BYTES_PER_TEXEL as usize / 4);
+        if words.len() != expected {
+            return Err(format!(
+                "checkpoint holds {} words but this {}x{} accumulation needs {}",
+                words.len(),
+                self.width,
+                self.height,
+                expected
+            ));
+        }
+        queue.write_buffer(&self.accum, 0, bytemuck::cast_slice(words));
+        Ok(())
     }
 
     /// Zero the histogram. Called once at the start of a run and **never

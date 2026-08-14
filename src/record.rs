@@ -48,6 +48,20 @@ use crate::gpu::Filter;
 use crate::offline::BitDepth;
 use crate::version::VERSION;
 
+/// Hex SHA-256, the one spelling.
+///
+/// Shared because a checkpoint's compatibility check and a record's scene hash
+/// have to agree exactly — two implementations that drifted would make every
+/// resume look like a different scene.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(out, "{:02x}", b);
+    }
+    out
+}
+
 /// PNG keyword for the embedded scene. Namespaced, because the PNG spec
 /// reserves the unprefixed short keywords for its own registered meanings.
 pub const KEY_SCENE: &str = "fracturize:scene";
@@ -116,12 +130,7 @@ impl RenderRecord {
     /// now" — the question you have a week later, looking at an image you like
     /// next to a file you have since edited.
     pub fn scene_sha256(&self) -> String {
-        let digest = Sha256::digest(self.scene_toml.as_bytes());
-        let mut out = String::with_capacity(64);
-        for b in digest {
-            let _ = write!(out, "{:02x}", b);
-        }
-        out
+        sha256_hex(self.scene_toml.as_bytes())
     }
 
     /// The record as a TOML document: the sidecar's contents, and the

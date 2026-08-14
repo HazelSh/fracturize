@@ -2431,6 +2431,59 @@ at one tier and 13.0x at another, which is what exposed the fp16 stall above.
 A number that moves when it shouldn't is worth more than a number that looks
 plausible.
 
+## Checkpoints: `--checkpoint`, `--resume`, and a Ctrl-C that keeps the work
+
+The grade buffer re-grades; a **checkpoint** resumes. It is the accumulation
+histogram itself — supersampled size, 32 bytes a texel, so 8x larger than a
+`.fgrade` at `--supersample 2` — and it is the state the chaos game was adding
+into, which is why it can be added to further.
+
+```
+fracturize -s scenes/blossom.toml --splat --spp 8000 --checkpoint -r out.png
+# ...Ctrl-C at any point; out.png and out.fhist are both written...
+fracturize -s scenes/blossom.toml --splat --spp 20000 --resume out.fhist -r out.png
+```
+
+**Ctrl-C keeps the render.** First interrupt finishes the current lap, saves,
+and reports the run partial; second interrupt exits immediately, because a
+program that ignores a second Ctrl-C is one you have to kill from another
+terminal. Measured: interrupting a 14,400-lap run at 6 seconds stopped at lap
+1341, kept 5,588 samples/px, and wrote both the PNG and a 61 MB checkpoint.
+Before this, `--checkpoint`'s promise of writing on abort was only reachable
+from the render-job dialog — from a terminal the process died first, which is
+precisely the case the feature exists for.
+
+**`--spp` is a total, not an increment.** Resuming to a figure you already have
+does nothing rather than doubling it. A bare `--resume` with no `--spp` runs one
+more lap.
+
+### A resume must deal a different hand
+
+**This was a bug, and a nasty one.** The chaos game is deterministic, so
+resuming with the original seed replays the identical walker stream and every
+"new" lap deposits a perfect copy of samples the histogram already holds.
+Measured: a 20 spp render checkpointed and resumed to 40 spp came out
+**byte-identical** to the 20 spp one. The sample count doubles, the noise does
+not fall at all, and the render reports a quality it did not deliver.
+
+`resume_seed(seed, prior_laps)` mixes the lap count in, which deals an
+independent stream while staying deterministic — resuming the same checkpoint
+twice gives the same picture, and `prior_laps == 0` returns the seed untouched
+so a fresh render is unchanged. Verified by convergence: independent-run
+difference falls 1.39x from 20 to 40 spp when resumed, against 1.38x
+straight-through and a √2 = 1.41 ideal.
+
+### What is refused, and why each would fail silently
+
+A checkpoint is only meaningful under the geometry and the scene that made it,
+so `check_compatible` refuses by name rather than producing a quiet mess:
+
+* **different scene** — adding another attractor's samples into the histogram
+  is a double exposure, at whatever ratio the sample counts landed on.
+* **different size** — reinterprets the buffer as a differently-shaped image.
+* **different `--supersample`** — the histogram is stored at the *supersampled*
+  size, so the two cannot be added at all.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

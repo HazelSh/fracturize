@@ -76,6 +76,29 @@ pub const DEFAULT_SEED: u64 = 0;
 /// already multiplied the index by.
 const WALKER_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 
+/// The seed a *resumed* run must use, given how many laps are already folded in.
+///
+/// Resuming with the original seed replays the identical walker stream, so the
+/// "new" lap deposits a perfect copy of samples the histogram already holds.
+/// Measured before this existed: a 20 spp render checkpointed and resumed to
+/// 40 spp came out **byte-identical** to the 20 spp one. The sample count
+/// doubles, the noise does not fall at all, and the render reports a quality
+/// it did not deliver — which is the worst shape a bug can have here.
+///
+/// Mixing the lap count in deals an independent hand while staying
+/// deterministic: resuming the same checkpoint twice gives the same picture.
+/// `prior_laps == 0` returns the seed untouched, so a fresh render is
+/// unchanged and [`DEFAULT_SEED`] still reproduces every earlier one.
+pub fn resume_seed(seed: u64, prior_laps: u32) -> u64 {
+    if prior_laps == 0 {
+        return seed;
+    }
+    // A different constant from WALKER_STRIDE: that one is already applied per
+    // walker index, and reusing it here would make lap `k` of a resume collide
+    // with walker `k` of a fresh run.
+    seed ^ (prior_laps as u64).wrapping_mul(0xA24B_AED4_963E_E407)
+}
+
 /// Per-walker seed: the index's own stride, xored with a mixed user seed.
 ///
 /// Xor rather than addition so that [`DEFAULT_SEED`] contributes nothing at
@@ -677,6 +700,47 @@ impl PointCompute {
 mod seed_tests {
     use super::*;
 
+    /// Zero laps means "not a resume", and must leave the stream alone or
+    /// every ordinary render changes.
+    #[test]
+    fn resuming_from_nothing_does_not_move_the_seed() {
+        for seed in [DEFAULT_SEED, 1, 7, u64::MAX] {
+            assert_eq!(resume_seed(seed, 0), seed);
+        }
+    }
+
+    /// The point of the function: each resume deals a different hand, or the
+    /// new laps re-deposit samples the histogram already has.
+    #[test]
+    fn each_resume_deals_a_different_hand() {
+        let mut seen = std::collections::HashSet::new();
+        for laps in 0..64u32 {
+            assert!(seen.insert(resume_seed(DEFAULT_SEED, laps)), "lap {} collided", laps);
+        }
+    }
+
+    /// And a resumed lap must not collide with a *walker* of a fresh run,
+    /// which is why the constant differs from WALKER_STRIDE.
+    #[test]
+    fn a_resumed_lap_does_not_collide_with_a_walker() {
+        let fresh: std::collections::HashSet<u64> =
+            (0..4096u32).map(|i| walker_seed(DEFAULT_SEED, i)).collect();
+        for laps in 1..64u32 {
+            let s = resume_seed(DEFAULT_SEED, laps);
+            for i in 0..64u32 {
+                assert!(!fresh.contains(&walker_seed(s, i)),
+                    "resume {} walker {} collides with a fresh walker", laps, i);
+            }
+        }
+    }
+
+    /// Deterministic: the same checkpoint resumed twice is the same picture.
+    #[test]
+    fn resuming_is_reproducible() {
+        assert_eq!(resume_seed(9, 5), resume_seed(9, 5));
+    }
+
+    
     /// The default has to be a no-op, or every render in the project changes
     /// the day a seed parameter is added.
     #[test]

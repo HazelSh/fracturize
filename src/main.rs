@@ -1,9 +1,11 @@
 mod app;
 mod avif;
+mod checkpoint_file;
 mod camera;
 mod haze;
 mod grade_file;
 mod info;
+mod interrupt;
 mod gpu;
 mod h264;
 mod history;
@@ -326,6 +328,29 @@ struct Args {
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "",
           help_heading = "Offline render")]
     grade_out: Option<String>,
+
+    /// Save the accumulation histogram, so the render can be resumed [none]
+    ///
+    /// Written however the run ends, cancellation included -- an interrupted
+    /// render you cannot resume is just a slower failure. Larger than
+    /// --grade-out: this is the supersampled histogram, 32 bytes a texel, so
+    /// 265 MB at 1080p and --supersample 2. Needs --splat and an accumulating
+    /// render (--spp or an --effort tier).
+    ///
+    /// Pass a path, or bare `--checkpoint` to write `<render>.fhist`.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "",
+          help_heading = "Offline render")]
+    checkpoint: Option<String>,
+
+    /// Keep accumulating on top of a saved .fhist [none]
+    ///
+    /// `--spp` names a *total*, so resuming to a figure you already have does
+    /// nothing rather than doubling it. Bare `--resume` with no --spp runs one
+    /// more lap. Refuses a checkpoint from a different scene, size or
+    /// supersample factor: adding samples of a different attractor into an
+    /// existing histogram is a silent double exposure.
+    #[arg(long, value_name = "FILE", help_heading = "Offline render")]
+    resume: Option<String>,
 
     /// Re-grade a saved .fgrade buffer instead of rendering [none]
     ///
@@ -2101,6 +2126,14 @@ fn main() {
             chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
             spp,
             grade,
+            checkpoint_out: args.checkpoint.as_ref().map(|p| {
+                if p.is_empty() {
+                    crate::checkpoint_file::Checkpoint::path_for(std::path::Path::new(out))
+                } else {
+                    std::path::PathBuf::from(p)
+                }
+            }),
+            resume_from: args.resume.as_ref().map(std::path::PathBuf::from),
             grade_out: args.grade_out.as_ref().map(|p| {
                 // Bare `--grade-out` means "beside the render".
                 if p.is_empty() {

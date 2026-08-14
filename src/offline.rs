@@ -235,6 +235,12 @@ pub struct OfflineParams<'a> {
     /// Save the pre-tonemap linear density beside the PNG, so the grade can be
     /// redone without re-rendering. See `grade_file`.
     pub grade_out: Option<std::path::PathBuf>,
+    /// Save the accumulation histogram, so the run can be *resumed*. Written
+    /// however the run ends, cancellation included — an interrupted render you
+    /// cannot resume is just a slower failure. See `checkpoint_file`.
+    pub checkpoint_out: Option<std::path::PathBuf>,
+    /// Load a histogram and keep accumulating on top of it.
+    pub resume_from: Option<std::path::PathBuf>,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -1538,9 +1544,16 @@ fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant)
 /// rendered and saved, and the return says [`Outcome::Partial`] so no caller
 /// can report it as a finished render.
 pub fn render(params: OfflineParams) -> Result<Outcome, String> {
-    if params.spp.is_some() {
+    if params.spp.is_some() || params.resume_from.is_some() {
         return render_accumulated(params);
     }
+    // The ring path has no histogram to save or continue, and saying so beats
+    // writing nothing and letting the flag read as if it had worked.
+    reject_checkpoint(
+        params.checkpoint_out.clone(),
+        params.resume_from.clone(),
+        "a ring-buffer render (add --spp)",
+    )?;
     let OfflineParams {
         mut scene,
         view,
@@ -1568,6 +1581,10 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         spp: _,
         grade,
         grade_out,
+        // Both already refused above: the ring path has no histogram to save
+        // or continue, and `render_accumulated` took every case that does.
+        checkpoint_out: _,
+        resume_from: _,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -1752,6 +1769,21 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
 /// here is cost, not principle — a 600-frame flight at `--spp 500` is 600
 /// accumulated stills. It wants its own budget in frames, not a flag inherited
 /// from the still path.
+fn reject_checkpoint(
+    checkpoint_out: Option<std::path::PathBuf>,
+    resume_from: Option<std::path::PathBuf>,
+    what: &str,
+) -> Result<(), String> {
+    if checkpoint_out.is_some() || resume_from.is_some() {
+        return Err(format!(
+            "--checkpoint / --resume carry one still's accumulation histogram; {} would need \
+             one per frame. Render the frames separately.",
+            what
+        ));
+    }
+    Ok(())
+}
+
 fn reject_grade_out(grade_out: Option<std::path::PathBuf>, what: &str) -> Result<(), String> {
     match grade_out {
         None => Ok(()),
@@ -1834,11 +1866,16 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         spp,
         grade,
         grade_out,
+        checkpoint_out,
+        resume_from,
     } = params;
-    let spp = spp.expect("only called with a sample target");
+    // `--resume` alone is legal and means "reach the target this checkpoint was
+    // already heading for", so the sample target is optional here even though
+    // `--spp` is the usual way in.
+    let requested_spp = spp;
     if !splat {
         return Err(
-            "--spp accumulates linear density for the log tonemap, so it needs --splat".into()
+            "accumulation feeds linear density to the log tonemap, so it needs --splat".into()
         );
     }
     if !matches!(grid, GridMode::Single) {
@@ -1863,13 +1900,41 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
+    // The checkpoint is read *before* the chaos game is built, because it
+    // decides how the walkers are seeded. The scene hash is what makes a resume
+    // safe: adding samples of a different attractor into an existing histogram
+    // is a silent double exposure — no error, no crash, just a picture of two
+    // things — so a mismatch is refused by name.
+    let scene_toml = scene.to_toml_string().unwrap_or_default();
+    let scene_sha = crate::record::sha256_hex(scene_toml.as_bytes());
+    let prior = match &resume_from {
+        Some(p) => {
+            let ck = crate::checkpoint_file::Checkpoint::read(p)?;
+            ck.check_compatible(width, height, sampling.n, &scene_sha)?;
+            println!(
+                "Resuming from {} — {:.0} samples/px already accumulated over {} laps",
+                p.display(),
+                ck.samples / (width as f64 * height as f64),
+                ck.laps,
+            );
+            Some(ck)
+        }
+        None => None,
+    };
+    let prior_samples = prior.as_ref().map_or(0.0, |c| c.samples);
+    let prior_laps = prior.as_ref().map_or(0, |c| c.laps);
+
     let mut compute = PointCompute::new(
         &device,
         &scene.transforms,
         &scene.colors,
         &scene.colormap,
         scene.point_count as u32,
-        chaos_seed,
+        // A resume must deal an *independent* hand. With the original seed the
+        // walkers replay their exact trajectory, so every "new" lap deposits a
+        // copy of samples the histogram already holds: the count doubles and
+        // the noise does not move. See `resume_seed`.
+        crate::gpu::points::compute::resume_seed(chaos_seed, prior_laps),
     );
     compute.zoom = scene_zoom(&scene)?;
     let capacity = compute.buffer_capacity;
@@ -1877,8 +1942,11 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // Laps to reach the target. `--spp` counts against *output* pixels, so
     // turning on supersampling costs N² more fill per lap but does not silently
     // demand N² more laps.
-    let target_samples = spp as f64 * width as f64 * height as f64;
-    let laps = (target_samples / capacity as f64).ceil().max(1.0) as u32;
+    // Set below, once a resumed checkpoint's prior samples are known: `--spp`
+    // names a *total*, so resuming to the figure you already have should do
+    // nothing rather than double it.
+    let laps;
+    let target_samples;
 
     let (base_camera, point_size, haze, folded) =
         base_setup(&view, &scene, haze_enabled, camera_over);
@@ -1947,26 +2015,59 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let histogram =
         Accumulator::new(&device, &queue, width, height, sampling.n, filter, filter_radius)?;
     let batch_bind_group = histogram.bind_batch(&device, &batch_view);
-    {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("accum_clear_encoder"),
-        });
-        histogram.clear(&mut encoder);
-        queue.submit(std::iter::once(encoder.finish()));
+
+    // Whatever the run starts from: an empty histogram, or the saved one read
+    // above.
+    match &prior {
+        Some(ck) => {
+            histogram.restore(&queue, &ck.words)?;
+        }
+        None => {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("accum_clear_encoder"),
+            });
+            histogram.clear(&mut encoder);
+            queue.submit(std::iter::once(encoder.finish()));
+        }
+    }
+
+    // `--spp` is a *total*, and a resume has some of it already. Default on a
+    // bare `--resume`: one more lap, so the flag on its own means "carry on a
+    // bit" rather than "do nothing" or "run forever".
+    let pixels = width as f64 * height as f64;
+    target_samples = match requested_spp {
+        Some(n) => n as f64 * pixels,
+        None => prior_samples + capacity as f64,
+    };
+    let remaining = (target_samples - prior_samples).max(0.0);
+    laps = (remaining / capacity as f64).ceil().max(0.0) as u32;
+    if laps == 0 {
+        println!(
+            "Already at {:.0} samples/px, past the {:.0} asked for — re-grading what is \
+             there rather than accumulating more.",
+            prior_samples / pixels,
+            target_samples / pixels,
+        );
     }
 
     let frames_per_lap = compute.frames_per_lap();
     println!(
-        "Accumulating {} laps x {} points ({} samples/px target) into a {}x{} histogram",
-        laps, capacity, spp, accum_w, accum_h,
+        "Accumulating {} laps x {} points (to {:.0} samples/px) into a {}x{} histogram",
+        laps, capacity, target_samples / pixels, accum_w, accum_h,
     );
     if accumulate != DEFAULT_ACCUMULATE {
         println!("  (--accumulate is ignored here: --spp sets how long the chaos game runs)");
     }
     if let Some(c) = &control {
         c.phase("accumulating");
-        c.log(format!("{} laps of {} points, target {} samples/px", laps, capacity, spp));
+        c.log(format!(
+            "{} laps of {} points, target {:.0} samples/px",
+            laps, capacity, target_samples / pixels
+        ));
     }
+
+    // From here a Ctrl-C finishes the lap and saves rather than losing the run.
+    crate::interrupt::install();
 
     let mut done_laps: u32 = 0;
     let mut outcome = Outcome::Complete;
@@ -1994,18 +2095,25 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         done_laps += 1;
 
+        // Two ways to stop, one meaning: keep what has accumulated. The dialog
+        // has a cancel button; a terminal has Ctrl-C.
+        let stopping = crate::interrupt::requested()
+            || control.as_ref().is_some_and(|c| c.should_stop());
         if let Some(c) = &control {
             c.progress(lap + 1, laps);
-            if c.should_stop() {
-                c.log(format!(
-                    "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
-                    done_laps,
-                    laps,
-                    done_laps as f64 * capacity as f64 / (width as f64 * height as f64),
-                ));
-                outcome = Outcome::Partial;
-                break;
+        }
+        if stopping {
+            let got = (prior_samples + done_laps as f64 * capacity as f64) / pixels;
+            let msg = format!(
+                "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
+                done_laps, laps, got,
+            );
+            println!("{}", msg);
+            if let Some(c) = &control {
+                c.log(msg);
             }
+            outcome = Outcome::Partial;
+            break;
         }
     }
     let t_fill = Instant::now();
@@ -2017,7 +2125,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // asked for. That is what makes a cancelled render come out at the right
     // brightness rather than dark in proportion to how early it stopped — and
     // what makes `--spp` a quality dial rather than an exposure dial.
-    let accumulated = done_laps as f64 * capacity as f64;
+    let accumulated = prior_samples + done_laps as f64 * capacity as f64;
     renderer.upload_params(
         &queue,
         exposure,
@@ -2071,6 +2179,33 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         adapter,
         (t_render - t_start).as_secs_f32(),
     );
+    // However the run ended — target reached or cancelled partway — the
+    // histogram goes to disk. That is the entire point: an interrupted render
+    // you cannot resume is just a slower failure.
+    if let Some(p) = &checkpoint_out {
+        let (aw, ah) = histogram.size();
+        let ck = crate::checkpoint_file::Checkpoint {
+            width: aw,
+            height: ah,
+            out_width: width,
+            out_height: height,
+            supersample: sampling.n,
+            samples: accumulated,
+            laps: prior_laps + done_laps,
+            scene_sha256: scene_sha.clone(),
+            words: histogram.read_back(&device, &queue),
+        };
+        match ck.write(p, record.as_ref()) {
+            Ok(()) => println!(
+                "Checkpoint: {} ({:.0} MB) — continue with --resume",
+                p.display(),
+                (aw as f64 * ah as f64 * 32.0) / 1e6,
+            ),
+            // The picture exists; a checkpoint that could not be filed is worth
+            // saying out loud but is not a failed render.
+            Err(e) => eprintln!("warning: {}", e),
+        }
+    }
     if let Some(p) = &grade_out {
         save_grade_buffer(
             p, &device, &queue, histogram.output_texture(), width, height, accumulated,
@@ -2187,9 +2322,12 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         spp,
         grade,
         grade_out,
+        checkpoint_out,
+        resume_from,
     } = params;
     reject_spp(spp, "an animation")?;
     reject_grade_out(grade_out, "an animation")?;
+    reject_checkpoint(checkpoint_out, resume_from, "an animation")?;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
@@ -2455,9 +2593,12 @@ pub fn render_mutations(
         spp,
         grade,
         grade_out,
+        checkpoint_out,
+        resume_from,
     } = params;
     reject_spp(spp, "a variant sheet")?;
     reject_grade_out(grade_out, "a variant sheet")?;
+    reject_checkpoint(checkpoint_out, resume_from, "a variant sheet")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -2654,9 +2795,12 @@ pub fn render_sweep(
         spp,
         grade,
         grade_out,
+        checkpoint_out,
+        resume_from,
     } = params;
     reject_spp(spp, "a sweep sheet")?;
     reject_grade_out(grade_out, "a sweep sheet")?;
+    reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 

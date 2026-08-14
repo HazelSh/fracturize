@@ -64,3 +64,10 @@ rav1e = { version = "0.8.1", default-features = false, features = ["threading"] 
 # from vendored C by the default "source" feature (no system library, and no
 # nasm needed — it falls back to the C kernels).
 openh264 = "0.9"
+
+# Clean Ctrl-C for long renders (see src/interrupt.rs): a signal handler that
+# lets an accumulating render finish its lap and save rather than losing it.
+# Already in the tree as a transitive dependency, so this costs nothing to
+# fetch, and it is unix-only because that is where the signals are.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
