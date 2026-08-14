@@ -2594,6 +2594,42 @@ structure along with the noise.
   line between the two files: grade buffers re-grade, checkpoints re-render.
 * Recorded in the sidecar only when non-zero, so earlier records are unchanged.
 
+## What each quality knob actually buys
+
+Measured on `scenes/lacewing.toml` at 960x540, gamma 2.3 / threshold 0.32.
+Noise is the RMSE between two renders that differ only in `--chaos-seed`, which
+isolates **sampling noise** from fractal structure — the structure is identical
+in both, so whatever remains is the sampling. This is the metric to use for any
+"is it less noisy?" question; a plain standard deviation cannot tell grain from
+filaments and will happily report a blurred image as an improved one.
+
+| configuration | noise | vs baseline |
+|---|---|---|
+| 100 spp, `--supersample 1` | 0.03462 | — |
+| 100 spp, `--supersample 2` | 0.03462 | 1.00x |
+| 100 spp, ss2, `--density-estimation 0.6` | 0.02280 | 1.52x |
+| 1000 spp, ss2 | 0.01194 | 2.90x |
+| 1000 spp, ss2, `--density-estimation 0.6` | 0.01104 | 3.14x |
+
+Three things worth reading off it:
+
+**Supersampling is not a denoiser.** It changes sampling noise by 0.008% — the
+two top rows are the same number. It fixes *aliasing*, which is a different
+defect that a noise metric cannot see: mean and standard deviation come out
+bit-identical between ss1 and ss2 while 5.9% of pixels differ, because
+supersampling redistributes energy locally and conserves it exactly. Judge it
+by looking at edges, never by a noise figure.
+
+**More samples follow 1/sqrt(N), with no plateau.** 10x the samples buys 2.90x,
+against the 3.16x the law predicts; the shortfall is the gamma curve, since
+RMSE is being measured after a nonlinear tonemap rather than on linear density.
+
+**DE retreats as a render converges.** It buys 34% at 100 spp and 7.5% at 1000
+spp, because it targets exactly the texels that are still noisy and there are
+fewer of them every lap. That falloff is the property that distinguishes DE
+from a blur, and it is what the neighbourhood probe exists to produce — see
+"the radius must ask its neighbourhood" above.
+
 ## View Files & Offline Rendering
 
 Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,

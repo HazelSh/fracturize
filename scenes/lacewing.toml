@@ -1,0 +1,109 @@
+# Lacewing — veined membrane over open air
+#
+# Built as a test subject for the render-quality work, and chosen to be hard in
+# the specific ways that work addresses. A scene that is uniformly dense proves
+# nothing: supersampling, density estimation and the gamma toe all exist to
+# handle images whose *range* is the problem, so this one is deliberately built
+# out of two materials at once.
+#
+# The membrane ("vane-a", "vane-b") is thin, bright and detailed — flattened on
+# one axis so it reads as a plate seen edge-on, where the structure is finest
+# and aliasing is worst. Around it "spray" throws a wide, faint spherical haze
+# that never accumulates more than a few samples per texel however long you
+# render. Between them the histogram spans four orders of magnitude inside one
+# frame, which is exactly the case where a fixed reconstruction filter has to
+# choose: soften the haze and you soften the veins with it.
+#
+# So it is a scene you can see the settings in:
+#
+#   fracturize -s scenes/lacewing.toml --splat -r out.png --effort medium
+#   ... --density-estimation 0.5      # haze smooths, veins do not move
+#   ... --gamma 2.4 --gamma-threshold 0.3   # depth without a grey veil
+#   ... --supersample 1               # what the filtering was doing for you
+#
+# "gyre" carries most of the walk and contracts by 0.87 with a 14° turn, a
+# gentle 0.2-octave period, so the core stays coherent rather than resolving
+# into separate rings — the eye reads it as depth instead of as banding.
+#
+# Claude Opus 5, 2026-08-14.
+
+[meta]
+name = "Lacewing"
+author = "Claude Opus 5"
+point_size = 0.0015
+point_count = 12_000_000
+color_speed = 0.42
+color_falloff = 0.72
+color_contrast = 2.3
+haze = 0.22
+background = [0.018, 0.020, 0.030]
+
+# Framing picked with the contact sheets rather than by guessing: --orbit-grid
+# 4x2 put yaw 31.5° clearly ahead (the wing opens toward the camera and the
+# plumes clear the top edge), and a --sweep over pitch showed the choice is
+# shallow between 0.36 and 0.54, so this sits at the near end of that plateau.
+# --info wants distance 5.18 "to fill the frame", which is measured against the
+# 95th-percentile radius and so includes the outermost spray; 3.6 crops that
+# and frames the membrane.
+[camera]
+distance = 3.6
+yaw = 0.55
+pitch = 0.36
+focus = [0.0, 0.0, 0.0]
+
+path_closed = true
+path_seconds = 16.0
+
+# The body of the walk: a slow contracting turn about the origin. Uniform scale
+# and zero translation, so the fixed point is the origin and the structure is
+# scale-invariant about it.
+[[transform]]
+name = "gyre"
+translation = [0.0, 0.0, 0.0]
+scale = 0.87
+rotation = [0.0, 14.0, 0.0]
+color = [0.30, 0.62, 0.86]
+weight = 5.0
+variations = { linear = 0.78, swirl = 0.22 }
+
+# The membrane. Flattened hard on Y so it is a plate, not a blob, and set at two
+# radii and angles so successive contractions interleave into a vein pattern
+# rather than stacking on themselves.
+[[transform]]
+name = "vane-a"
+translation = [0.60, 0.02, 0.0]
+scale = [0.36, 0.085, 0.36]
+rotation = [0.0, 42.0, 0.0]
+color = [0.96, 0.78, 0.36]
+weight = 1.3
+variations = { linear = 0.85, julia = 0.15 }
+
+[[transform]]
+name = "vane-b"
+translation = [-0.46, 0.10, 0.32]
+scale = [0.31, 0.075, 0.31]
+rotation = [11.0, -68.0, 0.0]
+color = [0.92, 0.42, 0.30]
+weight = 1.05
+
+# A thin bright rib across the vanes: narrow on two axes, long on the third.
+# This is the finest feature in the scene and the one to watch when changing
+# --supersample or --filter-radius.
+[[transform]]
+name = "rib"
+translation = [0.18, 0.52, -0.22]
+scale = [0.075, 0.40, 0.075]
+rotation = [0.0, 0.0, 24.0]
+color = [0.99, 0.93, 0.72]
+weight = 0.85
+
+# The open air. Spherical inversion at low weight throws a wide faint veil that
+# stays sparse at any sample count — the material density estimation is for.
+[[transform]]
+name = "spray"
+translation = [0.0, 0.05, 0.0]
+scale = 0.58
+rotation = [0.0, 0.0, 0.0]
+color = [0.44, 0.34, 0.72]
+weight = 0.8
+variations = { linear = 0.35, spherical = 0.65 }
