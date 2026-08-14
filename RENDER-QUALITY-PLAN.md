@@ -7,81 +7,67 @@ the numbers attached.
 
 ## Status
 
-**Slices 0 through 6a are implemented**, on branch `render-quality`, untested by Hazel.
+**The plan is implemented.** All eight slices and all five decisions, on `main`.
+The GUI controls are the one deliberate omission — Hazel's call, deferred to a
+renderer-dialog pass once everything else is done.
 
-- **Slice 0** (`5fdec96`) — encoder thread cap + `--threads` and a dialog control;
-  partial-result-on-cancel via a `render_job::Outcome` enum; the shared const-trimmed
-  `VERSION` in `src/version.rs`.
-- **Slice 1** (`2c3f86b`, `874866b`) — `--supersample`, `--filter`, `--filter-radius`,
-  the two clamp/threshold fixes, and `--bit-depth 16`.
-- **Slice 2** (`93782a1`) — render records: `fracturize:scene` / `fracturize:render`
-  PNG chunks and a `.render.toml` sidecar.
-- **Slice 3** (`2f5b80d`) — `--gpu-timing`, and the *negative* result that dispatch
-  batching is a 19% regression. Reverted; the instrument was kept.
-- **Slice 4a** (`6a0ebeb`) — `--chaos-seed`, with `DEFAULT_SEED = 0` reproducing every
-  earlier render byte for byte.
-- **Slice 4b** (`104cefd`) — the persistent accumulation histogram: `--spp`, `--effort
-  converged`, `src/gpu/points/accumulate.rs` and `shaders/points/accumulate.wgsl`.
-- **Slice 6a** (`87cfe7c`) — `--gamma`, `--gamma-threshold`, `--vibrancy`. Built *before*
-  slice 5 on purpose; see deviation 6.
-- **Slice 5a** — re-grading: `--grade-out`, `--retonemap`, `--grade-sweep`, and
-  `src/grade_file.rs`.
+| Slice | What | Commit |
+|-------|------|--------|
+| 0 | thread cap, `--threads`, partial-on-cancel, shared `VERSION` | `5fdec96` |
+| 1 | `--supersample`, `--filter`, `--filter-radius`, `--bit-depth 16` | `2c3f86b`, `874866b` |
+| 2 | render records: PNG chunks + `.render.toml` sidecar | `93782a1` |
+| 3 | `--gpu-timing`, and the negative result on dispatch batching | `2f5b80d` |
+| 4a | `--chaos-seed` | `6a0ebeb` |
+| 4b | the accumulation histogram: `--spp` | `104cefd` |
+| 6a | `--gamma`, `--gamma-threshold`, `--vibrancy` | `87cfe7c` |
+| 5a | re-grading: `--grade-out`, `--retonemap`, `--grade-sweep` | `2c80105` |
+| 5b | `--checkpoint`, `--resume`, Ctrl-C that keeps the work | `648149c` |
+| 7 | `--density-estimation` | `abd3208` |
 
-Deviations from what is written below, all deliberate and all argued at the point
-they occur:
+Also: size tiers `tiny..huge`, the grade living in view files, `tools/exposure_survey.py`,
+and two fixes to bugs this work uncovered (`19ea73f`, `494a24e`).
 
-1. **The size *floors* do not scale with N.** The text below says both bounds of the
-   splat radius clamp need scaling; that is right for the 12px cap and wrong for the
-   1px floor. One accumulation texel is the finest thing the target can represent, and
-   letting a splat be that small is exactly what supersampling buys — scaling the floor
-   would undo the feature for the smallest material in the picture. Only the cap scales.
-2. **16-bit PNG was not "nearly free".** It needed the render target format switched to
-   `Rgba16Float` with the sRGB encode moved to the CPU readback, and the contact sheet
-   and `glyphs::draw_label` widened to `u16`. Done, and 8-bit output is byte-identical
-   to before — but it is a slice of its own, not a line.
-3. **Dispatch batching, called "the real GPU-side lever" below, is a regression.**
-   Measured 19% slower end to end. See AGENTS.md, "GPU timing, and the batch size that
-   isn't", for the sweep and the likely mechanism.
-4. **Slice 4b folds per *lap*, not per dispatch.** The plan describes splatting each
-   dispatch's delta into a batch texture via a changed draw range. Folding is a compute
-   pass over every texel of the accumulation, so it wants amortizing over a whole ring
-   of points rather than an eightieth of one — and splatting a full lap needs no delta
-   tracking and no wrapped draw range at all. Simpler *and* faster.
-5. **The tier is `converged` (8000 spp), not `overnight`.** Measured convergence is
-   textbook 1/sqrt(N) with no plateau, and 8000 spp puts sampling noise ~100x below one
-   8-bit code at ~35 s per 1080p frame on the reference desktop. An "overnight" tier
-   would have promised something the hardware does not need. The table is in AGENTS.md
-   and in `Effort::preset`.
+### Where the plan was wrong
+
+Every one of these was settled by measuring, and each is argued where it occurs.
+
+1. **The size *floors* do not scale with N.** Right for the 12px cap, wrong for the
+   1px floor: one accumulation texel is the finest thing the target can represent, and
+   letting a splat be that small is exactly what supersampling buys.
+2. **16-bit PNG was not "nearly free"** — it needed the render target switched to
+   `Rgba16Float` with the sRGB encode moved to the CPU readback, and the sheet and
+   `glyphs::draw_label` widened to `u16`. A slice of its own, not a line.
+3. **Dispatch batching, "the real GPU-side lever", is a 19% regression.** Reverted;
+   the instrument was kept. See AGENTS.md.
+4. **Slice 4b folds per *lap*, not per dispatch.** Amortizing the fold over a whole
+   ring needs no delta tracking and no wrapped draw range. Simpler *and* faster.
+5. **Tiers are sizes, not durations or outcomes.** `tiny/small/medium/large/huge` =
+   1/10/100/1000/10000 spp. "overnight" depends on the machine; "converged" asserts an
+   outcome the user may have reason to push past.
+6. **Slice 6 came before slice 5.** The tonemap had two knobs, so retonemapping could
+   only have varied exposure — the one question already answerable by rendering twice.
+7. **The re-grade checkpoint is the post-filter buffer, not the histogram** — 32 MB
+   against 265 MB, and exact rather than approximate. The histogram is a *separate*
+   artifact for resuming (5b).
+8. **Density estimation is a mip pyramid, not a SAT.** An f32 SAT carries ~715x the
+   error of the faint tails DE exists to smooth. And a plain gather blooms rather than
+   de-noises; the radius has to ask its neighbourhood. Both measured — see the slice 7
+   commit and AGENTS.md.
 
 Also note **`--supersample` defaults to 2**, so every `--render` writes a different
 (better) image than it did. `--supersample 1` is byte-identical to the old renderer.
 
-Two panics that predate all of this were fixed on the way, both of which used to die
-inside wgpu quoting a number the user never typed: `--supersample 4` at 4K exceeding the
-8192px texture limit, and `--effort ultra` on a **zoom scene** dispatching 390,625
-workgroups against a limit of 65,535.
+Four bugs that predated all of this were fixed on the way: `--supersample 4` at 4K
+exceeding a texture limit that was wgpu's default rather than the hardware's;
+`--effort ultra` on a **zoom scene** dispatching 390,625 workgroups against a limit of
+65,535; the **fp16 stall at 2048** that made an accumulating render's peak brightness
+depend on `--points`; and a resume that replayed its own walker stream.
 
-6. **Slice 6 came before slice 5, and Hazel approved the swap.** The plan sequences
-   retonemapping first, but the tonemap had exactly two knobs — exposure and a hardcoded
-   gain — so a retonemap tool could only have varied exposure, which is the one question
-   already answerable by rendering twice. Building the gamma/threshold/vibrancy maths
-   first gave retonemapping something worth looking at.
-7. **The re-grade checkpoint is the post-filter buffer, not the histogram.** The tonemap
-   runs *after* the reconstruction filter, so its input is the output-sized buffer — 32 MB
-   at 1080p against 265 MB for the histogram behind it, and exact rather than approximate.
-   The histogram checkpoint (slice 5b) stays opt-in, for resuming rather than re-grading.
+**All five decisions are settled**, the fifth (adaptive exposure) measured with
+`tools/exposure_survey.py` and answered *no* — the scenes agree on typical brightness
+within 2.4x and disagree on peaks by 64x, which is dynamic range, not exposure.
 
-**All five decisions are now settled.**
-
-Remaining: **slice 5b** (histogram checkpoint + resume, `--checkpoint`, committed to disk
-on abort), **slice 7** (density estimation), and the **GUI** controls for the grade.
-Hazel's call on where a grade lives, 2026-08-13: **view files, not scene
-files** — a scene is the 3D thing you explore, a view is saved state for
-re-rendering, and a grade is the latter. Implemented; the GUI half is deferred
-to a renderer-dialog pass once everything else is done. Decision 5 is now answerable by looking —
-`--grade-sweep exposure` over a saved buffer is the experiment it was waiting for — but
-still open — it is meant to be
-settled by looking, once slice 5 exists.
+Remaining: the **GUI** controls for the grade, DE, and the accumulating render.
 
 ---
 
