@@ -336,8 +336,9 @@ without it the tiled renderer would ship with the same 9.6-samples/px default
 that caused the complaint.
 
 **1 — `TilePlan`**: pure geometry. Given output, N, binding limit, texture
-limit and a VRAM budget, produce tiles, halos, sub-frustums and pass grouping.
-No GPU. Fully testable, and every seam bug in §4 is a test on this type.
+limit and a VRAM budget, produce tiles, halos (sized from the actual settings,
+§10), sub-frustums and pass grouping. No GPU. Fully testable, and every seam
+bug in §4 is a test on this type — as is every row of §10's overhead table.
 
 **2 — Tiled accumulating still**, single pass, halos, sub-frustum cameras,
 assembled into the existing in-memory image. Correctness first: a 1-tile render
@@ -346,25 +347,210 @@ that is the acceptance test.
 
 **3 — Multi-pass**, with resident-tile grouping.
 
-**4 — Tiled TIFF writer** (§6), streaming, parallel per-tile compression.
+**4 — Compact histograms** (§4). Promoted from last to here: it halves the
+memory, and therefore the passes, and therefore the wall clock — §11's
+six-hour poster becomes four. It is the cheapest large win in the plan and
+everything after it is measured on top of it.
 
-**5 — `MAX_SUPERSAMPLE` to 16** (§5), once 1-4 make it safe.
+**5 — Tiled TIFF writer** (§6), streaming, parallel per-tile compression.
 
-**6 — The progress ledger and the shared phase enum** (§7).
+**6 — Preview writes** (§13). Small, and it is what makes a multi-hour render
+something a person can live with rather than bet on.
 
-**7 — Per-pass checkpoint and the resume UI** (§8).
+**7 — The progress ledger and the shared phase enum** (§7).
 
-**8 — Compact histograms** (§4), if the memory is still the binding constraint.
+**8 — Per-pass checkpoint and the GUI resume** (§8, §13).
+
+**9 — `MAX_SUPERSAMPLE` to 16** (§5), once the rest makes it safe. Late
+deliberately: §3 and §11 both say it is not what the poster needs, so it should
+not block the poster.
+
+**10 — Live preview in the render-job dialog** (§13).
+
+Then, as its own investigation rather than a slice: **denoising the grade
+buffer** (§12a), starting with a 100,000-spp ground-truth render of `lacewing`
+to score against.
 
 ---
 
-## 10. Open questions
+## 10. The halo, and how small a machine can tile
 
-1. **Is 600 ppi firm?** A2 at 300 ppi fits today at 1x and needs three passes at
-   2x. It changes the size of this project a lot (§3).
-2. **Colour handoff for print.** Everything here writes linear or sRGB RGB. A
+The halo is a **fixed cost in output pixels** (~8 per side) while the tile it
+sits around shrinks as **N²** for a given memory budget. So the overhead is
+negligible everywhere except one corner — high supersampling on a small
+binding limit — where it becomes the dominant cost:
+
+| budget | 1x | 2x | 4x | 16x |
+|---|---|---|---|---|
+| 2.1 GB *(GTX 1080)* | 0.4% | 0.8% | 1.6% | 6.6% |
+| 512 MB | 0.8% | 1.6% | 3.3% | 14.1% |
+| 128 MB | 1.6% | 3.3% | 6.7% | **31.5%** |
+| 32 MB | 3.3% | 6.7% | 14.1% | **80.7%** |
+
+At 32 MB and 16x the tile is 46 output pixels inside a 62-pixel rendered
+square: nearly half the work is halo. That is the failure mode to design
+against.
+
+**The fix is to size the halo from the actual settings, not the maximum.** The
+6 px is entirely density estimation's reach; the filter contributes 0.5-2. With
+DE off the halo is ~2 px, and the same table becomes:
+
+| budget | 1x | 2x | 4x | 16x |
+|---|---|---|---|---|
+| 128 MB | 0.4% | 0.8% | 1.6% | 6.7% |
+| 32 MB | 0.8% | 1.6% | 3.3% | 14.1% |
+
+80.7% → 14.1% for a change with no downside: a halo wide enough for a pass that
+is not running is pure waste. So `halo_px = (de.is_off() ? 0 : MAX_RADIUS_PX) +
+filter_radius`, and `TilePlan` reports it so the cost is visible rather than
+discovered.
+
+**Full-width strips** are the other lever, and they compose with tiling rather
+than replacing it: a strip that spans the image needs no left or right halo,
+because those edges are the picture's own. Overhead becomes linear in the
+strip's height instead of quadratic in a tile's side. The catch is that the
+downsample and DE intermediates are *textures*, capped at 32768, so a strip
+only works while `width * N <= 32768` — at A2 that is 1x and 2x, and not 4x.
+Which is fine, because 1x and 2x is what §3 argues for at poster size anyway.
+
+---
+
+## 11. spp or pixels? — spp, and the arithmetic is not close
+
+Your instinct is right, and it is worth pinning down because it decides where
+every marginal hour goes.
+
+At **600 ppi a pixel is 42 microns**, against roughly 87 microns for one arcmin
+of visual acuity at reading distance. The print is already sampling ~2x finer
+than the eye can resolve. Doubling to 1200 ppi quadruples the pixel count for
+detail that physically cannot be seen. Doubling `--spp` divides the noise by
+1.41, and the noise is the thing you are actually looking at.
+
+At a fixed compute budget the total is `spp x pixels`, so this is a genuine
+trade and it is lopsided: **pixels are already past the eye, noise is not.**
+
+So the target is not "more pixels than A2 at 600". It is **A2 at 600 with
+enough samples**, and that is a number we can name:
+
+| `--spp` at A2 600ppi | noise (RMSE) | at 8-bit | passes @2x | wall |
+|---|---|---|---|---|
+| 1,000 | 0.0069 | 1.7 levels | 3 | ~40 min |
+| 10,000 | 0.0026 | **0.67 levels** | 3 | ~6 hours |
+| 100,000 | 0.0008 | 0.2 levels | 3 | ~60 hours |
+
+0.67 levels at 8-bit is **below the quantisation step** — 10,000 samples/px is
+essentially a noise-free print, and it is a six-hour job rather than an
+impossible one. 100,000 buys 3.16x less noise for 10x the time, and buys it
+below the point where paper or eye can tell. That is the useful ceiling, and it
+is reachable.
+
+(`--spp` is per *output* pixel, so these figures carry over from the 1080p
+measurements in §1 unchanged — which is exactly why the tier system was built
+on samples/px instead of a point count.)
+
+**Compact histograms (§4) move this from 3 passes to 2**, taking the six-hour
+job to about four. That makes it the highest-leverage single change in the
+plan after tiling itself.
+
+---
+
+## 12. Past brute force: where "better" comes from after that
+
+1/sqrt(N) is a hard wall. Past 10,000 spp, ten times cleaner costs a hundred
+times the time — 60 hours buys 3.16x, 600 hours buys 10x. If "bigger, better,
+more beautiful" is to keep going after §11, it does not go there.
+
+Three directions, honestly ranked.
+
+### a) Denoise the grade buffer — the big one
+
+`--grade-out` already writes exactly the right input: the pre-tonemap linear
+density. `--retonemap` already re-processes it without re-rendering. A denoise
+pass slots into that seam with no change to the renderer at all, and inherits
+the property that makes the grade sweep useful — **render once, try sixteen
+settings.**
+
+Production renderers get the equivalent of 10-100x more samples this way, which
+is one to two decades of the table in §11 for free. The risk is specific and
+real: a flame image has genuine structure at the same scale as its noise, and
+an aggressive denoiser eats filaments — precisely the `rib` material `lacewing`
+was built to expose.
+
+But that risk is *measurable here in a way it usually isn't*, because §11 says
+a ground-truth render is affordable. Render `lacewing` once at 100,000 spp,
+keep it as the reference, and then any denoiser applied to a 1,000-spp buffer
+can be scored against it directly — with the same independent-seed method that
+produced every number in this document. A denoiser that eats filaments will
+show it immediately as error against the reference, not as an argument.
+
+Start with a guided/edge-aware filter written here (no dependency, fully
+understood) and only reach for something like OIDN if the simple thing plateaus.
+
+### b) Stratified or low-discrepancy transform selection
+
+The chaos game picks its next transform from a uniform random draw. A
+low-discrepancy sequence can do better than 1/sqrt(N) in some regimes — call it
+1/N^0.6 — which is modest but compounds over a six-hour render. Cheap to try,
+cheap to abandon, and measurable with the existing tooling.
+
+### c) Importance-sampled chaos — research, not a plan item
+
+The grain is worst in the sparse regions *by construction*: the chaos game
+visits in proportion to the attractor's natural measure, so low-measure regions
+get few samples and no amount of uniform sampling changes their relative share.
+Sampling with modified transform probabilities and carrying a compensating
+weight would let samples be steered — and is mathematically delicate, since
+weights can explode and a bad weight is a bright wrong pixel rather than a
+noisy one. Worth knowing it is the principled answer; not worth committing to.
+
+**Note that density estimation is not on this list.** DE is the denoiser we
+already have, and it is a *low-spp* tool: measured 34% benefit at 100 spp
+falling to 7.5% at 1000. At the sample counts §11 argues for it will be doing
+almost nothing, which is a reason to finish its GUI slice for ordinary renders
+and not to expect it to carry a poster.
+
+---
+
+## 13. Living with a six-hour render
+
+An hours-long render is a different kind of object from a minutes-long one, and
+three things follow.
+
+**Preview as it goes.** The accumulating render is an anytime algorithm —
+exposure is normalised by what has actually accumulated, so the histogram at
+40% is the same picture, noisier. That means a preview PNG can be written every
+pass (or every few minutes) at essentially no cost, and it changes the
+experience completely: you can look at hour one and decide whether hour six is
+worth having. Without it, a six-hour render is a six-hour bet.
+
+**Watch it in the dialog.** The job already owns a device; a downscaled readback
+per pass gives the render-job dialog a live thumbnail. For a job measured in
+hours, "is this going to be worth it" is a more useful question than "what
+percent is it".
+
+**Survive the machine.** Per-pass checkpointing and the GUI resume from §8,
+which you have approved. At six hours the relevant failure is not a crash but a
+reboot, and a render that cannot cross one is not really a six-hour feature.
+
+---
+
+## 14. Open questions
+
+**Settled:** scaling up is firm, with A2 at 600 ppi as the anchoring real use
+case. Tiled TIFF is the output format. The GUI gets a resume. The 8 px halo is
+accepted, with §10 planning for how it scales down.
+
+Still open:
+
+1. **Colour handoff for print.** Everything here writes linear or sRGB RGB. A
    print shop may want an ICC profile embedded, or CMYK separation. Out of
-   scope as written, but worth knowing before a poster gets sent.
-3. **Is the GTX 1080 the render machine?** Every number here is measured on it.
-   The binding limit in particular is a per-adapter property, and a card with a
-   4 GB binding limit would halve every pass count in §4.
+   scope as written, but worth knowing before a poster is actually sent — it is
+   the one thing in this document that could invalidate a six-hour render after
+   the fact.
+2. **Is the GTX 1080 the render machine?** Every number here is measured on it.
+   The binding limit is a per-adapter property, and a card with a 4 GB binding
+   limit would halve every pass count in §4 and §11.
+3. **How small a machine has to tile at all?** §10 says the halo stays cheap
+   down to a 32 MB budget except at 16x. Worth knowing whether the T490 is
+   expected to render posters or only to explore, because "explore here, render
+   there" makes the small-budget corner of that table irrelevant.
