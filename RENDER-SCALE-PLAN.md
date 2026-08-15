@@ -465,7 +465,18 @@ something a person can live with rather than bet on.
 the fit view as the loupe's picker. Promoted next to the preview writes it
 shares its readback with, rather than left to slice 10.
 
-**7 — The progress ledger and the shared phase enum** (§7).
+**7 — The progress ledger and the shared phase enum** (§7). *(done, `25851d3`)*
+
+> **CLI does not get a bar.** Hazel's call, and right: its reader is usually an
+> agent, and a redrawing ANSI bar is thousands of tokens of overdraw carrying
+> one number that matters only at the end. It gets discrete, greppable notices
+> instead — one line per pass on completion with its cost, plus in-pass notices
+> throttled by *time* (every 20s of real work), not by lap count. A pass is the
+> same number of laps whether it takes a second or ten minutes.
+>
+> The still's "encode bar" §7 asked for became moot: `Compression::Fast` took
+> saving to ~8% of a poster, so it is a weighted segment of the one bar rather
+> than a phase needing its own readout.
 
 **8 — Per-pass checkpoint and the GUI resume** (§8, §13).
 
