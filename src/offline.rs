@@ -2078,10 +2078,13 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         height,
         sampling.n,
         halo,
-        // Slice 2 renders one tile at a time, so residency is one tile. Slice 3
-        // is what groups them, and it is grouping that turns tiles into passes
-        // and passes into wall clock.
-        crate::tile::Budget { binding_limit, resident_limit: binding_limit },
+        // Twice the binding limit, which is what decides how many tiles share
+        // one run of the chaos game. Conservative on purpose: wgpu offers no
+        // way to ask how much memory the card has, so this is a budget rather
+        // than a measurement, and guessing high costs an out-of-memory abort
+        // minutes into a render. Every card puts its binding limit well under
+        // its VRAM — a quarter of it, typically — so twice it has margin.
+        crate::tile::Budget { binding_limit, resident_limit: binding_limit * 2 },
     )
     .map_err(|e| e.to_string())?;
 
@@ -2125,12 +2128,13 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // disappears, and the banding it was hiding appears. The picture getting
     // better is what makes the file worse, which is a strange enough sentence
     // to be worth the comment.
-    renderer.set_dither(match bit_depth {
+    let dither_lsbs = match bit_depth {
         BitDepth::Eight => 1.0,
         // 16 bits is ~256x finer, far below any achievable sampling noise, so
         // there is nothing here to dither and adding noise would only add noise.
         BitDepth::Sixteen => 0.0,
-    });
+    };
+    renderer.set_dither(dither_lsbs);
 
     // The one thing about this path that is not the same on every machine.
     // Without fp32 blending each lap's batch stalls at 2048 per texel, so the
@@ -2187,13 +2191,15 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         // takes a minute and one that takes an hour, and it is not a number
         // anyone can guess from the output size.
         println!(
-            "  in {} tiles ({}x{}, {} of histogram, +{:.1}% halo) — the chaos game runs once \
-             per tile",
+            "  in {} tiles ({}x{}, {} of histogram, +{:.1}% halo) over {} pass{} — the chaos \
+             game runs once per pass",
             plan.tiles.len(),
             plan.cols,
             plan.rows,
             crate::render_job::human_bytes(plan.total_histogram_bytes()),
             plan.halo_overhead() * 100.0,
+            plan.passes(),
+            if plan.passes() == 1 { "" } else { "es" },
         );
     }
     if accumulate != DEFAULT_ACCUMULATE {
@@ -2222,70 +2228,102 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // not the render.
     let mut last_histogram: Option<Accumulator> = None;
     let mut tiles_done = 0usize;
-    let total_laps = laps as u64 * plan.tiles.len() as u64;
 
-    'tiles: for tile in &plan.tiles {
-        // Every tile is a window onto the *same* camera — not its own camera,
-        // which is what the contact sheets do. `screen_height` stays the full
-        // output height so point sizes are decided once for the whole picture;
-        // the window is what makes this tile show its own part of it. Getting
-        // either of those from the tile instead would give tiles of visibly
-        // differing texture.
-        let camera = CameraUniforms::new(
-            base_camera.view_proj(aspect),
-            sampling.target_height(),
-            point_size,
-            aspect,
-            1.0,
-            haze_near,
-            haze_far,
-            haze.transmittance,
-            haze.saturation,
-            color_contrast,
-            scene.background.to_array(),
-            transparent,
-            scene.color_mode.packs_rgb(),
-        )
-        .with_zoom_guard(zoom.as_ref(), base_camera.eye())
-        .with_supersample(sampling.n)
-        .with_subfrustum(tile.subfrustum(width, height));
-        renderer.upload_camera(&queue, &camera);
-
-        let (tw, th) = (tile.render_width, tile.render_height);
-        let target = TileTarget::new(
-            &device, &queue, tw, th, clear, sampling, filter, filter_radius, bit_depth,
+    // One SplatRenderer per resident tile, built once and reused across passes.
+    // Each needs its own camera uniform and its own batch texture, which is the
+    // whole reason there is more than one; the pipelines inside are identical
+    // and rebuilding them per pass would pay shader compilation for nothing.
+    let mut renderers: Vec<SplatRenderer> = Vec::new();
+    for _ in 0..plan.resident.max(1) {
+        let mut r = SplatRenderer::new(
+            &device,
+            bit_depth.format(),
+            &compute.point_buffer,
+            &compute.colormap_buffer,
         );
-        // Sizes the batch texture and hands back the view the histogram reads.
-        let (batch_view, _, _) = renderer.prepare_accum(&device, tw, th);
-        let batch_view = batch_view.clone();
-        let histogram = Accumulator::new(
-            &device, &queue, tw, th, sampling.n, filter, filter_radius, density_estimation,
-        )?;
-        let batch_bind_group = histogram.bind_batch(&device, &batch_view);
+        r.set_supersample(&device, &queue, sampling.n, filter, filter_radius);
+        r.set_dither(dither_lsbs);
+        renderers.push(r);
+    }
+    drop(renderer);
 
-        // Whatever the run starts from: an empty histogram, or the saved one
-        // read above.
-        match &prior {
-            Some(ck) => {
-                histogram.restore(&queue, &ck.words)?;
+    let total_laps = laps as u64 * plan.passes() as u64;
+    let mut passes_done = 0u32;
+
+    'passes: for group in plan.pass_groups() {
+        // Set up every tile in this pass before any of them accumulates, so one
+        // run of the chaos game feeds all of them. This is the entire economy
+        // of tiling: a lap deposits samples across the whole attractor, and a
+        // tile keeps the ones landing in its window — so N tiles sharing a lap
+        // cost the same chaos game as one, while N tiles taking turns cost N.
+        let mut targets = Vec::with_capacity(group.len());
+        let mut histograms = Vec::with_capacity(group.len());
+        let mut batch_groups = Vec::with_capacity(group.len());
+        for (i, tile) in group.iter().enumerate() {
+            // Every tile is a window onto the *same* camera — not its own
+            // camera, which is what the contact sheets do. `screen_height`
+            // stays the full output height so point sizes are decided once for
+            // the whole picture; the window is what makes this tile show its
+            // own part of it. Getting either of those from the tile instead
+            // would give tiles of visibly differing texture.
+            let camera = CameraUniforms::new(
+                base_camera.view_proj(aspect),
+                sampling.target_height(),
+                point_size,
+                aspect,
+                1.0,
+                haze_near,
+                haze_far,
+                haze.transmittance,
+                haze.saturation,
+                color_contrast,
+                scene.background.to_array(),
+                transparent,
+                scene.color_mode.packs_rgb(),
+            )
+            .with_zoom_guard(zoom.as_ref(), base_camera.eye())
+            .with_supersample(sampling.n)
+            .with_subfrustum(tile.subfrustum(width, height));
+            renderers[i].upload_camera(&queue, &camera);
+
+            let (tw, th) = (tile.render_width, tile.render_height);
+            let target = TileTarget::new(
+                &device, &queue, tw, th, clear, sampling, filter, filter_radius, bit_depth,
+            );
+            // Sizes the batch texture and hands back the view the histogram
+            // reads.
+            let (batch_view, _, _) = renderers[i].prepare_accum(&device, tw, th);
+            let batch_view = batch_view.clone();
+            let histogram = Accumulator::new(
+                &device, &queue, tw, th, sampling.n, filter, filter_radius, density_estimation,
+            )?;
+            let batch_bind_group = histogram.bind_batch(&device, &batch_view);
+
+            // Whatever the run starts from: an empty histogram, or the saved
+            // one read above.
+            match &prior {
+                Some(ck) => {
+                    histogram.restore(&queue, &ck.words)?;
+                }
+                None => {
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("accum_clear_encoder"),
+                        });
+                    histogram.clear(&mut encoder);
+                    queue.submit(std::iter::once(encoder.finish()));
+                }
             }
-            None => {
-                let mut encoder =
-                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("accum_clear_encoder"),
-                    });
-                histogram.clear(&mut encoder);
-                queue.submit(std::iter::once(encoder.finish()));
-            }
+            targets.push(target);
+            histograms.push(histogram);
+            batch_groups.push(batch_bind_group);
         }
 
-        // Laps are counted per tile, and every tile runs the same number. A
-        // lap deposits its samples wherever the attractor puts them, so a tile
-        // showing a twentieth of the frame receives about a twentieth of them
-        // — which is exactly the density the full-frame count asks for. This
-        // is also why tiling costs what it costs: each tile needs the whole
-        // chaos game, not its own share of it.
-        let mut tile_laps: u32 = 0;
+        // Laps are counted per pass, and every pass runs the same number. A lap
+        // deposits its samples wherever the attractor puts them, so a tile
+        // showing a twentieth of the frame receives about a twentieth of them —
+        // which is exactly the density the full-frame count asks for.
+        let mut pass_laps: u32 = 0;
         for lap in 0..laps {
             for _ in 0..frames_per_lap {
                 compute.advance_fill(&queue);
@@ -2296,44 +2334,50 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 compute.dispatch_timed(&mut encoder, timer.as_mut());
                 queue.submit(std::iter::once(encoder.finish()));
             }
-            // Splat the whole ring and fold it in. Both passes go in one
-            // encoder: the fold reads exactly what the splat wrote, and queue
-            // order inside a submission gives that ordering.
+            // Splat the ring into every resident tile and fold each in. All of
+            // it goes in one encoder: each fold reads exactly what the splat
+            // before it wrote, and queue order inside a submission gives that
+            // ordering.
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("accum_fold_encoder"),
             });
-            renderer.splat_pass(&mut encoder, 0..capacity, use_point_primitives);
-            histogram.add(&mut encoder, &batch_bind_group);
+            for i in 0..group.len() {
+                renderers[i].splat_pass(&mut encoder, 0..capacity, use_point_primitives);
+                histograms[i].add(&mut encoder, &batch_groups[i]);
+            }
             queue.submit(std::iter::once(encoder.finish()));
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-            tile_laps += 1;
+            pass_laps += 1;
 
             // Two ways to stop, one meaning: keep what has accumulated. The
             // dialog has a cancel button; a terminal has Ctrl-C.
             let stopping = crate::interrupt::requested()
                 || control.as_ref().is_some_and(|c| c.should_stop());
             if let Some(c) = &control {
-                // Progress spans the whole render, not this tile, so the bar
-                // does not restart at every tile boundary.
-                let done = tiles_done as u64 * laps as u64 + (lap + 1) as u64;
-                c.progress(done.min(u32::MAX as u64) as u32, total_laps.min(u32::MAX as u64) as u32);
+                // Progress spans the whole render rather than this pass, so the
+                // bar does not restart at every pass boundary.
+                let done = passes_done as u64 * laps as u64 + (lap + 1) as u64;
+                c.progress(
+                    done.min(u32::MAX as u64) as u32,
+                    total_laps.min(u32::MAX as u64) as u32,
+                );
             }
             if stopping {
-                let got = (prior_samples + tile_laps as f64 * capacity as f64) / pixels;
+                let got = (prior_samples + pass_laps as f64 * capacity as f64) / pixels;
                 let msg = format!(
                     "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
-                    tile_laps, laps, got,
+                    pass_laps, laps, got,
                 );
                 println!("{}", msg);
                 if let Some(c) = &control {
                     c.log(msg);
                 }
                 outcome = Outcome::Partial;
-                done_laps = tile_laps;
-                break 'tiles;
+                done_laps = pass_laps;
+                break 'passes;
             }
         }
-        done_laps = tile_laps;
+        done_laps = pass_laps;
 
         // Exposure is normalized by the samples actually accumulated, not the
         // ones asked for. That is what makes a cancelled render come out at the
@@ -2342,51 +2386,64 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         // exposure dial. It is a whole-frame figure, identical for every tile,
         // which is what keeps the brightness continuous across a tile edge.
         let accumulated = prior_samples + done_laps as f64 * capacity as f64;
-        renderer.upload_params(
-            &queue,
-            exposure,
-            accumulated,
-            sampling.target_height(),
-            clear,
-            transparent,
-            grade,
-        );
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("accum_resolve_encoder"),
-        });
-        // Resolve to output-sized linear density (filtering on the way when
-        // supersampling is on), then the ordinary log tonemap.
-        let resolved = histogram.resolve(&device, &mut encoder);
-        let bind_group = renderer.tonemap_bind_group(&device, resolved);
-        renderer.tonemap_pass(&mut encoder, &target.color_view, &target.depth_view, &bind_group);
-        target.copy_out(&mut encoder);
-        queue.submit(std::iter::once(encoder.finish()));
-        // Keep only what this tile owns. The halo did its job by being there
-        // while the filter and the density estimator read it, and is dropped
-        // here.
-        let (crop_x, crop_y) = tile.crop_offset();
-        target.read_into_sheet_at(
-            &device,
-            &mut sheet,
-            width,
-            tile.x,
-            tile.y,
-            Crop { x: crop_x, y: crop_y, width: tile.width, height: tile.height },
-        );
+        for (i, tile) in group.iter().enumerate() {
+            renderers[i].upload_params(
+                &queue,
+                exposure,
+                accumulated,
+                sampling.target_height(),
+                clear,
+                transparent,
+                grade,
+            );
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("accum_resolve_encoder"),
+            });
+            // Resolve to output-sized linear density (filtering on the way when
+            // supersampling is on), then the ordinary log tonemap.
+            let resolved = histograms[i].resolve(&device, &mut encoder);
+            let bind_group = renderers[i].tonemap_bind_group(&device, resolved);
+            renderers[i].tonemap_pass(
+                &mut encoder,
+                &targets[i].color_view,
+                &targets[i].depth_view,
+                &bind_group,
+            );
+            targets[i].copy_out(&mut encoder);
+            queue.submit(std::iter::once(encoder.finish()));
+            // Keep only what this tile owns. The halo did its job by being
+            // there while the filter and the density estimator read it, and is
+            // dropped here.
+            let (crop_x, crop_y) = tile.crop_offset();
+            targets[i].read_into_sheet_at(
+                &device,
+                &mut sheet,
+                width,
+                tile.x,
+                tile.y,
+                Crop { x: crop_x, y: crop_y, width: tile.width, height: tile.height },
+            );
+            tiles_done += 1;
+        }
+        passes_done += 1;
+        if !plan.is_single() {
+            println!(
+                "  pass {}/{} done ({}/{} tiles)",
+                passes_done,
+                plan.passes(),
+                tiles_done,
+                plan.tiles.len(),
+            );
+        }
         // Held only for the single-tile path, where the checkpoint and
-        // `.fgrade` writers below still need it. Holding it across a tiled
+        // `.fgrade` writers below still need it. Holding one across a tiled
         // render would keep a whole histogram alive — 2.1 GB at the binding
-        // limit — while the *next* tile allocates its own, which is an
+        // limit — while the next pass allocates its own, which is an
         // out-of-memory abort on exactly the renders tiling exists to make
         // possible. Both features are refused above when tiling, so there is
         // nothing to keep.
         if plan.is_single() {
-            last_histogram = Some(histogram);
-        }
-        tiles_done += 1;
-        if !plan.is_single() {
-            println!("  tile {}/{} done", tiles_done, plan.tiles.len());
+            last_histogram = histograms.pop();
         }
     }
     let t_fill = Instant::now();

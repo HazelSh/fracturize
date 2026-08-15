@@ -45,6 +45,20 @@
 /// a histogram that no longer exists.
 pub use crate::gpu::points::accumulate::BYTES_PER_TEXEL;
 
+/// Bytes a *resident* tile occupies, per histogram texel.
+///
+/// The histogram is [`BYTES_PER_TEXEL`] of it, and the splat batch texture the
+/// laps render into is the rest — `Rgba32Float` at 16 bytes, the same texel
+/// count. Counting only the histogram would overestimate how many tiles fit by
+/// 50%, and the failure mode is an out-of-memory abort partway into a render
+/// that was already minutes deep.
+///
+/// The output-sized resolved copy and the readback are ignored: both are output
+/// pixels rather than histogram texels, so at any supersampling above 1x they
+/// are a small fraction of these two, and at 1x they are covered by the margin
+/// in [`Budget::resident_limit`].
+pub const RESIDENT_BYTES_PER_TEXEL: u64 = BYTES_PER_TEXEL + 16;
+
 /// The largest texture dimension wgpu will accept, and so the largest a tile's
 /// *supersampled* side may be. The histogram is a buffer, but the density
 /// pyramid and downsample intermediates are textures, and they are what this
@@ -212,17 +226,32 @@ impl std::fmt::Display for TileError {
 pub struct Budget {
     /// `max_storage_buffer_binding_size`. Caps one tile's histogram.
     pub binding_limit: u64,
-    /// Total histogram bytes that may be resident at once. Caps how many tiles
-    /// a pass can hold, and so how many passes the render takes — which is the
-    /// thing that actually costs wall clock.
+    /// GPU bytes the tiler may hold at once, across every tile of a pass.
+    ///
+    /// This is what decides how many tiles share a single run of the chaos
+    /// game, and therefore how many times that run happens — which is the
+    /// thing that actually costs wall clock. Two tiles resident halves a
+    /// render's chaos time; four quarters it.
+    ///
+    /// Deliberately not "all of VRAM". wgpu offers no way to ask how much
+    /// there is, so this is a budget rather than a measurement, and the cost of
+    /// guessing high is an out-of-memory abort minutes into a render. The
+    /// callers use twice the binding limit, which is conservative on any card
+    /// whose limit is the usual quarter of its memory.
     pub resident_limit: u64,
 }
 
 impl Budget {
-    /// The reference desktop: a 2.15 GB binding limit, and about three
-    /// full-size histograms resident inside 8 GB of VRAM.
+    /// The reference desktop: a 2.15 GB binding limit, and the same twice-the-
+    /// limit residency budget the renderer uses.
+    ///
+    /// Kept in step with `offline.rs` deliberately — this is what the tests
+    /// predict passes from, and a helper that budgeted differently from the
+    /// renderer would let the pass table pass while the renders it describes
+    /// took twice as long.
     pub fn gtx1080() -> Self {
-        Self { binding_limit: 2_147_483_648, resident_limit: 6_442_450_944 }
+        let binding_limit = 2_147_483_648;
+        Self { binding_limit, resident_limit: binding_limit * 2 }
     }
 }
 
@@ -287,8 +316,12 @@ impl TilePlan {
         // Residency decides passes, and passes decide the wall clock. At least
         // one, or a render with a large tile would report zero passes and do
         // nothing.
-        let per_tile =
-            tiles.iter().map(|t| t.texels(n) * BYTES_PER_TEXEL).max().unwrap_or(1).max(1);
+        let per_tile = tiles
+            .iter()
+            .map(|t| t.texels(n) * RESIDENT_BYTES_PER_TEXEL)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let resident = (budget.resident_limit / per_tile).clamp(1, tiles.len() as u64) as u32;
 
         Ok(Self {
@@ -565,27 +598,46 @@ mod tests {
     }
 
     /// `RENDER-SCALE-PLAN.md` §4 costs this work in *passes* — how many times
-    /// the chaos game has to be re-run — from a table computed by hand. This
-    /// pins the planner to that table, so if the arithmetic ever drifts it
-    /// fails here rather than in a six-hour render's wall clock.
+    /// the chaos game has to be re-run — and this pins the planner to that
+    /// cost, so if the arithmetic drifts it fails here rather than in a
+    /// six-hour render's wall clock.
+    ///
+    /// The figures are higher than §4's first table, which was computed by
+    /// hand against the histogram alone and assumed three resident. A resident
+    /// tile also holds its splat batch texture (see
+    /// [`RESIDENT_BYTES_PER_TEXEL`]), and the budget is twice the binding limit
+    /// rather than three times, because wgpu cannot report how much memory the
+    /// card has and guessing high aborts a render that is already minutes deep.
+    ///
+    /// Worth knowing: **the pass count does not depend on the tile size.**
+    /// Halve the tiles and twice as many fit in a pass, so `passes` is just
+    /// `total resident bytes / budget`. Tile size trades against the halo, not
+    /// against the wall clock; the budget is the only lever on passes.
     #[test]
     fn the_pass_table_from_the_plan_still_holds() {
-        // label, width, height, N, expected passes
-        let rows: &[(&str, u32, u32, u32, u32)] = &[
-            ("A2@600 1x", 9921, 14031, 1, 1),
-            ("A2@600 2x", 9921, 14031, 2, 3),
-            ("A2@600 4x", 9921, 14031, 4, 12),
-            ("8K 2x", 7680, 4320, 2, 1),
-            ("8K 4x", 7680, 4320, 4, 3),
-            ("4K 4x", 3840, 2160, 4, 1),
+        // label, width, height, N, expected tiles, expected passes
+        let rows: &[(&str, u32, u32, u32, usize, u32)] = &[
+            ("4K 2x", 3840, 2160, 2, 1, 1),
+            ("4K 4x", 3840, 2160, 4, 2, 2),
+            ("8K 2x", 7680, 4320, 2, 2, 2),
+            ("8K 4x", 7680, 4320, 4, 12, 12),
+            ("A2@600 1x", 9921, 14031, 1, 4, 2),
+            ("A2@600 2x", 9921, 14031, 2, 9, 9),
         ];
-        for &(label, w, h, n, want) in rows {
+        for &(label, w, h, n, tiles, passes) in rows {
             let p = TilePlan::new(w, h, n, Halo { px: 8 }, Budget::gtx1080()).unwrap();
-            assert_eq!(p.passes(), want, "{label}: {} tiles, {} resident", p.tiles.len(), p.resident);
+            assert_eq!(p.tiles.len(), tiles, "{label} tiles");
+            assert_eq!(p.passes(), passes, "{label} passes ({} resident)", p.resident);
             // And the halo stays a rounding error at every one of them, which
             // is the claim that makes tiling worth doing at all.
             assert!(p.halo_overhead() < 0.02, "{label}: halo {:.3}", p.halo_overhead());
         }
+        // A2 at 1x is the poster, and it really does group: four tiles, two
+        // passes, so the chaos game runs twice rather than four times. Measured
+        // at 89.4s of chaos against 96.7s ungrouped.
+        let a2 = TilePlan::new(9921, 14031, 1, Halo { px: 8 }, Budget::gtx1080()).unwrap();
+        assert_eq!(a2.resident, 2);
+        assert!(a2.pass_groups().all(|g| g.len() == 2));
     }
 
     /// A budget so small nothing can fit must say so rather than loop forever

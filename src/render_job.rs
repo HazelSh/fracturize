@@ -86,20 +86,25 @@ pub const PNG_SECS_PER_PIXEL: f32 = 4.0e-7;
 /// shared constant it would not.
 pub const PNG16_SECS_PER_PIXEL: f32 = 1.0e-6;
 
-/// Seconds to fold one histogram texel into the accumulator, as a fraction of
-/// the measured point throughput.
+/// Seconds to fold one histogram texel into the accumulator.
 ///
-/// The accumulating path pays this once per lap over `width * height * N²`
-/// texels, and it is the term that makes supersampling expensive: at 1080p the
-/// per-lap cost goes 0.0019s at 1x to 0.0367s at 4x, tracking texel count and
-/// nothing else. Measured at ~1.12ns/texel against ~664M points/s of chaos on
-/// the GTX 1080, i.e. the fold moves about 1.34 texels per point-slot of
-/// throughput.
+/// The accumulating path pays this once per lap over every texel of every
+/// tile, and at poster sizes it is the term that decides the wall clock: an A2
+/// render spends 32s of an 89s chaos phase here.
 ///
-/// Expressed as a ratio rather than an absolute so it tracks the machine: a
-/// GPU that fills points twice as fast folds about twice as fast too, and a
-/// hardcoded nanosecond figure would be a GTX 1080 constant quoted at a laptop.
-pub const FOLD_TEXELS_PER_POINT: f32 = 1.34;
+/// **An absolute figure, not a ratio to throughput, and that is a considered
+/// choice.** The ratio form was tried first and does not hold: fitting two A2
+/// renders that differ only in point-buffer size gives 4.96e-10 s/texel, and
+/// fitting a 1080p render gives 4.97e-10 — stable across a 67x range in output
+/// size — while the *point* throughput over that same range falls from ~957M/s
+/// to ~583M/s as splatting into a large histogram turns memory-bound. Tying the
+/// fold to a throughput that moves would import that movement into a term that
+/// does not have it.
+///
+/// The cost is that this is a GTX 1080 number. Re-measure it on another GPU by
+/// rendering the same scene at two point counts and solving the pair — the
+/// difference isolates this term, because everything else is unchanged.
+pub const FOLD_SECS_PER_TEXEL: f32 = 4.96e-10;
 
 /// CPU threads a job may use, when nobody said otherwise: **one less than the
 /// machine has**.
@@ -614,20 +619,22 @@ pub fn estimate_secs(
         }
         Samples::Accumulate { spp } => {
             let n2 = (params.supersample.max(1) as f32).powi(2);
-            let chaos = spp as f32 * pixels / throughput;
-            let fold =
-                params.laps() as f32 * pixels * n2 / (throughput * FOLD_TEXELS_PER_POINT);
-            // Every tile re-runs the whole chaos game, because a lap deposits
-            // its samples wherever the attractor puts them and a tile keeps
-            // only the ones that land in its own window. So the tile count is a
-            // straight multiplier on the render, and the largest single term in
-            // what a poster costs — quoting a one-tile figure for a nine-tile
-            // job would understate it by nine.
-            let tiles = params
-                .tile_plan(max_buffer_bytes)
-                .map(|p| p.tiles.len() as f32)
-                .unwrap_or(1.0);
-            (chaos + fold) * tiles
+            let plan = params.tile_plan(max_buffer_bytes).ok();
+            let tiles = plan.as_ref().map_or(1.0, |p| p.tiles.len() as f32);
+            let passes = plan.as_ref().map_or(1.0, |p| p.passes() as f32);
+            // Two passes over the points per lap, and they tile differently.
+            // The chaos game advances the buffer once per *pass*, because every
+            // tile resident in that pass shares the same points — that sharing
+            // is the whole economy of grouping. The splat then draws those
+            // points once per *tile*, since each tile has its own batch texture
+            // to draw into. Charging both to the tile count overstates a
+            // grouped render; charging both to the pass count understates it.
+            let points_work = spp as f32 * pixels * (passes + tiles);
+            // The fold is already a whole-image figure: the tiles partition the
+            // texels between them, so summing over tiles gives the output back.
+            // It must *not* be multiplied by the tile count again.
+            let texel_work = params.laps() as f32 * pixels * n2;
+            points_work / throughput + texel_work * FOLD_SECS_PER_TEXEL
         }
     };
 
