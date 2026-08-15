@@ -265,19 +265,88 @@ it is ~37s and **1.11 GB of image held in RAM**.
 Three separate problems, one answer:
 
 1. **PNG deflate is a single serial stream.** It cannot use `--threads` however
-   many cores are free.
+   many cores are free — this is the big one, and it is what makes saving 82%
+   of an 8K render.
 2. **It needs the whole image in memory**, which a tiled render otherwise never
    has to have.
 3. **139 Mpx PNG is an awkward handoff** for print tooling.
 
-**Write tiled 16-bit TIFF.** TIFF has native tiled storage, so render tiles map
-onto file tiles one-to-one: each is written the moment it finishes, each is
+**Not on that list: bit depth.** An earlier draft argued for TIFF partly on
+16-bit grounds, which was wrong — `--bit-depth 16` already writes 16-bit PNG
+and has for some time. TIFF earns its place on parallelism and streaming alone,
+and the case is strong enough without the bad argument.
+
+**Write tiled TIFF.** TIFF has native tiled storage, so render tiles map onto
+file tiles one-to-one: each is written the moment it finishes, each is
 compressed independently and therefore *in parallel across `--threads`*, and
-the full image is never resident. 16-bit TIFF is also the format a print shop
-actually wants. PNG stays the default at ordinary sizes.
+the full image is never resident. It is also what a print shop wants. PNG stays
+the default at ordinary sizes, at either depth.
+
+(A parallel PNG encoder is possible in principle — deflate permits
+independently compressed blocks concatenated into one stream, which is how
+`pigz` works. It would fix problem 1 but not 2, and TIFF gives both for less
+work. Worth knowing the option exists so the choice is an informed one.)
 
 This also gives the save phase honest progress for free: tiles written of tiles
 total.
+
+---
+
+## 6b. Dither, because a converged render is what bands
+
+8-bit output bands, and it is measurable without any reference image. On the
+100,000-spp `lacewing`:
+
+* a 300x200 patch of smooth material carries **1,134 distinct colours at 8-bit
+  against 56,747 at 16-bit** — a 50x collapse of the tonal range that is
+  actually there;
+* a 480 px scanline through that material uses **30 codes**, with runs of up to
+  **14 identical pixels**. A 14-pixel run of one code across continuously
+  varying material is a band, by definition.
+
+**Here is the part worth noticing: this is a symptom of converging.** Sampling
+noise is itself a dither. At 1,000 spp the render's own grain is several
+quantisation steps wide, so it randomises every rounding decision for free and
+no banding is possible. As `--spp` climbs, that self-dither shrinks below one
+step — around the 30,000 spp crossover in §11 — and the quantisation structure
+it was hiding emerges. **The banding appears exactly when the render finally
+gets good.** Which is precisely the regime this whole plan exists to reach.
+
+### The design
+
+**Dither has to live in the tonemap shader.** For `--bit-depth 8` the tonemap
+writes into an `Rgba8UnormSrgb` render target and the *hardware* does the
+rounding — the CPU-side path only ever sees bytes that have already been
+quantised, so there is no later point at which to intervene. One added term
+before the write, and a noise source.
+
+**Triangular PDF, one LSB.** Uniform (RPDF) dither decorrelates the error from
+the signal but leaves the noise floor signal-dependent, which is audible as
+"pumping" in audio and visible as breathing in a gradient. TPDF — the sum of
+two uniform draws, spanning ±1 LSB — decorrelates *and* removes that
+modulation, and is the standard answer.
+
+**Be honest about the trade: dither does not reduce error, it changes its
+character.** Round-to-nearest has an RMS error of 0.289q; TPDF has 0.5q. The
+error gets *larger* and the picture gets *better*, because structured error at
+0.289q is a visible contour and unstructured error at 0.5q is invisible grain
+below the noise the eye brings to it. Nothing here recovers information the
+file cannot hold — §11's crossover is unchanged as a statement about
+information. What changes is that past it the output degrades gracefully
+instead of into contours.
+
+**White noise is enough for print, and blue noise is a screen refinement.** A
+hash of pixel coordinate and render seed gives white TPDF in one line with no
+asset. A void-and-cluster blue-noise mask pushes the error into high spatial
+frequencies where the eye is least sensitive, which is meaningfully better on a
+monitor at 1:1 — and at 600 ppi is beside the point, since a dither grain is 42
+microns and invisible whatever its spectrum. Start white; add blue noise when
+the 1:1 preview (§13) makes it worth judging.
+
+**Two things not to dither.** The 16-bit path, where one step is 1/65535 and
+below anything the render or the eye contains — dithering it would add noise to
+buy nothing. And alpha, which is coverage rather than colour, matching what the
+existing 16-bit path already does by leaving alpha out of the sRGB encode.
 
 ---
 
@@ -352,10 +421,19 @@ memory, and therefore the passes, and therefore the wall clock — §11's
 six-hour poster becomes four. It is the cheapest large win in the plan and
 everything after it is measured on top of it.
 
+**4b — TPDF dither on the 8-bit path** (§6b). Out of order because it is small,
+independent of every other slice, and fixes a defect that is *already visible*
+in renders being made today — it does not need tiling, TIFF or anything else to
+land. One term in the tonemap shader.
+
 **5 — Tiled TIFF writer** (§6), streaming, parallel per-tile compression.
 
 **6 — Preview writes** (§13). Small, and it is what makes a multi-hour render
 something a person can live with rather than bet on.
+
+**6b — The two-scale preview in the dialog** (§13): fit view, 1:1 loupe, and
+the fit view as the loupe's picker. Promoted next to the preview writes it
+shares its readback with, rather than left to slice 10.
 
 **7 — The progress ledger and the shared phase enum** (§7).
 
@@ -365,7 +443,10 @@ something a person can live with rather than bet on.
 deliberately: §3 and §11 both say it is not what the poster needs, so it should
 not block the poster.
 
-**10 — Live preview in the render-job dialog** (§13).
+**10 — Blue-noise dither mask** (§6b), if the 1:1 preview from 6b shows white
+dither is worth improving on. Deliberately last and deliberately conditional:
+at print resolution it changes nothing, so it should be judged on a monitor
+against the thing it is supposed to improve.
 
 Then, as its own investigation rather than a slice: **denoising the grade
 buffer** (§12a), starting with a 100,000-spp ground-truth render of `lacewing`
@@ -449,10 +530,17 @@ has, and more samples buy nothing you can save. 10,000 spp is therefore the
 right target for a print: about six hours, half a quantisation step of noise,
 and the last point on the curve where more time still shows up in the file.
 
-Going further needs 16 bits, which is another argument for the TIFF in §6 — and
-`--bit-depth 16` is now mandatory for *measuring* noise at all, since an 8-bit
-file inflated these very figures by 24% at 10,000 spp and 108% at 100,000. See
-`AGENTS.md`, where that correction is recorded.
+Going further needs 16 bits — which `--bit-depth 16` already writes, so this is
+a reason to *use* that flag rather than a reason for any new format. And it is
+now mandatory for *measuring* noise at all, since an 8-bit file inflated these
+very figures by 24% at 10,000 spp and 108% at 100,000. See `AGENTS.md`, where
+that correction is recorded.
+
+Note this crossover is about *information*, and §6b's dither does not move it.
+What dither changes is that past the crossover an 8-bit file degrades into
+invisible grain rather than into visible contours — so 10,000 spp stays the
+right target for an 8-bit deliverable, and 16-bit is what makes going past it
+worth the hours.
 
 (`--spp` is per *output* pixel, so these figures carry over from the 1080p
 measurements in §1 unchanged — which is exactly why the tier system was built
@@ -555,10 +643,38 @@ pass (or every few minutes) at essentially no cost, and it changes the
 experience completely: you can look at hour one and decide whether hour six is
 worth having. Without it, a six-hour render is a six-hour bet.
 
-**Watch it in the dialog.** The job already owns a device; a downscaled readback
-per pass gives the render-job dialog a live thumbnail. For a job measured in
-hours, "is this going to be worth it" is a more useful question than "what
-percent is it".
+**Watch it in the dialog — at two scales, and both are load-bearing.**
+
+A fit-to-pane view of an A2 render is a **25x downscale**, and downscaling
+averages pixels together, which is precisely the operation that *destroys the
+evidence of grain*. A noisy render and a converged one look identical in the
+fit view. So the fit view can answer "is the composition right, is the exposure
+right, has it got as far as the left edge yet" and it structurally cannot
+answer "is it still grainy".
+
+A 1:1 view answers that and nothing else: it shows 0.3% of an A2 frame.
+
+So neither is a nice-to-have on top of the other — they answer disjoint
+questions, and a render this long needs both answered. The pairing is the
+standard loupe interaction: **the fit view is also the picker**, and clicking or
+dragging on it moves the 1:1 inspection point, with a rectangle on the fit view
+showing where the loupe is.
+
+Data flow fits the existing `JobEvent` channel without straining it. Per
+preview the job sends two small readbacks: a thumbnail (say 512 px wide) and a
+1:1 crop (say 512x512) around a point the UI last asked for. Both are tiny next
+to the histogram, and the crop centre travels the other way as a request. No
+new plumbing shape — the job already streams phase, progress and log lines this
+way.
+
+**And for a tiled render the preview is the progress bar.** Passes complete
+whole tiles, so the image fills in as a jigsaw: which tiles are done, and how
+they look, in one glance. That is more information than a percentage, and it is
+free — the tiles are being written anyway.
+
+A cadence of once per pass, or every few minutes for a long single pass,
+whichever is less frequent. The point is to be able to walk past the machine
+and know, not to animate.
 
 **Survive the machine.** Per-pass checkpointing and the GUI resume from §8,
 which you have approved. At six hours the relevant failure is not a crash but a
