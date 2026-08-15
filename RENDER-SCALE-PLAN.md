@@ -404,12 +404,12 @@ grain actually gets fixed (§1), it needs none of the machinery below, and
 without it the tiled renderer would ship with the same 9.6-samples/px default
 that caused the complaint.
 
-**1 — `TilePlan`**: pure geometry. Given output, N, binding limit, texture
+**1 — `TilePlan`**: pure geometry. *(done, `a94be75`)* Given output, N, binding limit, texture
 limit and a VRAM budget, produce tiles, halos (sized from the actual settings,
 §10), sub-frustums and pass grouping. No GPU. Fully testable, and every seam
 bug in §4 is a test on this type — as is every row of §10's overhead table.
 
-**2 — Tiled accumulating still**, single pass, halos, sub-frustum cameras,
+**2 — Tiled accumulating still** *(done, `176aa2c`)*, single pass, halos, sub-frustum cameras,
 assembled into the existing in-memory image. Correctness first: a 1-tile render
 and a 4-tile render of the same scene must agree to within sampling noise, and
 that is the acceptance test.
