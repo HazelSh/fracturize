@@ -696,19 +696,30 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
 
     if accumulating {
         let params = app.ui_state.render_job.params();
+        let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
+        // Tiles are not a detail to hide: past the binding limit the chaos game
+        // runs once per tile, so this line is where a job quietly stops costing
+        // seconds and starts costing minutes.
+        let tiling = match params.tile_plan(limit) {
+            Ok(p) if p.is_single() => String::new(),
+            Ok(p) => format!(" · {} tiles ({}x{})", p.tiles.len(), p.cols, p.rows),
+            Err(_) => String::from(" · will not fit"),
+        };
         ui.label(
             egui::RichText::new(format!(
-                "{} laps · {} histogram",
+                "{} laps · {} histogram{}",
                 params.laps(),
                 human_bytes(params.histogram_bytes()),
+                tiling,
             ))
             .small()
             .weak(),
         )
         .on_hover_text(
             "The histogram is one storage buffer at 32 bytes a texel, and supersampling \
-             squares it. It is the largest thing the job allocates and the first to hit the \
-             GPU's single-buffer limit.",
+             squares it. Past this GPU's single-buffer limit the render is split into tiles, \
+             each rendered separately and stitched — which works at any size, but re-runs the \
+             chaos game once per tile.",
         );
     }
 }
@@ -1025,7 +1036,7 @@ fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
         .small(),
     );
 
-    match estimate_secs(app, &params) {
+    match estimate_secs(app, &params, limit) {
         Some((low, high)) => {
             ui.label(
                 egui::RichText::new(format!(
@@ -1058,8 +1069,8 @@ fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
 
 /// A low/high seconds range for the job, from this session's measured
 /// throughput — `None` until the renderer has produced a frame to measure.
-fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
-    crate::render_job::estimate_secs(app.measured_throughput()?, params)
+fn estimate_secs(app: &App, params: &JobParams, limit: u64) -> Option<(f32, f32)> {
+    crate::render_job::estimate_secs(app.measured_throughput()?, params, limit)
 }
 
 /// The completed-this-session state: a green check, "Render done", and

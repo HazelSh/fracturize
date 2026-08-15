@@ -45,6 +45,14 @@ struct CameraUniforms {
     guard_ln_near: f32,
     guard_inv_ln_width: f32,
     max_point_pixels: f32,
+    /// This tile's window onto the frame: xy scale, zw offset, applied in NDC.
+    /// (1, 1, 0, 0) is the whole frame and is what every untiled render uses.
+    ///
+    /// It has to reach the shader rather than being folded into view_proj,
+    /// because a splat's position is projected but its *size* is added
+    /// afterwards as an NDC quad offset — see below. Scaling one without the
+    /// other gives every tile points of the wrong size.
+    subfrustum: vec4<f32>,
 }
 
 struct SplatParams {
@@ -181,7 +189,14 @@ fn vs_splat(
         return out;
     }
 
-    let ndc = clip.xyz / clip.w;
+    // Project, then crop to this tile's window. The identity window leaves
+    // this exactly as it was.
+    let ndc_full = clip.xyz / clip.w;
+    let ndc = vec3<f32>(
+        ndc_full.x * camera.subfrustum.x + camera.subfrustum.z,
+        ndc_full.y * camera.subfrustum.y + camera.subfrustum.w,
+        ndc_full.z,
+    );
 
     // Perspective splat radius in pixels of the *render target*, clamped so
     // subpixel points still deposit their energy and huge near-camera splats
@@ -204,8 +219,13 @@ fn vs_splat(
     let base_radius = 0.5 * camera.point_size * camera.screen_height / depth;
     let radius_px = clamp(base_radius, 1.0, camera.max_point_pixels);
 
-    let ndc_size_y = radius_px / camera.screen_height * 2.0;
-    let ndc_size_x = ndc_size_y / camera.aspect_ratio;
+    // The same window scales the splat's size, not just its position. A tile
+    // showing half the frame in the same number of texels magnifies by two,
+    // and a point has to magnify with it or the tile comes out finer-grained
+    // than its neighbours.
+    let ndc_size_y = radius_px / camera.screen_height * 2.0 * camera.subfrustum.y;
+    let ndc_size_x = (radius_px / camera.screen_height * 2.0 / camera.aspect_ratio)
+        * camera.subfrustum.x;
 
     let offset = vec2<f32>(
         f32(corner_index & 1u) * 2.0 - 1.0,
@@ -244,7 +264,16 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
         return out;
     }
 
-    out.clip_position = vec4<f32>(clip.xy / clip.w, 0.0, 1.0);
+    // The same tile window as vs_splat. Only the position needs it here: a
+    // point primitive is one texel wide by definition, and one texel is one
+    // texel whatever part of the frame this tile is showing.
+    let ndc = clip.xy / clip.w;
+    out.clip_position = vec4<f32>(
+        ndc.x * camera.subfrustum.x + camera.subfrustum.z,
+        ndc.y * camera.subfrustum.y + camera.subfrustum.w,
+        0.0,
+        1.0,
+    );
     out.color = haze_color(lookup_color(point.color_idx), depth);
     out.offset = vec2<f32>(0.0);
     out.weight = haze_weight(depth) * guard_weight(point.position);

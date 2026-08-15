@@ -352,6 +352,30 @@ impl JobParams {
         w as u64 * h as u64 * n2 * crate::gpu::points::accumulate::BYTES_PER_TEXEL
     }
 
+    /// How this job will be cut into tiles on a GPU with this binding limit.
+    ///
+    /// The dialog asks for the same reason the renderer does: past 67 M
+    /// histogram texels a render is no longer one pass over one buffer, and
+    /// what it costs is decided here rather than by the output size. Built from
+    /// the same [`crate::tile::TilePlan`] the renderer uses, so the figure
+    /// quoted before you agree to a job is the one the job then runs.
+    pub fn tile_plan(
+        &self,
+        max_buffer_bytes: u64,
+    ) -> Result<crate::tile::TilePlan, crate::tile::TileError> {
+        let (w, h) = self.kind.size();
+        crate::tile::TilePlan::new(
+            w,
+            h,
+            self.supersample,
+            crate::tile::Halo::for_settings(self.density_estimation, self.filter_radius),
+            crate::tile::Budget {
+                binding_limit: max_buffer_bytes,
+                resident_limit: max_buffer_bytes,
+            },
+        )
+    }
+
     /// Laps the accumulating path will run: enough folds of the whole point
     /// buffer to deposit `spp` samples on every output pixel.
     ///
@@ -387,23 +411,13 @@ impl JobParams {
             return Some("Width and height must both be non-zero.".to_string());
         }
         // The histogram is one storage buffer under the same binding limit, and
-        // at any real output size it is much the larger of the two — so this
-        // catches what the point-buffer check above never will. Says what to
-        // turn down, because the arithmetic is not obvious: supersampling is
-        // squared here, so dropping 4x to 2x buys back a factor of four where
-        // halving the width only buys two.
-        if self.histogram_bytes() > max_buffer_bytes {
-            let n = self.supersample.max(1);
-            return Some(format!(
-                "Accumulating {}x{} at {}x supersampling needs a {} histogram, over this GPU's \
-                 {} limit for a single buffer. Lower the supersampling{}, or render smaller.",
-                w,
-                h,
-                n,
-                human_bytes(self.histogram_bytes()),
-                human_bytes(max_buffer_bytes),
-                if n > 1 { " (it costs N² here)" } else { "" },
-            ));
+        // at any real output size it is much the larger of the two. It no
+        // longer *refuses* a job for being over it — the renderer tiles — so
+        // the only thing left to catch is a request no tiling can satisfy.
+        if self.samples.spp().is_some() {
+            if let Err(e) = self.tile_plan(max_buffer_bytes) {
+                return Some(e.to_string());
+            }
         }
         if let JobKind::Animation { fps, seconds, .. } = self.kind {
             if fps == 0 {
@@ -574,7 +588,11 @@ pub fn format_duration(secs: f32) -> String {
 /// Takes the throughput rather than the `App` so the arithmetic can be checked
 /// against real measurements — see the tests, which hold it to that ±40% band
 /// on every row that was measured.
-pub fn estimate_secs(throughput: f32, params: &JobParams) -> Option<(f32, f32)> {
+pub fn estimate_secs(
+    throughput: f32,
+    params: &JobParams,
+    max_buffer_bytes: u64,
+) -> Option<(f32, f32)> {
     if throughput <= 0.0 {
         return None;
     }
@@ -599,7 +617,17 @@ pub fn estimate_secs(throughput: f32, params: &JobParams) -> Option<(f32, f32)> 
             let chaos = spp as f32 * pixels / throughput;
             let fold =
                 params.laps() as f32 * pixels * n2 / (throughput * FOLD_TEXELS_PER_POINT);
-            chaos + fold
+            // Every tile re-runs the whole chaos game, because a lap deposits
+            // its samples wherever the attractor puts them and a tile keeps
+            // only the ones that land in its own window. So the tile count is a
+            // straight multiplier on the render, and the largest single term in
+            // what a poster costs — quoting a one-tile figure for a nine-tile
+            // job would understate it by nine.
+            let tiles = params
+                .tile_plan(max_buffer_bytes)
+                .map(|p| p.tiles.len() as f32)
+                .unwrap_or(1.0);
+            (chaos + fold) * tiles
         }
     };
 
@@ -610,6 +638,11 @@ pub fn estimate_secs(throughput: f32, params: &JobParams) -> Option<(f32, f32)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reference GTX 1080's binding limit, so the estimator's fixtures are
+    /// priced on the machine they were measured on.
+    #[allow(non_upper_case_globals)]
+    const Budget_LIMIT: u64 = 2_147_483_648;
 
     fn still(points: usize, w: u32, h: u32) -> JobParams {
         JobParams {
@@ -683,11 +716,12 @@ mod tests {
         assert_eq!(JobParams { samples: Samples::Ring { accumulate: 32 }, ..base }.laps(), 0);
     }
 
-    /// The histogram runs into the single-buffer binding limit long before the
-    /// point buffer does, so a check that only looks at points would let a job
-    /// through that dies several seconds later inside the driver.
+    /// A histogram over the binding limit used to be a refusal. It is now a
+    /// tiling, and the dialog has to agree with the renderer about that — a
+    /// dialog that still refused 4K at 4x would be the only thing standing
+    /// between someone and the render tiling was built to deliver.
     #[test]
-    fn the_histogram_is_checked_against_the_binding_limit() {
+    fn a_histogram_over_the_binding_limit_tiles_instead_of_refusing() {
         // 2.15 GB, the measured limit on the reference GTX 1080.
         let limit = 2_147_483_648u64;
         let acc = JobParams {
@@ -696,17 +730,22 @@ mod tests {
             supersample: 4,
             ..still(1_000_000, 3840, 2160)
         };
-        // 8.29M px x 16 x 32 B = 4.2 GB: over, and the point buffer is 16 MB,
-        // so nothing but the histogram check can catch this.
-        assert!(acc.point_buffer_bytes() < limit);
-        let reason = acc.rejection(limit).expect("4K at 4x must be refused");
-        assert!(reason.contains("supersampling"), "{reason}");
-        // The same job at 1x fits, and so does the ring path at 4x.
-        assert!(JobParams { supersample: 1, ..acc.clone() }.rejection(limit).is_none());
+        // 8.29M px x 16 x 32 B = 4.2 GB, well over the limit.
+        assert!(acc.histogram_bytes() > limit);
+        assert_eq!(acc.rejection(limit), None, "4K at 4x must now be renderable");
+        let plan = acc.tile_plan(limit).expect("and it must have a plan");
+        assert!(plan.tiles.len() > 1, "which means more than one tile");
+
+        // And the estimate has to know: every tile re-runs the whole chaos
+        // game, so a job that tiles costs a multiple of one that doesn't.
+        let one = JobParams { supersample: 1, ..acc.clone() };
+        assert!(one.tile_plan(limit).unwrap().is_single());
+        let (lo_tiled, _) = estimate_secs(664e6, &acc, limit).unwrap();
+        let (lo_one, _) = estimate_secs(664e6, &one, limit).unwrap();
         assert!(
-            JobParams { samples: Samples::Ring { accumulate: 32 }, ..acc }
-                .rejection(limit)
-                .is_none()
+            lo_tiled > lo_one * plan.tiles.len() as f32 * 0.5,
+            "tiling must show up in the estimate: {lo_tiled:.1}s over {lo_one:.1}s for {} tiles",
+            plan.tiles.len(),
         );
     }
 
@@ -742,7 +781,7 @@ mod tests {
                 supersample: n,
                 ..still(12_000_000, w, h)
             };
-            let (low, high) = estimate_secs(THROUGHPUT, &params).expect("a positive throughput");
+            let (low, high) = estimate_secs(THROUGHPUT, &params, Budget_LIMIT).expect("a positive throughput");
             assert!(
                 (low..=high).contains(&measured),
                 "{w}x{h} spp={spp} {n}x: measured {measured:.2}s outside the estimate's \
@@ -762,8 +801,8 @@ mod tests {
             ..still(12_000_000, 3840, 2160)
         };
         let sixteen = JobParams { bit_depth: crate::offline::BitDepth::Sixteen, ..eight.clone() };
-        let (lo8, hi8) = estimate_secs(664e6, &eight).unwrap();
-        let (lo16, hi16) = estimate_secs(664e6, &sixteen).unwrap();
+        let (lo8, hi8) = estimate_secs(664e6, &eight, Budget_LIMIT).unwrap();
+        let (lo16, hi16) = estimate_secs(664e6, &sixteen, Budget_LIMIT).unwrap();
         assert!(lo16 > lo8 && hi16 > hi8);
         // Measured at 4K, converged: 3.84 + 3.39 against 3.91 + 7.92.
         assert!((lo8..=hi8).contains(&7.23), "8-bit 4K: {lo8:.2}-{hi8:.2}s");

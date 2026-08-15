@@ -1032,6 +1032,15 @@ impl TileTarget {
 
     /// Map the readback, decode it to 16-bit sRGB, and blit it into the sheet
     /// at tile position `(col, row)`. The copy must already have been submitted.
+    /// Bytes one texel occupies in the readback — the two depths read from
+    /// different formats, and a crop has to skip whole texels in both.
+    fn bytes_per_texel(&self) -> u32 {
+        match self.depth_bits {
+            BitDepth::Eight => 4,
+            BitDepth::Sixteen => 8,
+        }
+    }
+
     fn read_into_sheet(
         &self,
         device: &wgpu::Device,
@@ -1040,23 +1049,52 @@ impl TileTarget {
         col: u32,
         row: u32,
     ) {
+        self.read_into_sheet_at(
+            device,
+            sheet,
+            sheet_w,
+            col * self.width,
+            row * self.height,
+            Crop { x: 0, y: 0, width: self.width, height: self.height },
+        );
+    }
+
+    /// The same, but writing an arbitrary sub-rectangle of the target to an
+    /// arbitrary place in the sheet.
+    ///
+    /// This is what a tiled render needs and a contact sheet does not. A tile
+    /// renders *wider than it keeps* — a halo, so that density estimation and
+    /// the downsample filter have real neighbours to read at the tile's edges
+    /// rather than clamping and leaving a seam — and then contributes only the
+    /// rectangle it owns. The crop is how the halo gets discarded, and every
+    /// tile's crop is disjoint, so the sheet is covered exactly once.
+    fn read_into_sheet_at(
+        &self,
+        device: &wgpu::Device,
+        sheet: &mut [u16],
+        sheet_w: u32,
+        dst_x: u32,
+        dst_y: u32,
+        crop: Crop,
+    ) {
         let slice = self.readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         {
             let data = slice.get_mapped_range();
-            let x0 = (col * self.width * 4) as usize;
-            let y0 = (row * self.height) as usize;
-            for y in 0..self.height as usize {
-                let src = y * self.padded_bytes_per_row as usize;
+            let x0 = (dst_x * 4) as usize;
+            let y0 = dst_y as usize;
+            for y in 0..crop.height as usize {
+                let src = (y + crop.y as usize) * self.padded_bytes_per_row as usize
+                    + (crop.x * self.bytes_per_texel()) as usize;
                 let dst = (y0 + y) * (sheet_w * 4) as usize + x0;
-                let row_out = &mut sheet[dst..dst + (self.width * 4) as usize];
+                let row_out = &mut sheet[dst..dst + (crop.width * 4) as usize];
                 match self.depth_bits {
                     // The hardware already encoded sRGB into 8 bits; widening
                     // by 257 is exactly reversible, so the sheet can be 16 bits
                     // wide without an 8-bit save writing anything different.
                     BitDepth::Eight => {
-                        let src_row = &data[src..src + (self.width * 4) as usize];
+                        let src_row = &data[src..src + (crop.width * 4) as usize];
                         for (o, &b) in row_out.iter_mut().zip(src_row) {
                             *o = b as u16 * 257;
                         }
@@ -1065,7 +1103,7 @@ impl TileTarget {
                     // leave alpha alone — coverage is not a colour, which is
                     // also what an sRGB target does.
                     BitDepth::Sixteen => {
-                        let src_row = &data[src..src + (self.width * 8) as usize];
+                        let src_row = &data[src..src + (crop.width * 8) as usize];
                         for (i, o) in row_out.iter_mut().enumerate() {
                             let h = u16::from_le_bytes([src_row[i * 2], src_row[i * 2 + 1]]);
                             let v = f16_to_f32(h);
@@ -1078,6 +1116,15 @@ impl TileTarget {
         }
         self.readback.unmap();
     }
+}
+
+/// A sub-rectangle of a render target, in target pixels.
+#[derive(Clone, Copy, Debug)]
+struct Crop {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
 }
 
 /// Draw a tile's parameters into its top-left corner.
@@ -2011,6 +2058,55 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let aspect = width as f32 / height as f32;
     let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
 
+    // How the output is cut up. One tile whenever the whole histogram fits,
+    // which is every render that worked before this existed — and that tile has
+    // no halo and an identity sub-frustum, so it is the same render it always
+    // was rather than a special case beside the tiled one.
+    let halo = crate::tile::Halo::for_settings(density_estimation, filter_radius);
+    // The real limit needs a 139 Mpx render to trigger, which is not a thing to
+    // put in a test suite. `FRACTURIZE_TILE_BINDING_LIMIT` pretends the GPU is
+    // smaller so the tiled path can be exercised at 400x300 — an env var rather
+    // than a flag because it describes a machine that isn't there, and nobody
+    // should reach for it while making a picture.
+    let binding_limit = std::env::var("FRACTURIZE_TILE_BINDING_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(device.limits().max_storage_buffer_binding_size as u64);
+    let plan = crate::tile::TilePlan::new(
+        width,
+        height,
+        sampling.n,
+        halo,
+        // Slice 2 renders one tile at a time, so residency is one tile. Slice 3
+        // is what groups them, and it is grouping that turns tiles into passes
+        // and passes into wall clock.
+        crate::tile::Budget { binding_limit, resident_limit: binding_limit },
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Three features that a tiled render cannot yet honour, refused up front
+    // rather than silently producing a file that misrepresents itself. Each
+    // names its own way forward.
+    if !plan.is_single() {
+        if checkpoint_out.is_some() || resume_from.is_some() {
+            return Err(format!(
+                "a {}x{} render is {} tiles here, and a checkpoint holds one histogram — \
+                 there is no format yet for a tiled one. Render smaller, lower the \
+                 supersampling, or drop --checkpoint/--resume.",
+                width,
+                height,
+                plan.tiles.len(),
+            ));
+        }
+        if grade_out.is_some() {
+            return Err(String::from(
+                "--grade-out writes the whole linear buffer, which a tiled render never has \
+                 in one piece. Lower the supersampling until the render fits in one tile.",
+            ));
+        }
+    }
+
     let mut renderer = SplatRenderer::new(
         &device,
         bit_depth.format(),
@@ -2044,52 +2140,6 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     }
 
     let (haze_near, haze_far) = haze.band(base_camera.distance);
-    let camera = CameraUniforms::new(
-        base_camera.view_proj(aspect),
-        sampling.target_height(),
-        point_size,
-        aspect,
-        1.0,
-        haze_near,
-        haze_far,
-        haze.transmittance,
-        haze.saturation,
-        color_contrast,
-        scene.background.to_array(),
-        transparent,
-        scene.color_mode.packs_rgb(),
-    )
-    .with_zoom_guard(zoom.as_ref(), base_camera.eye())
-    .with_supersample(sampling.n);
-    renderer.upload_camera(&queue, &camera);
-
-    let target = TileTarget::new(
-        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
-    );
-    // Sizes the batch texture and hands back the view the histogram reads.
-    let (batch_view, accum_w, accum_h) = renderer.prepare_accum(&device, width, height);
-    let batch_view = batch_view.clone();
-    let histogram =
-        Accumulator::new(
-            &device, &queue, width, height, sampling.n, filter, filter_radius,
-            density_estimation,
-        )?;
-    let batch_bind_group = histogram.bind_batch(&device, &batch_view);
-
-    // Whatever the run starts from: an empty histogram, or the saved one read
-    // above.
-    match &prior {
-        Some(ck) => {
-            histogram.restore(&queue, &ck.words)?;
-        }
-        None => {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("accum_clear_encoder"),
-            });
-            histogram.clear(&mut encoder);
-            queue.submit(std::iter::once(encoder.finish()));
-        }
-    }
 
     // `--spp` is a *total*, and a resume has some of it already. Default on a
     // bare `--resume`: one more lap, so the flag on its own means "carry on a
@@ -2113,8 +2163,26 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let frames_per_lap = compute.frames_per_lap();
     println!(
         "Accumulating {} laps x {} points (to {:.0} samples/px) into a {}x{} histogram",
-        laps, capacity, target_samples / pixels, accum_w, accum_h,
+        laps,
+        capacity,
+        target_samples / pixels,
+        width * sampling.n,
+        height * sampling.n,
     );
+    if !plan.is_single() {
+        // Said plainly, because it is the difference between a render that
+        // takes a minute and one that takes an hour, and it is not a number
+        // anyone can guess from the output size.
+        println!(
+            "  in {} tiles ({}x{}, {} of histogram, +{:.1}% halo) — the chaos game runs once \
+             per tile",
+            plan.tiles.len(),
+            plan.cols,
+            plan.rows,
+            crate::render_job::human_bytes(plan.total_histogram_bytes()),
+            plan.halo_overhead() * 100.0,
+        );
+    }
     if accumulate != DEFAULT_ACCUMULATE {
         println!("  (--accumulate is ignored here: --spp sets how long the chaos game runs)");
     }
@@ -2134,70 +2202,143 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let mut timer = gpu_timing
         .then(|| crate::gpu::GpuTimer::new(&device, &queue, GPU_TIMING_SAMPLES))
         .flatten();
-    for lap in 0..laps {
-        for _ in 0..frames_per_lap {
-            compute.advance_fill(&queue);
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("accum_chaos_encoder"),
-            });
-            compute.dispatch_timed(&mut encoder, timer.as_mut());
-            queue.submit(std::iter::once(encoder.finish()));
-        }
-        // Splat the whole ring and fold it in. Both passes go in one encoder:
-        // the fold reads exactly what the splat wrote, and queue order inside a
-        // submission gives that ordering.
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("accum_fold_encoder"),
-        });
-        renderer.splat_pass(&mut encoder, 0..capacity, use_point_primitives);
-        histogram.add(&mut encoder, &batch_bind_group);
-        queue.submit(std::iter::once(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        done_laps += 1;
-
-        // Two ways to stop, one meaning: keep what has accumulated. The dialog
-        // has a cancel button; a terminal has Ctrl-C.
-        let stopping = crate::interrupt::requested()
-            || control.as_ref().is_some_and(|c| c.should_stop());
-        if let Some(c) = &control {
-            c.progress(lap + 1, laps);
-        }
-        if stopping {
-            let got = (prior_samples + done_laps as f64 * capacity as f64) / pixels;
-            let msg = format!(
-                "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
-                done_laps, laps, got,
-            );
-            println!("{}", msg);
-            if let Some(c) = &control {
-                c.log(msg);
-            }
-            outcome = Outcome::Partial;
-            break;
-        }
-    }
-    let t_fill = Instant::now();
-    if let Some(t) = &timer {
-        println!("{}", crate::gpu::timing::summarize("GPU chaos dispatch", &t.read(&device, &queue)));
-    }
-
-    // Exposure is normalized by the samples actually accumulated, not the ones
-    // asked for. That is what makes a cancelled render come out at the right
-    // brightness rather than dark in proportion to how early it stopped — and
-    // what makes `--spp` a quality dial rather than an exposure dial.
-    let accumulated = prior_samples + done_laps as f64 * capacity as f64;
-    renderer.upload_params(
-        &queue,
-        exposure,
-        accumulated,
-        sampling.target_height(),
-        clear,
-        transparent,
-        grade,
-    );
-
     let mut sheet = vec![0u16; (width * height * 4) as usize];
-    {
+    // Kept from the last tile only so the single-tile path can still write a
+    // checkpoint and a `.fgrade` afterwards. Both are refused above when there
+    // is more than one tile, precisely because "the last tile's histogram" is
+    // not the render.
+    let mut last_histogram: Option<Accumulator> = None;
+    let mut tiles_done = 0usize;
+    let total_laps = laps as u64 * plan.tiles.len() as u64;
+
+    'tiles: for tile in &plan.tiles {
+        // Every tile is a window onto the *same* camera — not its own camera,
+        // which is what the contact sheets do. `screen_height` stays the full
+        // output height so point sizes are decided once for the whole picture;
+        // the window is what makes this tile show its own part of it. Getting
+        // either of those from the tile instead would give tiles of visibly
+        // differing texture.
+        let camera = CameraUniforms::new(
+            base_camera.view_proj(aspect),
+            sampling.target_height(),
+            point_size,
+            aspect,
+            1.0,
+            haze_near,
+            haze_far,
+            haze.transmittance,
+            haze.saturation,
+            color_contrast,
+            scene.background.to_array(),
+            transparent,
+            scene.color_mode.packs_rgb(),
+        )
+        .with_zoom_guard(zoom.as_ref(), base_camera.eye())
+        .with_supersample(sampling.n)
+        .with_subfrustum(tile.subfrustum(width, height));
+        renderer.upload_camera(&queue, &camera);
+
+        let (tw, th) = (tile.render_width, tile.render_height);
+        let target = TileTarget::new(
+            &device, &queue, tw, th, clear, sampling, filter, filter_radius, bit_depth,
+        );
+        // Sizes the batch texture and hands back the view the histogram reads.
+        let (batch_view, _, _) = renderer.prepare_accum(&device, tw, th);
+        let batch_view = batch_view.clone();
+        let histogram = Accumulator::new(
+            &device, &queue, tw, th, sampling.n, filter, filter_radius, density_estimation,
+        )?;
+        let batch_bind_group = histogram.bind_batch(&device, &batch_view);
+
+        // Whatever the run starts from: an empty histogram, or the saved one
+        // read above.
+        match &prior {
+            Some(ck) => {
+                histogram.restore(&queue, &ck.words)?;
+            }
+            None => {
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("accum_clear_encoder"),
+                    });
+                histogram.clear(&mut encoder);
+                queue.submit(std::iter::once(encoder.finish()));
+            }
+        }
+
+        // Laps are counted per tile, and every tile runs the same number. A
+        // lap deposits its samples wherever the attractor puts them, so a tile
+        // showing a twentieth of the frame receives about a twentieth of them
+        // — which is exactly the density the full-frame count asks for. This
+        // is also why tiling costs what it costs: each tile needs the whole
+        // chaos game, not its own share of it.
+        let mut tile_laps: u32 = 0;
+        for lap in 0..laps {
+            for _ in 0..frames_per_lap {
+                compute.advance_fill(&queue);
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("accum_chaos_encoder"),
+                    });
+                compute.dispatch_timed(&mut encoder, timer.as_mut());
+                queue.submit(std::iter::once(encoder.finish()));
+            }
+            // Splat the whole ring and fold it in. Both passes go in one
+            // encoder: the fold reads exactly what the splat wrote, and queue
+            // order inside a submission gives that ordering.
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("accum_fold_encoder"),
+            });
+            renderer.splat_pass(&mut encoder, 0..capacity, use_point_primitives);
+            histogram.add(&mut encoder, &batch_bind_group);
+            queue.submit(std::iter::once(encoder.finish()));
+            let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            tile_laps += 1;
+
+            // Two ways to stop, one meaning: keep what has accumulated. The
+            // dialog has a cancel button; a terminal has Ctrl-C.
+            let stopping = crate::interrupt::requested()
+                || control.as_ref().is_some_and(|c| c.should_stop());
+            if let Some(c) = &control {
+                // Progress spans the whole render, not this tile, so the bar
+                // does not restart at every tile boundary.
+                let done = tiles_done as u64 * laps as u64 + (lap + 1) as u64;
+                c.progress(done.min(u32::MAX as u64) as u32, total_laps.min(u32::MAX as u64) as u32);
+            }
+            if stopping {
+                let got = (prior_samples + tile_laps as f64 * capacity as f64) / pixels;
+                let msg = format!(
+                    "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
+                    tile_laps, laps, got,
+                );
+                println!("{}", msg);
+                if let Some(c) = &control {
+                    c.log(msg);
+                }
+                outcome = Outcome::Partial;
+                done_laps = tile_laps;
+                break 'tiles;
+            }
+        }
+        done_laps = tile_laps;
+
+        // Exposure is normalized by the samples actually accumulated, not the
+        // ones asked for. That is what makes a cancelled render come out at the
+        // right brightness rather than dark in proportion to how early it
+        // stopped — and what makes `--spp` a quality dial rather than an
+        // exposure dial. It is a whole-frame figure, identical for every tile,
+        // which is what keeps the brightness continuous across a tile edge.
+        let accumulated = prior_samples + done_laps as f64 * capacity as f64;
+        renderer.upload_params(
+            &queue,
+            exposure,
+            accumulated,
+            sampling.target_height(),
+            clear,
+            transparent,
+            grade,
+        );
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("accum_resolve_encoder"),
         });
@@ -2208,7 +2349,47 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         renderer.tonemap_pass(&mut encoder, &target.color_view, &target.depth_view, &bind_group);
         target.copy_out(&mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
-        target.read_into_sheet(&device, &mut sheet, width, 0, 0);
+        // Keep only what this tile owns. The halo did its job by being there
+        // while the filter and the density estimator read it, and is dropped
+        // here.
+        let (crop_x, crop_y) = tile.crop_offset();
+        target.read_into_sheet_at(
+            &device,
+            &mut sheet,
+            width,
+            tile.x,
+            tile.y,
+            Crop { x: crop_x, y: crop_y, width: tile.width, height: tile.height },
+        );
+        // Held only for the single-tile path, where the checkpoint and
+        // `.fgrade` writers below still need it. Holding it across a tiled
+        // render would keep a whole histogram alive — 2.1 GB at the binding
+        // limit — while the *next* tile allocates its own, which is an
+        // out-of-memory abort on exactly the renders tiling exists to make
+        // possible. Both features are refused above when tiling, so there is
+        // nothing to keep.
+        if plan.is_single() {
+            last_histogram = Some(histogram);
+        }
+        tiles_done += 1;
+        if !plan.is_single() {
+            println!("  tile {}/{} done", tiles_done, plan.tiles.len());
+        }
+    }
+    let t_fill = Instant::now();
+    if let Some(t) = &timer {
+        println!("{}", crate::gpu::timing::summarize("GPU chaos dispatch", &t.read(&device, &queue)));
+    }
+    let accumulated = prior_samples + done_laps as f64 * capacity as f64;
+    if tiles_done < plan.tiles.len() {
+        // Honest rather than tidy: the tiles that never ran are background, and
+        // a partial tiled render should say so rather than let someone find it
+        // in the file.
+        println!(
+            "  {} of {} tiles rendered — the rest are background",
+            tiles_done,
+            plan.tiles.len(),
+        );
     }
     let t_render = Instant::now();
 
@@ -2243,7 +2424,10 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // However the run ended — target reached or cancelled partway — the
     // histogram goes to disk. That is the entire point: an interrupted render
     // you cannot resume is just a slower failure.
-    if let Some(p) = &checkpoint_out {
+    // `last_histogram` is only ever `Some` for a single-tile render, and both
+    // writers below are refused when tiling, so this pairs the two rules rather
+    // than restating either.
+    if let (Some(p), Some(histogram)) = (&checkpoint_out, last_histogram.as_ref()) {
         let (aw, ah) = histogram.size();
         let ck = crate::checkpoint_file::Checkpoint {
             width: aw,
@@ -2267,7 +2451,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             Err(e) => eprintln!("warning: {}", e),
         }
     }
-    if let Some(p) = &grade_out {
+    if let (Some(p), Some(histogram)) = (&grade_out, last_histogram.as_ref()) {
         save_grade_buffer(
             p, &device, &queue, histogram.output_texture(), width, height, accumulated,
             sampling.target_height(), clear, transparent, exposure, grade, record.as_ref(),

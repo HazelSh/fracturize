@@ -262,6 +262,27 @@ pub struct CameraUniforms {
     ///
     /// It also uses up what was tail padding, so the struct is the same size.
     pub max_point_pixels: f32, // 4 bytes
+    /// This tile's window onto the camera: `[scale_x, scale_y, offset_x,
+    /// offset_y]`, applied in NDC after projection. `[1, 1, 0, 0]` — the
+    /// default, and what every non-tiled render uses — is the identity.
+    ///
+    /// # Why this is a uniform and not baked into `mvp`
+    ///
+    /// It would be simpler to premultiply the projection and leave the shader
+    /// alone, and it would be wrong. A splat's *position* is projected through
+    /// `mvp`, but its *size* is added afterwards, in NDC, as a quad offset
+    /// (see `splat.wgsl`). Baking the window into the matrix would scale where
+    /// each point lands without scaling how big it is, so every tile of a
+    /// tiled render would come out with points of the wrong size — and since
+    /// the scale factor differs with the tile's shape, tiles would visibly
+    /// differ in texture. That is exactly the failure `RENDER-SCALE-PLAN.md`
+    /// §4 warns about, arriving through the other door.
+    ///
+    /// So the shader applies it to both, and `screen_height` stays the **full
+    /// output** height rather than the tile's — which is the same rule, and
+    /// the reason `Sampling` is built from the output size and passed down
+    /// unchanged.
+    pub subfrustum: [f32; 4], // 16 bytes
 }
 
 /// The near-field cap at 1x, in output pixels. Both point renderers agree on
@@ -304,7 +325,22 @@ impl CameraUniforms {
             guard_inv_ln_width: 0.0,
             // 1x until someone says otherwise; see `with_supersample`.
             max_point_pixels: MAX_POINT_PIXELS,
+            // The whole frame. Identity, so every render that is not tiled is
+            // bit-for-bit what it was before tiling existed.
+            subfrustum: [1.0, 1.0, 0.0, 0.0],
         }
+    }
+
+    /// Render only the part of the frame this tile covers.
+    ///
+    /// `(scale_x, scale_y, offset_x, offset_y)` straight from
+    /// [`crate::tile::Tile::subfrustum`] — that is the only thing that should
+    /// ever produce these, because getting them from anywhere else means two
+    /// places compute where a tile aims and they can disagree by a pixel,
+    /// which is a seam.
+    pub fn with_subfrustum(mut self, window: (f32, f32, f32, f32)) -> Self {
+        self.subfrustum = [window.0, window.1, window.2, window.3];
+        self
     }
 
     /// Scale the caps that are expressed in render-target pixels for an
@@ -472,13 +508,32 @@ mod tests {
 
     #[test]
     fn test_camera_uniforms_size() {
-        // 128 + the guard's five scalars, rounded up to a multiple of 16.
+        // 144 (see below) + the tile window's vec4.
+        //
         // Declared in five shaders (points/render, points/splat, trace,
-        // gizmo, density/voxel_render); they all have to grow together.
-        assert_eq!(std::mem::size_of::<CameraUniforms>(), 144, "CameraUniforms must be 144 bytes to match WGSL struct");
+        // gizmo, density/voxel_render). They do *not* all have to grow
+        // together, and that is the point of appending rather than inserting:
+        // a uniform buffer may be larger than the struct a shader declares, so
+        // only `points/splat` — the one that renders tiles — knows about
+        // `subfrustum`, and the other four are untouched. Inserting a field
+        // anywhere else would silently shift every field after it for all five.
+        assert_eq!(
+            std::mem::size_of::<CameraUniforms>(),
+            160,
+            "CameraUniforms must be 160 bytes to match the WGSL struct",
+        );
         // The guard block starts where `_pad` used to, so nothing before it
         // moved and a shader that doesn't read it is unaffected.
         assert_eq!(std::mem::offset_of!(CameraUniforms, guard_center), 120);
+        // vec4 wants 16-byte alignment, and 144 is a multiple of 16 — so the
+        // window lands where WGSL expects it with no padding in between.
+        assert_eq!(std::mem::offset_of!(CameraUniforms, subfrustum), 144);
+        // The default is the whole frame, so an untiled render is unchanged.
+        let c = CameraUniforms::new(
+            Mat4::IDENTITY, 100.0, 0.01, 1.5, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, [0.0; 3], false,
+            false,
+        );
+        assert_eq!(c.subfrustum, [1.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]
