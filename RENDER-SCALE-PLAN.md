@@ -414,7 +414,25 @@ assembled into the existing in-memory image. Correctness first: a 1-tile render
 and a 4-tile render of the same scene must agree to within sampling noise, and
 that is the acceptance test.
 
-**3 — Multi-pass**, with resident-tile grouping.
+**3 — Multi-pass**, with resident-tile grouping. *(done, `a5ff3a4`)*
+
+> **Measured correction to §4's table.** Grouping saves less than the table
+> implies, because the pass count was computed against the histogram alone and
+> at three resident. A resident tile also holds its splat batch texture (48
+> B/texel, not 32), and the budget is twice the binding limit since wgpu cannot
+> report VRAM. Real figures: 4K@2x 1 tile/1 pass, 4K@4x 2/2, 8K@2x 2/2, 8K@4x
+> 12/12, A2@600 1x **4 tiles / 2 passes**, A2@600 2x 9/9.
+>
+> Two structural facts fell out. **The pass count does not depend on tile
+> size** — halve the tiles and twice as many fit per pass, so passes is just
+> total resident bytes over budget; tile size trades against the halo, not the
+> clock. And **the fold, not the chaos game, dominates at poster scale** (32s of
+> an 89s phase), which grouping cannot touch — so A2 went 96.7s → 89.4s, 8%.
+>
+> The lever that *does* move it is `--points`: laps fall with buffer size and
+> the fold is `laps x texels`, so 12M → 40M took A2's chaos phase to 67.0s. At
+> 1080p the same change moves under 25%, which is why §9 recorded the buffer as
+> inert. It is inert *at small sizes*.
 
 **4 — Compact histograms** (§4). Promoted from last to here: it halves the
 memory, and therefore the passes, and therefore the wall clock — §11's
