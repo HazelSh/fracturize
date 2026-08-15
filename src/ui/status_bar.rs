@@ -130,10 +130,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     // A running job is worth seeing without the dialog open —
                     // it's using the GPU this readout is measuring.
                     if let Some(job) = app.job() {
-                        let text = match job.fraction() {
-                            Some(f) => format!("render {}: {}%", job.phase, num::cell(f * 100.0, 0, 3)),
-                            None => format!("render {}", job.phase),
-                        };
+                        // The whole job, not the current phase — the status bar
+                        // has room for one number and it should be the one that
+                        // answers "how far along is this".
+                        let text = format!(
+                            "render {}: {}%",
+                            job.phase.label(),
+                            num::cell(job.overall() * 100.0, 0, 3),
+                        );
                         let text = if job.paused() { format!("{} (paused)", text) } else { text };
                         ui.add_space(10.0);
                         // A percentage climbing 9% -> 10% -> 100% used to widen

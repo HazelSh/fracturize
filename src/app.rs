@@ -34,7 +34,10 @@ pub struct JobHandle {
     cancel: Arc<std::sync::atomic::AtomicBool>,
     pause: Arc<std::sync::atomic::AtomicBool>,
     pub started: Instant,
-    pub phase: &'static str,
+    pub phase: crate::render_job::Phase,
+    /// Estimated cost of each phase, so one bar can span all of them. Built at
+    /// launch from the same constants the pre-flight estimate quotes.
+    pub ledger: crate::render_job::Ledger,
     pub done: u32,
     pub total: u32,
     pub log: Vec<String>,
@@ -94,11 +97,26 @@ impl JobHandle {
         (self.total > 0).then(|| (self.done as f32 / self.total as f32).clamp(0.0, 1.0))
     }
 
+    /// Fraction of the **whole job** complete, phases weighted by their
+    /// estimated cost.
+    ///
+    /// This is what a person watching wants, and it is not the same as
+    /// [`fraction`](Self::fraction): the phases are wildly unequal — an A2
+    /// poster spends 67s accumulating and 5.7s saving — so a bar showing
+    /// progress within the current phase races to 100% and starts again, which
+    /// reads as either finished or broken. Weighted, it only moves forward.
+    pub fn overall(&self) -> f32 {
+        self.ledger.fraction(self.phase, self.fraction())
+    }
+
     /// Seconds remaining, extrapolated from observed progress. `None` until
     /// there is enough progress for the extrapolation to mean anything —
     /// a countdown from one sample is a random number.
+    ///
+    /// Extrapolates from the *overall* fraction, so the estimate does not lurch
+    /// at every phase boundary the way a within-phase one does.
     pub fn remaining_secs(&self) -> Option<f32> {
-        let f = self.fraction()?;
+        let f = self.overall();
         if f < 0.05 {
             return None;
         }
@@ -3184,6 +3202,15 @@ impl App {
         scene.point_count = params.points;
         let view = self.current_view();
 
+        // Built here rather than on the job thread because the *measured*
+        // throughput lives on the app: the job renders on its own device and
+        // has no idea how fast this machine is.
+        let ledger = crate::render_job::Ledger::for_job(
+            &params,
+            self.measured_throughput(),
+            self.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT,
+        );
+
         let (tx, rx) = std::sync::mpsc::channel();
         let control = JobControl {
             events: tx,
@@ -3196,7 +3223,8 @@ impl App {
             cancel: control.cancel.clone(),
             pause: control.pause.clone(),
             started: Instant::now(),
-            phase: "starting",
+            phase: crate::render_job::Phase::Setup,
+            ledger,
             done: 0,
             total: 0,
             log: Vec::new(),
@@ -3233,7 +3261,7 @@ impl App {
         );
 
         std::thread::spawn(move || {
-            control.phase("setting up");
+            control.phase(crate::render_job::Phase::Setup);
             let base = crate::offline::OfflineParams {
                 scene,
                 view: Some(view),
@@ -3310,10 +3338,16 @@ impl App {
         while let Ok(event) = job.events.try_recv() {
             match event {
                 JobEvent::Phase(p) => {
+                    // A new phase resets the within-phase counter but never the
+                    // overall bar: the ledger derives that from which phase
+                    // this is, so it keeps climbing across the boundary.
                     job.phase = p;
                     job.done = 0;
                     job.total = 0;
-                    job.log.push(format!("— {}", p));
+                    match p.position() {
+                        Some(pos) => job.log.push(format!("— {} ({})", p.label(), pos)),
+                        None => job.log.push(format!("— {}", p.label())),
+                    }
                 }
                 JobEvent::Progress { done, total } => {
                     job.done = done;

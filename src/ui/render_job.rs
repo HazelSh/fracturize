@@ -1242,25 +1242,13 @@ fn check_mark(ui: &mut egui::Ui, color: egui::Color32) {
 /// Coupled to the literal phase strings `src/offline.rs` passes to
 /// `JobControl::phase` — `"setting up"`, `"filling points"`, `"rendering"` /
 /// `"rendering frames"`, `"saving"` / `"encoding"` — because there is no
-/// shared enum between that file (owned elsewhere as this is written) and
-/// this dialog. An unrecognised phase (including the handle's initial
-/// `"starting"`) falls back to `Setup`, which just reads both bars as
-/// not-started rather than misdrawing.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Stage {
-    Setup,
-    Render,
-    Encode,
-}
-
-fn stage_of(phase: &str) -> Stage {
-    match phase {
-        "rendering" | "rendering frames" => Stage::Render,
-        "encoding" | "saving" => Stage::Encode,
-        _ => Stage::Setup,
-    }
-}
-
+/// A progress bar's three states.
+///
+/// `NotStarted` and `Done` are what a *per-phase* bar needed, and the job now
+/// draws one weighted bar for the whole render instead — but the states stay
+/// because `progress_row` is still the shared drawing, and a future second bar
+/// (a queue, a batch) would want them again. See `Ledger`.
+#[allow(dead_code)]
 enum BarState {
     NotStarted,
     Active(Option<f32>),
@@ -1279,13 +1267,6 @@ fn percent(fraction: f32) -> egui::WidgetText {
         .into()
 }
 
-fn bar_state(current: Stage, bar: Stage, fraction: Option<f32>) -> BarState {
-    match current.cmp(&bar) {
-        std::cmp::Ordering::Less => BarState::NotStarted,
-        std::cmp::Ordering::Equal => BarState::Active(fraction),
-        std::cmp::Ordering::Greater => BarState::Done,
-    }
-}
 
 /// One labelled bar in the two-phase progress display.
 ///
@@ -1331,11 +1312,11 @@ fn progress_row(ui: &mut egui::Ui, label: &str, state: BarState, allow_pulse: bo
 
 fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // Read what the display needs before taking `&mut` for the buttons.
-    let (phase, fraction, elapsed, remaining, paused, cancelling, cancel_arm, log, out, kind) = {
+    let (phase, overall, elapsed, remaining, paused, cancelling, cancel_arm, log, out) = {
         let job = app.job().expect("caller checked");
         (
             job.phase,
-            job.fraction(),
+            job.overall(),
             job.started.elapsed().as_secs_f32(),
             job.remaining_secs(),
             job.paused(),
@@ -1343,13 +1324,18 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             job.cancel_arm,
             job.log.clone(),
             job.params.out_path.clone(),
-            job.params.kind,
         )
     };
 
     ui.label(egui::RichText::new(out.display().to_string()).small().weak());
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(phase).strong());
+        ui.label(egui::RichText::new(phase.label()).strong());
+        // Where in the work, when there is an interior worth naming — `pass
+        // 2/3` while accumulating, `tile 7/12` while resolving. A single-tile
+        // render says nothing here rather than "pass 1/1".
+        if let Some(pos) = phase.position() {
+            ui.label(egui::RichText::new(pos).small().weak());
+        }
         if cancelling {
             ui.label(egui::RichText::new("stopping…").color(ui.visuals().warn_fg_color));
         } else if paused {
@@ -1357,22 +1343,22 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 
-    // Two named bars, both visible for the whole job, so a person watching
-    // can always tell which of the two genuinely slow phases it's in and how
-    // far that one has got — a single bar that hits 100% and restarts for the
-    // next phase reads as either finished or lying, and used to be exactly
-    // that. `progress_row`'s `ProgressBar` gets an explicit available width,
-    // not `f32::INFINITY`: a `TextEdit` clamps an infinite desired width to
-    // what's there, but `ProgressBar` takes it literally and the auto-sized
-    // window it's in ends up with a degenerate rect that never gets drawn.
-    let stage = stage_of(phase);
-    progress_row(ui, "Render", bar_state(stage, Stage::Render, fraction), false);
-    // A still has no encode phase — the PNG write is fast and never reports
-    // progress at all, so a bar for it could never move (see the report for
-    // why animation's encode bar can't either, today).
-    if matches!(kind, JobKind::Animation { .. }) {
-        progress_row(ui, "Encode", bar_state(stage, Stage::Encode, fraction), !paused);
-    }
+    // **One bar for the whole job**, phases weighted by their estimated cost.
+    //
+    // There were two, named Render and Encode, chosen by matching phase strings
+    // across a module boundary. That model does not survive tiling: a render is
+    // now passes containing laps, then a resolve per tile, then a write, and
+    // the phases are wildly unequal — an A2 poster spends 67s accumulating and
+    // 5.7s saving. A bar per phase either races to 100% and restarts (reading
+    // as finished, or as broken) or gives a five-second write the same width as
+    // a minute of accumulation. Weighting by measured seconds gives one bar
+    // that is monotonic and roughly linear in time.
+    //
+    // `progress_row`'s `ProgressBar` gets an explicit available width, not
+    // `f32::INFINITY`: a `TextEdit` clamps an infinite desired width to what's
+    // there, but `ProgressBar` takes it literally and the auto-sized window it
+    // is in ends up with a degenerate rect that never gets drawn.
+    progress_row(ui, "Progress", BarState::Active(Some(overall)), false);
 
     ui.label(
         egui::RichText::new(match remaining {

@@ -437,13 +437,176 @@ impl JobParams {
     }
 }
 
+/// What a job is doing, and where in the work it has got to.
+///
+/// An enum rather than the `&'static str` this used to be. The dialog had to
+/// recognise phases by matching literal strings written in `offline.rs` — two
+/// modules agreeing on spelling with no shared type between them — so a new
+/// phase, or a typo, silently fell through to "not started" and drew a bar
+/// that never moved. Now a phase the display has not accounted for is a build
+/// error.
+///
+/// The variants carry their position because a tiled accumulating render has a
+/// phase *tree*, not a phase list: passes contain laps, and each pass is
+/// followed by a resolve per tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    /// Creating the device, compiling shaders, reading a checkpoint.
+    Setup,
+    /// Filling the point buffer, on the paths that fill before rendering.
+    Filling,
+    /// Accumulating laps. Every tile resident in this pass advances together,
+    /// which is why the tile is not named here — they are all being worked on.
+    Accumulating { pass: u32, passes: u32 },
+    /// Turning one tile's histogram into pixels and reading it back.
+    Resolving { tile: u32, tiles: u32 },
+    /// Rendering animation frames.
+    Frames,
+    /// Encoding video.
+    Encoding,
+    /// Writing the output file.
+    Saving,
+}
+
+impl Phase {
+    /// What to call this on screen.
+    pub fn label(self) -> &'static str {
+        match self {
+            Phase::Setup => "setting up",
+            Phase::Filling => "filling points",
+            Phase::Accumulating { .. } => "accumulating",
+            Phase::Resolving { .. } => "resolving",
+            Phase::Frames => "rendering frames",
+            Phase::Encoding => "encoding",
+            Phase::Saving => "saving",
+        }
+    }
+
+    /// The position line under the bar: `pass 2/3`, `tile 7/12`, or nothing
+    /// when the phase has no interior worth naming.
+    ///
+    /// Only shown when there is more than one, so an ordinary single-tile
+    /// render is not decorated with `pass 1/1 · tile 1/1`.
+    pub fn position(self) -> Option<String> {
+        match self {
+            Phase::Accumulating { passes, .. } if passes <= 1 => None,
+            Phase::Accumulating { pass, passes } => Some(format!("pass {}/{}", pass, passes)),
+            Phase::Resolving { tiles, .. } if tiles <= 1 => None,
+            Phase::Resolving { tile, tiles } => Some(format!("tile {}/{}", tile, tiles)),
+            _ => None,
+        }
+    }
+}
+
+/// Estimated seconds for each phase of a job, so one bar can span all of them.
+///
+/// Phases are wildly unequal — an A2 poster spends 67s accumulating and 5.7s
+/// saving — so a bar per phase either lies about the small ones or resets at
+/// every boundary, and a bar that hits 100% and starts again reads as finished.
+/// Weighting by measured cost gives **one bar that only ever moves forward**
+/// and is roughly linear in time.
+///
+/// The weights come from the same constants the estimator quotes before the
+/// job starts ([`estimate_secs`]), so the bar and the estimate cannot disagree
+/// about what the expensive part is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Ledger {
+    pub setup: f32,
+    pub accumulate: f32,
+    pub resolve: f32,
+    pub save: f32,
+}
+
+impl Ledger {
+    /// Weights for this job, at this machine's measured throughput.
+    ///
+    /// A throughput of `None` (the renderer has not warmed up yet) still gives
+    /// a usable ledger: the terms keep their *relative* sizes, which is all a
+    /// fraction needs — only the seconds would be wrong, and nothing here
+    /// quotes seconds.
+    pub fn for_job(params: &JobParams, throughput: Option<f32>, max_buffer_bytes: u64) -> Self {
+        let throughput = throughput.filter(|t| *t > 0.0).unwrap_or(600e6);
+        let (w, h) = params.kind.size();
+        let pixels = w as f32 * h as f32;
+        let frames = params.kind.frames() as f32;
+        let save = pixels * params.kind.secs_per_pixel(params.bit_depth) * frames;
+
+        let (accumulate, resolve) = match params.samples {
+            Samples::Ring { accumulate } => {
+                let fill = params.points as f32 * (accumulate.max(1) as f32 + 8.0) / throughput;
+                (fill + params.points as f32 * frames / throughput, 0.0)
+            }
+            Samples::Accumulate { spp } => {
+                let plan = params.tile_plan(max_buffer_bytes).ok();
+                let tiles = plan.as_ref().map_or(1.0, |p| p.tiles.len() as f32);
+                let passes = plan.as_ref().map_or(1.0, |p| p.passes() as f32);
+                let n2 = (params.supersample.max(1) as f32).powi(2);
+                let points_work = spp as f32 * pixels * (passes + tiles);
+                let texel_work = params.laps() as f32 * pixels * n2;
+                let accum = points_work / throughput + texel_work * FOLD_SECS_PER_TEXEL;
+                // The resolve is a filter, a tonemap and a readback per tile —
+                // small beside the accumulation, but it is the phase a big
+                // render sits in visibly, so it gets a weight rather than
+                // being folded into its neighbours and reading as a stall.
+                (accum, pixels * RESOLVE_SECS_PER_PIXEL * tiles)
+            }
+        };
+        Self { setup: SETUP_SECS, accumulate, resolve, save }
+    }
+
+    fn total(self) -> f32 {
+        (self.setup + self.accumulate + self.resolve + self.save).max(f32::EPSILON)
+    }
+
+    /// Overall fraction complete, given the phase and how far through it the
+    /// job says it is.
+    ///
+    /// Monotonic as long as phases arrive in order, which they do — the job is
+    /// a single thread reporting as it goes.
+    pub fn fraction(self, phase: Phase, within: Option<f32>) -> f32 {
+        let within = within.unwrap_or(0.0).clamp(0.0, 1.0);
+        let done = match phase {
+            Phase::Setup => self.setup * within,
+            Phase::Filling => self.setup + self.accumulate * within,
+            Phase::Accumulating { pass, passes } => {
+                let passes = passes.max(1) as f32;
+                let before = (pass.max(1) - 1) as f32 / passes;
+                self.setup + self.accumulate * (before + within / passes)
+            }
+            Phase::Resolving { tile, tiles } => {
+                let tiles = tiles.max(1) as f32;
+                self.setup
+                    + self.accumulate
+                    + self.resolve * ((tile.max(1) - 1) as f32 / tiles)
+            }
+            Phase::Frames => self.setup + self.accumulate * within,
+            Phase::Encoding | Phase::Saving => {
+                self.setup + self.accumulate + self.resolve + self.save * within
+            }
+        };
+        (done / self.total()).clamp(0.0, 1.0)
+    }
+}
+
+/// Device creation and shader compilation, in seconds. Measured at 0.13-0.35s
+/// across every render in this session, and it matters only for keeping a
+/// short job's bar from jumping straight to a large number.
+pub const SETUP_SECS: f32 = 0.2;
+
+/// Resolve, tonemap and read back one output pixel, per tile.
+///
+/// Measured from the "render" column of the offline timing line: ~0.00s at
+/// 1080p, 0.12s at 4K, 0.18s at 8K — so about 5e-9 s/px, small but not nothing
+/// at poster sizes.
+pub const RESOLVE_SECS_PER_PIXEL: f32 = 5.0e-9;
+
 /// What a running job reports back. Ordinary channel messages rather than
 /// shared state: the job runs on its own thread with its own wgpu device, and
 /// a queue of events is the one shape that can't tear.
 #[derive(Debug)]
 pub enum JobEvent {
-    /// Moved on to a named stage ("setting up", "filling points", …)
-    Phase(&'static str),
+    /// Moved on to a new phase, carrying where in the work it is.
+    Phase(Phase),
     Progress { done: u32, total: u32 },
     Log(String),
     /// Finished: where the file went and whether the job ran to its target, or
@@ -462,8 +625,8 @@ pub struct JobControl {
 }
 
 impl JobControl {
-    pub fn phase(&self, name: &'static str) {
-        let _ = self.events.send(JobEvent::Phase(name));
+    pub fn phase(&self, phase: Phase) {
+        let _ = self.events.send(JobEvent::Phase(phase));
     }
 
     pub fn log(&self, msg: impl Into<String>) {
@@ -831,6 +994,91 @@ mod tests {
         // Measured at 4K, converged: 3.69 + 0.19 against 4.04 + 0.45.
         assert!((lo8..=hi8).contains(&3.88), "8-bit 4K: {lo8:.2}-{hi8:.2}s");
         assert!((lo16..=hi16).contains(&4.49), "16-bit 4K: {lo16:.2}-{hi16:.2}s");
+    }
+
+    /// The one property a single bar spanning many phases must have: it never
+    /// goes backwards. A bar that retreats at a phase boundary is worse than no
+    /// bar, because it reads as the job having lost work.
+    #[test]
+    fn the_ledger_never_moves_backwards() {
+        let params = JobParams {
+            splat: true,
+            samples: Samples::Accumulate { spp: 100 },
+            supersample: 2,
+            ..still(12_000_000, 3840, 2160)
+        };
+        let limit = 512u64 << 20; // small, so it really tiles
+        let plan = params.tile_plan(limit).expect("a plan");
+        let ledger = Ledger::for_job(&params, Some(664e6), limit);
+        let (passes, tiles) = (plan.passes(), plan.tiles.len() as u32);
+        assert!(passes > 1 && tiles > 1, "need a tiled job to test the tree");
+
+        let mut walk = vec![(Phase::Setup, 0.0), (Phase::Setup, 1.0)];
+        for pass in 1..=passes {
+            for step in 0..=4 {
+                walk.push((Phase::Accumulating { pass, passes }, step as f32 / 4.0));
+            }
+        }
+        for tile in 1..=tiles {
+            walk.push((Phase::Resolving { tile, tiles }, 0.0));
+        }
+        walk.push((Phase::Saving, 0.0));
+        walk.push((Phase::Saving, 1.0));
+
+        let mut last = -1.0f32;
+        for (phase, within) in walk {
+            let f = ledger.fraction(phase, Some(within));
+            assert!(
+                f >= last - 1e-6,
+                "{phase:?} at {within}: {f:.4} went back from {last:.4}",
+            );
+            assert!((0.0..=1.0).contains(&f), "{phase:?}: {f} out of range");
+            last = f;
+        }
+        // And it actually reaches the end.
+        assert!((last - 1.0).abs() < 1e-6, "saving must finish at 1.0, got {last}");
+    }
+
+    /// The weights are the estimator's own terms, so the bar and the pre-flight
+    /// estimate cannot disagree about which part is the expensive one. On a
+    /// poster the accumulation dwarfs everything; that has to show up as most
+    /// of the bar's travel, or the bar is linear in phases rather than time.
+    #[test]
+    fn the_ledger_weights_match_where_the_time_actually_goes() {
+        let a2 = JobParams {
+            splat: true,
+            samples: Samples::Accumulate { spp: 40 },
+            supersample: 1,
+            bit_depth: crate::offline::BitDepth::Sixteen,
+            ..still(40_000_000, 9921, 14031)
+        };
+        let ledger = Ledger::for_job(&a2, Some(600e6), 2_147_483_648);
+        let total = ledger.setup + ledger.accumulate + ledger.resolve + ledger.save;
+        // Measured: 67.1s of chaos against 5.7s of saving, i.e. ~92% / ~8%.
+        let accum_share = ledger.accumulate / total;
+        assert!(
+            (0.80..0.97).contains(&accum_share),
+            "accumulation should be most of a poster: {:.3}",
+            accum_share,
+        );
+        assert!(ledger.save > ledger.setup, "a 139 Mpx write outweighs device setup");
+    }
+
+    /// A phase with nothing interesting inside it should not be decorated with
+    /// `pass 1/1`, and one that tiles should say where it is.
+    #[test]
+    fn only_a_divided_job_reports_a_position() {
+        assert_eq!(Phase::Accumulating { pass: 1, passes: 1 }.position(), None);
+        assert_eq!(Phase::Resolving { tile: 1, tiles: 1 }.position(), None);
+        assert_eq!(Phase::Saving.position(), None);
+        assert_eq!(
+            Phase::Accumulating { pass: 2, passes: 3 }.position().as_deref(),
+            Some("pass 2/3"),
+        );
+        assert_eq!(
+            Phase::Resolving { tile: 7, tiles: 12 }.position().as_deref(),
+            Some("tile 7/12"),
+        );
     }
 
     /// The default holds a core back for the rest of the desktop, and never

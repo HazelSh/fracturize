@@ -485,7 +485,7 @@ fn fill_points(
         scene.point_count, compute.warmup_frames, accumulate.max(1)
     );
     if let Some(c) = control {
-        c.phase("filling points");
+        c.phase(crate::render_job::Phase::Filling);
         c.log(format!(
             "chaos game: {} points, {} warmup + {} accumulation frames",
             scene.point_count,
@@ -555,6 +555,18 @@ fn fill_points(
     }
     Ok((compute, point_count, outcome))
 }
+/// How often a long pass says how it is doing, on stdout.
+///
+/// Deliberately not a progress bar. The CLI's reader is usually an agent, and
+/// a redrawing ANSI bar is thousands of tokens of overdraw carrying one number
+/// that only matters at the end. Discrete lines at a fixed *time* interval are
+/// cheap to read, greppable, and survive being piped to a file.
+///
+/// Time rather than laps because a pass is the same number of laps whether it
+/// takes a second or ten minutes: "every quarter of the laps" prints four
+/// useless lines for a fast pass and four uselessly-far-apart ones for a slow.
+const PROGRESS_NOTICE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+
 
 /// How many chaos dispatches `--gpu-timing` measures.
 ///
@@ -1720,7 +1732,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let mut sheet = vec![0u16; (sheet_w * sheet_h * 4) as usize];
 
     if let Some(c) = &control {
-        c.phase("rendering");
+        c.phase(crate::render_job::Phase::Frames);
     }
     for (idx, tile) in tiles.iter().enumerate() {
         // Second cancel point. A grid sheet is many tiles; a single still is
@@ -1793,7 +1805,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let t_render = Instant::now();
 
     if let Some(c) = &control {
-        c.phase("saving");
+        c.phase(crate::render_job::Phase::Saving);
     }
     // The camera in the record is the base framing. For a grid sheet that is
     // the framing every tile is derived from, which is the honest answer to
@@ -2220,7 +2232,6 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         println!("  (--accumulate is ignored here: --spp sets how long the chaos game runs)");
     }
     if let Some(c) = &control {
-        c.phase("accumulating");
         c.log(format!(
             "{} laps of {} points, target {:.0} samples/px",
             laps, capacity, target_samples / pixels
@@ -2261,7 +2272,6 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     }
     drop(renderer);
 
-    let total_laps = laps as u64 * plan.passes() as u64;
     let mut passes_done = 0u32;
 
     'passes: for group in plan.pass_groups() {
@@ -2333,6 +2343,14 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             batch_groups.push(batch_bind_group);
         }
 
+        if let Some(c) = &control {
+            c.phase(crate::render_job::Phase::Accumulating {
+                pass: passes_done + 1,
+                passes: plan.passes(),
+            });
+        }
+        let pass_started = Instant::now();
+        let mut last_notice = pass_started;
         // Laps are counted per pass, and every pass runs the same number. A lap
         // deposits its samples wherever the attractor puts them, so a tile
         // showing a twentieth of the frame receives about a twentieth of them —
@@ -2368,12 +2386,33 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             let stopping = crate::interrupt::requested()
                 || control.as_ref().is_some_and(|c| c.should_stop());
             if let Some(c) = &control {
-                // Progress spans the whole render rather than this pass, so the
-                // bar does not restart at every pass boundary.
-                let done = passes_done as u64 * laps as u64 + (lap + 1) as u64;
-                c.progress(
-                    done.min(u32::MAX as u64) as u32,
-                    total_laps.min(u32::MAX as u64) as u32,
+                // Progress *within this pass*. The ledger on the other side
+                // weights it into the overall bar, so this no longer has to
+                // fake a global figure — and the bar still never restarts.
+                c.progress(lap + 1, laps);
+            }
+            // Throttled by *time*, not by lap count. A pass is 90 laps whether
+            // it takes one second or ten minutes, so "every quarter of the
+            // laps" prints four useless lines for the former and four
+            // uselessly-far-apart ones for the latter. Every 20 seconds of
+            // actual work says nothing about a fast pass and keeps a long one
+            // honest, which is what a checkpoint notice is for.
+            if lap + 1 < laps && last_notice.elapsed() >= PROGRESS_NOTICE_EVERY {
+                last_notice = Instant::now();
+                let done = (lap + 1) as f32 / laps as f32;
+                // "of pass 1/1" is noise on a render that has only one.
+                let which = if plan.passes() > 1 {
+                    format!(" of pass {}/{}", passes_done + 1, plan.passes())
+                } else {
+                    String::new()
+                };
+                println!(
+                    "    {}%{} ({}/{} laps, {:.0}s in)",
+                    (done * 100.0).round() as u32,
+                    which,
+                    lap + 1,
+                    laps,
+                    pass_started.elapsed().as_secs_f32(),
                 );
             }
             if stopping {
@@ -2401,6 +2440,12 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         // which is what keeps the brightness continuous across a tile edge.
         let accumulated = prior_samples + done_laps as f64 * capacity as f64;
         for (i, tile) in group.iter().enumerate() {
+            if let Some(c) = &control {
+                c.phase(crate::render_job::Phase::Resolving {
+                    tile: tiles_done as u32 + 1,
+                    tiles: plan.tiles.len() as u32,
+                });
+            }
             renderers[i].upload_params(
                 &queue,
                 exposure,
@@ -2440,11 +2485,18 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             tiles_done += 1;
         }
         passes_done += 1;
+        // One line per pass, on completion, with what it cost — not a
+        // redrawing bar. The CLI's reader is usually an agent, and an ANSI bar
+        // is thousands of tokens of overdraw for a number that only matters at
+        // the end; discrete events are cheap to read, cheap to grep, and fine
+        // in a log file. Same reasoning for the quarter-way notices above,
+        // which only appear when a pass is long enough to want them.
         if !plan.is_single() {
             println!(
-                "  pass {}/{} done ({}/{} tiles)",
+                "  pass {}/{} done in {:.1}s — {} of {} tiles",
                 passes_done,
                 plan.passes(),
+                pass_started.elapsed().as_secs_f32(),
                 tiles_done,
                 plan.tiles.len(),
             );
@@ -2478,7 +2530,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let t_render = Instant::now();
 
     if let Some(c) = &control {
-        c.phase("saving");
+        c.phase(crate::render_job::Phase::Saving);
     }
     let achieved_spp = (accumulated / (width as f64 * height as f64)) as f32;
     let record = make_record(
@@ -2737,7 +2789,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let mut frame_rgba8 = vec![0u8; (width * height * 4) as usize];
 
     if let Some(c) = &control {
-        c.phase("rendering frames");
+        c.phase(crate::render_job::Phase::Frames);
         c.log(format!("{} frames at {} fps, {:.1}s", frames, anim.fps, seconds));
     }
     // Fold depth the point buffer has been carried to; see the wrap below.
@@ -2826,7 +2878,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     // leaving the dialog parked at a full bar for another ten seconds. H.264
     // encodes on the way in and only has the muxing left.
     if let Some(c) = &control {
-        c.phase("encoding");
+        c.phase(crate::render_job::Phase::Encoding);
         c.log(match anim.format {
             crate::video::Format::Avif => "flushing the AV1 encoder and muxing",
             crate::video::Format::Mp4 => "muxing the MP4",
@@ -3232,7 +3284,7 @@ pub fn render_sweep(
     let t_render = Instant::now();
 
     if let Some(c) = &control {
-        c.phase("saving");
+        c.phase(crate::render_job::Phase::Saving);
     }
     // No record: a mutation or sweep sheet is many different scenes, and a
     // `fracturize:scene` chunk claiming one of them would be a confident lie
