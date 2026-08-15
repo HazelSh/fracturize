@@ -128,10 +128,17 @@ impl Default for RenderJobForm {
             height: 720,
             points: 20_000_000,
             accumulate: 96,
-            // Slice 4 turns this on by default and gives it a control; slice 3
-            // only needs the estimator to be able to price it.
-            use_accumulate: false,
-            // `medium` on the CLI's `--effort` ladder.
+            // On by default. The ring path's density falls as the output grows
+            // — 21.7 samples/px at 720p down to 2.4 at 4K on the old defaults —
+            // so the previous default got *worse* the bigger you rendered,
+            // which is backwards. Falls back to the ring on its own wherever
+            // accumulation can't run; see `samples`.
+            use_accumulate: true,
+            // `medium` on the CLI's `--effort` ladder: the lowest tier that
+            // beats the old default at every output size. `small` is nearly
+            // free but regresses at 720p, which is this dialog's default size,
+            // and a default that makes the common case worse is not a good
+            // default however cheap it is.
             spp: 100,
             splat: false,
             exposure: 1.0,
@@ -494,6 +501,168 @@ fn draw_filename(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// Samples per pixel, however they are gathered.
+///
+/// The two rows are a genuine choice rather than a preference, because they
+/// scale in opposite directions and the dialog cannot hide which one you are
+/// on:
+///
+/// * **Accumulate** targets samples per *output* pixel, so the same setting
+///   means the same density at 720p and at A2.
+/// * **One pass** splats the filled buffer once, so its density is
+///   `points / pixels` and falls as the output grows — 21.7 samples/px at 720p
+///   and 2.4 at 4K from the settings this dialog used to default to. That is
+///   the grain, and it is why accumulation is now the default.
+///
+/// Accumulation is greyed rather than hidden where the renderer can't do it,
+/// carrying the same reason the CLI gives: a control that vanishes teaches
+/// nothing about why.
+fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
+    let form = &app.ui_state.render_job;
+    // Exactly the conditions `RenderJobForm::samples` enforces. An animation
+    // gives every frame its own camera, so there is no histogram to carry
+    // between them; the points renderer has no histogram at all.
+    let why_not = if !form.splat {
+        Some("Accumulation needs the splat renderer — the points renderer has no histogram.")
+    } else if form.mode != Mode::Still {
+        Some(
+            "Accumulation builds one still into a persistent histogram. Every frame of an \
+             animation has its own camera, so there is nothing to carry between them.",
+        )
+    } else {
+        None
+    };
+    let can_accumulate = why_not.is_none();
+    let mut accumulating = form.use_accumulate && can_accumulate;
+
+    ui.horizontal(|ui| {
+        ui.label("Samples");
+        let resp = ui.add_enabled(
+            can_accumulate,
+            egui::RadioButton::new(accumulating, "accumulate"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            why_not.unwrap_or(
+                "Fold lap after lap into a histogram until the target density is reached. \
+                 Resolution-independent: the same setting means the same density at any \
+                 output size. Stopping early gives a noisier version of the same picture, \
+                 never a darker one.",
+            ),
+            "click: accumulate to a sample target",
+        );
+        if resp.clicked() {
+            accumulating = true;
+        }
+        let resp = ui.radio(!accumulating, "one pass");
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Fill the point buffer once and splat it. Cheap and bounded, but the density it \
+             delivers is points ÷ pixels — so the same settings get grainier the larger you \
+             render.",
+            "click: a single pass over the point buffer",
+        );
+        if resp.clicked() {
+            accumulating = false;
+        }
+    });
+    app.ui_state.render_job.use_accumulate = accumulating;
+
+    if accumulating {
+        let mut spp = app.ui_state.render_job.spp;
+        // Logarithmic, and to 10,000 rather than to a comfortable number: the
+        // useful artistic band is 10-1,000, which lands at 25%-75% of a log
+        // track, and the top exists so the dial does not have to be abandoned
+        // for the command line at exactly the point the picture gets good.
+        let resp = ui.add(
+            egui::Slider::new(&mut spp, 1..=10_000).logarithmic(true).text("samples/px"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Target samples per output pixel. Noise falls as 1/√N, so each decade here is \
+             about 3.2x cleaner — and it keeps paying, with no plateau. 100 is a good \
+             working figure; past ~30,000 an 8-bit PNG can no longer hold what the render \
+             has, so save 16-bit.",
+            "drag: samples per output pixel",
+        );
+        if resp.changed() {
+            app.ui_state.render_job.spp = spp;
+        }
+    } else {
+        let mut accum = app.ui_state.render_job.accumulate;
+        let resp =
+            ui.add(egui::Slider::new(&mut accum, 1..=512).logarithmic(true).text("accumulate"));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Extra chaos-game frames stirred in after the buffer fills. It moves the walkers \
+             on without adding samples, so it is a convergence knob rather than a density \
+             one — it changes the picture but costs almost nothing.",
+            "drag: extra chaos-game frames",
+        );
+        if resp.changed() {
+            app.ui_state.render_job.accumulate = accum;
+        }
+    }
+
+    let max_m = app.max_point_capacity() as f32 / 1e6;
+    let mut millions = app.ui_state.render_job.points as f32 / 1e6;
+    let resp = ui.add(
+        egui::Slider::new(&mut millions, 0.5..=max_m)
+            .logarithmic(true)
+            // Shared with the interactive point-count slider (render_panel.rs)
+            // so a count reads the same k/M units in both dialogs, and so
+            // typing an exact value actually parses back — a formatter with
+            // no matching parser leaves egui trying to `f64::from_str` its
+            // own "1.5M" on Enter, which fails silently.
+            .custom_formatter(|v, _| super::render_panel::format_points(v))
+            .custom_parser(super::render_panel::parse_points)
+            .text("points"),
+    );
+    // The same slider means two different things, so it says which. Under
+    // accumulation it is a working set — measured, varying it 6x at a fixed
+    // sample target moved the wall clock under 25% — and telling someone it is
+    // a quality dial there would send them tuning the one control that isn't.
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if accumulating {
+            "The chaos game's working set: how much is folded in per lap. It changes how the \
+             work is cut up, not how much there is, so leave it be unless memory is tight — \
+             the sample target above is the quality dial."
+        } else {
+            "Points for *this job only* — the interactive buffer and your prefs are \
+             untouched, so the app stays as responsive as it was. Here the buffer *is* the \
+             sample count, so this is the quality dial."
+        },
+        "drag: point count for this job",
+    );
+    if resp.changed() {
+        app.ui_state.render_job.points = (millions * 1e6).round() as usize;
+    }
+
+    if accumulating {
+        let params = app.ui_state.render_job.params();
+        ui.label(
+            egui::RichText::new(format!(
+                "{} laps · {} histogram",
+                params.laps(),
+                human_bytes(params.histogram_bytes()),
+            ))
+            .small()
+            .weak(),
+        )
+        .on_hover_text(
+            "The histogram is one storage buffer at 32 bytes a texel, and supersampling \
+             squares it. It is the largest thing the job allocates and the first to hit the \
+             GPU's single-buffer limit.",
+        );
+    }
+}
+
 fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Size");
@@ -529,47 +698,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 
-    let max_m = app.max_point_capacity() as f32 / 1e6;
-    let mut millions = app.ui_state.render_job.points as f32 / 1e6;
-    let resp = ui.add(
-        egui::Slider::new(&mut millions, 0.5..=max_m)
-            .logarithmic(true)
-            // Shared with the interactive point-count slider (render_panel.rs)
-            // so a count reads the same k/M units in both dialogs, and so
-            // typing an exact value actually parses back — a formatter with
-            // no matching parser leaves egui trying to `f64::from_str` its
-            // own "1.5M" on Enter, which fails silently.
-            .custom_formatter(|v, _| super::render_panel::format_points(v))
-            .custom_parser(super::render_panel::parse_points)
-            .text("points"),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "Points for *this job only* — the interactive buffer and your prefs are \
-         untouched, so the app stays as responsive as it was.",
-        "drag: point count for this job",
-    );
-    if resp.changed() {
-        app.ui_state.render_job.points = (millions * 1e6).round() as usize;
-    }
-
-    let mut accum = app.ui_state.render_job.accumulate;
-    let resp = ui.add(
-        egui::Slider::new(&mut accum, 1..=512)
-            .logarithmic(true)
-            .text("accumulate"),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "Extra chaos-game frames after the buffer fills. More means a denser, \
-         smoother render for the same point count — and proportionally more time.",
-        "drag: accumulation frames",
-    );
-    if resp.changed() {
-        app.ui_state.render_job.accumulate = accum;
-    }
+    draw_samples(ui, app);
 
     // Supersampling sits with `points` and `accumulate` because all three are
     // cost/quality at fixed artistic intent — nothing here changes what the
@@ -1215,4 +1344,57 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             app.ui_state.render_job.open = false;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Accumulation is still-and-splat only, and the form is one of the two
+    /// places that has to know it. A form that could hand the renderer a
+    /// `Samples::Accumulate` it would refuse is a second copy of the rule,
+    /// free to drift out of step with the one the CLI enforces.
+    #[test]
+    fn the_form_never_asks_for_an_accumulation_the_renderer_would_refuse() {
+        let base = RenderJobForm { use_accumulate: true, splat: true, ..Default::default() };
+        assert_eq!(base.samples(), Samples::Accumulate { spp: base.spp });
+
+        // The points renderer has no histogram.
+        let flat = RenderJobForm { splat: false, ..RenderJobForm::default() };
+        assert!(matches!(flat.samples(), Samples::Ring { .. }));
+
+        // Every frame of an animation has its own camera.
+        for mode in [Mode::Animation, Mode::ViewDescriptor] {
+            let anim = RenderJobForm { mode, ..RenderJobForm::default() };
+            assert!(
+                matches!(anim.samples(), Samples::Ring { .. }),
+                "{mode:?} must fall back to the ring",
+            );
+        }
+
+        // Falling back must not *lose* the setting. The flag and the target
+        // both survive a trip through a mode that can't use them, which is why
+        // the form keeps them rather than storing a `Samples`.
+        let anim = RenderJobForm { mode: Mode::Animation, use_accumulate: true, splat: true, spp: 700, ..Default::default() };
+        assert!(matches!(anim.samples(), Samples::Ring { .. }));
+        let back = RenderJobForm { mode: Mode::Still, ..anim };
+        assert_eq!(back.samples(), Samples::Accumulate { spp: 700 });
+    }
+
+    /// A still render out of this dialog accumulates unless told otherwise —
+    /// the whole point of slice 4. The ring's density falls as the output
+    /// grows, so the old default got worse the bigger you rendered.
+    #[test]
+    fn a_still_defaults_to_accumulating_at_the_medium_tier() {
+        let form = RenderJobForm { splat: true, ..Default::default() };
+        assert_eq!(form.samples(), Samples::Accumulate { spp: 100 });
+    }
+
+    /// Zero samples per pixel is not a render. The slider cannot reach it, but
+    /// the field is public and a view file or a future preset could.
+    #[test]
+    fn a_sample_target_is_at_least_one() {
+        let form = RenderJobForm { use_accumulate: true, splat: true, spp: 0, ..Default::default() };
+        assert_eq!(form.samples(), Samples::Accumulate { spp: 1 });
+    }
 }
