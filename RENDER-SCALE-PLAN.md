@@ -446,6 +446,18 @@ land. One term in the tonemap shader.
 
 **5 — Tiled TIFF writer** (§6), streaming, parallel per-tile compression.
 
+> **Mostly overtaken.** `png::Compression::Fast` — fdeflate, specialised for
+> PNG rather than a lower zlib level — took a 4K/16-bit save from 7.73s to
+> 0.34s for a 9% larger file, pixel-identical. An A2 poster's save went 134.7s
+> → 5.7s, i.e. 58% of the job → 8%. Landed in `e7b08b1`.
+>
+> So the *speed* argument for TIFF is gone, and with the 16-bit argument
+> already retracted in §6 what remains is **residency**: PNG still needs the
+> whole image in memory at once (675 MB for A2 at 16-bit, and it is written
+> from a `Vec<u16>` sheet four times that). That is the real ceiling now, and
+> it bites at A1/A0 rather than A2. Reprioritise accordingly — this is no
+> longer on the critical path.
+
 **6 — Preview writes** (§13). Small, and it is what makes a multi-hour render
 something a person can live with rather than bet on.
 
