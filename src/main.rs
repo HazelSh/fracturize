@@ -21,6 +21,7 @@ mod scene;
 mod set;
 mod sweep;
 mod symmetry;
+mod tile;
 mod glyphs;
 mod randomize;
 mod record;
