@@ -318,7 +318,7 @@ mean by the Apophysis look and the GUI currently cannot reach it at all.
 "from the Render window" line so an inherited setting is not an invisible one.
 Retires the first of the six apology comments at `app.rs:3226`.
 
-**3 — The estimator, before any control that depends on it.** `estimate_secs`
+**3 — The estimator, before any control that depends on it.** *(done, `9be7a9b`)* `estimate_secs`
 and `total_bytes` learn the accumulating path. This leads rather than follows:
 the dialog's contract is that it tells you what a job costs *before* you agree
 to it, and shipping a control whose cost line is wrong by 40× would break the
@@ -326,11 +326,11 @@ one promise the module doc makes ("Estimates don't lie"). It is also testable on
 its own — the measurements in §9 are the fixture, and the estimate should land
 inside its own ±40% band on every row of that table.
 
-**4 — Samples radio + effort/spp,** defaulting to `accumulate`/`medium`, with
+**4 — Samples radio + effort/spp,** *(done, `523089e`)* defaulting to `accumulate`/`medium`, with
 the accumulate option greyed on non-still/non-splat carrying the CLI's reason.
 Now safe, because slice 3 can already price it.
 
-**5 — DE slider** in the Pixels group.
+**5 — DE slider** in the Pixels group. *(done, `4adb407`)*
 
 **6 — Sidecar files:** `.fgrade` and `.fhist` checkboxes, defaulting their
 paths off the render name the way the CLI's bare-flag forms do.
@@ -390,10 +390,43 @@ holding a gigabyte of VRAM while nobody is looking at it.
 ### Still open
 
 - **`--accumulate` may not cost what the GUI says it does.** Its slider hint
-  promises "proportionally more time"; measured at 1080p, `--accumulate` 1 → 512
+  promised "proportionally more time"; measured at 1080p, `--accumulate` 1 → 512
   moved wall time by about 0.02s while visibly changing the image (0.33M pixels
   differ at 32, 1.15M at 512). It advances the chaos game without adding
   samples, so it is a *convergence* knob and close to free — not a density knob
-  that costs time. The hint is wrong either way; whether the flag is also
-  underperforming is worth its own look. Low priority now that `accumulate`
-  lives in the non-default "one pass" branch.
+  that costs time. **The hint is fixed** as of slice 4 and now says exactly
+  that. Whether the flag is *also* underperforming is still open, and now low
+  priority: `accumulate` lives in the non-default "one pass" branch.
+
+### What slice 3 measured, and two lies it found
+
+The accumulating cost model, fitted on `lacewing` across a 15x `spp` range,
+three resolutions and three supersample factors, and accurate to ~7%:
+
+    chaos = spp x pixels / throughput
+    fold  = laps x pixels x N^2 x 1.12ns,   laps = spp x pixels / points
+
+The first term is **independent of the point buffer**: varying `--points` 6x at
+a fixed `spp` moved the total under 25%, all of it per-lap overhead. That is
+what makes the buffer a working set under accumulation rather than a quality
+dial, and it is why slice 4's `points` hint changes text with the mode.
+
+Resolution and supersampling land on the *same* axis — 1080p at 2x and 4K at 1x
+are both 8.29M histogram texels and both cost ~0.028 s/lap. The fold rate is
+stored as a ratio to measured throughput (`FOLD_TEXELS_PER_POINT`) so it tracks
+the machine instead of being a GTX 1080 constant quoted at a laptop.
+
+Two things the estimator was getting wrong, both of which mattered:
+
+* **`PNG_SECS_PER_PIXEL` was 20x low** — 2.0e-8 against a measured 4.0e-7. That
+  hid the term that *dominates* a large still: saving is 10.6s of a 13.8s 8K
+  job. 16-bit is 2.5x again and now has its own constant, so the depth checkbox
+  moves the estimate instead of being free. The cost also depends on *content*,
+  not just size — a 1080p frame saves in 0.43s at 20 spp and 0.85s once
+  converged, because deflate is doing the work — and the converged figure is
+  the one quoted, since accumulation is now the default.
+* **`total_bytes` never counted the histogram**, which is the largest single
+  thing an accumulating job allocates (1.06 GB at 4K x2 against 33 MB of
+  points) and the first buffer to hit the binding limit. `rejection` now checks
+  it and names supersampling as the thing to turn down, since it costs N^2
+  there.

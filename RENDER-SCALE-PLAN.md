@@ -398,7 +398,7 @@ as a requirement of the tiled path rather than a nicety.
 
 ## 9. Slices
 
-**0 — Finish `RENDER-GUI-PLAN.md` slices 3-5 first.** The estimator, the
+**0 — Finish `RENDER-GUI-PLAN.md` slices 3-5 first.** *(done: `9be7a9b`, `523089e`, `4adb407`)* The estimator, the
 samples radio defaulting to accumulate, and the DE slider. This is where the
 grain actually gets fixed (§1), it needs none of the machinery below, and
 without it the tiled renderer would ship with the same 9.6-samples/px default
