@@ -61,10 +61,26 @@ impl Filter {
     }
 }
 
-/// Supersampling bounds. 1 is off; past 4 the accumulation textures get large
-/// enough to be the thing that decides whether a render runs at all, for a
-/// difference nobody can see.
-pub const MAX_SUPERSAMPLE: u32 = 4;
+/// Supersampling bounds. 1 is off.
+///
+/// This was 4, because past it the accumulation buffers became the thing that
+/// decided whether a render ran at all — 4K at 4x wanted a 4.25 GB histogram
+/// against a 2.15 GB binding limit, and simply refused. Tiling removed that
+/// ceiling (see `crate::tile`), so the cap is no longer protecting anything and
+/// the reason for it has gone.
+///
+/// **16 is not free, and it is not a noise control.** It is anti-aliasing: N²
+/// samples in a pixel and N² samples across that pixel's sub-texels are the
+/// same sum, so supersampling has *no effect on grain* — measured at 0.008%,
+/// and zero for a reason. `--spp` is the noise dial. What 16x buys is the
+/// finest edges the output can carry, and it costs N² in fill, in histogram
+/// bytes and therefore in tiles: 16x is 16 times the memory of 4x and, past
+/// the binding limit, 16 times the chaos game too.
+///
+/// So it is available rather than recommended, and at poster resolution it is
+/// usually the wrong thing to spend on — at 600 ppi a pixel is 42 µm and there
+/// is nothing left to anti-alias.
+pub const MAX_SUPERSAMPLE: u32 = 16;
 
 /// Filter half-width in *output* pixels.
 ///
