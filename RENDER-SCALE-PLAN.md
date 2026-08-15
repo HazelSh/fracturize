@@ -432,17 +432,27 @@ trade and it is lopsided: **pixels are already past the eye, noise is not.**
 So the target is not "more pixels than A2 at 600". It is **A2 at 600 with
 enough samples**, and that is a number we can name:
 
-| `--spp` at A2 600ppi | noise (RMSE) | at 8-bit | passes @2x | wall |
+| `--spp` at A2 600ppi | noise (RMSE) | in 8-bit levels | passes @2x | wall |
 |---|---|---|---|---|
-| 1,000 | 0.0069 | 1.7 levels | 3 | ~40 min |
-| 10,000 | 0.0026 | **0.67 levels** | 3 | ~6 hours |
-| 100,000 | 0.0008 | 0.2 levels | 3 | ~60 hours |
+| 1,000 | 0.00665 | 1.70 | 3 | ~40 min |
+| 10,000 | 0.00211 | **0.54** | 3 | ~6 hours |
+| 100,000 | 0.000667 | 0.17 | 3 | ~60 hours |
 
-0.67 levels at 8-bit is **below the quantisation step** — 10,000 samples/px is
-essentially a noise-free print, and it is a six-hour job rather than an
-impossible one. 100,000 buys 3.16x less noise for 10x the time, and buys it
-below the point where paper or eye can tell. That is the useful ceiling, and it
-is reachable.
+Measured, not extrapolated — including the 100,000 row, which is a real
+five-minute render at 1080p (17,280 laps, and the accumulation holds up
+exactly: 3.157x then 3.155x per decade, against 1/sqrt(10) = 3.162).
+
+The useful ceiling has a sharp edge. **8-bit quantisation contributes 1.0 level
+of its own noise**, so sampling noise crosses below the file's own noise at
+about **30,000 spp** — past there an 8-bit output cannot hold what the render
+has, and more samples buy nothing you can save. 10,000 spp is therefore the
+right target for a print: about six hours, half a quantisation step of noise,
+and the last point on the curve where more time still shows up in the file.
+
+Going further needs 16 bits, which is another argument for the TIFF in §6 — and
+`--bit-depth 16` is now mandatory for *measuring* noise at all, since an 8-bit
+file inflated these very figures by 24% at 10,000 spp and 108% at 100,000. See
+`AGENTS.md`, where that correction is recorded.
 
 (`--spp` is per *output* pixel, so these figures carry over from the 1080p
 measurements in §1 unchanged — which is exactly why the tier system was built
@@ -485,6 +495,28 @@ show it immediately as error against the reference, not as an argument.
 
 Start with a guided/edge-aware filter written here (no dependency, fully
 understood) and only reach for something like OIDN if the simple thing plateaus.
+
+**The reference already exists**, and it is cheap. `lacewing` at 1080p, 100,000
+spp, two independent seeds — five minutes each, noise 0.000667, a sixth of a
+quantisation step. Any denoiser applied to the 1,000-spp buffer can be scored
+against it directly, and "did it eat the `rib` filaments" becomes a number
+rather than an argument.
+
+Regenerating it (`reference/` is gitignored — five minutes is cheaper than 22 MB
+of history):
+
+```sh
+for seed in 0 12345; do
+  fracturize -s scenes/lacewing.toml --splat --width 1920 --height 1080 \
+    --spp 100000 --chaos-seed $seed --supersample 1 --bit-depth 16 \
+    --grade-out reference/lacewing-1080p-100k-$seed.fgrade \
+    -r reference/lacewing-1080p-100k-$seed.png
+done
+```
+
+Keep the `.fgrade` buffers: they are the linear, pre-tonemap density, which is
+what a denoiser should operate on and what `--retonemap` re-grades in
+milliseconds.
 
 ### b) Stratified or low-discrepancy transform selection
 

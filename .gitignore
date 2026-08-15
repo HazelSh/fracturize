@@ -3,6 +3,10 @@ Cargo.lock
 /screenshots
 /renders
 /views
+# Ground-truth renders for scoring denoisers (RENDER-SCALE-PLAN.md §12a).
+# Regenerable in ~5 min each; the command is in that file, so the bytes stay out
+# of history.
+/reference
 __pycache__/
 *.pdf
 /.claude

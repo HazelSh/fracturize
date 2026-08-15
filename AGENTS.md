@@ -2620,9 +2620,31 @@ bit-identical between ss1 and ss2 while 5.9% of pixels differ, because
 supersampling redistributes energy locally and conserves it exactly. Judge it
 by looking at edges, never by a noise figure.
 
-**More samples follow 1/sqrt(N), with no plateau.** 10x the samples buys 2.90x,
-against the 3.16x the law predicts; the shortfall is the gamma curve, since
-RMSE is being measured after a nonlinear tonemap rather than on linear density.
+**More samples follow 1/sqrt(N), with no plateau.** 10x the samples buys 2.90x
+here, against the 3.16x the law predicts — and that shortfall was **the 8-bit
+PNG, not the renderer.** It was blamed on the gamma curve for a while, on the
+theory that RMSE measured after a nonlinear tonemap understates. That was
+wrong. Re-measured at `--bit-depth 16` on `lacewing` at 1080p:
+
+| `--spp` | noise, 16-bit | per decade | noise, 8-bit |
+|---|---|---|---|
+| 1,000 | 0.00665 | — | 0.00685 |
+| 10,000 | 0.00211 | **3.157x** | 0.00261 |
+| 100,000 | 0.000667 | **3.155x** | 0.00138 |
+
+3.16 to three digits, twice. The convergence is textbook and the instrument was
+the problem.
+
+**So a noise measurement must be made at 16-bit.** An 8-bit file's own
+quantisation contributes about `q/sqrt(12) * sqrt(2)` = 0.0016 RMSE between two
+independently quantised renders, which is a *floor* the measurement cannot see
+past. It inflates the figure by 24% at 10,000 spp and by 108% at 100,000, where
+the render is genuinely finer than the file can hold.
+
+That floor has a practical edge, not just a methodological one: sampling noise
+crosses below 8-bit quantisation noise at roughly **30,000 spp**. Past there an
+8-bit output is the limiting factor and more samples buy nothing you can save —
+which is one of the arguments for 16-bit TIFF in `RENDER-SCALE-PLAN.md`.
 
 **DE retreats as a render converges.** It buys 34% at 100 spp and 7.5% at 1000
 spp, because it targets exactly the texels that are still noisy and there are
