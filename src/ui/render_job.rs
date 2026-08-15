@@ -357,12 +357,15 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let params = app.ui_state.render_job.params();
         let named = !params.out_path.as_os_str().is_empty();
-        let resp =
-            ui.add_enabled(named, egui::Button::new(format!("{} Start", icons::PLAY)));
+        let blocked = filename_trouble(&params.out_path).is_some_and(|t| t.blocks_start());
+        let resp = ui
+            .add_enabled(named && !blocked, egui::Button::new(format!("{} Start", icons::PLAY)));
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            if named {
+            if blocked {
+                "That path is a directory. Add a filename to it."
+            } else if named {
                 "Run this job on a second GPU device — the app stays usable while it goes"
             } else {
                 "Give the output a filename first"
@@ -513,13 +516,65 @@ fn draw_filename(ui: &mut egui::Ui, app: &mut App) {
     app.ui_state.render_job.filename = name;
 
     let path = PathBuf::from(app.ui_state.render_job.filename.trim());
-    if path.exists() {
-        ui.label(
-            egui::RichText::new("This file exists and will be overwritten.")
-                .color(ui.visuals().warn_fg_color)
-                .small(),
-        );
+    let (text, color) = match filename_trouble(&path) {
+        Some(t) => (t.message(), t.color(ui.visuals())),
+        // A blank line rather than no line. **The row must always be there**,
+        // because everything below it moves when it isn't: every absolute path
+        // is typed through `/home`, `/home/you` and so on, so this row used to
+        // blink in and out under the cursor and shuffle the Start button up and
+        // down with it. A warning that relocates the button you are reaching
+        // for is worse than the thing it warns about.
+        None => (" ", ui.visuals().text_color()),
+    };
+    ui.label(egui::RichText::new(text).color(color).small());
+}
+
+/// What is wrong with the output path, if anything.
+///
+/// Split out from the drawing so the button below can refuse the same cases the
+/// label describes — a dialog that says "this is a directory" and then starts
+/// the job anyway has told you something it does not act on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FilenameTrouble {
+    /// An existing directory. Not an overwrite: the render cannot be written
+    /// here at all, and nothing would be clobbered if it tried.
+    IsDirectory,
+    /// An existing file, which the render will replace.
+    WillOverwrite,
+}
+
+impl FilenameTrouble {
+    fn message(self) -> &'static str {
+        match self {
+            FilenameTrouble::IsDirectory => "That's a directory — give the render a filename.",
+            FilenameTrouble::WillOverwrite => "This file exists and will be overwritten.",
+        }
     }
+
+    fn color(self, visuals: &egui::Visuals) -> egui::Color32 {
+        match self {
+            // An error, not a warning: overwriting is a choice someone can
+            // make, and writing to a directory is not a thing that can happen.
+            FilenameTrouble::IsDirectory => visuals.error_fg_color,
+            FilenameTrouble::WillOverwrite => visuals.warn_fg_color,
+        }
+    }
+
+    /// Whether this stops the job. Overwriting does not — it is what the
+    /// warning is for.
+    fn blocks_start(self) -> bool {
+        matches!(self, FilenameTrouble::IsDirectory)
+    }
+}
+
+fn filename_trouble(path: &std::path::Path) -> Option<FilenameTrouble> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if path.is_dir() {
+        return Some(FilenameTrouble::IsDirectory);
+    }
+    path.is_file().then_some(FilenameTrouble::WillOverwrite)
 }
 
 /// Samples per pixel, however they are gathered.
@@ -1480,6 +1535,28 @@ mod tests {
         // Clamped, since the field is public even though the slider is not.
         let hot = RenderJobForm { density_estimation: 4.0, ..acc };
         assert_eq!(hot.density().amount, 1.0);
+    }
+
+    /// A directory is not a file waiting to be overwritten: nothing would be
+    /// clobbered, the render simply cannot be written there. It gets its own
+    /// message and stops the job, rather than being reported as an overwrite
+    /// and then attempted anyway.
+    #[test]
+    fn a_directory_is_refused_rather_than_overwritten() {
+        let dir = std::env::temp_dir();
+        assert_eq!(filename_trouble(&dir), Some(FilenameTrouble::IsDirectory));
+        assert!(FilenameTrouble::IsDirectory.blocks_start());
+
+        let file = dir.join("fracturize-filename-trouble.png");
+        std::fs::write(&file, b"x").expect("write a temp file");
+        assert_eq!(filename_trouble(&file), Some(FilenameTrouble::WillOverwrite));
+        // Overwriting is a choice, not an error — the warning exists so it is
+        // an informed one, and it must not disable the button.
+        assert!(!FilenameTrouble::WillOverwrite.blocks_start());
+        let _ = std::fs::remove_file(&file);
+
+        assert_eq!(filename_trouble(&dir.join("nothing-here.png")), None);
+        assert_eq!(filename_trouble(std::path::Path::new("")), None);
     }
 
     /// Zero samples per pixel is not a render. The slider cannot reach it, but
