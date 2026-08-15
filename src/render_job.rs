@@ -452,6 +452,24 @@ impl JobParams {
 /// The variants carry their position because a tiled accumulating render has a
 /// phase *tree*, not a phase list: passes contain laps, and each pass is
 /// followed by a resolve per tile.
+/// Where a tiled render has got to, as counters that only ever go up.
+///
+/// Both are carried by both phases, and that is the point. Passes and resolves
+/// **interleave** — pass 1, resolve its tiles, pass 2, resolve its tiles — so a
+/// phase that knew only its own counter would send the bar to nearly full at
+/// the first resolve and then back to a twentieth when the next pass started.
+/// Carrying both means every phase can say how much of the *whole* job is
+/// behind it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TilePos {
+    /// 1-based pass currently running, or just finished.
+    pub pass: u32,
+    pub passes: u32,
+    /// Tiles fully resolved and written into the image so far.
+    pub tiles_done: u32,
+    pub tiles: u32,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
     /// Creating the device, compiling shaders, reading a checkpoint.
@@ -459,10 +477,10 @@ pub enum Phase {
     /// Filling the point buffer, on the paths that fill before rendering.
     Filling,
     /// Accumulating laps. Every tile resident in this pass advances together,
-    /// which is why the tile is not named here — they are all being worked on.
-    Accumulating { pass: u32, passes: u32 },
+    /// which is why no single tile is named — they are all being worked on.
+    Accumulating(TilePos),
     /// Turning one tile's histogram into pixels and reading it back.
-    Resolving { tile: u32, tiles: u32 },
+    Resolving(TilePos),
     /// Rendering animation frames.
     Frames,
     /// Encoding video.
@@ -477,8 +495,8 @@ impl Phase {
         match self {
             Phase::Setup => "setting up",
             Phase::Filling => "filling points",
-            Phase::Accumulating { .. } => "accumulating",
-            Phase::Resolving { .. } => "resolving",
+            Phase::Accumulating(_) => "accumulating",
+            Phase::Resolving(_) => "resolving",
             Phase::Frames => "rendering frames",
             Phase::Encoding => "encoding",
             Phase::Saving => "saving",
@@ -492,10 +510,10 @@ impl Phase {
     /// render is not decorated with `pass 1/1 · tile 1/1`.
     pub fn position(self) -> Option<String> {
         match self {
-            Phase::Accumulating { passes, .. } if passes <= 1 => None,
-            Phase::Accumulating { pass, passes } => Some(format!("pass {}/{}", pass, passes)),
-            Phase::Resolving { tiles, .. } if tiles <= 1 => None,
-            Phase::Resolving { tile, tiles } => Some(format!("tile {}/{}", tile, tiles)),
+            Phase::Accumulating(p) if p.passes > 1 => Some(format!("pass {}/{}", p.pass, p.passes)),
+            Phase::Resolving(p) if p.tiles > 1 => {
+                Some(format!("tile {}/{}", p.tiles_done + 1, p.tiles))
+            }
             _ => None,
         }
     }
@@ -571,16 +589,24 @@ impl Ledger {
         let done = match phase {
             Phase::Setup => self.setup * within,
             Phase::Filling => self.setup + self.accumulate * within,
-            Phase::Accumulating { pass, passes } => {
-                let passes = passes.max(1) as f32;
-                let before = (pass.max(1) - 1) as f32 / passes;
-                self.setup + self.accumulate * (before + within / passes)
-            }
-            Phase::Resolving { tile, tiles } => {
-                let tiles = tiles.max(1) as f32;
+            // Both terms, always, because the two phases interleave. The
+            // accumulate term counts whole passes behind us plus this one's
+            // progress; the resolve term counts tiles already written. Each
+            // only ever grows, so their sum does too — which is the property
+            // the bar exists to have.
+            Phase::Accumulating(p) => {
+                let passes = p.passes.max(1) as f32;
+                let done_passes = (p.pass.max(1) - 1) as f32;
                 self.setup
-                    + self.accumulate
-                    + self.resolve * ((tile.max(1) - 1) as f32 / tiles)
+                    + self.accumulate * ((done_passes + within) / passes)
+                    + self.resolve * (p.tiles_done as f32 / p.tiles.max(1) as f32)
+            }
+            // The pass this tile belongs to is finished by the time it is being
+            // resolved, so its accumulation counts in full.
+            Phase::Resolving(p) => {
+                self.setup
+                    + self.accumulate * (p.pass.max(1) as f32 / p.passes.max(1) as f32)
+                    + self.resolve * (p.tiles_done as f32 / p.tiles.max(1) as f32)
             }
             Phase::Frames => self.setup + self.accumulate * within,
             Phase::Encoding | Phase::Saving => {
@@ -1000,8 +1026,16 @@ mod tests {
     }
 
     /// The one property a single bar spanning many phases must have: it never
-    /// goes backwards. A bar that retreats at a phase boundary is worse than no
-    /// bar, because it reads as the job having lost work.
+    /// goes backwards.
+    ///
+    /// A progress bar tracks the **user's** task — it starts when they click
+    /// Start and ends when the file is on disk — so every phase has to *add* to
+    /// it rather than own it. The first version of this test walked all the
+    /// passes and then all the tiles, which is not the order the renderer
+    /// works in: passes and resolves **interleave**, and against the real order
+    /// the bar shot to nearly full at the first resolve and dropped back to a
+    /// twentieth when the next pass began. So this walks it exactly as
+    /// `render_accumulated` emits it.
     #[test]
     fn the_ledger_never_moves_backwards() {
         let params = JobParams {
@@ -1017,13 +1051,19 @@ mod tests {
         assert!(passes > 1 && tiles > 1, "need a tiled job to test the tree");
 
         let mut walk = vec![(Phase::Setup, 0.0), (Phase::Setup, 1.0)];
-        for pass in 1..=passes {
+        let mut tiles_done = 0u32;
+        for (pass, group) in (1..=passes).zip(plan.pass_groups()) {
+            // Accumulate this pass...
             for step in 0..=4 {
-                walk.push((Phase::Accumulating { pass, passes }, step as f32 / 4.0));
+                let pos = TilePos { pass, passes, tiles_done, tiles };
+                walk.push((Phase::Accumulating(pos), step as f32 / 4.0));
             }
-        }
-        for tile in 1..=tiles {
-            walk.push((Phase::Resolving { tile, tiles }, 0.0));
+            // ...then resolve the tiles it held, one at a time.
+            for _ in group {
+                let pos = TilePos { pass, passes, tiles_done, tiles };
+                walk.push((Phase::Resolving(pos), 0.0));
+                tiles_done += 1;
+            }
         }
         walk.push((Phase::Saving, 0.0));
         walk.push((Phase::Saving, 1.0));
@@ -1038,7 +1078,8 @@ mod tests {
             assert!((0.0..=1.0).contains(&f), "{phase:?}: {f} out of range");
             last = f;
         }
-        // And it actually reaches the end.
+        // And it actually reaches the end, rather than stopping short and
+        // leaving the last sliver for a phase that never reports.
         assert!((last - 1.0).abs() < 1e-6, "saving must finish at 1.0, got {last}");
     }
 
@@ -1071,17 +1112,14 @@ mod tests {
     /// `pass 1/1`, and one that tiles should say where it is.
     #[test]
     fn only_a_divided_job_reports_a_position() {
-        assert_eq!(Phase::Accumulating { pass: 1, passes: 1 }.position(), None);
-        assert_eq!(Phase::Resolving { tile: 1, tiles: 1 }.position(), None);
+        let one = TilePos { pass: 1, passes: 1, tiles_done: 0, tiles: 1 };
+        assert_eq!(Phase::Accumulating(one).position(), None);
+        assert_eq!(Phase::Resolving(one).position(), None);
         assert_eq!(Phase::Saving.position(), None);
-        assert_eq!(
-            Phase::Accumulating { pass: 2, passes: 3 }.position().as_deref(),
-            Some("pass 2/3"),
-        );
-        assert_eq!(
-            Phase::Resolving { tile: 7, tiles: 12 }.position().as_deref(),
-            Some("tile 7/12"),
-        );
+        let many = TilePos { pass: 2, passes: 3, tiles_done: 6, tiles: 12 };
+        assert_eq!(Phase::Accumulating(many).position().as_deref(), Some("pass 2/3"));
+        // The tile being worked on is the one after those already done.
+        assert_eq!(Phase::Resolving(many).position().as_deref(), Some("tile 7/12"));
     }
 
     /// The default holds a core back for the rest of the desktop, and never

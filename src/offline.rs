@@ -2452,10 +2452,12 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         }
 
         if let Some(c) = &control {
-            c.phase(crate::render_job::Phase::Accumulating {
+            c.phase(crate::render_job::Phase::Accumulating(crate::render_job::TilePos {
                 pass: passes_done + 1,
                 passes: plan.passes(),
-            });
+                tiles_done: tiles_done as u32,
+                tiles: plan.tiles.len() as u32,
+            }));
         }
         let pass_started = Instant::now();
         let mut last_notice = pass_started;
@@ -2549,10 +2551,12 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         let accumulated = prior_samples + done_laps as f64 * capacity as f64;
         for (i, tile) in group.iter().enumerate() {
             if let Some(c) = &control {
-                c.phase(crate::render_job::Phase::Resolving {
-                    tile: tiles_done as u32 + 1,
+                c.phase(crate::render_job::Phase::Resolving(crate::render_job::TilePos {
+                    pass: passes_done + 1,
+                    passes: plan.passes(),
+                    tiles_done: tiles_done as u32,
                     tiles: plan.tiles.len() as u32,
-                });
+                }));
             }
             renderers[i].upload_params(
                 &queue,
