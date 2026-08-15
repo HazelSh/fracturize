@@ -2118,6 +2118,19 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // path calls `splat_pass` and `tonemap_pass` directly, with the histogram
     // and *its* filter in between.
     renderer.set_supersample(&device, &queue, sampling.n, filter, filter_radius);
+    // One LSB of triangular dither, but only where something quantizes to 8
+    // bits. This is the path that reaches high sample counts, and past roughly
+    // 30,000 samples/px the render's own grain drops below one 8-bit step —
+    // so the sampling noise that had been dithering the output for free
+    // disappears, and the banding it was hiding appears. The picture getting
+    // better is what makes the file worse, which is a strange enough sentence
+    // to be worth the comment.
+    renderer.set_dither(match bit_depth {
+        BitDepth::Eight => 1.0,
+        // 16 bits is ~256x finer, far below any achievable sampling noise, so
+        // there is nothing here to dither and adding noise would only add noise.
+        BitDepth::Sixteen => 0.0,
+    });
 
     // The one thing about this path that is not the same on every machine.
     // Without fp32 blending each lap's batch stalls at 2048 per texel, so the

@@ -64,7 +64,10 @@ struct SplatParams {
     gamma_inv: f32,
     gamma_threshold: f32,
     vibrancy: f32,
-    _pad: [f32; 2],
+    /// LSBs of triangular dither before the 8-bit quantize. 0 is off, and off
+    /// takes the shader's early return, so an undithered render is untouched.
+    dither: f32,
+    _pad: f32,
 }
 
 /// The tonemap grade, as the CLI and the record speak about it.
@@ -134,6 +137,16 @@ pub struct SplatRenderer {
     /// tonemap. That position is the whole design: filtering after the log
     /// would blur in a perceptually compressed space and muddy bright cores.
     supersample: Option<Supersample>,
+    /// LSBs of dither the tonemap adds before the 8-bit quantize. 0 — the
+    /// default, and what the window uses — is off.
+    ///
+    /// Opt-in rather than inferred from the target format, even though the
+    /// format is what makes it necessary, because the two 8-bit surfaces want
+    /// different answers: a `--bit-depth 8` file is kept and looked at closely,
+    /// while the viewport is redrawn continuously and is not what anyone judges
+    /// a gradient from. Inferring would quietly change the interactive look as
+    /// a side effect of a file-format decision.
+    dither: f32,
 }
 
 /// What supersampling adds: the factor, the kernel, and the output-sized
@@ -391,6 +404,7 @@ impl SplatRenderer {
             params_buffer,
             accum: None,
             supersample: None,
+            dither: 0.0,
         }
     }
 
@@ -437,6 +451,18 @@ impl SplatRenderer {
     }
 
 
+    /// Dither the tonemap's output by `lsbs` steps of the 8-bit code before
+    /// the hardware quantizes it.
+    ///
+    /// One LSB of triangular noise is the standard choice and what
+    /// `--bit-depth 8` asks for; 0 turns it off entirely and takes the shader's
+    /// early return, so an undithered render is byte-for-byte what it was.
+    /// Pointless above 8 bits — a 16-bit file's quantization is already far
+    /// under the sampling noise — so the 16-bit path leaves this alone.
+    pub fn set_dither(&mut self, lsbs: f32) {
+        self.dither = lsbs.max(0.0);
+    }
+
     pub fn upload_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
     }
@@ -480,7 +506,8 @@ impl SplatRenderer {
             gamma_inv: 1.0 / grade.gamma,
             gamma_threshold: grade.gamma_threshold,
             vibrancy: grade.vibrancy,
-            _pad: [0.0; 2],
+            dither: self.dither,
+            _pad: 0.0,
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
     }

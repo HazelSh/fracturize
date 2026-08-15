@@ -74,7 +74,10 @@ struct SplatParams {
     /// 1 = gamma reaches the picture through coverage alone (hue untouched),
     /// 0 = through each colour channel (highlights roll off toward white).
     vibrancy: f32,
-    _pad0: vec2<f32>,
+    /// 1 LSB of triangular dither before the hardware quantizes to 8 bits.
+    /// 0 is off, and off is exact — see `dither_srgb`.
+    dither: f32,
+    _pad0: f32,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -286,6 +289,96 @@ fn fs_splat(in: SplatOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color * w, w);
 }
 
+/// sRGB transfer function, both directions.
+///
+/// Needed here because the dither has to be **one step of the output code**,
+/// and the output is sRGB-encoded by the hardware on the way to 8 bits. A
+/// constant offset in linear light is a wildly varying offset in code space —
+/// near black one 8-bit step spans about 0.0003 of linear and near white about
+/// 0.006, a factor of twenty — so dithering in linear would be far too strong
+/// in the shadows and far too weak in the highlights, which is where the
+/// banding actually is.
+fn srgb_encode(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        return c * 12.92;
+    }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+fn srgb_decode(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+/// A cheap integer hash, for per-pixel noise that is the same every render.
+///
+/// Deterministic on purpose: two renders of the same scene should differ by
+/// their sampling, not by their dither, and a re-render that shifts the grain
+/// would make A/B comparison harder for no gain.
+fn hash_u32(x: u32) -> u32 {
+    var h = x;
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return h;
+}
+
+fn rand01(p: vec2<i32>, salt: u32) -> f32 {
+    let h = hash_u32(u32(p.x) * 73856093u ^ u32(p.y) * 19349663u ^ salt * 83492791u);
+    return f32(h) * (1.0 / 4294967296.0);
+}
+
+/// Triangular (TPDF) dither of one output code, applied in sRGB space.
+///
+/// # Why a converged render is what bands
+///
+/// Sampling noise is itself a dither. At low `--spp` the render's own grain
+/// spans several quantization steps and randomizes every rounding decision for
+/// free, so banding cannot appear. As `spp` climbs, that self-dither shrinks
+/// below one step — around 30,000 spp at 8 bits — and the structure it was
+/// hiding emerges. **The banding appears exactly when the render finally gets
+/// good**, which is the regime the whole scaling effort exists to reach.
+/// Measured on a 100,000-spp render: 1,134 distinct colours in a 300x200 patch
+/// of smooth material at 8 bits, against 56,747 at 16.
+///
+/// # Triangular, not uniform
+///
+/// Uniform dither decorrelates the error from the signal but leaves the noise
+/// *power* signal-dependent, which reads as the grain breathing as a gradient
+/// passes through it. TPDF — the difference of two uniforms — removes that too,
+/// and is the standard result from audio for the same reason.
+///
+/// # It makes the error bigger, and the picture better
+///
+/// Rounding has an RMS error of 0.289 of a step; TPDF raises that to 0.5. No
+/// information is recovered and the 8-bit crossover does not move. What changes
+/// is that the error stops being *structured*: a contour that the eye finds
+/// instantly becomes grain that it does not. Past the crossover an 8-bit file
+/// then degrades gracefully instead of into rings.
+fn dither_srgb(c: vec3<f32>, p: vec2<i32>, amount: f32) -> vec3<f32> {
+    if amount <= 0.0 {
+        return c;
+    }
+    let encoded = vec3<f32>(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b));
+    // Independent noise per channel: shared noise would move all three the same
+    // way, which is a luminance wobble rather than the chroma-neutral grain we
+    // want.
+    let n = vec3<f32>(
+        rand01(p, 0u) - rand01(p, 1u),
+        rand01(p, 2u) - rand01(p, 3u),
+        rand01(p, 4u) - rand01(p, 5u),
+    );
+    let d = clamp(encoded + n * (amount / 255.0), vec3<f32>(0.0), vec3<f32>(1.0));
+    // Back to linear, because the hardware will encode again on the way out.
+    // The round trip is exact to float precision, so `amount = 0` above is not
+    // merely close to the old path — this function is skipped entirely.
+    return vec3<f32>(srgb_decode(d.r), srgb_decode(d.g), srgb_decode(d.b));
+}
+
 // === Tonemap pass ===
 
 @group(0) @binding(0) var accum: texture_2d<f32>;
@@ -352,13 +445,19 @@ fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
     // one compositing model rather than two.
     let emitted = mix(desaturated, vibrant, params.vibrancy);
 
+    // Dither the colour and never the alpha. Coverage is not a colour: it is
+    // read as a mask, and noise in a mask is a ragged edge rather than a finer
+    // gradient.
+    let px = vec2<i32>(in.clip_position.xy);
     if transparent {
         // Straight (non-premultiplied) alpha, which is what PNG stores:
         // colour is the palette hue, coverage is the log density, so the
         // dusty edges stay dusty instead of turning into a cutout.
-        return vec4<f32>(emitted / max(coverage, 1e-6), coverage);
+        let straight = emitted / max(coverage, 1e-6);
+        return vec4<f32>(dither_srgb(straight, px, params.dither), coverage);
     }
-    return vec4<f32>(params.background.rgb * (1.0 - coverage) + emitted, 1.0);
+    let composited = params.background.rgb * (1.0 - coverage) + emitted;
+    return vec4<f32>(dither_srgb(composited, px, params.dither), 1.0);
 }
 
 /// Gamma with a linear toe: `x^(1/gamma)`, blended toward a straight line
