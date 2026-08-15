@@ -3207,8 +3207,12 @@ impl App {
 
         let out = params.out_path.clone();
         let kind = params.kind;
-        let (splat, exposure, transparent, accumulate) =
-            (params.splat, params.exposure, params.transparent, params.accumulate);
+        let (splat, exposure, transparent) = (params.splat, params.exposure, params.transparent);
+        // Two fields out of one choice: `--spp` is what makes the accumulating
+        // path run, and `accumulate` is the ring path's extra-frames dial that
+        // it ignores. `Samples` is the single place that decides, so the two
+        // can't be set to disagree here.
+        let (spp, accumulate) = (params.samples.spp(), params.samples.accumulate());
         // Read off `self` rather than `params`: the grade is not a job field,
         // it is the window's live look, and the job renders what you saw.
         let grade = self.grade;
@@ -3259,10 +3263,7 @@ impl App {
                 // there is nothing here that would use one until accumulation
                 // lands, and a knob with no effect is worse than none.
                 chaos_seed: crate::gpu::points::compute::DEFAULT_SEED,
-                // The dialog has no sample-target control yet. Accumulation is
-                // a CLI dial for now — it changes what a render *costs* by
-                // orders of magnitude, and the dialog's other controls do not.
-                spp: None,
+                spp,
                 // Inherited from the Render window, like `exposure` above,
                 // rather than duplicated as three more sliders in the dialog:
                 // the grade is the one thing here you can already see live, so

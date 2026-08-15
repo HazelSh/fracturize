@@ -59,9 +59,47 @@ pub const AV1_SECS_PER_PIXEL: f32 = 6.0e-7;
 /// zero; if this is ever re-measured on another machine, scale them together.
 pub const H264_SECS_PER_PIXEL: f32 = 6.0e-8;
 
-/// The same for a PNG: deflate on an already-rendered buffer, cheap enough
-/// that it only shows up on very large stills.
-pub const PNG_SECS_PER_PIXEL: f32 = 2.0e-8;
+/// The same for an 8-bit PNG: readback, then deflate on an already-rendered
+/// buffer.
+///
+/// Measured on the GTX 1080 desktop at 720p, 1080p and 4K, all within 5% of
+/// each other per pixel once the image has converged. This is **20x the figure
+/// that stood here before**, which was small enough to make saving invisible in
+/// the estimate — and saving is the majority of a large still's wall clock
+/// (~10.6s of a 13.8s 8K job). An estimate that hides the dominant term is the
+/// same class of lie `AV1_SECS_PER_PIXEL` was introduced to stop telling.
+///
+/// It depends on the *content*, not just the size, because deflate is doing
+/// the work: a nearly-empty 1080p frame at 20 spp saves in 0.43s where a
+/// converged one at 1,000 spp takes 0.85s, and it saturates there. The
+/// converged figure is the one quoted, since accumulation is now the default
+/// and a job worth estimating is a job worth converging.
+pub const PNG_SECS_PER_PIXEL: f32 = 4.0e-7;
+
+/// The same for a 16-bit PNG: **2.5x** the 8-bit cost, measured the same way
+/// (1080p 2.11s and 4K 6.35s against 0.85s and 1.69s).
+///
+/// Twice the bytes through deflate, and they are the *noisy* low bytes, so it
+/// is worse than linear in the data and better than the depth ratio suggests.
+/// Quoted separately rather than folded into one average because bit depth is
+/// a checkbox in the dialog: picking it should move the estimate, and with one
+/// shared constant it would not.
+pub const PNG16_SECS_PER_PIXEL: f32 = 1.0e-6;
+
+/// Seconds to fold one histogram texel into the accumulator, as a fraction of
+/// the measured point throughput.
+///
+/// The accumulating path pays this once per lap over `width * height * N²`
+/// texels, and it is the term that makes supersampling expensive: at 1080p the
+/// per-lap cost goes 0.0019s at 1x to 0.0367s at 4x, tracking texel count and
+/// nothing else. Measured at ~1.12ns/texel against ~664M points/s of chaos on
+/// the GTX 1080, i.e. the fold moves about 1.34 texels per point-slot of
+/// throughput.
+///
+/// Expressed as a ratio rather than an absolute so it tracks the machine: a
+/// GPU that fills points twice as fast folds about twice as fast too, and a
+/// hardcoded nanosecond figure would be a GTX 1080 constant quoted at a laptop.
+pub const FOLD_TEXELS_PER_POINT: f32 = 1.34;
 
 /// CPU threads a job may use, when nobody said otherwise: **one less than the
 /// machine has**.
@@ -121,10 +159,18 @@ impl JobKind {
     }
 
     /// Seconds of encoding per output pixel, which is the term that dominates
-    /// an animation and differs by an order of magnitude between the codecs.
-    pub fn secs_per_pixel(&self) -> f32 {
+    /// an animation and differs by an order of magnitude between the codecs —
+    /// and dominates a large still too, which the estimate used to miss.
+    ///
+    /// Takes the depth because a still's cost depends on it and an animation's
+    /// does not: video is 8-bit by codec, so the parameter is simply ignored
+    /// there rather than being a second thing to keep in step.
+    pub fn secs_per_pixel(&self, bit_depth: crate::offline::BitDepth) -> f32 {
         match self {
-            JobKind::Still { .. } => PNG_SECS_PER_PIXEL,
+            JobKind::Still { .. } => match bit_depth {
+                crate::offline::BitDepth::Eight => PNG_SECS_PER_PIXEL,
+                crate::offline::BitDepth::Sixteen => PNG16_SECS_PER_PIXEL,
+            },
             JobKind::Animation { format, .. } => match format {
                 crate::video::Format::Avif => AV1_SECS_PER_PIXEL,
                 crate::video::Format::Mp4 => H264_SECS_PER_PIXEL,
@@ -155,15 +201,69 @@ impl JobKind {
     }
 }
 
+/// How many samples the job asks for — and therefore which of the two
+/// renderers runs.
+///
+/// The distinction is not a implementation detail leaking into the form. The
+/// two paths answer the *same* question with opposite scaling, and that is
+/// exactly what a person choosing between them needs to see:
+///
+/// * [`Samples::Ring`] fills the point buffer once and splats it, so the
+///   density it delivers is `points / pixels` — it **falls as the output
+///   grows**. The same settings that give 21.7 samples/px at 720p give 2.4 at
+///   4K, which is why big renders out of this dialog came out grainy.
+/// * [`Samples::Accumulate`] folds lap after lap into a persistent histogram
+///   until it reaches a target measured *per output pixel*, so the density is
+///   resolution-independent by construction and the cost scales with the
+///   picture instead of the buffer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Samples {
+    /// One pass over the filled ring, plus `accumulate` extra chaos frames
+    /// stirred in before it is splatted. Cheap, bounded, and the only thing an
+    /// animation can do — every frame needs its own camera, so there is no
+    /// histogram to carry between them.
+    Ring { accumulate: u32 },
+    /// Accumulate until `spp` samples per output pixel have landed. An anytime
+    /// algorithm: stopping early gives a noisier version of the same picture,
+    /// never a darker or a partial one.
+    Accumulate { spp: u32 },
+}
+
+impl Samples {
+    /// The per-output-pixel sample target, when there is one.
+    pub fn spp(self) -> Option<u32> {
+        match self {
+            Samples::Ring { .. } => None,
+            Samples::Accumulate { spp } => Some(spp),
+        }
+    }
+
+    /// Extra chaos frames for the ring path. The accumulating path ignores it
+    /// — `spp` is what decides how long the chaos game runs there — so this
+    /// hands back the default rather than a number that would read as meaning
+    /// something.
+    pub fn accumulate(self) -> u32 {
+        match self {
+            Samples::Ring { accumulate } => accumulate,
+            Samples::Accumulate { .. } => crate::offline::DEFAULT_ACCUMULATE,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct JobParams {
     pub kind: JobKind,
     pub out_path: PathBuf,
     /// Points in the chaos-game buffer. Job-scoped: never read from or
     /// written back to the interactive capacity or prefs.
+    ///
+    /// Its meaning depends on [`samples`](Self::samples): under
+    /// [`Samples::Ring`] the buffer *is* the sample count, and under
+    /// [`Samples::Accumulate`] it is only a working set — bigger just means
+    /// fewer, larger laps for the same result.
     pub points: usize,
-    /// Extra chaos-game frames after the buffer fills
-    pub accumulate: u32,
+    /// How much sampling to do, and which renderer that implies.
+    pub samples: Samples,
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
@@ -223,7 +323,40 @@ impl JobParams {
         } else {
             0
         };
-        self.point_buffer_bytes() + target + extra
+        self.point_buffer_bytes() + target + extra + self.histogram_bytes()
+    }
+
+    /// The persistent accumulation histogram, in bytes — zero unless the job
+    /// is accumulating.
+    ///
+    /// 32 bytes a texel (four channels of 64-bit fixed point) over
+    /// `width * height * N²`, and it is far and away the largest thing an
+    /// accumulating job allocates: at 4K and 2x it is 1.06 GB against 33 MB of
+    /// point buffer. It is also a **single storage buffer**, so it is the term
+    /// that runs into `max_storage_buffer_binding_size` first — see
+    /// [`rejection`](Self::rejection), and `RENDER-SCALE-PLAN.md` §2 for why
+    /// that limit and not VRAM is the ceiling this whole plan is built around.
+    pub fn histogram_bytes(&self) -> u64 {
+        if self.samples.spp().is_none() {
+            return 0;
+        }
+        let (w, h) = self.kind.size();
+        let n2 = (self.supersample.max(1) as u64).pow(2);
+        w as u64 * h as u64 * n2 * crate::gpu::points::accumulate::BYTES_PER_TEXEL
+    }
+
+    /// Laps the accumulating path will run: enough folds of the whole point
+    /// buffer to deposit `spp` samples on every output pixel.
+    ///
+    /// `spp` counts against *output* pixels rather than histogram texels, which
+    /// is what makes supersampling cost N² more fill per lap without silently
+    /// demanding N² more laps for the same stated quality.
+    pub fn laps(&self) -> u32 {
+        let Some(spp) = self.samples.spp() else { return 0 };
+        let (w, h) = self.kind.size();
+        let samples = spp as u64 * w as u64 * h as u64;
+        let capacity = (self.points as u64).max(1);
+        samples.div_ceil(capacity).min(u32::MAX as u64) as u32
     }
 
     /// Why this job can't run, if it can't. Checked before anything is
@@ -245,6 +378,25 @@ impl JobParams {
         let (w, h) = self.kind.size();
         if w == 0 || h == 0 {
             return Some("Width and height must both be non-zero.".to_string());
+        }
+        // The histogram is one storage buffer under the same binding limit, and
+        // at any real output size it is much the larger of the two — so this
+        // catches what the point-buffer check above never will. Says what to
+        // turn down, because the arithmetic is not obvious: supersampling is
+        // squared here, so dropping 4x to 2x buys back a factor of four where
+        // halving the width only buys two.
+        if self.histogram_bytes() > max_buffer_bytes {
+            let n = self.supersample.max(1);
+            return Some(format!(
+                "Accumulating {}x{} at {}x supersampling needs a {} histogram, over this GPU's \
+                 {} limit for a single buffer. Lower the supersampling{}, or render smaller.",
+                w,
+                h,
+                n,
+                human_bytes(self.histogram_bytes()),
+                human_bytes(max_buffer_bytes),
+                if n > 1 { " (it costs N² here)" } else { "" },
+            ));
         }
         if let JobKind::Animation { fps, seconds, .. } = self.kind {
             if fps == 0 {
@@ -390,6 +542,64 @@ pub fn format_duration(secs: f32) -> String {
     }
 }
 
+/// A low/high seconds range for the job, from a measured point throughput.
+///
+/// The terms have wildly different weights depending on what is being
+/// rendered, so all of them are counted rather than the small ones assumed
+/// away:
+///
+/// * **the ring path** — filling the buffer (`points × frames`), then one pass
+///   over the points to splat each frame. Both ÷ throughput.
+/// * **the accumulating path** — `spp × pixels` points of chaos *however the
+///   laps are cut*, plus one fold per lap over `pixels × N²` texels. Measured:
+///   varying the buffer 6x at fixed `spp` moved the total under 25%, while
+///   `spp` and pixels move it exactly in proportion. That is why the buffer is
+///   a working set here and not a quality dial.
+/// * **encoding** each frame — pixels × a per-format, per-depth constant. This
+///   is the *majority* of a large still (~10.6s of a 13.8s 8K job), which the
+///   estimate used to miss entirely; see [`PNG_SECS_PER_PIXEL`].
+///
+/// The ±40% spread is not decoration. The throughput comes from a different
+/// workload at a different point count and resolution, so the honest thing is
+/// to put the uncertainty in the width of the range rather than to quote a
+/// number with a decimal point on it.
+///
+/// Takes the throughput rather than the `App` so the arithmetic can be checked
+/// against real measurements — see the tests, which hold it to that ±40% band
+/// on every row that was measured.
+pub fn estimate_secs(throughput: f32, params: &JobParams) -> Option<(f32, f32)> {
+    if throughput <= 0.0 {
+        return None;
+    }
+    let (w, h) = params.kind.size();
+    let pixels = w as f32 * h as f32;
+    // Per-codec, and per bit depth for a still: H.264 encodes about an order of
+    // magnitude faster than AV1, and one shared constant would misquote
+    // whichever it wasn't measured on.
+    let encode = pixels * params.kind.secs_per_pixel(params.bit_depth);
+
+    let chaos = match params.samples {
+        // Warmup is roughly the buffer refilling once before the extra frames
+        // start.
+        Samples::Ring { accumulate } => {
+            let fill_frames = accumulate.max(1) as f32 + 8.0;
+            let per_frame = params.points as f32 / throughput;
+            params.points as f32 * fill_frames / throughput
+                + per_frame * params.kind.frames() as f32
+        }
+        Samples::Accumulate { spp } => {
+            let n2 = (params.supersample.max(1) as f32).powi(2);
+            let chaos = spp as f32 * pixels / throughput;
+            let fold =
+                params.laps() as f32 * pixels * n2 / (throughput * FOLD_TEXELS_PER_POINT);
+            chaos + fold
+        }
+    };
+
+    let mid = chaos + encode * params.kind.frames() as f32;
+    Some((mid * 0.6, mid * 1.4))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,7 +609,7 @@ mod tests {
             kind: JobKind::Still { width: w, height: h },
             out_path: PathBuf::from("renders/x.png"),
             points,
-            accumulate: 32,
+            samples: Samples::Ring { accumulate: 32 },
             splat: false,
             exposure: 1.0,
             transparent: false,
@@ -427,6 +637,129 @@ mod tests {
         let flat = JobParams { splat: false, ..one.clone() };
         let flat2 = JobParams { supersample: 2, ..flat.clone() };
         assert_eq!(flat2.total_bytes() - flat.total_bytes(), px * 8 * 4);
+    }
+
+    /// A ring job must not be charged for a histogram it never allocates, and
+    /// an accumulating one must be — it is the largest single thing on the
+    /// device and the term that decides whether the job can run at all.
+    #[test]
+    fn only_an_accumulating_job_pays_for_a_histogram() {
+        let ring = JobParams { splat: true, ..still(1_000_000, 1920, 1080) };
+        assert_eq!(ring.histogram_bytes(), 0);
+        let acc = JobParams { samples: Samples::Accumulate { spp: 100 }, ..ring.clone() };
+        let px = 1920u64 * 1080;
+        assert_eq!(acc.histogram_bytes(), px * 32);
+        assert_eq!(acc.total_bytes() - ring.total_bytes(), px * 32);
+        // Squared in N, which is why the rejection message says to reach for
+        // the supersampling first.
+        let acc4 = JobParams { supersample: 4, ..acc.clone() };
+        assert_eq!(acc4.histogram_bytes(), px * 16 * 32);
+    }
+
+    /// `spp` counts against *output* pixels, not histogram texels — so turning
+    /// supersampling on costs N² more work per lap but must not silently demand
+    /// N² more laps for the same stated quality.
+    #[test]
+    fn laps_cover_the_output_pixels_and_ignore_supersampling() {
+        let base = JobParams {
+            splat: true,
+            samples: Samples::Accumulate { spp: 100 },
+            ..still(12_000_000, 1920, 1080)
+        };
+        // 100 x 2,073,600 samples / 12M a lap = 17.28 -> 18 whole laps.
+        assert_eq!(base.laps(), 18);
+        assert_eq!(JobParams { supersample: 4, ..base.clone() }.laps(), 18);
+        // A bigger working set is fewer, larger laps for the same total work.
+        assert_eq!(JobParams { points: 24_000_000, ..base.clone() }.laps(), 9);
+        // The ring path has no laps at all.
+        assert_eq!(JobParams { samples: Samples::Ring { accumulate: 32 }, ..base }.laps(), 0);
+    }
+
+    /// The histogram runs into the single-buffer binding limit long before the
+    /// point buffer does, so a check that only looks at points would let a job
+    /// through that dies several seconds later inside the driver.
+    #[test]
+    fn the_histogram_is_checked_against_the_binding_limit() {
+        // 2.15 GB, the measured limit on the reference GTX 1080.
+        let limit = 2_147_483_648u64;
+        let acc = JobParams {
+            splat: true,
+            samples: Samples::Accumulate { spp: 100 },
+            supersample: 4,
+            ..still(1_000_000, 3840, 2160)
+        };
+        // 8.29M px x 16 x 32 B = 4.2 GB: over, and the point buffer is 16 MB,
+        // so nothing but the histogram check can catch this.
+        assert!(acc.point_buffer_bytes() < limit);
+        let reason = acc.rejection(limit).expect("4K at 4x must be refused");
+        assert!(reason.contains("supersampling"), "{reason}");
+        // The same job at 1x fits, and so does the ring path at 4x.
+        assert!(JobParams { supersample: 1, ..acc.clone() }.rejection(limit).is_none());
+        assert!(
+            JobParams { samples: Samples::Ring { accumulate: 32 }, ..acc }
+                .rejection(limit)
+                .is_none()
+        );
+    }
+
+    /// The estimator's whole contract is that it prices a job *before* you
+    /// agree to it, so it is held to real measurements rather than to itself.
+    ///
+    /// Every row is a timed `--spp` render of `scenes/lacewing.toml` on the
+    /// reference GTX 1080, at ~664M points/s of measured chaos throughput.
+    /// The quoted figure is `chaos fill + encode+save`, i.e. everything the
+    /// dialog's estimate covers, and each must land inside the ±40% band the
+    /// estimate itself advertises — otherwise the range is a lie in exactly
+    /// the way the module doc says it must not be.
+    #[test]
+    fn the_accumulating_estimate_matches_measured_renders() {
+        const THROUGHPUT: f32 = 664e6;
+        // width, height, spp, supersample, measured seconds
+        let rows: &[(u32, u32, u32, u32, f32)] = &[
+            (1920, 1080, 50, 2, 0.27 + 0.61),
+            (1920, 1080, 100, 2, 0.49 + 0.76),
+            (1920, 1080, 200, 2, 1.00 + 0.93),
+            (1920, 1080, 400, 2, 1.93 + 0.88),
+            (1920, 1080, 800, 2, 3.87 + 0.92),
+            (1280, 720, 200, 1, 0.28 + 0.43),
+            (1920, 1080, 200, 1, 0.69 + 0.86),
+            (1920, 1080, 200, 4, 1.91 + 0.76),
+            (3840, 2160, 200, 1, 3.84 + 3.39),
+            (3840, 2160, 100, 2, 3.61 + 3.27),
+        ];
+        for &(w, h, spp, n, measured) in rows {
+            let params = JobParams {
+                splat: true,
+                samples: Samples::Accumulate { spp },
+                supersample: n,
+                ..still(12_000_000, w, h)
+            };
+            let (low, high) = estimate_secs(THROUGHPUT, &params).expect("a positive throughput");
+            assert!(
+                (low..=high).contains(&measured),
+                "{w}x{h} spp={spp} {n}x: measured {measured:.2}s outside the estimate's \
+                 {low:.2}-{high:.2}s band",
+            );
+        }
+    }
+
+    /// Saving is the majority of a large still, so the depth checkbox has to
+    /// move the estimate — with one shared constant it would not, and a 16-bit
+    /// 4K job would be quoted at well under half its real cost.
+    #[test]
+    fn bit_depth_moves_a_large_stills_estimate() {
+        let eight = JobParams {
+            splat: true,
+            samples: Samples::Accumulate { spp: 200 },
+            ..still(12_000_000, 3840, 2160)
+        };
+        let sixteen = JobParams { bit_depth: crate::offline::BitDepth::Sixteen, ..eight.clone() };
+        let (lo8, hi8) = estimate_secs(664e6, &eight).unwrap();
+        let (lo16, hi16) = estimate_secs(664e6, &sixteen).unwrap();
+        assert!(lo16 > lo8 && hi16 > hi8);
+        // Measured at 4K, converged: 3.84 + 3.39 against 3.91 + 7.92.
+        assert!((lo8..=hi8).contains(&7.23), "8-bit 4K: {lo8:.2}-{hi8:.2}s");
+        assert!((lo16..=hi16).contains(&11.83), "16-bit 4K: {lo16:.2}-{hi16:.2}s");
     }
 
     /// The default holds a core back for the rest of the desktop, and never
@@ -532,7 +865,13 @@ mod tests {
         assert_eq!(JobKind::Still { width: 8, height: 8 }.extension(), "png");
         // H.264 is the cheap one; quoting AV1's figure for it was the bug the
         // per-codec constant exists to prevent.
-        assert!(mp4.secs_per_pixel() < avif.secs_per_pixel());
+        let eight = crate::offline::BitDepth::Eight;
+        assert!(mp4.secs_per_pixel(eight) < avif.secs_per_pixel(eight));
+        // Video is 8-bit by codec, so the depth must not move an animation's
+        // cost — only a still's.
+        assert_eq!(avif.secs_per_pixel(crate::offline::BitDepth::Sixteen), avif.secs_per_pixel(eight));
+        let still = JobKind::Still { width: 8, height: 8 };
+        assert!(still.secs_per_pixel(crate::offline::BitDepth::Sixteen) > still.secs_per_pixel(eight));
         assert!(avif.label().contains("AVIF") && mp4.label().contains("MP4"));
     }
 

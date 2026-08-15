@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::app::App;
 use crate::render_job::{
-    format_duration, format_estimate, human_bytes, JobKind, JobParams, Outcome,
+    format_duration, format_estimate, human_bytes, JobKind, JobParams, Outcome, Samples,
 };
 
 use super::hints::hinted;
@@ -74,6 +74,15 @@ pub struct RenderJobForm {
     pub height: u32,
     pub points: usize,
     pub accumulate: u32,
+    /// Accumulate into a histogram rather than splatting the ring once.
+    ///
+    /// Kept as a flag beside both of the numbers it chooses between, rather
+    /// than as a `Samples` enum on the form, for the same reason `mode` is:
+    /// switching back and forth must not lose the other option's setting.
+    pub use_accumulate: bool,
+    /// Samples per output pixel to accumulate to. Only read when
+    /// `use_accumulate` is set.
+    pub spp: u32,
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
@@ -119,6 +128,11 @@ impl Default for RenderJobForm {
             height: 720,
             points: 20_000_000,
             accumulate: 96,
+            // Slice 4 turns this on by default and gives it a control; slice 3
+            // only needs the estimator to be able to price it.
+            use_accumulate: false,
+            // `medium` on the CLI's `--effort` ladder.
+            spp: 100,
             splat: false,
             exposure: 1.0,
             transparent: false,
@@ -155,12 +169,29 @@ impl RenderJobForm {
         }
     }
 
+    /// What this form is asking the renderer for.
+    ///
+    /// The accumulating path is **still + splat only**, and that is enforced
+    /// here rather than only in the control that sets the flag. An animation
+    /// gives every frame its own camera, so there is no histogram to carry
+    /// between them; the points renderer has no histogram at all. The same two
+    /// conditions gate `--spp` on the command line, and a form that could
+    /// build a `Samples::Accumulate` the renderer would refuse would be a
+    /// second place for that rule to drift out of step.
+    pub fn samples(&self) -> Samples {
+        if self.use_accumulate && self.splat && self.mode == Mode::Still {
+            Samples::Accumulate { spp: self.spp.max(1) }
+        } else {
+            Samples::Ring { accumulate: self.accumulate }
+        }
+    }
+
     fn params(&self) -> JobParams {
         JobParams {
             kind: self.kind(),
             out_path: PathBuf::from(self.filename.trim()),
             points: self.points,
-            accumulate: self.accumulate,
+            samples: self.samples(),
             splat: self.splat,
             exposure: self.exposure,
             transparent: self.transparent,
@@ -846,39 +877,10 @@ fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// A low/high seconds range for the job, from measured throughput.
-///
-/// Three terms, because they have wildly different weights depending on what
-/// is being rendered:
-///
-/// * **filling** the point buffer — points × frames ÷ measured throughput;
-/// * **rendering** each frame — one pass over the points, so also ÷ throughput;
-/// * **encoding** each frame — pixels × a per-format constant. For a still
-///   this rounds to nothing. For an animation it is the whole job.
-///
-/// The ±40% spread is not decoration. The throughput comes from a different
-/// workload at a different point count and resolution, so the honest thing is
-/// to put the uncertainty in the width of the range rather than to quote a
-/// number with a decimal point on it.
+/// A low/high seconds range for the job, from this session's measured
+/// throughput — `None` until the renderer has produced a frame to measure.
 fn estimate_secs(app: &App, params: &JobParams) -> Option<(f32, f32)> {
-    let throughput = app.measured_throughput()?;
-    if throughput <= 0.0 {
-        return None;
-    }
-    // Warmup is roughly the buffer refilling once before accumulation starts.
-    let fill_frames = params.accumulate.max(1) as f32 + 8.0;
-    let fill = params.points as f32 * fill_frames / throughput;
-
-    let (w, h) = params.kind.size();
-    let pixels = w as f32 * h as f32;
-    // Per-codec: H.264 encodes about an order of magnitude faster than AV1,
-    // and one shared constant would misquote whichever it wasn't measured on.
-    let encode_per_pixel = params.kind.secs_per_pixel();
-    let per_frame = params.points as f32 / throughput + pixels * encode_per_pixel;
-    let render = per_frame * params.kind.frames() as f32;
-
-    let mid = fill + render;
-    Some((mid * 0.6, mid * 1.4))
+    crate::render_job::estimate_secs(app.measured_throughput()?, params)
 }
 
 /// The completed-this-session state: a green check, "Render done", and
