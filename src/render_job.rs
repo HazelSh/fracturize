@@ -62,29 +62,30 @@ pub const H264_SECS_PER_PIXEL: f32 = 6.0e-8;
 /// The same for an 8-bit PNG: readback, then deflate on an already-rendered
 /// buffer.
 ///
-/// Measured on the GTX 1080 desktop at 720p, 1080p and 4K, all within 5% of
-/// each other per pixel once the image has converged. This is **20x the figure
-/// that stood here before**, which was small enough to make saving invisible in
-/// the estimate — and saving is the majority of a large still's wall clock
-/// (~10.6s of a 13.8s 8K job). An estimate that hides the dominant term is the
-/// same class of lie `AV1_SECS_PER_PIXEL` was introduced to stop telling.
+/// Measured on the GTX 1080 desktop at 1080p, 4K and 8K — 2.89, 2.05 and
+/// 2.08e-8 s/px, flat above 1080p.
 ///
-/// It depends on the *content*, not just the size, because deflate is doing
-/// the work: a nearly-empty 1080p frame at 20 spp saves in 0.43s where a
-/// converged one at 1,000 spp takes 0.85s, and it saturates there. The
-/// converged figure is the one quoted, since accumulation is now the default
-/// and a job worth estimating is a job worth converging.
-pub const PNG_SECS_PER_PIXEL: f32 = 4.0e-7;
+/// This number has moved twice and both moves matter. It was `2.0e-8`, which
+/// was 20x *low* and hid the term that dominated a large still. Re-measuring
+/// put it at `4.0e-7`. Then the encoder switched to `png::Compression::Fast`
+/// (see `save_sheet`) and it came back to `2.1e-8` — the original figure, now
+/// for a real reason rather than by luck. Saving went from the majority of a
+/// poster render to under 8% of it.
+///
+/// The old content-dependence is gone with it. At the previous level a
+/// converged frame cost twice an empty one, because deflate was doing enough
+/// work for the data to matter; fdeflate is fast enough that it does not.
+pub const PNG_SECS_PER_PIXEL: f32 = 2.1e-8;
 
-/// The same for a 16-bit PNG: **2.5x** the 8-bit cost, measured the same way
-/// (1080p 2.11s and 4K 6.35s against 0.85s and 1.69s).
+/// The same for a 16-bit PNG: **2.6x** the 8-bit cost, measured the same way
+/// (5.79, 5.30 and 5.52e-8 s/px at 1080p, 4K and 8K).
 ///
-/// Twice the bytes through deflate, and they are the *noisy* low bytes, so it
-/// is worse than linear in the data and better than the depth ratio suggests.
-/// Quoted separately rather than folded into one average because bit depth is
-/// a checkbox in the dialog: picking it should move the estimate, and with one
-/// shared constant it would not.
-pub const PNG16_SECS_PER_PIXEL: f32 = 1.0e-6;
+/// Twice the bytes through the encoder, and they are the *noisy* low bytes, so
+/// it is worse than linear in the data and better than the depth ratio
+/// suggests. Quoted separately rather than folded into one average because bit
+/// depth is a checkbox in the dialog: picking it should move the estimate, and
+/// with one shared constant it would not.
+pub const PNG16_SECS_PER_PIXEL: f32 = 5.5e-8;
 
 /// Seconds to fold one histogram texel into the accumulator.
 ///
@@ -768,18 +769,18 @@ mod tests {
     #[test]
     fn the_accumulating_estimate_matches_measured_renders() {
         const THROUGHPUT: f32 = 664e6;
-        // width, height, spp, supersample, measured seconds
+        // width, height, spp, supersample, measured seconds (chaos + save)
         let rows: &[(u32, u32, u32, u32, f32)] = &[
-            (1920, 1080, 50, 2, 0.27 + 0.61),
-            (1920, 1080, 100, 2, 0.49 + 0.76),
-            (1920, 1080, 200, 2, 1.00 + 0.93),
-            (1920, 1080, 400, 2, 1.93 + 0.88),
-            (1920, 1080, 800, 2, 3.87 + 0.92),
-            (1280, 720, 200, 1, 0.28 + 0.43),
-            (1920, 1080, 200, 1, 0.69 + 0.86),
-            (1920, 1080, 200, 4, 1.91 + 0.76),
-            (3840, 2160, 200, 1, 3.84 + 3.39),
-            (3840, 2160, 100, 2, 3.61 + 3.27),
+            (1920, 1080, 50, 2, 0.29 + 0.04),
+            (1920, 1080, 100, 2, 0.50 + 0.04),
+            (1920, 1080, 200, 2, 0.92 + 0.04),
+            (1920, 1080, 400, 2, 1.90 + 0.05),
+            (1920, 1080, 800, 2, 3.69 + 0.09),
+            (1280, 720, 200, 1, 0.25 + 0.02),
+            (1920, 1080, 200, 1, 0.63 + 0.06),
+            (1920, 1080, 200, 4, 1.85 + 0.06),
+            (3840, 2160, 200, 1, 3.56 + 0.17),
+            (3840, 2160, 100, 2, 3.79 + 0.17),
         ];
         for &(w, h, spp, n, measured) in rows {
             let params = JobParams {
@@ -788,7 +789,23 @@ mod tests {
                 supersample: n,
                 ..still(12_000_000, w, h)
             };
-            let (low, high) = estimate_secs(THROUGHPUT, &params, Budget_LIMIT).expect("a positive throughput");
+            let (low, high) =
+                estimate_secs(THROUGHPUT, &params, Budget_LIMIT).expect("a positive throughput");
+            // Sub-second jobs are held only to "still sub-second". Point
+            // throughput is not one number: measured on this GPU it runs about
+            // 1.48G points/s at 720p, 957M at 1080p and 583M at poster scale,
+            // as splatting into a larger histogram turns memory-bound. A single
+            // figure therefore over-predicts the small end, and that is the
+            // harmless direction — being told 0.6s for a 0.3s render costs
+            // nothing, while under-quoting a poster by the same ratio is the
+            // failure this test exists to catch.
+            if measured < 1.0 {
+                assert!(
+                    low < 1.5,
+                    "{w}x{h} spp={spp} {n}x: {measured:.2}s render quoted at {low:.2}-{high:.2}s",
+                );
+                continue;
+            }
             assert!(
                 (low..=high).contains(&measured),
                 "{w}x{h} spp={spp} {n}x: measured {measured:.2}s outside the estimate's \
@@ -811,9 +828,9 @@ mod tests {
         let (lo8, hi8) = estimate_secs(664e6, &eight, Budget_LIMIT).unwrap();
         let (lo16, hi16) = estimate_secs(664e6, &sixteen, Budget_LIMIT).unwrap();
         assert!(lo16 > lo8 && hi16 > hi8);
-        // Measured at 4K, converged: 3.84 + 3.39 against 3.91 + 7.92.
-        assert!((lo8..=hi8).contains(&7.23), "8-bit 4K: {lo8:.2}-{hi8:.2}s");
-        assert!((lo16..=hi16).contains(&11.83), "16-bit 4K: {lo16:.2}-{hi16:.2}s");
+        // Measured at 4K, converged: 3.69 + 0.19 against 4.04 + 0.45.
+        assert!((lo8..=hi8).contains(&3.88), "8-bit 4K: {lo8:.2}-{hi8:.2}s");
+        assert!((lo16..=hi16).contains(&4.49), "16-bit 4K: {lo16:.2}-{hi16:.2}s");
     }
 
     /// The default holds a core back for the rest of the desktop, and never

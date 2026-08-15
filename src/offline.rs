@@ -1172,6 +1172,20 @@ fn save_sheet(
     let err = |e: std::io::Error| format!("Failed to save {}: {}", out_path.display(), e);
     let file = std::fs::File::create(out_path).map_err(err)?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    // `Fast`, not the default `Balanced`, and it is not a close call.
+    //
+    // Saving was the majority of every large render — 135s of a 232s A2
+    // poster, 10.6s of a 13.8s 8K frame — and essentially all of it was
+    // deflate. Measured at 4K/16-bit: **7.73s to 0.34s, a 23x speedup, for a
+    // 9% larger file** (43 MB to 47 MB). png 0.18's `Fast` is not a lower
+    // zlib level; it is `fdeflate`, a DEFLATE implementation specialised for
+    // PNG's filtered-row structure, which is why the gap is a factor of
+    // twenty rather than the two or three a level change would buy.
+    //
+    // Nothing is lost but bytes: PNG is lossless at every level, and the two
+    // files were verified pixel-identical. Trading 9% of a poster's size for
+    // two minutes of its wall clock is not a trade anyone would decline.
+    enc.set_compression(png::Compression::Fast);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(match depth {
         BitDepth::Eight => png::BitDepth::Eight,
