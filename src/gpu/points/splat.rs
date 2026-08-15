@@ -623,6 +623,32 @@ impl SplatRenderer {
         points: std::ops::Range<u32>,
         use_point_primitives: bool,
     ) {
+        self.splat_chunk(encoder, points, use_point_primitives, true);
+    }
+
+    /// One slice of a lap's points, with control over whether the batch target
+    /// is cleared first.
+    ///
+    /// Splatting a whole lap in a single submission is what a big render used
+    /// to do, and on a card with a watchdog it is how a render *kills the
+    /// device*: 100M points at 12x is one draw of 400M vertices into a texture
+    /// the size of a wall, and the driver resets the GPU rather than wait —
+    /// `Error in Device::poll: Parent device is lost`. It is also why the
+    /// desktop stops responding, since there is no preemption point anywhere in
+    /// it.
+    ///
+    /// Chunking gives the driver somewhere to breathe. `clear` is true for the
+    /// first chunk of a lap and false for the rest, so the batch accumulates
+    /// across them exactly as one big pass would — additive blending does not
+    /// care where the submission boundaries fall, so the arithmetic is
+    /// unchanged and only the scheduling differs.
+    pub fn splat_chunk(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        points: std::ops::Range<u32>,
+        use_point_primitives: bool,
+        clear: bool,
+    ) {
         let accum = self.accum.as_ref().expect("accumulation target must be ensured first");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("splat_accum_pass"),
@@ -630,7 +656,11 @@ impl SplatRenderer {
                 view: &accum.view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,

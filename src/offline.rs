@@ -635,6 +635,20 @@ pub(crate) fn idle_after_lap(busy: std::time::Duration, share: f32) -> Option<st
     (idle > 0.001).then(|| std::time::Duration::from_secs_f32(idle.min(2.0)))
 }
 
+/// Points splatted per GPU submission.
+///
+/// Bounds how long the card is busy without a preemption point, which is the
+/// difference between a render that finishes and one that takes the device down
+/// with it: a whole lap at 100M points and 12x supersampling is one draw of
+/// 400M vertices into a texture of tens of millions of texels, and the driver's
+/// watchdog resets the GPU rather than wait for it.
+///
+/// 4M is ~7ms of draw at the measured throughput before fill costs, and a splat
+/// at high supersampling can cover a lot of fragments per point, so the margin
+/// matters. The cost of chunking is one submission per 4M points — tens of
+/// microseconds against milliseconds of work.
+const SPLAT_CHUNK_POINTS: u32 = 4_000_000;
+
 /// How often a long pass says how it is doing, on stdout.
 ///
 /// Deliberately not a progress bar. The CLI's reader is usually an agent, and
@@ -2510,18 +2524,42 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 compute.dispatch_timed(&mut encoder, timer.as_mut());
                 queue.submit(std::iter::once(encoder.finish()));
             }
-            // Splat the ring into every resident tile and fold each in. All of
-            // it goes in one encoder: each fold reads exactly what the splat
-            // before it wrote, and queue order inside a submission gives that
-            // ordering.
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("accum_fold_encoder"),
-            });
+            // Splat the ring into every resident tile and fold each in.
+            //
+            // **Chunked, and submitted as it goes.** Doing a whole lap in one
+            // submission is what lost the device on a big render: 100M points
+            // at 12x is a single draw of 400M vertices into an enormous
+            // texture, the driver's watchdog gives up waiting and resets the
+            // GPU (`Parent device is lost`), and the desktop is frozen for the
+            // duration because nothing can preempt it. Additive blending does
+            // not care where the submission boundaries fall, so this is the
+            // same arithmetic with somewhere for the driver to breathe.
+            //
+            // The fold still shares an encoder with the last chunk: it reads
+            // exactly what the splats wrote, and queue order within a
+            // submission is what guarantees it sees all of them.
             for i in 0..group.len() {
-                renderers[i].splat_pass(&mut encoder, 0..capacity, use_point_primitives);
-                histograms[i].add(&mut encoder, &batch_groups[i]);
+                let mut start = 0u32;
+                while start < capacity {
+                    let end = (start + SPLAT_CHUNK_POINTS).min(capacity);
+                    let last = end >= capacity;
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("accum_fold_encoder"),
+                        });
+                    renderers[i].splat_chunk(
+                        &mut encoder,
+                        start..end,
+                        use_point_primitives,
+                        start == 0,
+                    );
+                    if last {
+                        histograms[i].add(&mut encoder, &batch_groups[i]);
+                    }
+                    queue.submit(std::iter::once(encoder.finish()));
+                    start = end;
+                }
             }
-            queue.submit(std::iter::once(encoder.finish()));
             let lap_started = Instant::now();
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
             let lap_took = lap_started.elapsed();
