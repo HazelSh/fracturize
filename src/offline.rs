@@ -284,10 +284,18 @@ impl Sampling {
         let max = device.limits().max_texture_dimension_2d;
         let (w, h) = (width * self.n, height * self.n);
         if w > max || h > max {
+            // Name the factor that would fit rather than "lower it": the caller
+            // has the numbers to work it out and no reason to have to.
+            let fits = max / width.max(height).max(1);
+            let advice = if fits >= 1 {
+                format!("--supersample {} is the most this output size allows", fits)
+            } else {
+                String::from("even --supersample 1 is past it, so render smaller")
+            };
             return Err(format!(
-                "--supersample {} makes a {}x{} accumulation, past this GPU's {}px texture limit \
-                 — render smaller, or lower --supersample",
-                self.n, w, h, max
+                "--supersample {} makes a {}x{} accumulation, past this GPU's {}px texture limit. \
+                 {}.",
+                self.n, w, h, max, advice
             ));
         }
         Ok(())
@@ -1551,11 +1559,16 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     }
     // The ring path has no histogram to save or continue, and saying so beats
     // writing nothing and letting the flag read as if it had worked.
-    reject_checkpoint(
-        params.checkpoint_out.clone(),
-        params.resume_from.clone(),
-        "a ring-buffer render (add --spp)",
-    )?;
+    // Not `reject_checkpoint`: that one is for renders that would need *many*
+    // histograms, one per frame or tile. This render has none at all, which is
+    // a different problem with a different answer.
+    if params.checkpoint_out.is_some() || params.resume_from.is_some() {
+        return Err("--checkpoint / --resume save and restore the accumulation histogram, and a \
+                    ring-buffer render does not build one — it splats the point buffer once, so \
+                    there is no partial state to keep or continue from. Add --spp or an --effort \
+                    tier to accumulate."
+            .into());
+    }
     reject_density_estimation(
         params.density_estimation,
         "a ring-buffer render",
@@ -1706,12 +1719,13 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
                 }
             }
             TileRenderer::Splat(_) => eprintln!(
-                "warning: --grade-out needs a single tile; a contact sheet has one linear \
-                 buffer per tile. Not written."
+                "warning: --grade-out needs a single tile, and a contact sheet has one linear \
+                 buffer per tile. Not written — render the tile you want on its own."
             ),
             TileRenderer::Points(_) => eprintln!(
-                "warning: --grade-out is a splat-renderer feature (there is no linear density \
-                 behind the points renderer). Not written."
+                "warning: --grade-out saves the linear density behind the tonemap, and the \
+                 points renderer has none — it draws opaque points with no log curve to undo. \
+                 Not written — add --splat."
             ),
         }
     };
@@ -1780,6 +1794,19 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
 /// here is cost, not principle — a 600-frame flight at `--spp 500` is 600
 /// accumulated stills. It wants its own budget in frames, not a flag inherited
 /// from the still path.
+/// What to tell someone who asked a contact sheet to accumulate.
+///
+/// Worth its own constant because it is the one rejection people arrive at
+/// *without having typed the flag it names*: `--effort` maps to `--spp` under
+/// `--splat`, so a perfectly reasonable `--orbit-grid 4x2 --effort small` lands
+/// here and reads as a complaint about a flag the user did not use. Saying so
+/// is the difference between a dead end and a next command.
+const SHEET_DENSITY_IS_POINTS: &str =
+    "--spp accumulates a single still into a persistent histogram, and a contact sheet would be \
+     one full accumulation run per tile. Set a sheet's density with --points instead: the tiles \
+     share one fill of the point buffer, which is what makes a sheet cheap enough to be worth \
+     rendering. (--effort implies --spp under --splat, so an --effort tier arrives here too.)";
+
 fn reject_density_estimation(
     de: crate::gpu::points::density::DensityEstimation,
     what: &str,
@@ -1799,35 +1826,40 @@ fn reject_checkpoint(
     checkpoint_out: Option<std::path::PathBuf>,
     resume_from: Option<std::path::PathBuf>,
     what: &str,
+    fix: &str,
 ) -> Result<(), String> {
     if checkpoint_out.is_some() || resume_from.is_some() {
         return Err(format!(
-            "--checkpoint / --resume carry one still's accumulation histogram; {} would need \
-             one per frame. Render the frames separately.",
-            what
+            "--checkpoint / --resume carry one still's accumulation histogram, and {} renders \
+             many — one histogram each. {}",
+            what, fix
         ));
     }
     Ok(())
 }
 
-fn reject_grade_out(grade_out: Option<std::path::PathBuf>, what: &str) -> Result<(), String> {
+fn reject_grade_out(
+    grade_out: Option<std::path::PathBuf>,
+    what: &str,
+    fix: &str,
+) -> Result<(), String> {
     match grade_out {
         None => Ok(()),
         Some(_) => Err(format!(
-            "--grade-out saves one still's linear density; {} would need one buffer per frame. \
-             Render the frames separately.",
-            what
+            "--grade-out saves one still's linear density, and {} renders many — one buffer each. \
+             {}",
+            what, fix
         )),
     }
 }
 
-fn reject_spp(spp: Option<u32>, what: &str) -> Result<(), String> {
+fn reject_spp(spp: Option<u32>, what: &str, fix: &str) -> Result<(), String> {
     match spp {
         None => Ok(()),
         Some(_) => Err(format!(
-            "--spp accumulates one still into a persistent histogram; {} would be one full \
-             accumulation run per frame. Render the frames separately.",
-            what
+            "--spp accumulates one still into a persistent histogram, and {} renders many — one \
+             full accumulation run each. {}",
+            what, fix
         )),
     }
 }
@@ -1906,11 +1938,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         );
     }
     if !matches!(grid, GridMode::Single) {
-        return Err(
-            "--spp renders one accumulated still; a contact sheet would be one full accumulation \
-             run per tile. Render the tiles separately."
-                .into(),
-        );
+        return Err(SHEET_DENSITY_IS_POINTS.into());
     }
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -2002,9 +2030,11 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // someone to compare two renders that were never comparable.
     if !renderer.accumulation_is_exact() {
         eprintln!(
-            "warning: this GPU lacks FLOAT32_BLENDABLE, so accumulation runs in fp16 and \
-             each pass stalls at 2048 per texel. Bright cores will be under-counted, and \
-             the amount depends on --points. Lower --points for more, smaller laps."
+            "warning: this GPU lacks FLOAT32_BLENDABLE, so accumulation runs in fp16, where \
+             each lap's batch stops counting at 2048 per texel. Bright cores come out \
+             under-counted by an amount that depends on --points, which means two renders at \
+             different --points are not comparable. Lowering --points makes each lap smaller \
+             and clips less, at the cost of more laps for the same --spp."
         );
         if let Some(c) = &control {
             c.log(String::from(
@@ -2357,10 +2387,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         resume_from,
         density_estimation,
     } = params;
-    reject_spp(spp, "an animation")?;
-    reject_grade_out(grade_out, "an animation")?;
-    reject_checkpoint(checkpoint_out, resume_from, "an animation")?;
-    reject_density_estimation(density_estimation, "an animation", "Render the frames separately.")?;
+    reject_spp(spp, "an animation", "Render the frame you want as a single still.")?;
+    reject_grade_out(grade_out, "an animation", "Render the frame you want as a single still.")?;
+    reject_checkpoint(checkpoint_out, resume_from, "an animation", "Render the frame you want as a single still.")?;
+    reject_density_estimation(density_estimation, "an animation", "Render the frame you want as a single still.")?;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
@@ -2631,10 +2661,10 @@ pub fn render_mutations(
         resume_from,
         density_estimation,
     } = params;
-    reject_spp(spp, "a variant sheet")?;
-    reject_grade_out(grade_out, "a variant sheet")?;
-    reject_checkpoint(checkpoint_out, resume_from, "a variant sheet")?;
-    reject_density_estimation(density_estimation, "a variant sheet", "Render the frames separately.")?;
+    reject_spp(spp, "a variant sheet", "Set the sheet's density with --points instead.")?;
+    reject_grade_out(grade_out, "a variant sheet", "Render the tile you want on its own.")?;
+    reject_checkpoint(checkpoint_out, resume_from, "a variant sheet", "Render the tile you want on its own.")?;
+    reject_density_estimation(density_estimation, "a variant sheet", "Render the tile you want on its own.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -2835,10 +2865,10 @@ pub fn render_sweep(
         resume_from,
         density_estimation,
     } = params;
-    reject_spp(spp, "a sweep sheet")?;
-    reject_grade_out(grade_out, "a sweep sheet")?;
-    reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet")?;
-    reject_density_estimation(density_estimation, "a sweep sheet", "Render the frames separately.")?;
+    reject_spp(spp, "a sweep sheet", "Set the sheet's density with --points instead.")?;
+    reject_grade_out(grade_out, "a sweep sheet", "Render the tile you want on its own.")?;
+    reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet", "Render the tile you want on its own.")?;
+    reject_density_estimation(density_estimation, "a sweep sheet", "Render the tile you want on its own.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 

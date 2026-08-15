@@ -303,10 +303,21 @@ struct Args {
     /// a density; --spp goes past `huge`. The points renderer has no histogram,
     /// so there a tier degrades to the nearest point buffer and says so.
     /// Explicit --points / --spp override it.
+    ///
+    /// Renders one still: because it accumulates, it cannot drive a contact
+    /// sheet or an animation, which would each want a separate accumulation run
+    /// per tile or frame. Set those with --points, which is the density knob
+    /// they share one fill of.
     #[arg(long, value_enum, value_name = "PRESET", hide_possible_values = true, help_heading = "Offline render")]
     effort: Option<Effort>,
 
     /// Point buffer capacity — more points is denser [--effort, else scene]
+    ///
+    /// The density knob for anything rendering more than one image: contact
+    /// sheets and animations share a single fill of this buffer, which is what
+    /// makes them affordable, and cannot use the accumulating --effort/--spp.
+    /// For a single still, prefer --effort — a buffer capacity is a ceiling on
+    /// the samples in the picture, and a tier is not.
     ///
     /// In windowed mode the Render window's value, saved to prefs, sits
     /// between this and the scene's own point_count.
