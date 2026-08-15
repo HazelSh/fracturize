@@ -3213,6 +3213,7 @@ impl App {
         // it ignores. `Samples` is the single place that decides, so the two
         // can't be set to disagree here.
         let (spp, accumulate) = (params.samples.spp(), params.samples.accumulate());
+        let density_estimation = params.density_estimation;
         // Read off `self` rather than `params`: the grade is not a job field,
         // it is the window's live look, and the job renders what you saw.
         let grade = self.grade;
@@ -3273,8 +3274,7 @@ impl App {
                 grade_out: None,
                 checkpoint_out: None,
                 resume_from: None,
-                // No DE control in the dialog yet; slice 7 is CLI-side.
-                density_estimation: Default::default(),
+                density_estimation,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),

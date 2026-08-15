@@ -278,6 +278,13 @@ pub struct JobParams {
     /// Bits per channel in the PNG. An output-format choice, not a quality
     /// one — the render is identical either way.
     pub bit_depth: crate::offline::BitDepth,
+    /// The variable-width blur: wide kernels where the histogram is sparse and
+    /// noisy, narrow where it is dense and detailed.
+    ///
+    /// Needs an accumulating render, and not for a passing reason —
+    /// `TARGET_DENSITY` is calibrated in raw accumulated units, so there has to
+    /// be a histogram for it to read a density from.
+    pub density_estimation: crate::gpu::points::density::DensityEstimation,
     /// CPU threads this job's encoders may use. A **machine** setting, not
     /// artwork: it describes the box, so it lives in prefs and on the command
     /// line and never in a scene or a view. A sidecar may record what was used,
@@ -610,6 +617,7 @@ mod tests {
             out_path: PathBuf::from("renders/x.png"),
             points,
             samples: Samples::Ring { accumulate: 32 },
+            density_estimation: Default::default(),
             splat: false,
             exposure: 1.0,
             transparent: false,

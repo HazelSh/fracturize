@@ -83,6 +83,9 @@ pub struct RenderJobForm {
     /// Samples per output pixel to accumulate to. Only read when
     /// `use_accumulate` is set.
     pub spp: u32,
+    /// Strength of the density-estimation blur, 0-1. Only reaches the renderer
+    /// on an accumulating splat render; see `samples`.
+    pub density_estimation: f32,
     pub splat: bool,
     pub exposure: f32,
     pub transparent: bool,
@@ -140,6 +143,10 @@ impl Default for RenderJobForm {
             // and a default that makes the common case worse is not a good
             // default however cheap it is.
             spp: 100,
+            // Off by default: it is the most distinctive thing here and also
+            // the most opinionated, so it is opt-in rather than something a
+            // render quietly arrives with.
+            density_estimation: 0.0,
             splat: false,
             exposure: 1.0,
             transparent: false,
@@ -193,12 +200,26 @@ impl RenderJobForm {
         }
     }
 
+    /// The density estimation this job will actually run.
+    ///
+    /// Gated on [`samples`](Self::samples) rather than tracked separately,
+    /// because DE has no meaning without a histogram: `TARGET_DENSITY` is
+    /// calibrated in raw accumulated units, so there must be accumulated units
+    /// to read. A one-pass render silently ignoring a non-zero setting would be
+    /// worse than the control being off — the slider is disabled and says why.
+    pub fn density(&self) -> crate::gpu::points::density::DensityEstimation {
+        let amount =
+            if self.samples().spp().is_some() { self.density_estimation } else { 0.0 };
+        crate::gpu::points::density::DensityEstimation { amount }.clamped()
+    }
+
     fn params(&self) -> JobParams {
         JobParams {
             kind: self.kind(),
             out_path: PathBuf::from(self.filename.trim()),
             points: self.points,
             samples: self.samples(),
+            density_estimation: self.density(),
             splat: self.splat,
             exposure: self.exposure,
             transparent: self.transparent,
@@ -642,6 +663,35 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
     );
     if resp.changed() {
         app.ui_state.render_job.points = (millions * 1e6).round() as usize;
+    }
+
+    // Density estimation belongs here rather than with the filter, even though
+    // both are blurs: this one needs a *histogram* to read a density from, so
+    // it lives or dies with the choice made three rows up. Greyed with its
+    // reason rather than hidden, for the same cause as the radio.
+    let mut de = app.ui_state.render_job.density_estimation;
+    let resp = ui.add_enabled(
+        accumulating,
+        egui::Slider::new(&mut de, 0.0..=1.0).fixed_decimals(2).text("density estimation"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if accumulating {
+            "The variable-width blur: wide kernels where the histogram is sparse and noisy, \
+             narrow where it is dense and detailed. This is most of what distinguishes an \
+             Apophysis render, and it is not substitutable by more samples — those improve \
+             the whole image proportionally, while this targets exactly the regions still \
+             noisy at a finite budget. Linear end to end, so 0.3 is three tenths of the \
+             effect; try it before 1.0."
+        } else {
+            "Density estimation reads a density off the accumulation histogram, so it needs \
+             an accumulating render. Switch Samples to accumulate."
+        },
+        "drag: density-estimation strength",
+    );
+    if resp.changed() {
+        app.ui_state.render_job.density_estimation = de;
     }
 
     if accumulating {
@@ -1388,6 +1438,37 @@ mod tests {
     fn a_still_defaults_to_accumulating_at_the_medium_tier() {
         let form = RenderJobForm { splat: true, ..Default::default() };
         assert_eq!(form.samples(), Samples::Accumulate { spp: 100 });
+    }
+
+    /// Density estimation reads a density off the accumulation histogram, so
+    /// a one-pass render must not carry a setting it would silently ignore —
+    /// and must not carry one out of range either.
+    #[test]
+    fn density_estimation_needs_a_histogram_to_read() {
+        let acc = RenderJobForm {
+            use_accumulate: true,
+            splat: true,
+            density_estimation: 0.3,
+            ..Default::default()
+        };
+        assert_eq!(acc.density().amount, 0.3);
+
+        // Ring path, points renderer, animation: no histogram, so no DE.
+        let ring = RenderJobForm { use_accumulate: false, ..Default::default() };
+        assert!(RenderJobForm { density_estimation: 0.3, ..ring }.density().is_off());
+        let flat = RenderJobForm { splat: false, density_estimation: 0.3, ..Default::default() };
+        assert!(flat.density().is_off());
+        let anim = RenderJobForm {
+            mode: Mode::Animation,
+            splat: true,
+            density_estimation: 0.3,
+            ..Default::default()
+        };
+        assert!(anim.density().is_off());
+
+        // Clamped, since the field is public even though the slider is not.
+        let hot = RenderJobForm { density_estimation: 4.0, ..acc };
+        assert_eq!(hot.density().amount, 1.0);
     }
 
     /// Zero samples per pixel is not a render. The slider cannot reach it, but
