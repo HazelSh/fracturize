@@ -2134,6 +2134,8 @@ fn main() {
             .unwrap_or(1.0);
 
         let params = offline::OfflineParams {
+            // A terminal render owns the GPU; nothing else is on it.
+            gpu_reserve: 0,
             scene,
             view,
             width: args.width,

@@ -243,6 +243,16 @@ pub struct OfflineParams<'a> {
     pub resume_from: Option<std::path::PathBuf>,
     /// Density estimation amount, 0-1. 0 is off and allocates nothing.
     pub density_estimation: crate::gpu::points::density::DensityEstimation,
+    /// GPU memory already in use on the same card, which this render must not
+    /// plan as if it had.
+    ///
+    /// Zero from a terminal, where the render owns the GPU. **Not** zero from
+    /// the window: the job renders on its own wgpu device but the same physical
+    /// card, and the live viewport is holding its own point buffer and targets
+    /// the whole time. Ignoring that is what let a render plan tiles that each
+    /// fitted the driver's limits and still ran the card out of memory — while
+    /// the identical job from the CLI succeeded.
+    pub gpu_reserve: u64,
 }
 
 /// Everything about a render that is measured in render-target pixels.
@@ -444,6 +454,45 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
     }))
     .map_err(|e| format!("Failed to create device: {}", e))?;
     Ok((device, queue, adapter_name))
+}
+
+/// A device error caught instead of panicking, so a render that runs the card
+/// out of memory can say so and stop.
+///
+/// wgpu's default handler for an uncaptured error aborts the process, which on
+/// the job thread means a stack trace where a message belongs: a poster render
+/// that has been going for two minutes dies with
+/// `thread '<unnamed>' panicked: wgpu error: Out of Memory` and no indication
+/// which dial to turn. Out of memory is the one device error a *correct*
+/// program can still hit — it depends on what else is on the card, which is not
+/// knowable in advance — so it has to be an outcome, not a crash.
+#[derive(Clone, Default)]
+struct DeviceErrors(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl DeviceErrors {
+    /// Route this device's uncaptured errors here instead of to the panic
+    /// handler.
+    fn install(device: &wgpu::Device) -> Self {
+        let sink = Self::default();
+        let slot = sink.0.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            let msg = e.to_string();
+            log::error!("wgpu device error: {}", msg);
+            let mut guard = slot.lock().expect("device error slot");
+            if guard.is_none() {
+                *guard = Some(msg);
+            }
+        }));
+        sink
+    }
+
+    /// The first error since the device was created, if any. Flushes pending
+    /// work first, because an allocation failure is reported asynchronously and
+    /// checking without polling would usually look clean.
+    fn take(&self, device: &wgpu::Device) -> Option<String> {
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        self.0.lock().expect("device error slot").take()
+    }
 }
 
 /// Run the chaos game until the point buffer is full and then some. The long
@@ -1609,6 +1658,17 @@ fn save_grade_buffer(
     }
 }
 
+/// A rule and a one-line header, so consecutive renders are scannable.
+///
+/// The offline paths print a dozen lines each — the plan, per-pass notices, the
+/// record path, the result, the timing — and back to back in a terminal or a
+/// log they run together with nothing marking where one render stops and the
+/// next starts. One rule per render is enough to find the boundary by eye, and
+/// keeps the header greppable (`grep '^──'`) for anything reading the log.
+fn print_start(what: &str, width: u32, height: u32, out_path: &Path) {
+    println!("\n── {} {}x{} → {}", what, width, height, out_path.display());
+}
+
 fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant) {
     let secs = |a: Instant, b: Instant| (b - a).as_secs_f32();
     println!(
@@ -1627,7 +1687,14 @@ fn print_timing(t0: Instant, t1: Instant, t2: Instant, t3: Instant, t4: Instant)
 /// rendered and saved, and the return says [`Outcome::Partial`] so no caller
 /// can report it as a finished render.
 pub fn render(params: OfflineParams) -> Result<Outcome, String> {
-    if params.spp.is_some() || params.resume_from.is_some() {
+    let accumulating = params.spp.is_some() || params.resume_from.is_some();
+    print_start(
+        if accumulating { "still" } else { "still (one pass)" },
+        params.width,
+        params.height,
+        params.out_path,
+    );
+    if accumulating {
         return render_accumulated(params);
     }
     // The ring path has no histogram to save or continue, and saying so beats
@@ -1681,6 +1748,8 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // The ring path has no accumulate->filter->tonemap chain for DE to sit
         // in; refused above alongside the checkpoint flags.
         density_estimation: _,
+        // Only the accumulating path tiles, so only it budgets against this.
+        gpu_reserve: _,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -2000,6 +2069,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         checkpoint_out,
         resume_from,
         density_estimation,
+        gpu_reserve,
     } = params;
     // `--resume` alone is legal and means "reach the target this checkpoint was
     // already heading for", so the sample target is optional here even though
@@ -2025,6 +2095,11 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 
     let (device, queue, adapter) = create_device()?;
+    // Catch device errors rather than letting wgpu abort the process. Out of
+    // memory is the one a correct program can still hit — it depends on what
+    // else is on the card — and on a long render it must arrive as a message,
+    // not as a stack trace two minutes in.
+    let device_errors = DeviceErrors::install(&device);
     sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
@@ -2094,11 +2169,12 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     // smaller so the tiled path can be exercised at 400x300 — an env var rather
     // than a flag because it describes a machine that isn't there, and nobody
     // should reach for it while making a picture.
+    let real_limit = device.limits().max_storage_buffer_binding_size as u64;
     let binding_limit = std::env::var("FRACTURIZE_TILE_BINDING_LIMIT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(device.limits().max_storage_buffer_binding_size as u64);
+        .unwrap_or(real_limit);
     let plan = crate::tile::TilePlan::new(
         width,
         height,
@@ -2110,7 +2186,20 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         // than a measurement, and guessing high costs an out-of-memory abort
         // minutes into a render. Every card puts its binding limit well under
         // its VRAM — a quarter of it, typically — so twice it has margin.
-        crate::tile::Budget { binding_limit, resident_limit: binding_limit * 2 },
+        crate::tile::Budget {
+            binding_limit,
+            // From the *real* device, not the override: the test hook exists to
+            // force tiling at a small output size, and shrinking the memory
+            // budget along with it would starve the point buffer instead.
+            resident_limit: real_limit * 2,
+            // Everything already on the card before a tile is allocated: this
+            // job's point buffer, plus whatever the caller says is spoken for.
+            // A render launched from the window shares the GPU with the live
+            // viewport; one launched from a terminal does not, which is exactly
+            // why the same settings succeeded here and ran out of memory there.
+            fixed_bytes: scene.point_count as u64 * crate::render_job::BYTES_PER_POINT
+                + gpu_reserve,
+        },
     )
     .map_err(|e| e.to_string())?;
 
@@ -2341,6 +2430,25 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             targets.push(target);
             histograms.push(histogram);
             batch_groups.push(batch_bind_group);
+
+            // Checked here, where the big allocations have just happened and
+            // the numbers to explain them are in scope. Everything after this
+            // point would be operating on resources the driver refused.
+            if let Some(e) = device_errors.take(&device) {
+                let per_tile = tile.texels(sampling.n) * crate::tile::RESIDENT_BYTES_PER_TEXEL;
+                return Err(format!(
+                    "the GPU ran out of memory setting up tile {} of {} ({} for the tile, {} for \
+                     the point buffer): {}. Lower --supersample (it costs N² here), use fewer \
+                     --points, or render smaller.",
+                    tiles_done + 1,
+                    plan.tiles.len(),
+                    crate::render_job::human_bytes(per_tile),
+                    crate::render_job::human_bytes(
+                        scene.point_count as u64 * crate::render_job::BYTES_PER_POINT
+                    ),
+                    e,
+                ));
+            }
         }
 
         if let Some(c) = &control {
@@ -2673,6 +2781,7 @@ pub struct AnimParams {
 /// the **frame loop** keeps what has been encoded — a shorter clip is a real
 /// partial result — provided there are at least two frames to mux.
 pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outcome, String> {
+    print_start("animation", params.width, params.height, params.out_path);
     let OfflineParams {
         mut scene,
         view,
@@ -2706,6 +2815,8 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         checkpoint_out,
         resume_from,
         density_estimation,
+        // Only the accumulating path tiles, so only it budgets against this.
+        gpu_reserve: _,
     } = params;
     reject_spp(spp, "an animation", "Render the frame you want as a single still.")?;
     reject_grade_out(grade_out, "an animation", "Render the frame you want as a single still.")?;
@@ -2948,6 +3059,7 @@ pub fn render_mutations(
     strength: f32,
     seed: Option<u64>,
 ) -> Result<Outcome, String> {
+    print_start("variant sheet", params.width, params.height, params.out_path);
     let OfflineParams {
         mut scene,
         view,
@@ -2980,6 +3092,8 @@ pub fn render_mutations(
         checkpoint_out,
         resume_from,
         density_estimation,
+        // Only the accumulating path tiles, so only it budgets against this.
+        gpu_reserve: _,
     } = params;
     reject_spp(spp, "a variant sheet", "Set the sheet's density with --points instead.")?;
     reject_grade_out(grade_out, "a variant sheet", "Render the tile you want on its own.")?;
@@ -3152,6 +3266,7 @@ pub fn render_sweep(
     rows: u32,
     build: &dyn Fn(&[String]) -> Result<Scene, String>,
 ) -> Result<Outcome, String> {
+    print_start("sweep sheet", params.width, params.height, params.out_path);
     let OfflineParams {
         scene,
         view,
@@ -3184,6 +3299,8 @@ pub fn render_sweep(
         checkpoint_out,
         resume_from,
         density_estimation,
+        // Only the accumulating path tiles, so only it budgets against this.
+        gpu_reserve: _,
     } = params;
     reject_spp(spp, "a sweep sheet", "Set the sheet's density with --points instead.")?;
     reject_grade_out(grade_out, "a sweep sheet", "Render the tile you want on its own.")?;

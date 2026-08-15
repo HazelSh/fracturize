@@ -3242,6 +3242,26 @@ impl App {
         // can't be set to disagree here.
         let (spp, accumulate) = (params.samples.spp(), params.samples.accumulate());
         let density_estimation = params.density_estimation;
+        // What the *window* is holding on the same card while the job runs.
+        //
+        // The job gets its own wgpu device, which makes it easy to forget that
+        // it does not get its own GPU. The interactive point buffer alone is
+        // hundreds of megabytes and the viewport's splat targets are more, so a
+        // job that plans as if the card were empty will happily size tiles it
+        // cannot allocate — which is exactly what happened, and why the same
+        // settings rendered fine from a terminal.
+        //
+        // Deliberately an over-estimate. Planning one tile too many costs a
+        // little wall clock; planning one too few costs the whole render.
+        let gpu_reserve = {
+            let points = self.point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
+            let (vw, vh) = self.gpu.size();
+            let (w, h) = (vw as u64, vh as u64);
+            // Splat accumulation, resolve, surface and depth — call it six
+            // full-size targets at 8 bytes, which is generous and cheap to be
+            // wrong about in this direction.
+            points + w * h * 8 * 6
+        };
         // Read off `self` rather than `params`: the grade is not a job field,
         // it is the window's live look, and the job renders what you saw.
         let grade = self.grade;
@@ -3263,6 +3283,7 @@ impl App {
         std::thread::spawn(move || {
             control.phase(crate::render_job::Phase::Setup);
             let base = crate::offline::OfflineParams {
+                gpu_reserve,
                 scene,
                 view: Some(view),
                 width: kind.size().0,

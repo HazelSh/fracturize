@@ -377,7 +377,10 @@ impl JobParams {
             crate::tile::Halo::for_settings(self.density_estimation, self.filter_radius),
             crate::tile::Budget {
                 binding_limit: max_buffer_bytes,
-                resident_limit: max_buffer_bytes,
+                resident_limit: max_buffer_bytes * 2,
+                // The point buffer is on the same card and is not small: 100M
+                // points is 1.6 GB, comparable to a whole tile.
+                fixed_bytes: self.point_buffer_bytes(),
             },
         )
     }

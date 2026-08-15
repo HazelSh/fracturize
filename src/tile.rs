@@ -204,12 +204,27 @@ pub enum TileError {
     /// with an absurd supersample factor or a tiny budget, but it is a real
     /// arithmetic possibility and returning it beats looping forever.
     HopelessTile { needed: u64, limit: u64 },
+    /// The fixed costs — the point buffer, and whatever else is already on the
+    /// card — leave no room for tiles of any size.
+    ///
+    /// Distinct from [`HopelessTile`](Self::HopelessTile) because the fix is
+    /// different and not guessable from it: shrinking the tiles cannot help
+    /// when the thing filling the card is not a tile. This is the shape of the
+    /// failure a big `--points` produces on a busy GPU.
+    BudgetExhausted { fixed: u64, limit: u64 },
 }
 
 impl std::fmt::Display for TileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TileError::Empty => write!(f, "an output with a zero dimension has nothing to tile"),
+            TileError::BudgetExhausted { fixed, limit } => write!(
+                f,
+                "{} of GPU memory is already committed (the point buffer, plus anything else on \
+                 the card) against a {} budget, leaving nothing for tiles. Use fewer --points.",
+                crate::render_job::human_bytes(*fixed),
+                crate::render_job::human_bytes(*limit),
+            ),
             TileError::HopelessTile { needed, limit } => write!(
                 f,
                 "even a single pixel needs {} of histogram against a {} limit — lower the \
@@ -239,6 +254,20 @@ pub struct Budget {
     /// callers use twice the binding limit, which is conservative on any card
     /// whose limit is the usual quarter of its memory.
     pub resident_limit: u64,
+    /// Memory already spoken for on the same card, before a single tile is
+    /// allocated: the job's own point buffer, plus anything the caller knows
+    /// about.
+    ///
+    /// This is not bookkeeping. A 100M-point buffer is **1.6 GB** — comparable
+    /// to a whole tile — and a render launched from the window shares the card
+    /// with the live viewport, which is holding its own points and targets.
+    /// Ignoring both is what let a 1920x1080 render at 12x plan six tiles that
+    /// fitted the binding limit individually and then ran the card out of
+    /// memory: the same job from the CLI, with no window on the GPU, succeeded.
+    ///
+    /// Subtracted from the budget *and* used to size tiles, so a machine with
+    /// less to spare gets more, smaller tiles rather than a failure.
+    pub fixed_bytes: u64,
 }
 
 impl Budget {
@@ -251,7 +280,14 @@ impl Budget {
     /// took twice as long.
     pub fn gtx1080() -> Self {
         let binding_limit = 2_147_483_648;
-        Self { binding_limit, resident_limit: binding_limit * 2 }
+        Self { binding_limit, resident_limit: binding_limit * 2, fixed_bytes: 0 }
+    }
+
+    /// What is left for tiles once the fixed costs are met. At least one byte,
+    /// so the planner's arithmetic cannot divide by zero — a budget this tight
+    /// simply fails the `fits` check and reports [`TileError::HopelessTile`].
+    fn spare(self) -> u64 {
+        self.resident_limit.saturating_sub(self.fixed_bytes).max(1)
     }
 }
 
@@ -275,6 +311,14 @@ impl TilePlan {
         if output_width == 0 || output_height == 0 {
             return Err(TileError::Empty);
         }
+        // Checked before the search, because the search shrinks tiles and this
+        // is the one shortfall shrinking tiles cannot fix.
+        if budget.fixed_bytes >= budget.resident_limit {
+            return Err(TileError::BudgetExhausted {
+                fixed: budget.fixed_bytes,
+                limit: budget.resident_limit,
+            });
+        }
         let n = supersample.max(1);
 
         // The cheapest tiling that satisfies both constraints. Grow the grid one
@@ -283,7 +327,7 @@ impl TilePlan {
         // paid per side — stays a small fraction of each.
         let (mut cols, mut rows) = (1u32, 1u32);
         loop {
-            if Self::fits(output_width, output_height, cols, rows, n, halo, budget.binding_limit) {
+            if Self::fits(output_width, output_height, cols, rows, n, halo, budget) {
                 break;
             }
             // A single output pixel that still doesn't fit is hopeless, and
@@ -322,7 +366,7 @@ impl TilePlan {
             .max()
             .unwrap_or(1)
             .max(1);
-        let resident = (budget.resident_limit / per_tile).clamp(1, tiles.len() as u64) as u32;
+        let resident = (budget.spare() / per_tile).clamp(1, tiles.len() as u64) as u32;
 
         Ok(Self {
             output_width,
@@ -376,12 +420,20 @@ impl TilePlan {
         Self::tile_at(w, h, cols, rows, col, row, halo)
     }
 
-    fn fits(w: u32, h: u32, cols: u32, rows: u32, n: u32, halo: Halo, limit: u64) -> bool {
+    /// Whether this grid's largest tile is legal: under the driver's texture
+    /// and single-binding limits, *and* affordable alongside the fixed costs.
+    ///
+    /// The memory test is what makes a tile shrink for a small machine. Without
+    /// it a tile only had to fit the binding limit, which says nothing about
+    /// whether the card can also hold the point buffer and a live viewport.
+    fn fits(w: u32, h: u32, cols: u32, rows: u32, n: u32, halo: Halo, budget: Budget) -> bool {
         let t = Self::probe_tile(w, h, cols, rows, halo);
         let (tw, th) = (t.render_width as u64 * n as u64, t.render_height as u64 * n as u64);
+        let texels = tw * th;
         tw <= MAX_TEXTURE_DIM as u64
             && th <= MAX_TEXTURE_DIM as u64
-            && tw * th * BYTES_PER_TEXEL <= limit
+            && texels * BYTES_PER_TEXEL <= budget.binding_limit
+            && texels * RESIDENT_BYTES_PER_TEXEL <= budget.spare()
     }
 
     /// Passes this plan takes: how many times the chaos game has to be re-run.
@@ -463,7 +515,7 @@ mod tests {
         for (w, h, limit) in
             [(4096u32, 4096u32, 64u64 << 20), (4097, 2161, 16 << 20), (1000, 999, 4 << 20)]
         {
-            let plan = TilePlan::new(w, h, 2, halo8(), Budget { binding_limit: limit, resident_limit: limit })
+            let plan = TilePlan::new(w, h, 2, halo8(), Budget { binding_limit: limit, resident_limit: limit, fixed_bytes: 0 })
                 .unwrap();
             let mut seen = vec![0u8; (w as usize) * (h as usize)];
             for t in &plan.tiles {
@@ -488,7 +540,7 @@ mod tests {
     fn no_tile_exceeds_the_binding_limit() {
         for n in [1u32, 2, 4, 16] {
             for limit in [32u64 << 20, 512 << 20, 2_147_483_648] {
-                let budget = Budget { binding_limit: limit, resident_limit: limit * 3 };
+                let budget = Budget { binding_limit: limit, resident_limit: limit * 3, fixed_bytes: 0 };
                 let plan = TilePlan::new(3840, 2160, n, halo8(), budget).unwrap();
                 for t in &plan.tiles {
                     let bytes = t.texels(n) * BYTES_PER_TEXEL;
@@ -505,7 +557,7 @@ mod tests {
     /// not exist, and the picture's own edge is not a seam.
     #[test]
     fn the_halo_stops_at_the_image_edge() {
-        let budget = Budget { binding_limit: 8 << 20, resident_limit: 64 << 20 };
+        let budget = Budget { binding_limit: 8 << 20, resident_limit: 64 << 20, fixed_bytes: 0 };
         let plan = TilePlan::new(2000, 2000, 1, halo8(), budget).unwrap();
         assert!(plan.cols >= 3 && plan.rows >= 3, "need interior tiles: {}x{}", plan.cols, plan.rows);
         for t in &plan.tiles {
@@ -532,7 +584,7 @@ mod tests {
         assert_eq!(on.px, 7);
 
         // The corner the plan warns about: 16x on a 32 MB budget.
-        let budget = Budget { binding_limit: 32 << 20, resident_limit: 32 << 20 };
+        let budget = Budget { binding_limit: 32 << 20, resident_limit: 32 << 20, fixed_bytes: 0 };
         let wide = TilePlan::new(1920, 1080, 16, on, budget).unwrap();
         let lean = TilePlan::new(1920, 1080, 16, off, budget).unwrap();
         assert!(
@@ -548,7 +600,7 @@ mod tests {
     #[test]
     fn residency_decides_the_pass_count() {
         // Sixteen tiles, four resident: four passes.
-        let budget = Budget { binding_limit: 8 << 20, resident_limit: 32 << 20 };
+        let budget = Budget { binding_limit: 8 << 20, resident_limit: 32 << 20, fixed_bytes: 0 };
         let plan = TilePlan::new(4000, 4000, 1, halo8(), budget).unwrap();
         assert_eq!(plan.passes(), (plan.tiles.len() as u32).div_ceil(plan.resident));
         assert!(plan.passes() >= 1);
@@ -562,7 +614,7 @@ mod tests {
     /// can fix, because the halo corrects filtering, not aim.
     #[test]
     fn subfrustums_tile_the_same_camera() {
-        let budget = Budget { binding_limit: 4 << 20, resident_limit: 16 << 20 };
+        let budget = Budget { binding_limit: 4 << 20, resident_limit: 16 << 20, fixed_bytes: 0 };
         let plan = TilePlan::new(1024, 1024, 1, Halo { px: 0 }, budget).unwrap();
         assert!(plan.cols > 1 && plan.rows > 1);
         for t in &plan.tiles {
@@ -640,11 +692,59 @@ mod tests {
         assert!(a2.pass_groups().all(|g| g.len() == 2));
     }
 
+    /// The bug this was written for: a 1920x1080 render at 12x planned six
+    /// tiles that each fitted the binding limit, then ran the card out of
+    /// memory — while the identical job from a terminal succeeded. The
+    /// difference was everything the planner was not counting: a 1.6 GB point
+    /// buffer, and a live viewport holding its own buffers on the same card.
+    ///
+    /// Fixed costs must therefore *shrink the tiles*, not just reduce how many
+    /// are resident.
+    #[test]
+    fn fixed_costs_make_tiles_smaller_not_just_fewer() {
+        let budget = Budget::gtx1080();
+        let free = TilePlan::new(1920, 1080, 12, Halo { px: 1 }, budget).unwrap();
+
+        // 100M points is 1.6 GB, and a window with its own points and targets
+        // is another 1.3 GB or so.
+        let crowded = Budget { fixed_bytes: 1_600_000_000 + 1_300_000_000, ..budget };
+        let plan = TilePlan::new(1920, 1080, 12, Halo { px: 1 }, crowded).unwrap();
+
+        assert!(
+            plan.tiles.len() > free.tiles.len(),
+            "a crowded card must be given more, smaller tiles: {} against {}",
+            plan.tiles.len(),
+            free.tiles.len(),
+        );
+        // And the largest tile must actually fit what is left, which is the
+        // property that was missing.
+        let spare = crowded.resident_limit - crowded.fixed_bytes;
+        for t in &plan.tiles {
+            assert!(
+                t.texels(12) * RESIDENT_BYTES_PER_TEXEL <= spare,
+                "tile needs {} of a {} remainder",
+                t.texels(12) * RESIDENT_BYTES_PER_TEXEL,
+                spare,
+            );
+        }
+    }
+
+    /// When the fixed costs alone exceed the budget, shrinking tiles cannot
+    /// help — so it says that, rather than reporting a tile size as the
+    /// problem and sending someone to tune the wrong dial.
+    #[test]
+    fn a_card_already_full_names_the_thing_filling_it() {
+        let budget = Budget { fixed_bytes: 5_000_000_000, ..Budget::gtx1080() };
+        let err = TilePlan::new(1920, 1080, 1, Halo { px: 1 }, budget).unwrap_err();
+        assert!(matches!(err, TileError::BudgetExhausted { .. }), "{err:?}");
+        assert!(err.to_string().contains("--points"), "{err}");
+    }
+
     /// A budget so small nothing can fit must say so rather than loop forever
     /// splitting a grid it can never make small enough.
     #[test]
     fn an_impossible_budget_is_reported_not_hung() {
-        let budget = Budget { binding_limit: 16, resident_limit: 16 };
+        let budget = Budget { binding_limit: 16, resident_limit: 16, fixed_bytes: 0 };
         let err = TilePlan::new(256, 256, 16, halo8(), budget).unwrap_err();
         assert!(matches!(err, TileError::HopelessTile { .. }), "{err:?}");
         assert!(err.to_string().contains("supersampling"), "{err}");
