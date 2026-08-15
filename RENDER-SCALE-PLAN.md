@@ -421,7 +421,7 @@ memory, and therefore the passes, and therefore the wall clock — §11's
 six-hour poster becomes four. It is the cheapest large win in the plan and
 everything after it is measured on top of it.
 
-**4b — TPDF dither on the 8-bit path** (§6b). Out of order because it is small,
+**4b — TPDF dither on the 8-bit path** (§6b). *(done, `84bc0ae`)* Out of order because it is small,
 independent of every other slice, and fixes a defect that is *already visible*
 in renders being made today — it does not need tiling, TIFF or anything else to
 land. One term in the tonemap shader.
@@ -439,7 +439,7 @@ shares its readback with, rather than left to slice 10.
 
 **8 — Per-pass checkpoint and the GUI resume** (§8, §13).
 
-**9 — `MAX_SUPERSAMPLE` to 16** (§5), once the rest makes it safe. Late
+**9 — `MAX_SUPERSAMPLE` to 16** (§5) *(done, `4d4ab7a`)*, once the rest makes it safe. Late
 deliberately: §3 and §11 both say it is not what the poster needs, so it should
 not block the poster.
 
