@@ -104,6 +104,9 @@ pub struct RenderJobForm {
     /// CPU threads the encoder may use. Seeded from prefs in [`open`] and
     /// written back when it changes: a machine setting, so it follows the
     /// person across scenes rather than living with the job's artwork.
+    /// Fraction of the GPU the render may take. A machine setting like
+    /// `threads`, seeded from prefs.
+    pub gpu_share: f32,
     pub threads: usize,
     /// A snapshot of the job launched from this form, if `Start` has been
     /// clicked and the launch wasn't rejected. See `StartedJob`.
@@ -161,6 +164,7 @@ impl Default for RenderJobForm {
             seconds: 8.0,
             quality: 60,
             format: crate::video::Format::Avif,
+            gpu_share: 1.0,
             threads: crate::render_job::default_threads(),
             started: None,
         }
@@ -227,6 +231,7 @@ impl RenderJobForm {
             filter: self.filter,
             filter_radius: self.filter_radius,
             bit_depth: self.bit_depth,
+            gpu_share: self.gpu_share,
             threads: self.threads,
         }
     }
@@ -247,6 +252,7 @@ pub fn open(app: &mut App) {
     let mut form = RenderJobForm {
         open: true,
         threads: app.render_threads(),
+        gpu_share: app.render_gpu_share(),
         splat: app.render_mode == crate::app::RenderMode::Splat,
         exposure: app.exposure,
         transparent: app.transparent_render,
@@ -776,6 +782,31 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
              each rendered separately and stitched — which works at any size, but re-runs the \
              chaos game once per tile.",
         );
+
+        // A machine setting among job settings, like `threads` below, and it
+        // says so. Here rather than with the encoder because this is what
+        // steers the *long* part of a still: the chaos game saturates the card,
+        // and on a one-GPU desktop that is the card drawing the window you are
+        // watching from.
+        let mut share = app.ui_state.render_job.gpu_share;
+        let resp = ui.add(
+            egui::Slider::new(&mut share, 0.05..=1.0)
+                .fixed_decimals(2)
+                .text("GPU share"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "How much of the GPU this render may take. 1.00 is as fast as possible and will \
+             make the desktop stutter; lower values sleep between laps so the compositor gets \
+             a turn. It costs exactly what it says — 0.50 is about twice the wall clock. \
+             Follows you across scenes, saved to prefs; never written to a scene file.",
+            "drag: share of the GPU this render may take",
+        );
+        if resp.changed() {
+            app.ui_state.render_job.gpu_share = share;
+            app.set_render_gpu_share(share);
+        }
     }
 }
 

@@ -357,6 +357,16 @@ struct Args {
     #[arg(long, value_name = "AMOUNT", help_heading = "Offline render")]
     density_estimation: Option<f32>,
 
+    /// Fraction of the GPU to use, 0.05-1.0 [1.0 = all of it]
+    ///
+    /// The chaos game saturates the card, and on a single-GPU desktop that is
+    /// the same card drawing everything else. Below 1.0 the render sleeps
+    /// between laps in proportion, so the compositor gets a turn -- at the cost
+    /// of taking proportionally longer. 0.5 is roughly twice the wall clock for
+    /// a desktop that stays usable.
+    #[arg(long, value_name = "FRACTION", default_value_t = 1.0, help_heading = "Offline render")]
+    gpu_share: f32,
+
     /// Save the accumulation histogram, so the render can be resumed [none]
     ///
     /// Written however the run ends, cancellation included -- an interrupted
@@ -2136,6 +2146,7 @@ fn main() {
         let params = offline::OfflineParams {
             // A terminal render owns the GPU; nothing else is on it.
             gpu_reserve: 0,
+            gpu_share: args.gpu_share,
             scene,
             view,
             width: args.width,

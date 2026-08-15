@@ -243,6 +243,17 @@ pub struct OfflineParams<'a> {
     pub resume_from: Option<std::path::PathBuf>,
     /// Density estimation amount, 0-1. 0 is off and allocates nothing.
     pub density_estimation: crate::gpu::points::density::DensityEstimation,
+    /// Fraction of the GPU's time this render may take, 0.05-1.0.
+    ///
+    /// 1.0 is "as fast as possible", which is what a render wants and not
+    /// always what the person running it wants: the chaos game saturates the
+    /// card, and on a single-GPU desktop that is the same card drawing the
+    /// window you are watching it from. Below 1.0 the render sleeps between
+    /// laps in proportion, handing the time back to the compositor.
+    ///
+    /// It costs exactly what it says — 0.5 takes about twice as long — so it is
+    /// a deliberate trade rather than free politeness.
+    pub gpu_share: f32,
     /// GPU memory already in use on the same card, which this render must not
     /// plan as if it had.
     ///
@@ -604,6 +615,26 @@ fn fill_points(
     }
     Ok((compute, point_count, outcome))
 }
+/// How long to sleep after a lap that took `busy`, to hold the render to
+/// `share` of the GPU's time.
+///
+/// `busy / share - busy`, so 1.0 sleeps not at all and 0.5 sleeps exactly as
+/// long as the work took. Clamped at both ends: above 0.99 there is nothing
+/// worth yielding, and below 0.05 a render would take twenty times as long,
+/// which is not a setting anyone wants by accident.
+///
+/// Capped at two seconds a lap so a single slow lap on a huge tile cannot turn
+/// into a minute of sleeping — the cap makes the throttle gentler than asked on
+/// exactly the renders where laps are already long enough to leave gaps.
+pub(crate) fn idle_after_lap(busy: std::time::Duration, share: f32) -> Option<std::time::Duration> {
+    let share = share.clamp(0.05, 1.0);
+    if share > 0.99 {
+        return None;
+    }
+    let idle = busy.as_secs_f32() * (1.0 / share - 1.0);
+    (idle > 0.001).then(|| std::time::Duration::from_secs_f32(idle.min(2.0)))
+}
+
 /// How often a long pass says how it is doing, on stdout.
 ///
 /// Deliberately not a progress bar. The CLI's reader is usually an agent, and
@@ -1750,6 +1781,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         density_estimation: _,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
+        gpu_share: _,
     } = params;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
@@ -2070,6 +2102,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         resume_from,
         density_estimation,
         gpu_reserve,
+        gpu_share,
     } = params;
     // `--resume` alone is legal and means "reach the target this checkpoint was
     // already heading for", so the sample target is optional here even though
@@ -2439,7 +2472,8 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 return Err(format!(
                     "the GPU ran out of memory setting up tile {} of {} ({} for the tile, {} for \
                      the point buffer): {}. Lower --supersample (it costs N² here), use fewer \
-                     --points, or render smaller.",
+                     --points, or render smaller — or wait, if something else is using the card, \
+                     since these figures may be well under what it has.",
                     tiles_done + 1,
                     plan.tiles.len(),
                     crate::render_job::human_bytes(per_tile),
@@ -2488,8 +2522,25 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 histograms[i].add(&mut encoder, &batch_groups[i]);
             }
             queue.submit(std::iter::once(encoder.finish()));
+            let lap_started = Instant::now();
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            let lap_took = lap_started.elapsed();
             pass_laps += 1;
+
+            // Hand some of the card back, if asked. A lap is one submission the
+            // GPU runs flat out, so back-to-back laps leave nothing for the
+            // compositor and the desktop the render was launched from starts to
+            // stutter. Sleeping between them in proportion is the whole
+            // mechanism: at a share of 0.5 the card is idle as long as it was
+            // busy, and the render takes about twice as long.
+            //
+            // Between laps rather than inside one, because a lap is already the
+            // unit everything else here is chunked into — the cancel check, the
+            // progress report — and it is short enough (tens of milliseconds to
+            // a couple of seconds) to make a responsive gap.
+            if let Some(idle) = idle_after_lap(lap_took, gpu_share) {
+                std::thread::sleep(idle);
+            }
 
             // Two ways to stop, one meaning: keep what has accumulated. The
             // dialog has a cancel button; a terminal has Ctrl-C.
@@ -2821,6 +2872,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         density_estimation,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
+        gpu_share: _,
     } = params;
     reject_spp(spp, "an animation", "Render the frame you want as a single still.")?;
     reject_grade_out(grade_out, "an animation", "Render the frame you want as a single still.")?;
@@ -3098,6 +3150,7 @@ pub fn render_mutations(
         density_estimation,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
+        gpu_share: _,
     } = params;
     reject_spp(spp, "a variant sheet", "Set the sheet's density with --points instead.")?;
     reject_grade_out(grade_out, "a variant sheet", "Render the tile you want on its own.")?;
@@ -3305,6 +3358,7 @@ pub fn render_sweep(
         density_estimation,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
+        gpu_share: _,
     } = params;
     reject_spp(spp, "a sweep sheet", "Set the sheet's density with --points instead.")?;
     reject_grade_out(grade_out, "a sweep sheet", "Render the tile you want on its own.")?;

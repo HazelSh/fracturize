@@ -291,6 +291,13 @@ pub struct JobParams {
     /// `TARGET_DENSITY` is calibrated in raw accumulated units, so there has to
     /// be a histogram for it to read a density from.
     pub density_estimation: crate::gpu::points::density::DensityEstimation,
+    /// Fraction of the GPU this job may take, 0.05-1.0.
+    ///
+    /// A **machine** setting like [`threads`](Self::threads): it describes how
+    /// much of this box the render is allowed to eat, not anything about the
+    /// artwork. On a single-GPU desktop the render competes with the window it
+    /// was started from, and a saturated card makes everything else stutter.
+    pub gpu_share: f32,
     /// CPU threads this job's encoders may use. A **machine** setting, not
     /// artwork: it describes the box, so it lives in prefs and on the command
     /// line and never in a scene or a view. A sidecar may record what was used,
@@ -851,6 +858,7 @@ mod tests {
             points,
             samples: Samples::Ring { accumulate: 32 },
             density_estimation: Default::default(),
+            gpu_share: 1.0,
             splat: false,
             exposure: 1.0,
             transparent: false,
@@ -1120,6 +1128,29 @@ mod tests {
         assert_eq!(Phase::Accumulating(many).position().as_deref(), Some("pass 2/3"));
         // The tile being worked on is the one after those already done.
         assert_eq!(Phase::Resolving(many).position().as_deref(), Some("tile 7/12"));
+    }
+
+    /// The throttle costs what it says and stops where it should: 1.0 never
+    /// sleeps, 0.5 sleeps as long as the work took, and a slow lap cannot turn
+    /// into a minute of idling.
+    #[test]
+    fn the_gpu_throttle_trades_time_for_headroom() {
+        use std::time::Duration;
+        let lap = Duration::from_millis(100);
+        assert_eq!(crate::offline::idle_after_lap(lap, 1.0), None, "full speed never sleeps");
+        let half = crate::offline::idle_after_lap(lap, 0.5).expect("half speed sleeps");
+        assert!(
+            (half.as_secs_f32() - 0.1).abs() < 0.01,
+            "half the GPU means idling as long as it worked: {half:?}",
+        );
+        let quarter = crate::offline::idle_after_lap(lap, 0.25).expect("quarter speed sleeps");
+        assert!((quarter.as_secs_f32() - 0.3).abs() < 0.01, "{quarter:?}");
+        // A long lap is capped, so the throttle stays gentle exactly where laps
+        // are already long enough to leave gaps.
+        let slow = crate::offline::idle_after_lap(Duration::from_secs(30), 0.5).unwrap();
+        assert!(slow <= Duration::from_secs(2), "a slow lap must not idle for ever: {slow:?}");
+        // Absurd values are clamped rather than obeyed.
+        assert!(crate::offline::idle_after_lap(lap, 0.0).unwrap() <= Duration::from_secs(2));
     }
 
     /// The default holds a core back for the rest of the desktop, and never

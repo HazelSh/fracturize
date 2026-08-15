@@ -86,6 +86,18 @@ pub struct Prefs {
     /// [`crate::render_job::default_threads`] (one less than the machine has).
     #[serde(default)]
     pub threads: Option<usize>,
+    /// Fraction of the GPU a render job may take, 0.05-1.0.
+    ///
+    /// A machine setting for the same reason `threads` is: it describes how
+    /// much of *this box* a render is allowed to eat while you keep using it,
+    /// which is a fact about the desk it sits on rather than about the artwork.
+    ///
+    /// `#[serde(default)]` like every field here, and not as a formality:
+    /// [`Prefs::load`] falls back to `Default` on *any* parse error, so a field
+    /// that cannot cope with an older file does not merely lose its own value
+    /// — it silently resets every preference the person has.
+    #[serde(default)]
+    pub gpu_share: Option<f32>,
     /// Where each panel window was left, keyed by its `ui::WindowKey` name:
     /// `[x, y, width, height]` in egui points. Panels you've arranged stay
     /// arranged across launches; anything absent falls back to the
@@ -105,6 +117,7 @@ impl Default for Prefs {
             author: None,
             point_count: None,
             threads: None,
+            gpu_share: None,
             window_geometry: BTreeMap::new(),
         }
     }
@@ -156,6 +169,7 @@ mod tests {
         let p: Prefs = toml::from_str(old).expect("an older prefs file must still parse");
         assert!(p.invert_pitch, "the settings that were there must survive");
         assert_eq!(p.orbit_style, OrbitStyle::Trackball, "and the new one takes its default");
+        assert_eq!(p.gpu_share, None, "and so does one added later still");
     }
 
     #[test]

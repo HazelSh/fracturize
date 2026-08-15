@@ -3242,6 +3242,7 @@ impl App {
         // can't be set to disagree here.
         let (spp, accumulate) = (params.samples.spp(), params.samples.accumulate());
         let density_estimation = params.density_estimation;
+        let gpu_share = params.gpu_share;
         // What the *window* is holding on the same card while the job runs.
         //
         // The job gets its own wgpu device, which makes it easy to forget that
@@ -3284,6 +3285,7 @@ impl App {
             control.phase(crate::render_job::Phase::Setup);
             let base = crate::offline::OfflineParams {
                 gpu_reserve,
+                gpu_share,
                 scene,
                 view: Some(view),
                 width: kind.size().0,
@@ -3356,7 +3358,32 @@ impl App {
         use crate::render_job::{JobEvent, Outcome, CANCELLED};
         let Some(job) = &mut self.job else { return };
         let mut finished = None;
-        while let Ok(event) = job.events.try_recv() {
+        loop {
+            let event = match job.events.try_recv() {
+                Ok(e) => e,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                // The sender is gone without having sent `Done`, which means
+                // the render thread died — a panic inside wgpu, most likely.
+                //
+                // Before this, that left the dialog waiting on a message that
+                // was never coming: the bar frozen at its last value, no error,
+                // no way to tell a hung render from a dead one, and the only
+                // clue in a terminal the window may not even have. A job that
+                // cannot finish must still *end*.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Only when the job did *not* report a result. A finished
+                    // job drops its sender the moment after sending `Done`, so
+                    // both arrive in the same drain and treating that as a
+                    // failure would turn every successful render into an error.
+                    if finished.is_some() {
+                        break;
+                    }
+                    finished = Some(Err(String::from(
+                        "the render thread stopped unexpectedly — if it ran out of GPU memory                          the details are on stderr. Try fewer points, less supersampling, or a                          smaller output.",
+                    )));
+                    break;
+                }
+            };
             match event {
                 JobEvent::Phase(p) => {
                     // A new phase resets the within-phase counter but never the
@@ -4719,6 +4746,22 @@ impl App {
             return;
         }
         self.prefs.threads = Some(n);
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Fraction of the GPU a render job may take. See [`prefs::Prefs::gpu_share`].
+    pub fn render_gpu_share(&self) -> f32 {
+        self.prefs.gpu_share.unwrap_or(1.0).clamp(0.05, 1.0)
+    }
+
+    /// Remember it. Deferred write, like every other slider-driven pref, so
+    /// dragging doesn't rewrite prefs.toml every frame.
+    pub fn set_render_gpu_share(&mut self, share: f32) {
+        let share = share.clamp(0.05, 1.0);
+        if self.prefs.gpu_share == Some(share) {
+            return;
+        }
+        self.prefs.gpu_share = Some(share);
         self.prefs_dirty_since = Some(std::time::Instant::now());
     }
 
