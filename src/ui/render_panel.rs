@@ -43,6 +43,14 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.add_space(6.0);
             class_heading(
                 ui,
+                "View",
+                "Saved with a view file and written into render records — never into the scene.",
+            );
+            draw_grade(ui, app);
+
+            ui.add_space(6.0);
+            class_heading(
+                ui,
                 "Preference",
                 "Follows you across scenes, saved to prefs — never written to a scene file.",
             );
@@ -105,6 +113,153 @@ fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
         );
         if resp.changed() {
             app.set_exposure(exposure);
+        }
+    });
+}
+
+/// One grade row: its name on its own line, then a full-width slider under it.
+///
+/// Not `Slider::text()`, which is how every other slider in this window is
+/// labelled, and the difference is deliberate. `text()` puts the label to the
+/// *right* of the widget and takes the room out of the widget's own travel, so
+/// the longest label in a group sets how short every slider in it is. "gamma
+/// threshold" is long enough to make that a bad trade, and the name is not
+/// negotiable — it is what a person carries between this window,
+/// `--gamma-threshold`, and Apophysis, which calls it the same thing.
+///
+/// So the label moved instead of the name. Stacking also lets the three rows
+/// read as one group with a common left edge rather than as three sliders that
+/// happen to be adjacent, which is what they are.
+fn grade_row(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    logarithmic: bool,
+    tip: &str,
+    hint: &str,
+) -> bool {
+    ui.label(egui::RichText::new(label).small());
+    // Give the slider the row, less the width its own value box will claim.
+    // `slider_width` is the track only, so without this the track keeps the
+    // default ~100px and the row is mostly empty space.
+    let saved = ui.spacing().slider_width;
+    ui.spacing_mut().slider_width = (ui.available_width() - 64.0).max(80.0);
+    let resp = ui.add(
+        egui::Slider::new(value, range)
+            .logarithmic(logarithmic)
+            .fixed_decimals(2),
+    );
+    ui.spacing_mut().slider_width = saved;
+    hinted(resp, &mut app.ui_state, tip, hint).changed()
+}
+
+/// The tonemap grade: gamma, its threshold, and vibrancy.
+///
+/// Live, and the reason it is live rather than a render-dialog setting: the
+/// grade is a pure function of the accumulated density, so the curve applied
+/// here is the same arithmetic an offline render applies. Deciding between
+/// gamma 2.2 and 2.6 is a thing you do by looking, and every other arrangement
+/// makes you commit to a number and find out minutes later.
+///
+/// Disabled wholesale under the points renderer, which draws opaque points
+/// with no log curve for a grade to act on — greyed rather than hidden, per the
+/// house rule, so the feature can still say it exists.
+fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
+    let splat = app.render_mode == RenderMode::Splat;
+    ui.add_enabled_ui(splat, |ui| {
+        let mut grade = app.grade;
+
+        let changed = grade_row(
+            ui,
+            app,
+            "gamma",
+            &mut grade.gamma,
+            0.5..=6.0,
+            true,
+            if splat {
+                "Lifts the dim end of the tonemap — most of what people mean by the \
+                 Apophysis look. 1.00 is off, and there is no gamma curve at all below \
+                 this control: just the log and a fixed gain.\n\n\
+                 Logarithmic, because it is a ratio: 2.0 to 2.2 is the same size of change \
+                 as 4.0 to 4.4, and the shader works in 1/gamma."
+            } else {
+                "Only applies to the splat renderer — opaque points have no tonemap to grade"
+            },
+            "drag: adjust tonemap gamma",
+        );
+
+        // Both remaining knobs act *on the gamma curve*, and at gamma 1 the
+        // curve is x^1: the threshold has nothing to flatten and both vibrancy
+        // routes collapse to the same arithmetic (`Grade::NEUTRAL`'s own note
+        // says so, and `--vibrancy`'s help says "inert at --gamma 1"). Greying
+        // them teaches that dependency for free, and costs nothing to undo —
+        // they come back the moment gamma leaves 1.
+        let graded = grade.gamma != 1.0;
+        let mut changed = changed;
+        ui.add_enabled_ui(graded, |ui| {
+            changed |= grade_row(
+                ui,
+                app,
+                "gamma threshold",
+                &mut grade.gamma_threshold,
+                0.0..=0.6,
+                false,
+                if graded {
+                    "The toe that stops gamma lifting background speckle into a grey veil: \
+                     coverage below this blends toward a straight line. 0 is off.\n\n\
+                     Measured useful range is 0.05-0.5. Note this is in post-log *coverage*, \
+                     where the whole scale is 0-1 — flam3 has a knob with the same name \
+                     measured in raw density, and the two numbers do not transfer."
+                } else {
+                    "Needs a gamma curve to flatten — raise gamma above 1.00"
+                },
+                "drag: adjust the gamma threshold",
+            );
+
+            changed |= grade_row(
+                ui,
+                app,
+                "vibrancy",
+                &mut grade.vibrancy,
+                0.0..=1.0,
+                false,
+                if graded {
+                    "How gamma reaches colour: 1.00 puts the curve through each channel and \
+                     keeps hue, 0.00 applies it to brightness alone and rolls bright cores \
+                     toward white."
+                } else {
+                    "Inert without a gamma curve to route — raise gamma above 1.00"
+                },
+                "drag: adjust vibrancy",
+            );
+        });
+
+        // A named point, not merely "the defaults": at gamma 1 the tonemap is
+        // exactly the one this window had before it could grade at all, which
+        // a test pins. Three coupled sliders is a state worth one click out of.
+        let neutral = grade.is_neutral();
+        let resp = ui.add_enabled(
+            splat && !neutral,
+            egui::Button::new(egui::RichText::new("neutral").small()),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if neutral {
+                "Already neutral — this is the tonemap with no grade on it"
+            } else {
+                "Back to no grade at all: gamma 1, no threshold, full vibrancy"
+            },
+            "click: clear the grade",
+        );
+        if resp.clicked() {
+            grade = crate::gpu::points::splat::Grade::NEUTRAL;
+        }
+
+        if changed || resp.clicked() {
+            app.grade = grade.clamped();
         }
     });
 }

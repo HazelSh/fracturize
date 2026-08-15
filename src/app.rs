@@ -782,6 +782,21 @@ pub struct App {
     /// Splat-renderer exposure multiplier (W / Shift+W)
     pub exposure: f32,
 
+    /// The tonemap grade — gamma, its threshold, and vibrancy.
+    ///
+    /// Live, and exactly live: the grade is a pure function of the accumulated
+    /// density, so the curve this applies in the window is the same arithmetic
+    /// an offline render applies. The viewport's input is noisier, but it is
+    /// not an *approximation* of the render's grade, which is what makes this
+    /// worth being a slider you drag rather than a number you commit to in the
+    /// render dialog and find out about minutes later.
+    ///
+    /// **View** data, not scene data — see `View`'s own note on why. That is
+    /// also why there is no `set_grade` committing to the undo history the way
+    /// `set_exposure` does: undo is for edits Ctrl+S will write to the scene
+    /// TOML, and this is never written there.
+    pub grade: crate::gpu::points::splat::Grade,
+
     /// Chaos-game trace overlay (X): show walker paths as line segments
     pub show_traces: bool,
 
@@ -872,6 +887,9 @@ impl App {
         view: Option<View>,
         splat: bool,
         exposure: Option<f32>,
+        // `grade` arrives already resolved against the view and the CLI flags
+        // — see `resolve_grade` in `main.rs`, which the headless path shares.
+        grade: crate::gpu::points::splat::Grade,
     ) -> Self {
         let gpu = GpuContext::new(window.clone(), vsync).await;
 
@@ -1074,6 +1092,7 @@ impl App {
             last_capacity_change: Instant::now(),
             render_mode,
             exposure,
+            grade: grade.clamped(),
             show_traces: false,
             scene,
             scene_path,
@@ -1175,6 +1194,10 @@ impl App {
             if let Some(e) = v.exposure {
                 self.exposure = e;
             }
+            // Per field, via `View::grade` — a hand-written view that sets only
+            // `gamma` gets the neutral threshold and vibrancy rather than being
+            // treated as carrying no grade at all.
+            self.grade = v.grade();
         }
         self.path_t = None;
         self.invalidate_default_path();
@@ -1672,6 +1695,17 @@ impl App {
     }
 
     /// The view currently on screen, for saving (V) and for render jobs
+    /// The grade a saved view should carry, or `None` for "don't write one".
+    ///
+    /// Two ways to be nothing worth saving: the points renderer, which has no
+    /// tonemap for a grade to act on, and a neutral grade, which is the
+    /// tonemap this app had before grading existed. Both resolve back to
+    /// neutral on load, so omitting them loses nothing and keeps a view file
+    /// down to what someone actually chose.
+    fn saved_grade(&self) -> Option<crate::gpu::points::splat::Grade> {
+        grade_for_view(self.render_mode, self.grade)
+    }
+
     fn current_view(&self) -> View {
         View {
             scene: self.scene_path.clone(),
@@ -1701,13 +1735,14 @@ impl App {
                 RenderMode::Points => None,
                 RenderMode::Splat => Some(self.exposure),
             },
-            // The window has no grade controls yet — that is the renderer-dialog
-            // pass — so a view saved from here carries none and loads neutral.
-            // Written by hand or by a future dialog, they work already: the
-            // offline path reads them (see `View::grade`).
-            gamma: None,
-            gamma_threshold: None,
-            vibrancy: None,
+            // Only under splat, and only when the grade actually says
+            // something. The points renderer has no tonemap to grade, and
+            // writing a neutral grade explicitly would put three lines in every
+            // view file to describe the absence of one — `View::grade` already
+            // resolves a missing field to neutral.
+            gamma: self.saved_grade().map(|g| g.gamma),
+            gamma_threshold: self.saved_grade().map(|g| g.gamma_threshold),
+            vibrancy: self.saved_grade().map(|g| g.vibrancy),
         }
     }
 
@@ -3174,6 +3209,9 @@ impl App {
         let kind = params.kind;
         let (splat, exposure, transparent, accumulate) =
             (params.splat, params.exposure, params.transparent, params.accumulate);
+        // Read off `self` rather than `params`: the grade is not a job field,
+        // it is the window's live look, and the job renders what you saw.
+        let grade = self.grade;
         let threads = params.threads;
         let (supersample, filter, filter_radius, bit_depth) =
             (params.supersample, params.filter, params.filter_radius, params.bit_depth);
@@ -3225,8 +3263,11 @@ impl App {
                 // a CLI dial for now — it changes what a render *costs* by
                 // orders of magnitude, and the dialog's other controls do not.
                 spp: None,
-                // No grade control in the dialog yet; slice 6a is CLI-side.
-                grade: crate::gpu::points::splat::Grade::NEUTRAL,
+                // Inherited from the Render window, like `exposure` above,
+                // rather than duplicated as three more sliders in the dialog:
+                // the grade is the one thing here you can already see live, so
+                // the job's job is to match what you were looking at.
+                grade,
                 // No re-grading from the dialog yet; slice 5a is CLI-side.
                 grade_out: None,
                 checkpoint_out: None,
@@ -5201,10 +5242,10 @@ impl App {
                     SCREENSHOT_HEIGHT as f32,
                     crate::scene::clear_color(self.scene.background, alpha),
                     self.transparent_render,
-                    // The window has no grade control yet; slice 6a is a CLI
-                    // and render-record feature. NEUTRAL is the tonemap the
-                    // window has always had.
-                    crate::gpu::points::splat::Grade::NEUTRAL,
+                    // A screenshot is what the window is showing, grade
+                    // included — anything else and S would silently save a
+                    // different picture from the one on screen.
+                    self.grade,
                 );
                 self.splat_renderer.render(
                     &self.gpu.device,
@@ -5496,7 +5537,9 @@ impl App {
                     height as f32,
                     crate::scene::clear_color(self.scene.background, 1.0),
                     false,
-                    crate::gpu::points::splat::Grade::NEUTRAL,
+                    // The window's own grade — the whole point of it being a
+                    // live control rather than a render setting.
+                    self.grade,
                 );
                 self.splat_renderer.render(
                     &self.gpu.device,
@@ -5592,12 +5635,46 @@ impl App {
     }
 }
 
+/// Free-standing so it can be tested without a GPU: `App` needs a device, and
+/// this is a decision about two plain values.
+fn grade_for_view(
+    mode: RenderMode,
+    grade: crate::gpu::points::splat::Grade,
+) -> Option<crate::gpu::points::splat::Grade> {
+    match mode {
+        RenderMode::Points => None,
+        RenderMode::Splat if grade.is_neutral() => None,
+        RenderMode::Splat => Some(grade),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const STILL: Duration = Duration::from_secs(5);
     const JUST_MOVED: Duration = Duration::from_millis(50);
+
+    /// A view file should carry a grade only when there is a grade to carry.
+    ///
+    /// Both silences matter and for different reasons. Under the points
+    /// renderer there is no tonemap for a grade to act on, so writing one would
+    /// describe a setting that could not have applied. And a *neutral* grade is
+    /// the absence of one — `View::grade` resolves a missing field back to
+    /// neutral — so writing it out would put three lines in every view file to
+    /// say nothing happened.
+    #[test]
+    fn a_view_only_carries_a_grade_when_there_is_one() {
+        use crate::gpu::points::splat::Grade;
+        let graded = Grade { gamma: 2.4, gamma_threshold: 0.3, vibrancy: 0.8 };
+
+        assert_eq!(grade_for_view(RenderMode::Splat, graded), Some(graded));
+        assert_eq!(grade_for_view(RenderMode::Splat, Grade::NEUTRAL), None);
+        // Points: silent even when the grade is set, because switching to the
+        // points renderer does not clear it — it just has nowhere to apply.
+        assert_eq!(grade_for_view(RenderMode::Points, graded), None);
+        assert_eq!(grade_for_view(RenderMode::Points, Grade::NEUTRAL), None);
+    }
 
     #[test]
     fn the_pointer_goes_when_it_is_parked_on_the_artwork_in_view_mode() {

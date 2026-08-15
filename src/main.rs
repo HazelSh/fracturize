@@ -1304,6 +1304,25 @@ impl Effort {
     }
 }
 
+/// The tonemap grade: flags over the view over neutral, field by field.
+///
+/// The same ladder `--exposure` climbs, and per-field deliberately — a view
+/// that sets only `gamma` should not drag a threshold and a vibrancy along with
+/// it, and `--gamma` on the command line should not silently discard the
+/// vibrancy the view asked for.
+///
+/// Shared by the headless render and the window, because the window now has a
+/// live grade to seed. Before it did, `--gamma` with a window was accepted and
+/// ignored — the flag parsed, nothing applied it, and nothing said so.
+fn resolve_grade(args: &Args, view: Option<&View>) -> gpu::points::splat::Grade {
+    let from_view = view.map(|v| v.grade()).unwrap_or_default();
+    gpu::points::splat::Grade {
+        gamma: args.gamma.unwrap_or(from_view.gamma),
+        gamma_threshold: args.gamma_threshold.unwrap_or(from_view.gamma_threshold),
+        vibrancy: args.vibrancy.unwrap_or(from_view.vibrancy),
+    }
+}
+
 /// Parse `--grade-range FROM:TO`, defaulting per axis.
 ///
 /// The defaults are the measured useful ranges rather than the clamp bounds:
@@ -1406,6 +1425,10 @@ impl ApplicationHandler for AppWrapper {
         let view = self.args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
         });
+        // `view` is moved into `App::new` below, and the grade is resolved from
+        // it *and* the flags — so keep a copy for that rather than reordering
+        // the argument list around an ownership detail.
+        let view_for_grade = view.clone();
 
         // Create app (blocking on async)
         let app = pollster::block_on(App::new(
@@ -1417,6 +1440,7 @@ impl ApplicationHandler for AppWrapper {
             view,
             self.args.splat,
             self.args.exposure,
+            resolve_grade(&self.args, view_for_grade.as_ref()),
         ));
 
         self.egui = Some(ui::EguiLayer::new(&window, &app.gpu.device, app.gpu.format));
@@ -2073,15 +2097,7 @@ fn main() {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
         });
 
-        // Flags over the view over neutral, field by field — the same ladder
-        // `exposure` above uses, and per-field so a view that sets only gamma
-        // does not drag the other two along with it.
-        let from_view = view.as_ref().map(|v| v.grade()).unwrap_or_default();
-        let grade = gpu::points::splat::Grade {
-            gamma: args.gamma.unwrap_or(from_view.gamma),
-            gamma_threshold: args.gamma_threshold.unwrap_or(from_view.gamma_threshold),
-            vibrancy: args.vibrancy.unwrap_or(from_view.vibrancy),
-        };
+        let grade = resolve_grade(&args, view.as_ref());
 
         let grid = match (&args.orbit_grid, &args.move_grid) {
             (Some(_), Some(_)) => {

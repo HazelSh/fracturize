@@ -767,7 +767,41 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// What this job inherits rather than owns.
+///
+/// The grade is a live control in the Render window (see `render_panel`), and
+/// the job renders what you were looking at — so it is not duplicated here as
+/// three more sliders. But an inherited setting that is never shown is a trap:
+/// you would tune a grade, open this dialog, see no mention of it, and have no
+/// way to know whether the render was about to apply it. So it is stated, and
+/// only when there is something to state — a neutral grade is the absence of
+/// one, and a line saying so every time would be noise.
+fn draw_inherited(ui: &mut egui::Ui, app: &mut App) {
+    if !app.ui_state.render_job.splat || app.grade.is_neutral() {
+        return;
+    }
+    let g = app.grade;
+    let mut parts = vec![format!("gamma {:.2}", g.gamma)];
+    if g.gamma_threshold > 0.0 {
+        parts.push(format!("threshold {:.2}", g.gamma_threshold));
+    }
+    if g.vibrancy != 1.0 {
+        parts.push(format!("vibrancy {:.2}", g.vibrancy));
+    }
+    ui.label(
+        egui::RichText::new(format!("grade: {} — from the Render window", parts.join(" · ")))
+            .small()
+            .weak(),
+    )
+    .on_hover_text(
+        "The tonemap grade is a live control, so it is set where you can see it working \
+         rather than here. This job will render with the grade the window is showing.",
+    );
+}
+
 fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
+    draw_inherited(ui, app);
+
     let params = app.ui_state.render_job.params();
     let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
 
