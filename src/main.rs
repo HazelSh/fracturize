@@ -278,6 +278,20 @@ struct Args {
     #[arg(long, value_name = "0-1", default_value_t = fit::loss::DEFAULT_GRID_SHARE, help_heading = "Likeness")]
     fit_structure: f32,
 
+    /// Push the fit below this similarity dimension [no limit]
+    ///
+    /// The dial that asks for fractal character directly instead of hoping it
+    /// falls out. Every improvement to the loss makes the pictures smoother,
+    /// because the reference is a photograph, its density is smooth, and the
+    /// smoothest reachable attractor scores best — lace and holes are things
+    /// the objective actively penalises.
+    ///
+    /// A solid silhouette wants d near 2. Ask for 1.6 and the same shape has
+    /// to be built out of less material: dust, holes, filigree. One-sided, so
+    /// a fit already sparser than this is left alone.
+    #[arg(long, value_name = "D", help_heading = "Likeness")]
+    fit_dimension: Option<f32>,
+
     /// Annealing steps per seed [4000]
     #[arg(long, value_name = "N", default_value_t = 4000, help_heading = "Likeness")]
     fit_iters: usize,
@@ -2189,6 +2203,7 @@ fn main() {
                 points: args.fit_points,
                 seed: args.seed.unwrap_or(0),
                 depth: args.fit_depth.clamp(0.0, 1.0),
+                dimension: args.fit_dimension,
                 axis_mode: match args.fit_axis.trim().to_ascii_lowercase().as_str() {
                     "plane" => fit::solve::AxisMode::InPlane,
                     "view" | "z" => fit::solve::AxisMode::Fixed(glam::Vec3::Z),

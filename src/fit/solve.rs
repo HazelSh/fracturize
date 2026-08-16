@@ -324,7 +324,33 @@ pub struct Config {
     pub symmetry: Option<OrbitKind>,
     /// See [`Params::axis_mode`].
     pub axis_mode: AxisMode,
+    /// Similarity dimension the fit is pushed *below*, if any.
+    ///
+    /// The answer to a problem the other dials could not touch: every
+    /// improvement to the loss made the pictures mushier. That is not a bug in
+    /// any one term, it is what the objective wants — the target is a sampled
+    /// photograph, its density is smooth, and the smoothest reachable
+    /// attractor scores best. Lace, dust and holes are *penalised*, because
+    /// the reference does not have them.
+    ///
+    /// So the fractal character has to be asked for directly rather than
+    /// hoped for as a side effect of starvation. `Σsᵢᵈ = 1` is already
+    /// computed for `--info`; pulling `d` down forces the same silhouette to
+    /// be built out of less material, which is the difference between a cloud
+    /// and a filigree.
+    ///
+    /// One-sided: a fit that is *already* sparser than asked is left alone.
+    /// Nothing here ever wants to push dimension up.
+    pub dimension: Option<f32>,
 }
+
+/// How hard [`Config::dimension`] pulls, per unit of excess, squared.
+///
+/// Both loss terms are normalised to about 1 for an uninformative cloud, so
+/// this is on the same scale as the whole rest of the objective: half a
+/// dimension over budget costs about 6% of a hopeless fit, a full dimension
+/// about 25%.
+const DIMENSION_WEIGHT: f32 = 0.25;
 
 impl Default for Config {
     fn default() -> Self {
@@ -338,6 +364,7 @@ impl Default for Config {
             depth: 0.0,
             symmetry: None,
             axis_mode: AxisMode::InPlane,
+            dimension: None,
         }
     }
 }
@@ -345,6 +372,9 @@ impl Default for Config {
 pub struct Outcome {
     pub params: Params,
     pub loss: f32,
+    /// Similarity dimension of the winner, for the log line — this is the
+    /// number that says whether the result is lace or cloud.
+    pub dimension: Option<f32>,
     /// Loss of the best random start, so the log can say what the annealing
     /// was worth on top of the dice.
     pub initial_loss: f32,
@@ -374,6 +404,7 @@ pub fn fit(target: &loss::Target, cfg: &Config) -> Outcome {
             Some(w) => {
                 let w = super::normalize_walk(w);
                 target.eval(&w.pos, &w.col, cfg.slices, stream, &mut scratch)
+                    + dimension_penalty(p, cfg.dimension)
             }
             None => f32::INFINITY,
         }
@@ -451,7 +482,23 @@ pub fn fit(target: &loss::Target, cfg: &Config) -> Outcome {
     let (params, loss) =
         if cur_score < best_score { (cur, cur_score) } else { (best, best_score) };
 
-    Outcome { params, loss, initial_loss }
+    let dimension = crate::scene::similarity_dimension(&params.to_transforms());
+    Outcome { params, loss, initial_loss, dimension }
+}
+
+/// What this parameter vector's similarity dimension costs, if a budget was set.
+///
+/// `None` from `similarity_dimension` means the maps do not form a sensible
+/// set to solve `Σsᵢᵈ = 1` over — every map non-contractive, or none weighted.
+/// The walk would already have been rejected in that case, so there is nothing
+/// to add.
+pub fn dimension_penalty(p: &Params, budget: Option<f32>) -> f32 {
+    let Some(budget) = budget else { return 0.0 };
+    let Some(d) = crate::scene::similarity_dimension(&p.to_transforms()) else {
+        return 0.0;
+    };
+    let excess = (d - budget).max(0.0);
+    DIMENSION_WEIGHT * excess * excess
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {

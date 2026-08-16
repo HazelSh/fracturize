@@ -377,11 +377,15 @@ pub fn run(opts: &Options) -> Result<(), String> {
             .map_err(|e| format!("Failed to write {}: {}", path, e))?;
 
         println!(
-            "seed {:>3}: loss {:.5} (best random start {:.5}, {:.0}× better)  -> {}",
+            "seed {:>3}: loss {:.4} (from {:.4}, {:.0}× better)  dimension {}  -> {}",
             opts.solve.seed.wrapping_add(i as u64),
             outcome.loss,
             outcome.initial_loss,
             outcome.initial_loss / outcome.loss.max(1e-9),
+            match outcome.dimension {
+                Some(d) => format!("{d:.2}"),
+                None => "--".to_string(),
+            },
             path,
         );
         let shown = normalize_walk(raw);
