@@ -84,11 +84,21 @@ pub const MAX_SUPERSAMPLE: u32 = 16;
 
 /// Filter half-width in *output* pixels.
 ///
-/// The floor is 0.5 and not lower: below half an output pixel the kernel cannot
-/// reach every source texel of the block, so some samples would be dropped
-/// outright — supersampling that throws away three quarters of what it computed.
-/// At exactly 0.5 the box kernel is the N x N block average.
-pub const MIN_FILTER_RADIUS: f32 = 0.5;
+/// 0.5 is the *reconstruction* floor: at exactly 0.5 the box kernel is the
+/// N x N block average, and every source texel of the block is inside the
+/// support. Below it the kernel reaches only the texels nearest the pixel
+/// centre and the rest of the block is discarded — supersampling that throws
+/// away most of what it computed.
+///
+/// That is a real cost and it is also, sometimes, the point: a sub-0.5 radius
+/// is a *sharpening* control, a crop of each block rather than an average of
+/// it, which keeps the finest detail an N x render resolves at the price of
+/// aliasing it. So the floor is 0.1 and the 0.5 line is documented rather than
+/// enforced. What is enforced is that a pixel always gets a value: below
+/// 0.5/N the support can fall between the texel centres entirely, and
+/// `downsample.wgsl` point-samples the nearest texel instead of returning
+/// black.
+pub const MIN_FILTER_RADIUS: f32 = 0.1;
 /// Past this the blur is doing more than reconstruction and the tap count grows
 /// as its square.
 pub const MAX_FILTER_RADIUS: f32 = 2.0;
@@ -315,11 +325,13 @@ mod tests {
         }
     }
 
-    /// The floor exists so the kernel always reaches every source texel of the
-    /// block; below it, supersampling would discard most of what it computed.
+    /// 0.5 is where the kernel covers the whole block, so it is the *default*
+    /// — the floor is lower on purpose (see `MIN_FILTER_RADIUS`), because a
+    /// deliberately undersized kernel is a sharpening control.
     #[test]
-    fn the_filter_radius_floor_covers_the_whole_block() {
-        assert!(MIN_FILTER_RADIUS >= 0.5);
+    fn the_default_filter_radius_covers_the_whole_block() {
+        assert_eq!(DEFAULT_FILTER_RADIUS, 0.5);
+        assert!(MIN_FILTER_RADIUS > 0.0);
         assert!(DEFAULT_FILTER_RADIUS >= MIN_FILTER_RADIUS);
         assert!(DEFAULT_FILTER_RADIUS <= MAX_FILTER_RADIUS);
     }

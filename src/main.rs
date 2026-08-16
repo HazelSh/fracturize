@@ -670,10 +670,14 @@ struct Args {
     #[arg(long, value_enum, value_name = "KERNEL", hide_possible_values = true, help_heading = "Offline render")]
     filter: Option<crate::gpu::Filter>,
 
-    /// Filter half-width in output pixels, 0.5-2.0 [0.5]
+    /// Filter half-width in output pixels, 0.1-2.0 [0.5]
     ///
     /// At 0.5 with --filter box this is exactly an N x N block average. The
     /// tap radius in accumulation pixels is this times --supersample.
+    ///
+    /// Above 0.5 trades detail for smoothness; below it the kernel reads only
+    /// part of each block, which sharpens at the price of aliasing — a crop of
+    /// the block rather than an average of it.
     #[arg(long, value_name = "PX", help_heading = "Offline render")]
     filter_radius: Option<f32>,
 

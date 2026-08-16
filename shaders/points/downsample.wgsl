@@ -159,11 +159,20 @@ fn fs_downsample(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     if wsum == 0.0 {
-        // Cannot happen for any kernel offered here — every one is non-zero at
-        // t = 0 and the centre tap is always inside the support — but a
-        // divide by zero would be a NaN in the output file rather than a
-        // visible mistake, so it is guarded rather than assumed.
-        return vec4<f32>(0.0);
+        // A support narrower than half a source texel can fall *between* the
+        // texel centres and catch nothing — the pixel centre sits on a texel
+        // boundary whenever N is even, so at N = 2 anything under r = 0.25
+        // does this everywhere. That is reachable: the radius floor is 0.1,
+        // because an undersized kernel is a sharpening control (see
+        // `MIN_FILTER_RADIUS`). The limit of a shrinking kernel is a point
+        // sample, so take one rather than returning black — which would
+        // otherwise be a whole empty image, and read as a broken render.
+        let p = clamp(vec2<i32>(centre), vec2<i32>(0), dims - vec2<i32>(1));
+        var v = textureLoad(src, p, 0);
+        if straight {
+            return v;
+        }
+        return max(v, vec4<f32>(0.0));
     }
     var out = acc / wsum;
 

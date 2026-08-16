@@ -903,7 +903,9 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
                 if ss > 1 {
                     "Filter half-width in output pixels. At 0.5 with the box kernel this is \
                      exactly an N x N block average; wider trades detail for smoothness \
-                     uniformly across the whole picture."
+                     uniformly across the whole picture. Below 0.5 the kernel reads only \
+                     the middle of each block — sharper, and aliased, down to a point \
+                     sample."
                 } else {
                     "Needs supersampling above 1x — there is nothing to filter down at 1x."
                 },
