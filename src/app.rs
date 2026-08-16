@@ -54,7 +54,25 @@ pub struct JobHandle {
     /// which is worse than no countdown at all.
     paused_at: Option<Instant>,
     paused_total: Duration,
+    /// The countdown actually shown, and the working-time it was last moved at.
+    ///
+    /// Not the raw extrapolation: that is `working / f - working` off an
+    /// `overall()` which only moves when a frame, lap or tile reports, so it
+    /// sawtooths — creeping up between reports and dropping at each one, by
+    /// tens of seconds on a job whose reports are seconds apart. A countdown
+    /// that visibly jitters is one you can't read a number off. See
+    /// [`tick_estimate`](Self::tick_estimate).
+    eta: Option<f32>,
+    eta_at: f32,
 }
+
+/// Time constant of the ETA filter, in seconds of working time: how long the
+/// shown countdown takes to slew most of the way to a changed estimate.
+///
+/// Long enough to absorb the report-to-report sawtooth, short enough that a
+/// job which genuinely slows down (a tile grid hitting the small tiles at the
+/// edge) says so within a few seconds rather than a minute.
+const ETA_TAU: f32 = 6.0;
 
 impl JobHandle {
     pub fn paused(&self) -> bool {
@@ -109,19 +127,59 @@ impl JobHandle {
         self.ledger.fraction(self.phase, self.fraction())
     }
 
-    /// Seconds remaining, extrapolated from observed progress. `None` until
-    /// there is enough progress for the extrapolation to mean anything —
-    /// a countdown from one sample is a random number.
+    /// Seconds remaining, extrapolated from observed progress and filtered.
+    /// `None` until there is enough progress for the extrapolation to mean
+    /// anything — a countdown from one sample is a random number.
     ///
     /// Extrapolates from the *overall* fraction, so the estimate does not lurch
     /// at every phase boundary the way a within-phase one does.
     pub fn remaining_secs(&self) -> Option<f32> {
+        self.eta
+    }
+
+    /// The unfiltered extrapolation [`tick_estimate`](Self::tick_estimate)
+    /// steers towards. Split out so the filter can be tested against it.
+    fn raw_remaining_secs(&self) -> Option<f32> {
         let f = self.overall();
         if f < 0.05 {
             return None;
         }
         let working = self.working_elapsed();
         Some((working / f - working).max(0.0))
+    }
+
+    /// Move the shown countdown. Called once per frame, from `poll_job`.
+    ///
+    /// Two things happen here, and they are the two things a countdown has to
+    /// do. It **counts down in real time**: between progress reports the number
+    /// falls by the seconds that actually passed, because that is what those
+    /// seconds mean. And it **slews** towards the current extrapolation with a
+    /// time constant rather than snapping to it, so a report that revises the
+    /// estimate by a minute arrives as a few seconds of drift instead of a
+    /// jump. Filtering the *rate* instead would be the textbook answer and is
+    /// worse here: the rate can read zero across a long silent phase, and
+    /// `1 / 0` is a countdown to the heat death of the universe.
+    ///
+    /// Paused time is excluded, same as everywhere else on this handle: the
+    /// countdown holds while paused instead of running out.
+    pub fn tick_estimate(&mut self) {
+        if self.paused() {
+            return;
+        }
+        let working = self.working_elapsed();
+        let dt = (working - self.eta_at).max(0.0);
+        self.eta_at = working;
+        let Some(raw) = self.raw_remaining_secs() else {
+            return;
+        };
+        self.eta = Some(match self.eta {
+            None => raw,
+            Some(shown) => {
+                let counted_down = (shown - dt).max(0.0);
+                let alpha = 1.0 - (-dt / ETA_TAU).exp();
+                counted_down + alpha * (raw - counted_down)
+            }
+        });
     }
 }
 
@@ -3241,6 +3299,8 @@ impl App {
             cancel_arm: Default::default(),
             paused_at: None,
             paused_total: Duration::ZERO,
+            eta: None,
+            eta_at: 0.0,
         };
 
         let out = params.out_path.clone();
@@ -3367,6 +3427,9 @@ impl App {
     fn poll_job(&mut self) {
         use crate::render_job::{JobEvent, Outcome, CANCELLED};
         let Some(job) = &mut self.job else { return };
+        // Before draining, not after: the countdown is a filter over time, and
+        // it wants the estimate as it stood over the frame that just passed.
+        job.tick_estimate();
         let mut finished = None;
         loop {
             let event = match job.events.try_recv() {

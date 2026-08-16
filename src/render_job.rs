@@ -759,6 +759,19 @@ pub fn format_estimate(low_secs: f32, high_secs: f32) -> String {
     format!("{} – {}", format_duration(low_secs), format_duration(high_secs))
 }
 
+/// [`format_duration`] in a fixed seven-character cell, right-aligned.
+///
+/// Seven is exact rather than generous: the widest string any branch below can
+/// produce under a day is `"59m 59s"` or `"23h 59m"`, both seven. It is the
+/// width a *running* readout needs — an elapsed time crosses `9s -> 10s`,
+/// `59s -> 1m 00s` and `59m 59s -> 1h 00m` while you watch, and each of those
+/// changes the string's length, so an unpadded countdown shuffles itself and
+/// everything after it sideways once a minute. Only useful in a monospace
+/// cell; see `ui::num::small_cell`.
+pub fn format_duration_cell(secs: f32) -> String {
+    format!("{:>7}", format_duration(secs))
+}
+
 pub fn format_duration(secs: f32) -> String {
     let s = secs.max(0.0).round() as u64;
     match s {
@@ -845,6 +858,19 @@ pub fn estimate_secs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The countdown's width is what holds the readout still, so the claim
+    /// that seven characters covers every branch is asserted rather than
+    /// believed — across the two length changes an elapsed time makes while
+    /// you watch it (`59s -> 1m 00s`, `59m 59s -> 1h 00m`).
+    #[test]
+    fn a_duration_cell_is_seven_characters_wide() {
+        for secs in [0.0, 9.0, 10.0, 59.0, 60.0, 599.0, 3599.0, 3600.0, 86_399.0] {
+            let cell = format_duration_cell(secs);
+            assert_eq!(cell.chars().count(), 7, "{} -> {:?}", secs, cell);
+            assert_eq!(cell.trim(), format_duration(secs));
+        }
+    }
 
     /// The reference GTX 1080's binding limit, so the estimator's fixtures are
     /// priced on the machine they were measured on.

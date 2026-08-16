@@ -14,11 +14,19 @@ use std::time::Instant;
 
 use crate::app::App;
 use crate::render_job::{
-    format_duration, format_estimate, human_bytes, JobKind, JobParams, Outcome, Samples,
+    format_duration, format_duration_cell, format_estimate, human_bytes, JobKind, JobParams,
+    Outcome, Samples,
 };
 
 use super::hints::hinted;
 use super::icons;
+use super::num;
+
+/// Character budget for the elapsed/remaining readout: two seven-character
+/// duration cells plus `" elapsed · about "` and `" left"`. Sized to the
+/// longer of the two forms so the countdown appearing at 5% doesn't resize
+/// the line it lands in.
+const ELAPSED_CHARS: usize = 36;
 
 /// The app's established "this is healthy/good" green — the p99 sparkline in
 /// `ui::status_bar` uses the same value for a frametime under budget. Reused
@@ -1393,15 +1401,21 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // is in ends up with a degenerate rect that never gets drawn.
     progress_row(ui, "Progress", BarState::Active(Some(overall)), false);
 
-    ui.label(
-        egui::RichText::new(match remaining {
-            // Only shown once progress can support it; never counts upward,
-            // because a rising countdown is worse than no countdown.
-            Some(r) => format!("{} elapsed · about {} left", format_duration(elapsed), format_duration(r)),
-            None => format!("{} elapsed", format_duration(elapsed)),
-        })
-        .small(),
-    );
+    // Both durations in fixed-width cells, and the whole line in one: this is
+    // the readout that ticks every frame for an hour, so every length change
+    // in it is a shuffle you watch. `JobHandle::tick_estimate` handles the
+    // other half — the countdown's *value* jittering rather than its width.
+    let line = match remaining {
+        // "about", because it is: the countdown is only shown once progress
+        // can support it, and it is filtered, not exact.
+        Some(r) => format!(
+            "{} elapsed · about {} left",
+            format_duration_cell(elapsed),
+            format_duration_cell(r)
+        ),
+        None => format!("{} elapsed", format_duration_cell(elapsed)),
+    };
+    num::small_cell(ui, &line, ELAPSED_CHARS);
 
     ui.separator();
     egui::ScrollArea::vertical()
