@@ -89,6 +89,12 @@ pub fn text_cell(ui: &mut egui::Ui, s: &str, width: usize) -> egui::Response {
     cell_label(ui, egui::RichText::new(s).monospace(), width, &egui::TextStyle::Monospace)
 }
 
+/// [`text_cell`] keeping the caller's own styling — for a readout that goes
+/// weak to say it has stopped tracking the control it sits beside.
+pub fn text_cell_rich(ui: &mut egui::Ui, text: egui::RichText, width: usize) -> egui::Response {
+    cell_label(ui, text.monospace(), width, &egui::TextStyle::Monospace)
+}
+
 /// [`text_cell`] at the `Small` text style, for the weak sub-readouts that sit
 /// under a control rather than in a bar.
 pub fn small_cell(ui: &mut egui::Ui, s: &str, width: usize) -> egui::Response {

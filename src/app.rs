@@ -5136,6 +5136,39 @@ impl App {
         self.rendered_point_size() * screen_height / self.camera.distance <= 1.5
     }
 
+    /// **How big a dot actually lands on screen, in pixels, at the focus** —
+    /// and whether asking for a different size would change that.
+    ///
+    /// The size control is in world units, so the same number means wildly
+    /// different things from scene to scene: `jspace` is framed at distance
+    /// 3.0 and `sierpinski-infinity` at 0.0186, a factor of 160, and a size
+    /// that is coarse grain on one is invisible on the other. This is that
+    /// number in the unit the person is actually looking at.
+    ///
+    /// **At the focus**, because perspective means there is no single answer:
+    /// a dot at the front of the attractor covers more screen than the same
+    /// dot at the back. The focus is the one depth the framing is *about*.
+    ///
+    /// The second return is "this is saturated": below 1.5px the renderer
+    /// swaps to native 1px primitives and above `MAX_POINT_PIXELS` the shader
+    /// clamps, and in both regimes dragging the control changes nothing you
+    /// can see. That is worth saying — it is the whole reason a size of 1e-5
+    /// and one of 1e-6 render byte-identical on a zoom scene.
+    pub fn point_pixels_at_focus(&self, screen_height: f32) -> (f32, bool) {
+        if self.use_point_primitives(screen_height) {
+            return (1.0, true);
+        }
+        let raw = self.rendered_point_size() * screen_height / self.camera.distance.max(1e-9);
+        let max = crate::gpu::buffers::MAX_POINT_PIXELS;
+        (raw.min(max), raw > max)
+    }
+
+    /// Viewport height in physical pixels — what a projected size is measured
+    /// against, and the panel has no other way to ask.
+    pub fn viewport_height(&self) -> f32 {
+        self.gpu.size().1 as f32
+    }
+
     // === Drawing fewer points than we have, when they'd land on top of
     //     each other ===
 

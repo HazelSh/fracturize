@@ -550,6 +550,26 @@ slight delay on the pointcount ramp-up after editing?
   - still open, the same defect at the other end: [ / ] clamp at 0.1 while the slider stops
     at 0.02, so a size set by keyboard above 0.02 parks the handle at the far right reading
     a number it isn't. Left alone -- a too-big point size is self-evident on screen.
+ -- [DONE, your ask] projected-size readout under the slider: "= 4.6 px", what the world-space
+    number actually comes to on screen. Measured **at the camera focus**, per your call --
+    perspective means a dot at the front of the attractor covers more screen than the same
+    dot at the back, and the focus is the one depth the framing is about.
+  - uses the shader's own convention (point_size * screen_height / depth, render.wgsl:123),
+    not the true perspective factor, because the readout has to agree with what you're
+    looking at. Worth knowing they differ by 1/(2 tan(fov/2)) = 1.207 at our 45 degree vFoV:
+    a "world-space" point is drawn 17% smaller than that world extent would project to.
+    Constant factor, so it's only ever mattered as a naming quibble -- flagging it because
+    the readout is the first thing that puts the two side by side.
+  - goes **weak** when the number has stopped tracking the slider: under 1.5px the renderer
+    swaps to native 1px primitives, over 12px the shader clamps, and in both regimes dragging
+    changes nothing you can see. That is the thing you hit -- 1e-5 and 1e-6 on
+    sierpinski-infinity render byte-identical (measured: mean abs difference 0.0).
+  - what it shows now: sierpinski-infinity as loaded = 4.6 px, and jspace as loaded = a weak
+    1.0 px -- already floored at its own framing, which is why its whole size range looked
+    identical in the cross-scene sweep. Same number, 160x different framing.
+  - sits on its own line under the slider (num.rs's "weak sub-readout under a control"
+    convention). Say the word if you'd rather it went inline on the slider row -- it's tight
+    at panel width, which is why it isn't there already.
  -- on-load, which you asked about: nothing to fix, and here's why for each path.
   - scene load: camera is set *from* the scene, so the reference is the framing being loaded
     and the factor is exactly 1. Consistent by construction, both for open-a-file and for

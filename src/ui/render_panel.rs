@@ -10,6 +10,12 @@
 use crate::app::{App, RenderMode};
 
 use super::hints::hinted;
+use super::num;
+
+/// Character budget for the projected-size readout beside the point-size
+/// slider: `"≈999.9 px"` is the widest it gets, since the shader clamps a
+/// drawn point at `MAX_POINT_PIXELS`.
+const PX_READOUT_CHARS: usize = 9;
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     let mut open = app.ui_state.panels.render_open;
@@ -289,15 +295,33 @@ fn draw_point_size(ui: &mut egui::Ui, app: &mut App) {
             .logarithmic(true)
             .text("point size"),
     );
+    let (px, saturated) = app.point_pixels_at_focus(app.viewport_height());
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "World-space point size — smaller is finer and dustier ([ / ])",
+        format!(
+            "World-space point size — smaller is finer and dustier ([ / ]).\n\n\
+             The readout beside it is what that comes to in pixels, measured at the \
+             focus: the same world size is coarse grain on a scene framed at 0.02 and \
+             invisible on one framed at 3.0.{}",
+            if saturated {
+                " Right now it is pinned — the renderer draws 1px points below 1.5px \
+                 and clamps above 12px, so moving the slider won't change what you see. \
+                 Point count is the dial that still does."
+            } else {
+                ""
+            }
+        ),
         "drag: adjust point size",
     );
     if resp.changed() {
         app.set_point_size(size);
     }
+    // Weak when it's pinned: the number has stopped tracking the slider, and a
+    // readout that silently disagrees with the control above it is worse than
+    // no readout. Fixed-width cell so it can't shove the row as it changes.
+    let text = egui::RichText::new(format!("≈{:>4} px", num::fixed(px, 1)));
+    num::text_cell_rich(ui, if saturated { text.weak() } else { text }, PX_READOUT_CHARS);
     // Point count used to follow straight on from point size — two sliders that
     // read as a pair and aren't one. It's a *preference*, so it sits under the
     // Preference heading at the foot of the panel now.
