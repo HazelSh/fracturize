@@ -2959,6 +2959,53 @@ way for agents to render specific framings without keyboard interaction.
   second with `RUST_LOG=info` and shown in the window title/HUD.
 - Running the app without `--screenshot` blocks until closed - use timeouts.
 
+### Driving the running app: use a nested X server, always
+
+`--screenshot` covers the point cloud, and view files cover framing. When you
+genuinely need the *live* app — anything about input handling, or anything
+whose symptom only exists while the camera is moving — drive it inside
+**Xephyr**, on a display of its own, and never on `:0`.
+
+This is not tidiness. XTest events do not go to the process you have in mind;
+they go to whatever the pointer is over and whatever holds focus. Synthetic
+scroll aimed at this app has landed in Hazel's other windows and scrolled them.
+There is no targeting flag that fixes that — the isolation is the fix.
+
+```python
+xe = subprocess.Popen(['Xephyr', ':79', '-screen', '1800x1000', '-ac', '-noreset'])
+env = dict(os.environ, DISPLAY=':79')
+app = subprocess.Popen(['./target/release/fracturize', '--scene', scene], env=env)
+d = display.Display(':79')                      # python-xlib; there is no xdotool
+```
+
+Four things that will each cost you a run:
+
+- **Capture the Xephyr *root*, not the app's window.** `get_image` on the app's
+  own window returns blank — it is a GL surface and its contents are not in the
+  X server. Find the window for its geometry, then read those coordinates out
+  of the root.
+- **Make the Xephyr screen bigger than the window.** The app opens larger than
+  you expect; a read that runs past the root's edge fails with `BadMatch`, not
+  with a short read. Clamp the request to the root geometry as well.
+- **Give it time to come up.** The point buffer fills over several seconds and
+  a capture taken early is of a half-built picture, which reads exactly like
+  the artifact you are hunting.
+- **To hold the camera still, load a view with `-v`, not a keystroke.** Applying
+  a view pauses the orbit as a documented side effect. Toggling camera motion
+  with `o` depends on focus having landed where you assumed, and when it
+  silently doesn't you get a moving camera that you believe is stationary.
+
+That last one is worth stating as a rule of its own, because it produced a
+confident wrong answer during the zoom investigation: **frame-to-frame
+differencing measures flicker only if the camera is provably stationary.**
+Verify the camera is still *before* attributing anything to the renderer —
+compare a frame against one many frames later, and check the ratio to the
+adjacent-frame difference. A scene that is merely moving shows a large lag-1
+difference and a much larger lag-N one; a scene that is genuinely resampling
+every frame shows the two nearly equal. Reporting the first as the second wastes
+a bisect. Pinned properly, an ordinary scene sits at ~0.00% frame-to-frame and
+a zoom scene at ~0.16%.
+
 ## Coding Conventions
 
 - Keep it simple - avoid over-abstraction
