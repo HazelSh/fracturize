@@ -278,19 +278,25 @@ struct Args {
     #[arg(long, value_name = "0-1", default_value_t = fit::loss::DEFAULT_GRID_SHARE, help_heading = "Likeness")]
     fit_structure: f32,
 
-    /// Push the fit below this similarity dimension [no limit]
+    /// Push the fit below this similarity dimension, or `off` [1.6]
     ///
     /// The dial that asks for fractal character directly instead of hoping it
-    /// falls out. Every improvement to the loss makes the pictures smoother,
-    /// because the reference is a photograph, its density is smooth, and the
-    /// smoothest reachable attractor scores best — lace and holes are things
-    /// the objective actively penalises.
+    /// falls out of a small map budget. Left alone the loss makes pictures
+    /// smoother, not more fractal: the reference is a photograph, its density
+    /// is smooth, and the smoothest reachable attractor scores best, so lace
+    /// and holes are things the objective actively penalises. Unconstrained
+    /// fits land around d = 2.0-2.4, which --info calls overfull — a solid.
     ///
     /// A solid silhouette wants d near 2. Ask for 1.6 and the same shape has
     /// to be built out of less material: dust, holes, filigree. One-sided, so
     /// a fit already sparser than this is left alone.
-    #[arg(long, value_name = "D", help_heading = "Likeness")]
-    fit_dimension: Option<f32>,
+    ///
+    /// On by default because across five cards it was a clear improvement on
+    /// three and a wash on the other two, never a loss. It does cost fidelity
+    /// — roughly a quarter of the loss on cards with a small subject in a big
+    /// frame — which is the trade the whole feature exists to make.
+    #[arg(long, value_name = "D|off", default_value = "1.6", help_heading = "Likeness")]
+    fit_dimension: String,
 
     /// Annealing steps per seed [4000]
     #[arg(long, value_name = "N", default_value_t = 4000, help_heading = "Likeness")]
@@ -2203,7 +2209,19 @@ fn main() {
                 points: args.fit_points,
                 seed: args.seed.unwrap_or(0),
                 depth: args.fit_depth.clamp(0.0, 1.0),
-                dimension: args.fit_dimension,
+                dimension: match args.fit_dimension.trim().to_ascii_lowercase().as_str() {
+                    "off" | "none" => None,
+                    spec => match spec.parse::<f32>() {
+                        Ok(d) if d > 0.0 => Some(d),
+                        _ => {
+                            eprintln!(
+                                "--fit-dimension wants a positive number or `off`, not '{}'",
+                                spec
+                            );
+                            std::process::exit(1);
+                        }
+                    },
+                },
                 axis_mode: match args.fit_axis.trim().to_ascii_lowercase().as_str() {
                     "plane" => fit::solve::AxisMode::InPlane,
                     "view" | "z" => fit::solve::AxisMode::Fixed(glam::Vec3::Z),
