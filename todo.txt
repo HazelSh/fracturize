@@ -517,6 +517,48 @@ slight delay on the pointcount ramp-up after editing?
 ---- ui issue: eye/disable does full-on 'remove this transform from the scene'
  -- would like 'this transform contributes no pixels' which Apophysis does, but what does it mean in the chaosgame?
 
+---- [DONE] saving reset the rendered point size (your report: the GUI *value* held still,
+     the drawn points jumped)
+ -- cause: under an infinite zoom, point_size means a size *at the scene's own framing* --
+    rendered_point_size scales it by eye/scene_reference_eye. Ctrl+S calls set_camera, which
+    re-authors that framing to wherever you are now, so the reference moved and the size
+    didn't move with it. Saving at the deep end of a band halved the reference and doubled
+    every dot. Reproduced on sierpinski-infinity: zoom in 14 notches, Ctrl+S, dots 2x.
+ -- fix: sync_scene_for_save reads the drawn size *before* set_camera and writes that, to the
+    scene and to the live value both. The number in the panel does change now -- it has to,
+    it's relative to a framing you just moved -- but the picture doesn't, which is the half
+    that matters. Verified live with the camera stopped: identical dots before/after, with a
+    control frame in between to show what mere chaos-fizz looks like.
+ -- two latent bugs underneath it, both of which the fix would have hit constantly:
+  - scene.rs's tidy() rounds to four decimal places, so anything under 5e-5 was written as
+    0.0 -- a save deep in a band reloaded with no points at all. point_size now serialises to
+    six significant figures (tidy_sig). Pre-existing: a hand-edited point_size = 0.00003 was
+    already destroyed by the next save.
+  - approx(), which decides whether to rewrite a key, used a flat 5e-5 -- larger than the
+    entire value at those sizes, so every distinct small point size compared equal and the
+    save silently kept the old one. It scales with magnitude now, floored at a thousandth.
+ -- the slider floor was 0.0001 and is now the value itself when a scene sits under it
+    (MIN_POINT_SIZE = 1e-6 for the setters). A save at the deep end multiplies the size by
+    the zoom's own scale, so a scene authored at the old floor legitimately lands below it,
+    and clamping there would have put the jump straight back one period down.
+ -- on-load, which you asked about: nothing to fix, and here's why for each path.
+  - scene load: camera is set *from* the scene, so the reference is the framing being loaded
+    and the factor is exactly 1. Consistent by construction, both for open-a-file and for
+    random/blank.
+  - offline (--render): offline.rs's base_setup already refers the size to the scene's
+    authored framing the same way, so a scene saved mid-zoom now renders offline exactly as
+    it looked on screen. That was *not* true before this fix.
+  - RESIDUAL, your call: a saved *view* stores the authored point_size, and its reference is
+    the scene's framing at load time. That's right as long as the scene's framing hasn't
+    moved since -- but Ctrl+S mid-zoom is exactly a thing that moves it, so views taken
+    before such a save will draw at a different size after it. Fixing it means either
+    storing the framing-relative size in the view file (format change) or not re-anchoring
+    on save at all, which is the bigger question below.
+ -- BIGGER QUESTION, deliberately not answered: should Ctrl+S bake a *wrapped* framing into a
+    zoom scene at all? scene.camera_distance is also the renorm band, so saving mid-zoom
+    re-anchors the band, the edge guard and the octave count too -- the point size was just
+    the visible half. Compare a48b1c2, "stop baking the framing into them".
+
 ---- render job testing notes
 
 -- [DONE] would like kernel-size on the filter to go under 0.5, probably down to 0.1 or so.

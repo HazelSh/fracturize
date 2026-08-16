@@ -1742,7 +1742,7 @@ impl Scene {
             meta: SceneMeta {
                 name: self.name.clone(),
                 author: Some(self.author.clone()),
-                point_size: tidy(self.point_size),
+                point_size: tidy_sig(self.point_size),
                 points_per_frame: self.points_per_frame,
                 decay: tidy(self.decay),
                 color_speed: tidy(self.color_speed),
@@ -1900,6 +1900,25 @@ fn tidy(v: f32) -> f64 {
     (v as f64 * 10_000.0).round() / 10_000.0 + 0.0
 }
 
+/// [`tidy`] for a value whose useful range spans orders of magnitude, where
+/// four decimal places is not a precision but a floor.
+///
+/// `point_size` is the one: it runs from 1e-6 to 1e-1 (see
+/// `crate::app::MIN_POINT_SIZE`), so `tidy` gave the bottom of that range a
+/// single significant figure and rounded anything under 5e-5 to **zero** — a
+/// scene saved deep in a zoom band came back with no points at all. Six
+/// significant figures is finer than an f32 carries either way, and leaves
+/// every value an existing scene file holds byte-identical.
+fn tidy_sig(v: f32) -> f64 {
+    let v = v as f64;
+    if v == 0.0 || !v.is_finite() {
+        return 0.0;
+    }
+    let places = 5 - v.abs().log10().floor() as i32;
+    let scale = 10f64.powi(places);
+    (v * scale).round() / scale + 0.0
+}
+
 /// A rotation vector, rounded for the file. Finer than [`tidy`]: this is the
 /// exact form, used precisely where the readable one won't do, so rounding it
 /// to four places would defeat the purpose.
@@ -1998,8 +2017,17 @@ fn path_keys_to_defs(p: &CameraPath) -> Vec<PathKeyDef> {
 
 // === Comment-preserving merge helpers ===
 
+/// Do these two write the same value, as far as this file cares?
+///
+/// The tolerance scales with the magnitude, floored at a thousandth. A flat
+/// 5e-5 was right while every value here sat near 1 and was rounded to four
+/// places — but `point_size` now runs down to 1e-6 (see [`tidy_sig`]), and a
+/// flat tolerance there declares every distinct point size equal to every
+/// other, so `set_f64` would leave the old one in the file and the save would
+/// silently do nothing.
 fn approx(a: f64, b: f64) -> bool {
-    (a - b).abs() < 5e-5
+    let scale = a.abs().max(b.abs()).clamp(1e-3, 1.0);
+    (a - b).abs() < 5e-5 * scale
 }
 
 fn value_as_f64(v: &toml_edit::Value) -> Option<f64> {
@@ -2427,6 +2455,50 @@ fn inline_variation_tables(content: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A point size has to survive the file across its whole range, which now
+    /// runs from 1e-6 up (see `crate::app::MIN_POINT_SIZE`). Round-tripped
+    /// through a *real* scene file, because the write path that matters is the
+    /// merge into an existing document, not the fresh serialization.
+    ///
+    /// The regression this pins: `tidy`'s four decimal places rounded anything
+    /// under 5e-5 to zero, so a scene saved deep in a zoom band reloaded with
+    /// no points at all.
+    #[test]
+    fn a_point_size_survives_the_file_at_every_size() {
+        let dir = std::env::temp_dir().join("fracturize_point_size_roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "scenes/sierpinski-infinity.toml";
+        if !std::path::Path::new(src).exists() {
+            return;
+        }
+        for v in [1e-6f32, 3.25e-5, 1e-4, 1.5e-3, 2e-3, 1.2e-2] {
+            let p = dir.join(format!("{}.toml", v));
+            std::fs::copy(src, &p).unwrap();
+            let mut scene = super::Scene::load(&p).unwrap();
+            scene.point_size = v;
+            scene.save(&p).unwrap();
+            let back = super::Scene::load(&p).unwrap();
+            assert!(
+                (back.point_size - v).abs() <= v * 1e-4,
+                "{} came back as {}",
+                v,
+                back.point_size
+            );
+        }
+    }
+
+    /// Six significant figures, and never zero for a value that isn't.
+    #[test]
+    fn tidy_sig_keeps_the_small_end() {
+        assert_eq!(super::tidy_sig(0.0), 0.0);
+        assert_eq!(super::tidy_sig(1e-6), 1e-6);
+        assert_eq!(super::tidy_sig(0.0015), 0.0015);
+        assert_eq!(super::tidy_sig(0.012), 0.012);
+        // The old rounding's failure, stated as the thing it must not do.
+        assert!(super::tidy_sig(3.25e-5) > 0.0);
+        assert!((super::tidy_sig(3.25e-5) - 3.25e-5).abs() < 1e-10);
+    }
+
 
     // === rotation round-trips =============================================
 

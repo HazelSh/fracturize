@@ -34,6 +34,18 @@ pub fn unix_timestamp() -> u64 {
 /// database, this app has no date dependency, and guessing wrong would put a
 /// confidently incorrect hour on the label. The date and the ordering are
 /// what the label is for.
+/// Floor on the point size the controls will set.
+///
+/// It was 0.0001, which was also the point-size slider's lower bound and was
+/// fine while the number meant one thing. Under an infinite zoom it means a
+/// size *at the scene's own framing*, and saving re-expresses it against the
+/// framing being written (see `sync_scene_for_save`) — a save at the deep end
+/// of a band multiplies it by the zoom's scale, so a scene authored at the old
+/// floor legitimately ends up below it. A floor a real scene sits under is a
+/// control that lies about its own value, and clamping to it would put back
+/// exactly the jump that change removed.
+pub const MIN_POINT_SIZE: f32 = 1e-6;
+
 pub fn view_display_name(name: &str) -> String {
     let Some(secs) = name.parse::<i64>().ok().filter(|s| *s > 0) else {
         return name.to_string();
@@ -1954,8 +1966,26 @@ impl App {
     /// Fold the live values that live on `App` rather than on `Scene` back
     /// into the scene, so what gets written is what's on screen.
     fn sync_scene_for_save(&mut self) {
+        // **Read the drawn size before the framing moves.** Under an infinite
+        // zoom the authored `point_size` is a size *at the scene's own
+        // framing* — `rendered_point_size` scales it by how far the eye has
+        // travelled from there — and the next line makes that framing this
+        // one. Copying the authored number across would leave a scene that
+        // draws dots at a different size than the one you just saved: Ctrl+S
+        // deep in a band visibly doubled them, because the reference halved
+        // and the size didn't move with it.
+        //
+        // Without a zoom this is exactly `self.point_size` and the whole thing
+        // is a no-op, which is why it isn't guarded: `rendered_point_size`
+        // already knows when the question doesn't apply.
+        let drawn = self.rendered_point_size();
         self.scene.set_camera(&self.camera);
-        self.scene.point_size = self.point_size;
+        // Deliberately not through `set_point_size`: that clamps to the
+        // slider's range, and a save at the deep end of a band legitimately
+        // lands under it (the factor bottoms out at the zoom's own scale).
+        // Clamping here would put the jump back, one period further down.
+        self.point_size = drawn;
+        self.scene.point_size = drawn;
         self.scene.color_falloff = self.color_falloff;
         self.scene.color_contrast = self.color_contrast;
         self.scene.haze = self.haze_amount;
@@ -4532,7 +4562,7 @@ impl App {
     pub fn adjust_point_size(&mut self, increase: bool) {
         let before = self.edit_snapshot();
         let factor = if increase { 1.1 } else { 0.909 };
-        self.point_size = (self.point_size * factor).clamp(0.0001, 0.1);
+        self.point_size = (self.point_size * factor).clamp(MIN_POINT_SIZE, 0.1);
         log::info!("Point size: {:.5}", self.point_size);
         self.commit_edit("Point size", Some("point_size"), before);
     }
@@ -4617,7 +4647,7 @@ impl App {
 
     pub fn set_point_size(&mut self, size: f32) {
         let before = self.edit_snapshot();
-        self.point_size = size.clamp(0.0001, 0.1);
+        self.point_size = size.clamp(MIN_POINT_SIZE, 0.1);
         self.commit_edit("Point size", Some("point_size"), before);
     }
 
