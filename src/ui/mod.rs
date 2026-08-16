@@ -70,6 +70,15 @@ pub struct UiState {
     /// editor left open when the selection moves can be dropped rather than
     /// renaming whatever got selected next.
     pub editing_name: Option<(usize, String)>,
+    /// Camera window's saved-views list: the view being renamed inline (via
+    /// its right-click menu), as `(file it was opened on, buffer)`. The path
+    /// rather than an index, because the list re-sorts under the editor the
+    /// moment the rename lands.
+    pub renaming_view: Option<(std::path::PathBuf, String)>,
+    /// Why the last rename was refused, shown under the list until the next
+    /// attempt. There is no toast in this app, so a refusal has to be said
+    /// where it happened or it is said only to the log.
+    pub view_rename_error: Option<String>,
     /// Filter text for the Transforms rail. Session state, not a preference:
     /// it's a way of looking at *this* list right now.
     pub transform_filter: String,
@@ -135,6 +144,8 @@ impl UiState {
             renaming_transform: None,
             focus_name_field: false,
             editing_name: None,
+            renaming_view: None,
+            view_rename_error: None,
             transform_filter: String::new(),
             pending_ui_scale: None,
             transform_menu: None,

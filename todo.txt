@@ -479,13 +479,37 @@ slight delay on the pointcount ramp-up after editing?
 ---- should be able to put views onto a camera path, extract views from path points, etc.
  -- need CLI support to sample a camera path, do renders at selected points, etc
 
----- icons on the right-click menu
+---- [DONE] icons on the right-click menu
+ -- transform menu (both places it opens -- the rail row and a gizmo right-click, one shared
+    function): copy / eye / trash / pencil / magnifier-plus. also the palette editor's
+    "Delete stop", and the two detail-pane buttons that duplicate menu items (Rename,
+    Zoom about this), so the same action looks the same wherever you find it.
+ -- the eye is *crossed out* on the row that says "Disable", which is the opposite of the
+    rail's eye toggle next door. deliberate: an icon on a verb shows the action, an icon on
+    a thing shows its state, and icons.rs's convention already puts glyphs on actions.
+ -- two new codepoints, read off a rendered contact sheet rather than guessed:
+    pencil-simple E3B4, magnifying-glass-plus E310.
 
----- can't rename views
+---- [DONE] can't rename views
+ -- right-click a view in the Camera window -> Rename, edits in place like the transform
+    header does. Enter or click-away commits, Esc cancels, and a refusal (empty name, name
+    taken) says so under the list instead of only in the log.
+ -- the list shows the part *after* the scene slug now -- every row in that panel had the
+    same prefix, in a panel that belongs to that scene. full path still on hover.
+ -- and a never-renamed view reads as a date ("2025-08-16 14:08") rather than ten digits of
+    unix timestamp. UTC, since we have no date dependency and no tz database to be right
+    with; renaming one starts from an empty field, because a timestamp isn't a name.
+ -- sort is by mtime now, not reverse-lexical on the name. that only *was* newest-first
+    because the names were timestamps -- one rename and it would have sorted by first letter.
 
 ---- ui note: Color value for palette -- get value in-line with the "color value" label, drop slide in favor of slide on-palette instead. 
 
----- needs to reset camera-path timer on scene load, so scenes play from the start
+---- [DONE] needs to reset camera-path timer on scene load, so scenes play from the start
+ -- playhead rewinds to 0 on both ways a scene arrives (open a file, and random/blank, which
+    had the same defect). the zoom depth counters go with it -- on a zoom loop you were
+    landing at whatever depth the *previous* scene had reached.
+ -- playing-or-stopped is kept: that's a transport state you set, and a scene that stopped
+    the camera dead on load would be its own annoyance. only the position resets.
 
 ---- ui bug: at high zoom, gizmo camera-axis-rotate dashed-circle renders over the UI
  -- how can this bug be possible? 
@@ -495,7 +519,26 @@ slight delay on the pointcount ramp-up after editing?
 
 ---- render job testing notes
 
--- would like kernel-size on the filter to go under 0.5, probably down to 0.1 or so. 
+-- [DONE] would like kernel-size on the filter to go under 0.5, probably down to 0.1 or so.
+ - floor is 0.1 now, CLI and dialog. 0.5 stays the default and keeps its documented meaning
+   (the N x N block average, the kernel that reaches every source texel); below it you get a
+   crop of each block instead of an average -- sharper, and aliased.
+ - it needed a shader fix to be safe, not just a smaller number: under 0.5/N the support can
+   fall between texel centres and catch *nothing*, which at N=2 is anything under r=0.25 --
+   every pixel, whole image black. downsample.wgsl point-samples the nearest texel there
+   now, which is the limit of a shrinking kernel anyway.
+
+-- [DONE] time estimate for render jobs needs to be, like, constant textwidth, and also
+   smoothed per-frame
+ - width: both durations sit in a seven-character monospace cell (widest string under a day
+   is "59m 59s" / "23h 59m"), and the whole line in a 36-character one, so neither the
+   9s->10s nor the 59s->1m 00s rollover shuffles the row.
+ - smoothing: an IIR, but not on the rate. the countdown counts down in real time between
+   progress reports and slews toward the current extrapolation with a 6s time constant.
+   filtering the *rate* is the textbook answer and is wrong here -- the rate reads zero
+   across a long silent phase, and 1/0 is a countdown to the heat death of the universe.
+ - the sawtooth that fixes: overall() only moves when a frame/lap/tile reports, so the raw
+   working/f - working crept up between reports and dropped tens of seconds at each one.
 
 
 ---- naming 

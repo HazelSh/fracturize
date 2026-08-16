@@ -23,6 +23,45 @@ pub fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// A saved view's name as the Camera panel should show it.
+///
+/// Views are born called `<slug>-<unix timestamp>`, so until somebody renames
+/// one its name is ten digits — which says *when* and reads as nothing. A bare
+/// timestamp becomes `2026-08-16 14:08` (UTC); anything else is a name a
+/// person chose and is shown exactly as they wrote it.
+///
+/// UTC rather than local time, and deliberately: the offset rules are a
+/// database, this app has no date dependency, and guessing wrong would put a
+/// confidently incorrect hour on the label. The date and the ordering are
+/// what the label is for.
+pub fn view_display_name(name: &str) -> String {
+    let Some(secs) = name.parse::<i64>().ok().filter(|s| *s > 0) else {
+        return name.to_string();
+    };
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, rem / 3600, (rem % 3600) / 60)
+}
+
+/// Days since the Unix epoch to a civil (proleptic Gregorian) date.
+///
+/// Howard Hinnant's `civil_from_days`, the standard branch-free form — chosen
+/// over a leap-year loop because it is the version that is *known* correct,
+/// and over a date crate because one label does not earn a dependency.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// A running render job, as the dialog needs to see it: what was asked for,
 /// where it has got to, and the two switches that stop it.
 ///
@@ -1758,19 +1797,71 @@ impl App {
         let Ok(entries) = std::fs::read_dir("views") else {
             return Vec::new();
         };
-        let mut out: Vec<(String, std::path::PathBuf)> = entries
+        let mut out: Vec<(f64, String, std::path::PathBuf)> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "toml"))
             .filter_map(|p| {
                 let stem = p.file_stem()?.to_str()?.to_string();
-                stem.starts_with(&prefix).then_some((stem, p))
+                if !stem.starts_with(&prefix) {
+                    return None;
+                }
+                // The scene's own slug is on every name in this list, in a
+                // panel that belongs to that scene — so what's shown is the
+                // part that differs. The full path is a hover away.
+                let name = stem[prefix.len()..].to_string();
+                let age = std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0.0, |d| d.as_secs_f64());
+                Some((age, name, p))
             })
             .collect();
-        // Names end in a unix timestamp, so a reverse lexical sort is
-        // newest-first for as long as timestamps keep their digit count.
-        out.sort_by(|a, b| b.0.cmp(&a.0));
-        out
+        // Newest first, by the file's own mtime. This used to be a reverse
+        // lexical sort on the name, which was newest-first only because the
+        // names were unix timestamps — `rename_saved_view` means they aren't
+        // any more, and a renamed view would otherwise sort itself to wherever
+        // its first letter fell.
+        out.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        out.into_iter().map(|(_, name, p)| (name, p)).collect()
+    }
+
+    /// Give a saved view a name of its own. `name` is the part after the
+    /// scene's slug — what the Camera panel shows and edits.
+    ///
+    /// Returns an error string fit to show, and changes nothing when it does:
+    /// a rename that half-happens loses somebody's framing.
+    pub fn rename_saved_view(
+        &mut self,
+        path: &std::path::Path,
+        name: &str,
+    ) -> Result<(), String> {
+        // Same slug rule as `scene_slug`: this becomes a filename, and it has
+        // to keep the `<slug>-` prefix that `scan_saved_views` filters on or
+        // the view vanishes out of its own scene's list.
+        let clean: String = name
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        let clean = clean.trim_matches('-').to_string();
+        if clean.is_empty() {
+            return Err("a view needs a name".to_string());
+        }
+        let target =
+            std::path::PathBuf::from(format!("views/{}-{}.toml", self.scene_slug(), clean));
+        if target == path {
+            return Ok(());
+        }
+        if target.exists() {
+            return Err(format!("{} already exists", target.display()));
+        }
+        std::fs::rename(path, &target).map_err(|e| format!("{}: {}", path.display(), e))?;
+        log::info!("View renamed: {} -> {}", path.display(), target.display());
+        self.invalidate_saved_views();
+        Ok(())
     }
 
     /// Load one of `saved_views()` back onto the current scene.
@@ -5881,6 +5972,29 @@ fn grade_for_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The label a never-renamed view gets. Anchored on real timestamps
+    /// checked against `date -u`, including a leap day and a year boundary,
+    /// because the whole point of the branch-free civil-date form is that it
+    /// is right at the awkward dates rather than plausible at the easy ones.
+    #[test]
+    fn a_timestamped_view_reads_as_a_date() {
+        assert_eq!(view_display_name("0"), "0");
+        assert_eq!(view_display_name("1"), "1970-01-01 00:00");
+        assert_eq!(view_display_name("1755353324"), "2025-08-16 14:08");
+        // 2024-02-29, a leap day, and one second before 2025.
+        assert_eq!(view_display_name("1709208000"), "2024-02-29 12:00");
+        assert_eq!(view_display_name("1735689599"), "2024-12-31 23:59");
+    }
+
+    /// A name somebody typed is shown as they typed it — only a bare
+    /// timestamp is reinterpreted, and "hero-shot-2" is not one.
+    #[test]
+    fn a_chosen_view_name_is_left_alone() {
+        for name in ["hero-shot", "hero-shot-2", "", "12-34", "-1"] {
+            assert_eq!(view_display_name(name), name);
+        }
+    }
 
     const STILL: Duration = Duration::from_secs(5);
     const JUST_MOVED: Duration = Duration::from_millis(50);

@@ -224,24 +224,86 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
         return;
     }
 
+    // An editor left open on a view that is no longer in this list — the scene
+    // changed under it — belongs to nothing, so drop it.
+    if let Some((p, _)) = &app.ui_state.renaming_view {
+        if !views.iter().any(|(_, path)| path == p) {
+            app.ui_state.renaming_view = None;
+        }
+    }
+
     let mut load: Option<std::path::PathBuf> = None;
+    let mut rename: Option<(std::path::PathBuf, String)> = None;
     egui::ScrollArea::vertical()
         .id_salt("fracturize_saved_views")
         .max_height(110.0)
         .show(ui, |ui| {
             for (name, path) in &views {
-                let resp = ui.add(egui::Button::new(name.as_str()).frame(false));
+                if app.ui_state.renaming_view.as_ref().is_some_and(|(p, _)| p == path) {
+                    // Same in-place editor the Transforms pane header uses:
+                    // the name becomes a field where it is read, Enter or
+                    // click-away commits, Esc cancels.
+                    let resp = {
+                        let (_, buf) = app.ui_state.renaming_view.as_mut().unwrap();
+                        ui.add(
+                            egui::TextEdit::singleline(buf)
+                                .id(egui::Id::new(("fracturize_view_name", path)))
+                                .hint_text("name this view")
+                                .desired_width(f32::INFINITY),
+                        )
+                    };
+                    resp.request_focus();
+                    let enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                    let escape = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
+                    if escape {
+                        app.ui_state.renaming_view = None;
+                        app.ui_state.view_rename_error = None;
+                    } else if enter || resp.lost_focus() {
+                        if let Some((p, text)) = app.ui_state.renaming_view.take() {
+                            rename = Some((p, text));
+                        }
+                    }
+                    continue;
+                }
+
+                let shown = crate::app::view_display_name(name);
+                let resp = ui.add(egui::Button::new(shown.as_str()).frame(false));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
                     path.display().to_string(),
-                    "click: load this view",
+                    "click: load this view · right-click: rename",
                 );
+                resp.context_menu(|ui| {
+                    if ui.button((icons::PENCIL, "Rename")).clicked() {
+                        // A name that is still the birth timestamp is not a
+                        // name, so the field starts empty rather than
+                        // prefilled with ten digits to delete first.
+                        let seed = if name.parse::<u64>().is_ok() {
+                            String::new()
+                        } else {
+                            name.clone()
+                        };
+                        app.ui_state.renaming_view = Some((path.clone(), seed));
+                        app.ui_state.view_rename_error = None;
+                        ui.close();
+                    }
+                });
                 if resp.clicked() {
                     load = Some(path.clone());
                 }
             }
         });
+    if let Some((path, text)) = rename {
+        app.ui_state.view_rename_error = app.rename_saved_view(&path, &text).err();
+    }
+    if let Some(err) = &app.ui_state.view_rename_error {
+        ui.label(
+            egui::RichText::new(err.clone())
+                .small()
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
     if let Some(path) = load {
         app.load_saved_view(&path);
     }
