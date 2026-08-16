@@ -278,6 +278,25 @@ struct Args {
     #[arg(long, value_name = "0-1", default_value_t = fit::loss::DEFAULT_GRID_SHARE, help_heading = "Likeness")]
     fit_structure: f32,
 
+    /// How far each map may blend toward a nonlinearity, 0-1 [0.45]
+    ///
+    /// Pure affine maps cannot hold a real subject. Six of them, or twenty,
+    /// still only make unions of parallelograms of the thing — that is a limit
+    /// of the map class, not of the solver or the loss, and no amount of
+    /// tuning either gets past it. A nonlinearity buys far more expression per
+    /// parameter than another affine map does.
+    ///
+    /// Each map picks one variation and how far to lean on it. The palette is
+    /// weighted toward folds, which keep points near where they started and
+    /// build structure; the strongly non-local ones smear a likeness into a
+    /// spiral of itself and are left out. 0 is the old pure-affine behaviour.
+    ///
+    /// Note this makes --fit-dimension report the linear skeleton rather than
+    /// the attractor, since the similarity dimension is computed from the
+    /// affine parts alone.
+    #[arg(long, value_name = "0-1", default_value_t = 0.45, help_heading = "Likeness")]
+    fit_nonlinear: f32,
+
     /// Push the fit below this similarity dimension, or `off` [1.6]
     ///
     /// The dial that asks for fractal character directly instead of hoping it
@@ -2209,6 +2228,7 @@ fn main() {
                 points: args.fit_points,
                 seed: args.seed.unwrap_or(0),
                 depth: args.fit_depth.clamp(0.0, 1.0),
+                nonlinear: args.fit_nonlinear.clamp(0.0, 1.0),
                 dimension: match args.fit_dimension.trim().to_ascii_lowercase().as_str() {
                     "off" | "none" => None,
                     spec => match spec.parse::<f32>() {

@@ -200,7 +200,7 @@ fn sheet(cells: &[RgbImage], cols: usize, cell: u32) -> RgbImage {
 
 // ---------------------------------------------------------------- emit
 
-/// Bake the fit's normalisation into the maps and hand back a scene.
+/// Frame the fitted attractor and hand back a scene.
 ///
 /// **The framing is part of the answer, not scratch work.** The fit centres
 /// and scales the attractor on every evaluation in order to compare it with
@@ -208,56 +208,29 @@ fn sheet(cells: &[RgbImage], cols: usize, cell: u32) -> RgbImage {
 /// correct fractal from an angle and distance that hide the likeness
 /// entirely, which looks exactly like a failed fit.
 ///
-/// It goes into the maps rather than only into the camera. Conjugating by the
-/// similarity `S(x) = k(x − c)` sends `f(x) = Mx + t` to
-/// `f'(y) = My + k(Mc + t − c)`: the linear part is untouched, so the maps
-/// stay `R·diag(s)` and stay writable, and the attractor simply *is* where
-/// the fit judged it to be. The camera is then a plain framing of the box.
+/// It goes in the camera, and *only* in the camera. An earlier version baked
+/// it into the maps by conjugation — `S(x) = k(x − c)` sends `f(x) = Mx + t`
+/// to `f'(y) = My + k(Mc + t − c)`, which is tidy, keeps the maps writable and
+/// puts the attractor honestly at the origin. It is also wrong as soon as a
+/// map is anything but affine.
 ///
-/// **Only what commutes with the symmetry group may be baked in.** The walk
-/// applies `g ∘ f` with `g` drawn from the group, so conjugating `f` alone
-/// gives `g ∘ S f S⁻¹`, which is not `S (g ∘ f) S⁻¹` unless `S` commutes with
-/// every `g`. Uniform scaling about the origin always does. Translation does
-/// not — except along a cyclic group's own axis, which its rotations leave
-/// fixed. So the centring is projected onto what the group allows, and
-/// whatever is left over goes to the camera's focus instead, where it costs
-/// nothing. Getting this wrong would emit a scene that silently differs from
-/// the one that was fitted.
+/// The walk applies `post ∘ variations ∘ affine`, so conjugating the affine
+/// part alone computes `V ∘ S A S⁻¹` where the conjugate of the whole map is
+/// `S ∘ V ∘ A ∘ S⁻¹`. Those differ, because a variation does not commute with
+/// a similarity: `spherical` is `p/r²`, `boxfold` clamps at ±1, `bulb` works
+/// on a radius — every one of them is defined about the origin at a fixed
+/// scale, so moving and resizing the space underneath changes what they do.
+/// The symmetry group has the same problem for the same reason, and only
+/// uniform scaling and axial translation ever escaped it.
+///
+/// A camera has none of these constraints. It frames whatever is there,
+/// exactly, whatever the maps are made of.
 fn to_scene(params: &solve::Params, name: &str, walk: &solve::Walk) -> Scene {
-    use crate::symmetry::OrbitKind;
-
     let norm = normalizer(&walk.pos);
-    let center = Vec3::new(
-        norm.center.x,
-        norm.center.y,
-        median(walk.world.iter().map(|p| p.z)),
-    );
-    let k = norm.scale;
-
-    let bakeable = match params.symmetry {
-        None => center,
-        // A rotation about the axis fixes the axis, so sliding along it
-        // commutes with the whole group.
-        Some(OrbitKind::Cyclic(_)) => {
-            let axis = params.axis_of();
-            axis * center.dot(axis)
-        }
-        // Dihedral half-turns and the polyhedral groups fix only the origin.
-        Some(_) => Vec3::ZERO,
-    };
-
-    let mut transforms = params.to_transforms();
-    for t in &mut transforms {
-        let (s, r, tr) = t.matrix.to_scale_rotation_translation();
-        let linear = glam::Mat3::from_quat(r) * glam::Mat3::from_diagonal(s);
-        let moved = k * (linear * bakeable + tr - bakeable);
-        t.matrix = glam::Mat4::from_scale_rotation_translation(s, r, moved);
-    }
-    // Where the attractor ends up once the bakeable part has been applied.
-    let focus = k * (center - bakeable);
 
     let mut scene = Scene::blank();
     scene.name = name.to_string();
+    let transforms = params.to_transforms();
     scene.transform_names = (0..transforms.len()).map(|i| Some(format!("map-{i}"))).collect();
     scene.colors = params.colors();
     scene.transforms = transforms;
@@ -269,13 +242,25 @@ fn to_scene(params: &solve::Params, name: &str, walk: &solve::Walk) -> Scene {
     scene.set_color_mode(ColorMode::Mix);
     scene.regenerate_colormap();
 
-    // Looking down −z, which is the direction the loss projected along. 45°
-    // vertical FOV puts the ±0.75 box comfortably in frame at this distance.
-    scene.camera_focus = focus;
-    scene.camera_distance = 2.0;
+    // Looking down −z, which is the direction the loss projected along.
+    scene.camera_focus = Vec3::new(
+        norm.center.x,
+        norm.center.y,
+        median(walk.world.iter().map(|p| p.z)),
+    );
+    scene.camera_distance = FRAMING / norm.scale;
     scene.camera_orientation = crate::rot::Orientation::IDENTITY;
     scene
 }
+
+/// Camera distance, in units of the fit's normalisation scale.
+///
+/// The fit judges everything inside `±BOX`, which in scene coordinates is a
+/// half-extent of `BOX / scale`. A 45° vertical field of view covers
+/// `0.414 · d`, so `BOX / 0.414 ≈ 1.81 / scale` exactly fills the frame.
+/// Rounded up to 2, because a fit whose outermost band is cropped looks like a
+/// fit that lost its edges — this leaves about 10% margin.
+const FRAMING: f32 = 2.0;
 
 // ----------------------------------------------------------------- run
 
@@ -434,22 +419,40 @@ mod tests {
         assert!((again.scale - 1.0).abs() < 1e-2, "already scaled: {}", again.scale);
     }
 
-    /// The emitted scene must render the attractor that was fitted.
+    /// The emitted scene must *show* the attractor that was fitted.
     ///
-    /// Baking the framing into the maps is a conjugation, and a conjugation
-    /// that does not commute with the symmetry group changes the shape rather
-    /// than moving it. That failure is invisible — the file is a valid scene
-    /// and a perfectly good fractal, just not the one that was scored — so it
-    /// gets a test that compares the two clouds directly rather than checking
-    /// that the numbers look plausible.
+    /// The framing is the half of the answer that is easiest to get silently
+    /// wrong: the file is a valid scene and a perfectly good fractal either
+    /// way, just pointed somewhere that hides the likeness. So this measures
+    /// the scene the way a reader meets it — walk its own transforms, then
+    /// check its own camera is aimed at what came out.
+    ///
+    /// Run across the awkward cases on purpose. Nonlinear maps and symmetry
+    /// groups are exactly what broke the previous approach, which baked the
+    /// framing into the affine part and so computed `V ∘ S A S⁻¹` instead of
+    /// `S ∘ V ∘ A ∘ S⁻¹`.
     #[test]
-    fn the_emitted_scene_walks_the_attractor_that_was_fitted() {
+    fn the_emitted_scene_frames_the_attractor_that_was_fitted() {
         use crate::symmetry::OrbitKind;
 
-        for group in [None, Some(OrbitKind::Cyclic(6)), Some(OrbitKind::Dihedral(3))] {
+        let cases = [
+            (None, 0.0, "plain affine"),
+            (None, 0.6, "nonlinear"),
+            (Some(OrbitKind::Cyclic(6)), 0.6, "cyclic + nonlinear"),
+            (Some(OrbitKind::Dihedral(3)), 0.4, "dihedral + nonlinear"),
+        ];
+
+        for (group, nonlinear, what) in cases {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(21);
-            let mut params = solve::Params::random(4, 0.0, group, solve::AxisMode::InPlane, &mut rng);
-            // Off-centre, so the conjugation has real work to do.
+            let mut params = solve::Params::random(
+                4,
+                0.0,
+                group,
+                solve::AxisMode::InPlane,
+                nonlinear,
+                &mut rng,
+            );
+            // Off-centre, so the framing has real work to do.
             for m in &mut params.maps {
                 m.translation += Vec3::new(1.5, -2.0, 0.5);
             }
@@ -457,7 +460,8 @@ mod tests {
             let fitted = solve::walk(&params, 30_000, &mut rng).unwrap();
             let scene = to_scene(&params, "t", &fitted);
 
-            // Walk the scene's own transforms — the thing a reader opens.
+            // Walk the scene's own transforms — the thing a reader opens —
+            // rather than trusting that they are the ones we handed over.
             let enabled = vec![true; scene.transforms.len()];
             let mut srng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(22);
             let mut walker =
@@ -465,69 +469,31 @@ mod tests {
             for _ in 0..crate::trace::BURN_IN_STEPS {
                 walker.step(&mut srng);
             }
-            let emitted: Vec<Vec2> = (0..30_000)
+            let shown: Vec<Vec2> = (0..30_000)
                 .map(|_| {
                     walker.step(&mut srng);
                     Vec2::new(walker.pos.x, walker.pos.y)
                 })
                 .collect();
 
-            // Both normalised: the comparison is of *shape*, since where the
-            // scene sits is the camera's business and is checked separately.
-            let a = normalizer(&fitted.pos);
-            let b = normalizer(&emitted);
-            let shape = |pts: &[Vec2], n: Norm, q: f32| {
-                Vec2::new(
-                    percentile(pts.iter().map(|p| n.apply(*p).x), q),
-                    percentile(pts.iter().map(|p| n.apply(*p).y), q),
-                )
-            };
-            for q in [0.05, 0.25, 0.5, 0.75, 0.95] {
-                let want = shape(&fitted.pos, a, q);
-                let got = shape(&emitted, b, q);
-                assert!(
-                    (want - got).length() < 0.06,
-                    "{:?}: quantile {q} moved {:?} -> {:?}; the emitted scene is not \
-                     the attractor that was fitted",
-                    group.map(|g| g.label()),
-                    want,
-                    got,
-                );
-            }
+            let actual = normalizer(&shown);
+            let aimed = Vec2::new(scene.camera_focus.x, scene.camera_focus.y);
+            let half = BOX / actual.scale;
+
+            // The camera looks where the material is, to within a tenth of the
+            // attractor's own size.
+            assert!(
+                (aimed - actual.center).length() < half * 0.1,
+                "{what}: camera aims at {aimed:?} but the scene walks to {:?}",
+                actual.center,
+            );
+            // And from far enough to see all of it, without it being a speck.
+            let visible = scene.camera_distance * (crate::camera::FOV_Y_RADIANS * 0.5).tan();
+            assert!(
+                visible > half && visible < half * 1.6,
+                "{what}: half-extent {half:.3} framed at half-height {visible:.3}",
+            );
         }
     }
 
-    #[test]
-    fn conjugation_moves_the_attractor_into_the_box() {
-        // The emitted scene must show the likeness from its own default
-        // camera. That means the normalisation the fit judged through has to
-        // survive into the file, and the way it survives is by being baked
-        // into the maps.
-        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(9);
-        let mut params = solve::Params::random(5, 1.0, None, solve::AxisMode::InPlane, &mut rng);
-        // Shove the whole IFS far off the origin and shrink it, so a
-        // conjugation that quietly did nothing could not pass.
-        for m in &mut params.maps {
-            m.translation = m.translation * 0.2 + Vec3::new(7.0, -4.0, 2.0);
-        }
-        let walk = solve::walk(&params, 20_000, &mut rng).unwrap();
-        assert!(
-            walk.pos[0].length() > 2.0,
-            "the un-normalised attractor must actually be off-frame for this to test anything"
-        );
-        let scene = to_scene(&params, "t", &walk);
-
-        let stats = crate::trace::measure(&scene.transforms, &vec![true; scene.transforms.len()])
-            .expect("a fitted scene must walk");
-        assert!(
-            stats.center.length() < 0.35,
-            "attractor should sit at the origin, found {:?}",
-            stats.center
-        );
-        assert!(
-            (0.3..2.0).contains(&stats.radius),
-            "attractor should fill the framed box, r95 = {}",
-            stats.radius
-        );
-    }
 }

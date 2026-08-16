@@ -45,6 +45,47 @@ pub struct MapParams {
     pub log_weight: f32,
     /// Linear RGB, the same space a scene's per-transform `color` is in.
     pub color: Vec3,
+    /// Index into [`PALETTE`] — which nonlinearity this map blends toward.
+    pub variation: usize,
+    /// How far toward it, 0 (pure affine) to [`Config::nonlinear`].
+    pub var_amount: f32,
+}
+
+/// The nonlinearities a fit may reach for.
+///
+/// Not all twenty: fitting a free blend over every slot would be 120 extra
+/// dimensions for six maps, and most of that space is mush. One choice plus
+/// one amount per map is twelve, and it matches what `randomize.rs` found
+/// about *rolled* flames — a single characteristic variation reads as a
+/// coherent form where a pile of unrelated distortions does not.
+///
+/// Chosen for representational work rather than for prettiness. Folds
+/// (`absfold`, `boxfold`, `spherefold`, `bent`, `horseshoe`) keep points near
+/// where they started and buy structure, which is what a subject needs; the
+/// strongly non-local ones (`polar`, `disc`, `spiral`) smear a likeness into
+/// a spiral of itself and are left out. `spherical`, `julia` and `bulb` are in
+/// because the plan names them as the fracturize dial's own ingredients.
+pub const PALETTE: [&str; 12] = [
+    "sinusoidal",
+    "spherical",
+    "swirl",
+    "horseshoe",
+    "julia",
+    "bent",
+    "fisheye",
+    "bubble",
+    "absfold",
+    "boxfold",
+    "spherefold",
+    "bulb",
+];
+
+/// Slot in `VARIATION_NAMES` for each palette entry.
+fn palette_slot(i: usize) -> usize {
+    crate::scene::VARIATION_NAMES
+        .iter()
+        .position(|v| *v == PALETTE[i % PALETTE.len()])
+        .expect("palette names must exist in VARIATION_NAMES")
 }
 
 /// The whole parameter vector.
@@ -106,6 +147,22 @@ pub struct Params {
     pub axis_mode: AxisMode,
     /// Raw axis parameter, interpreted through [`Self::axis_mode`].
     pub axis: Vec3,
+    /// Ceiling on every map's [`MapParams::var_amount`].
+    ///
+    /// Pure affine maps cannot hold a real subject — six of them, or twenty,
+    /// still only ever produce unions of parallelograms of the thing, and no
+    /// amount of loss engineering changes what the map class can express. A
+    /// nonlinearity is far more expressive per parameter than another affine
+    /// map, which is the argument for reaching here before reaching for a
+    /// bigger budget.
+    ///
+    /// Note what this does to [`Config::dimension`]: `Σsᵢᵈ = 1` is computed
+    /// from the *affine* parts alone, so with variations live the reported
+    /// dimension describes the linear skeleton rather than the attractor it
+    /// actually produces. The pressure still bites — it still forces the
+    /// skeleton to be built out of less — but the number stops being a
+    /// measurement of the picture.
+    pub nonlinear: f32,
 }
 
 /// Where a fitted symmetry axis may point.
@@ -143,8 +200,10 @@ impl Params {
         depth: f32,
         symmetry: Option<OrbitKind>,
         axis_mode: AxisMode,
+        nonlinear: f32,
         rng: &mut impl Rng,
     ) -> Self {
+        let nonlinear = nonlinear.max(1e-6);
         let m = (0..maps)
             .map(|_| MapParams {
                 translation: Vec3::new(
@@ -164,6 +223,8 @@ impl Params {
                 ),
                 log_weight: rng.gen_range(-0.4..0.4),
                 color: Vec3::new(rng.r#gen(), rng.r#gen(), rng.r#gen()),
+                variation: rng.gen_range(0..PALETTE.len()),
+                var_amount: rng.gen_range(0.0..nonlinear),
             })
             .collect();
         Self {
@@ -172,6 +233,7 @@ impl Params {
             depth,
             symmetry,
             axis_mode,
+            nonlinear,
             // Near-vertical: the orientation almost every upright subject has,
             // and a start the fit can walk away from cheaply.
             axis: Vec3::new(rng.gen_range(-0.5..0.5), 1.0, 0.0).normalize(),
@@ -214,7 +276,20 @@ impl Params {
                 weight: m.log_weight.exp().clamp(1e-3, 1e3),
                 color_speed: self.color_speed,
                 explicit_color_speed: None,
-                variations: TransformSpec::linear_variations(),
+                variations: {
+                    // A blend of linear and one nonlinearity, summing to 1 so
+                    // the map keeps the magnitude its affine part was fitted
+                    // with. `apply_variations` adds `w · f(p)` over the slots,
+                    // so weights that did not sum to 1 would silently rescale
+                    // every map.
+                    let mut v = [0.0f32; crate::scene::NUM_VARIATIONS];
+                    let a = m.var_amount.clamp(0.0, 1.0);
+                    v[0] = 1.0 - a;
+                    if a > 0.0 {
+                        v[palette_slot(m.variation)] += a;
+                    }
+                    v
+                },
                 // Every map carries the group, so the whole form is a
                 // quotient rather than one symmetric part beside free ones.
                 // `Shared` colour: the copies *are* the same map, and
@@ -324,6 +399,8 @@ pub struct Config {
     pub symmetry: Option<OrbitKind>,
     /// See [`Params::axis_mode`].
     pub axis_mode: AxisMode,
+    /// See [`Params::nonlinear`].
+    pub nonlinear: f32,
     /// Similarity dimension the fit is pushed *below*, if any.
     ///
     /// The answer to a problem the other dials could not touch: every
@@ -364,6 +441,7 @@ impl Default for Config {
             depth: 0.0,
             symmetry: None,
             axis_mode: AxisMode::InPlane,
+            nonlinear: 0.0,
             dimension: None,
         }
     }
@@ -413,10 +491,10 @@ pub fn fit(target: &loss::Target, cfg: &Config) -> Outcome {
     // Random starts. A quarter of the whole budget goes here because the
     // annealer only rearranges what it was handed: at six maps most of the
     // basins are hopeless and the cheapest way past them is to roll again.
-    let mut cur = Params::random(cfg.maps, cfg.depth, cfg.symmetry, cfg.axis_mode, &mut rng);
+    let mut cur = Params::random(cfg.maps, cfg.depth, cfg.symmetry, cfg.axis_mode, cfg.nonlinear, &mut rng);
     let mut cur_loss = f32::INFINITY;
     for _ in 0..cfg.inits {
-        let candidate = Params::random(cfg.maps, cfg.depth, cfg.symmetry, cfg.axis_mode, &mut rng);
+        let candidate = Params::random(cfg.maps, cfg.depth, cfg.symmetry, cfg.axis_mode, cfg.nonlinear, &mut rng);
         let l = measure(&candidate, cfg.seed ^ 0x9e37);
         if l < cur_loss {
             cur_loss = l;
@@ -517,7 +595,7 @@ fn propose(cur: &Params, step: f32, rng: &mut impl Rng) -> Params {
 
     if rng.r#gen::<f32>() < 0.04 {
         let i = rng.gen_range(0..n);
-        next.maps[i] = Params::random(1, next.depth, next.symmetry, next.axis_mode, rng).maps[0];
+        next.maps[i] = Params::random(1, next.depth, next.symmetry, next.axis_mode, next.nonlinear, rng).maps[0];
         return next;
     }
     // The axis is one parameter for the whole scene rather than one per map,
@@ -538,18 +616,25 @@ fn propose(cur: &Params, step: f32, rng: &mut impl Rng) -> Params {
         return next;
     }
 
+    let ceiling = next.nonlinear;
     let touched = if rng.r#gen::<f32>() < 0.7 { 1 } else { 2.min(n) };
     for _ in 0..touched {
         let m = &mut next.maps[rng.gen_range(0..n)];
         let jitter = |rng: &mut dyn RngCore, s: f32| -> Vec3 {
             Vec3::new(gauss(rng), gauss(rng), gauss(rng)) * s * step
         };
-        match rng.gen_range(0..5) {
+        match rng.gen_range(0..6) {
             0 => m.translation += jitter(rng, 0.22),
             1 => m.rotvec += jitter(rng, 0.35),
             2 => m.log_scale += jitter(rng, 0.25),
             3 => m.log_weight += gauss(rng) * 0.3 * step,
-            _ => m.color = (m.color + jitter(rng, 0.2)).clamp(Vec3::ZERO, Vec3::ONE),
+            4 => m.color = (m.color + jitter(rng, 0.2)).clamp(Vec3::ZERO, Vec3::ONE),
+            _ if ceiling <= 0.0 => m.translation += jitter(rng, 0.22),
+            // Which nonlinearity is discrete, so it cannot be annealed into
+            // gradually — a third of the time, jump outright. The rest of the
+            // time walk the amount, which is where the fine tuning lives.
+            _ if rng.r#gen::<f32>() < 0.33 => m.variation = rng.gen_range(0..PALETTE.len()),
+            _ => m.var_amount = (m.var_amount + gauss(rng) * 0.15 * step).clamp(0.0, ceiling),
         }
     }
     next
@@ -592,12 +677,15 @@ mod tests {
                     log_scale: Vec3::splat(0.5f32.ln()),
                     log_weight: 0.0,
                     color: Vec3::splat(0.5),
+                    variation: 0,
+                    var_amount: 0.0,
                 })
                 .collect(),
             color_speed: 0.6,
             depth: 0.0,
             symmetry: None,
             axis_mode: AxisMode::InPlane,
+            nonlinear: 0.0,
             axis: Vec3::Y,
         }
     }
@@ -700,7 +788,7 @@ mod tests {
     fn scales_are_always_contractive() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
         for _ in 0..200 {
-            let mut p = Params::random(4, 1.0, None, AxisMode::InPlane, &mut rng);
+            let mut p = Params::random(4, 1.0, None, AxisMode::InPlane, 0.0, &mut rng);
             // Even an optimiser that has run away must not produce a map that
             // expands: the walk would diverge and the scene would not render.
             p.maps[0].log_scale = Vec3::splat(9.0);
@@ -716,7 +804,7 @@ mod tests {
     #[test]
     fn a_walk_produces_the_requested_cloud() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(2);
-        let p = Params::random(5, 1.0, None, AxisMode::InPlane, &mut rng);
+        let p = Params::random(5, 1.0, None, AxisMode::InPlane, 0.0, &mut rng);
         let w = walk(&p, 2000, &mut rng).expect("contractive maps must walk");
         assert_eq!(w.pos.len(), 2000);
         assert_eq!(w.col.len(), 2000);
@@ -730,7 +818,7 @@ mod tests {
         // loader reads back. Anything else emits a scene that silently
         // differs from what was fitted.
         let mut rng = rand::rngs::StdRng::seed_from_u64(5);
-        let p = Params::random(6, 1.0, None, AxisMode::InPlane, &mut rng);
+        let p = Params::random(6, 1.0, None, AxisMode::InPlane, 0.0, &mut rng);
         for t in p.to_transforms() {
             let (s, r, tr) = t.matrix.to_scale_rotation_translation();
             let rebuilt = Mat4::from_scale_rotation_translation(s, r, tr);
