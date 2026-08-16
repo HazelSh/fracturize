@@ -2,6 +2,7 @@ mod app;
 mod avif;
 mod checkpoint_file;
 mod camera;
+mod fit;
 mod haze;
 mod grade_file;
 mod info;
@@ -150,6 +151,149 @@ struct Args {
     /// exactly by passing it back.
     #[arg(long, value_name = "INT", help_heading = "Scene")]
     seed: Option<u64>,
+
+    // ------------------------------------------------------------- Likeness
+    /// Fit an IFS to a reference image and write it out as a scene
+    ///
+    /// "That, but made fractally." The result is an ordinary scene file — the
+    /// transform panel opens it, the gizmos push it around, --mutations wrecks
+    /// it. The solver is an authoring assist, and it hands off.
+    ///
+    /// It is not meant to converge. Six affine maps cannot hold a subject, and
+    /// what comes back is the subject assembled out of ghosts of itself at
+    /// three or four scales. That is the point; a perfect reconstruction would
+    /// be a photograph. Start with --fit-seeds 20 and --fit-preview, and pick
+    /// with your eye rather than by the loss.
+    #[arg(long, value_name = "IMAGE", help_heading = "Likeness")]
+    fit: Option<String>,
+
+    /// Where the fitted scene goes [fit.toml]
+    ///
+    /// With --fit-seeds above 1 this is a stem: fit.toml becomes fit-000.toml,
+    /// fit-001.toml, and so on.
+    #[arg(long, value_name = "FILE", default_value = "fit.toml", help_heading = "Likeness")]
+    fit_out: String,
+
+    /// Maps the fit is allowed [6]
+    ///
+    /// The master dial, and about 70% of the whole look. Fewer maps is a
+    /// starker, more obviously fractal failure; more starts to look like a
+    /// blurry photograph, which is the failure mode to avoid.
+    #[arg(long, value_name = "N", default_value_t = 6, help_heading = "Likeness")]
+    fit_maps: usize,
+
+    /// How pixels become density: matte, luminance or edges [edges]
+    ///
+    /// An artistic choice, not preprocessing — the same reference gives three
+    /// unrelated targets. matte is silhouette and mass; luminance keeps the
+    /// glow and hollows the body out; edges keeps outline and internal seams,
+    /// and is usually the richest.
+    #[arg(long, value_enum, value_name = "MAP", default_value = "edges", help_heading = "Likeness")]
+    fit_density: fit::target::Density,
+
+    /// How the subject is separated from the setting: saliency or none [saliency]
+    ///
+    /// A soft weight, never a mask: a wrong mask deletes the subject, a wrong
+    /// weight only lets some scenery in, and scenery at low density reads as
+    /// atmosphere. Use `none` for character and full-art references, where the
+    /// subject is the whole picture and nothing needs separating.
+    #[arg(long, value_enum, value_name = "MODE", default_value = "saliency", help_heading = "Likeness")]
+    fit_weight: fit::target::Weight,
+
+    /// Crop the reference before fitting: `card`, or L,T,R,B as fractions [none]
+    ///
+    /// `card` is the art box of a standard Grand Archive frame. Tokens run
+    /// lower and full-art cards have no box at all, so give fractions where
+    /// the layout differs.
+    #[arg(long, value_name = "CARD|L,T,R,B", help_heading = "Likeness")]
+    fit_crop: Option<String>,
+
+    /// Fraction of the loss that measures colour rather than shape, 0-1 [0.2]
+    ///
+    /// Colour rides in the same transport loss as geometry, so this is one
+    /// dial between "match the shape, ignore the palette" and the reverse. At
+    /// 0 the fit is purely geometric and the map colours are left to the dice.
+    ///
+    /// It buys likeness expensively: colour competes with geometry for the
+    /// same budget, and a starved solver has very little to spare. Measured on
+    /// a Sierpinski reference, half the metric on colour cost the triangle
+    /// entirely. Raise it when the subject is identified by its palette more
+    /// than its outline.
+    #[arg(long, value_name = "0-1", default_value_t = 0.2, help_heading = "Likeness")]
+    fit_color: f32,
+
+    /// Fit under a symmetry group: Cyc8, Dih4, Icosa, ... [none]
+    ///
+    /// The solver only gets a quotient of the subject and the group rebuilds
+    /// the rest, so the thing comes back as an ornament of itself. Native
+    /// symmetry does not expand the transform list — a C8 fit of six maps is
+    /// still a six-map scene.
+    ///
+    /// It is also a prior, not only a dial. A solid of revolution's 3D shape
+    /// is recoverable from one view once the axis is fixed, which is exactly
+    /// what a single-view fit otherwise lacks. The axis is fitted, and starts
+    /// near-vertical: without a group the fit's own failure mode is radial
+    /// symmetry about the view axis, and a group about *that* axis would only
+    /// formalise it.
+    #[arg(long, value_name = "GROUP", help_heading = "Likeness")]
+    fit_symmetry: Option<String>,
+
+    /// Where the symmetry axis points: plane, view, or X,Y,Z [plane]
+    ///
+    /// `plane` keeps the axis in the picture plane and fits the one remaining
+    /// angle — a solid of revolution seen side-on, which is a canister, a
+    /// column or a figure. `view` pins it at the camera for a rosette facing
+    /// the viewer, which is what card-art crystals tend to be.
+    ///
+    /// Not left to the solver, because the solver picks wrong: with a free
+    /// axis it drives it to the view direction on most seeds, a rosette being
+    /// the cheapest way to satisfy the loss. That is a different object from
+    /// the one in most references.
+    #[arg(long, value_name = "PLANE|VIEW|X,Y,Z", default_value = "plane", help_heading = "Likeness")]
+    fit_axis: String,
+
+    /// How far out of the image plane the maps may reach, 0-1 [0]
+    ///
+    /// The prior that makes a single reference view solvable. Free 3D maps
+    /// against one projection are wildly underdetermined, and the solver
+    /// spends its whole budget on out-of-plane rotations the loss can barely
+    /// see. At 0 the attractor is planar. Above 0 it is the depth
+    /// hallucination dial: the result reads as itself from one angle and is an
+    /// abstract solid from every other.
+    #[arg(long, value_name = "0-1", default_value_t = 0.0, help_heading = "Likeness")]
+    fit_depth: f32,
+
+    /// Annealing steps per seed [4000]
+    #[arg(long, value_name = "N", default_value_t = 4000, help_heading = "Likeness")]
+    fit_iters: usize,
+
+    /// Independent fits from different starts [1]
+    ///
+    /// Every one is a legitimate output and the best-scoring one is often not
+    /// the best-looking one, so the whole ladder is written out. Seeds run in
+    /// parallel.
+    #[arg(long, value_name = "N", default_value_t = 1, help_heading = "Likeness")]
+    fit_seeds: usize,
+
+    /// Points walked per evaluation [4096]
+    ///
+    /// The reason a gradient-free fit is affordable at all. Raising it makes
+    /// the loss steadier and the fit proportionally slower; the answer is
+    /// always looked at with a much larger cloud regardless.
+    #[arg(long, value_name = "N", default_value_t = 4096, help_heading = "Likeness")]
+    fit_points: usize,
+
+    /// Write a contact strip of what the solver is aiming at
+    ///
+    /// Four cells: the art, the subject weight, the target density, and the
+    /// sampled cloud. Worth looking at before every fit — most bad fits are
+    /// bad targets.
+    #[arg(long, value_name = "PNG", help_heading = "Likeness")]
+    fit_target: Option<String>,
+
+    /// Write a contact sheet of the target beside every seed's attractor
+    #[arg(long, value_name = "PNG", help_heading = "Likeness")]
+    fit_preview: Option<String>,
 
     // --------------------------------------------------------------- Camera
     /// Load a saved view: framing, point size, haze [the scene's own]
@@ -1989,6 +2133,88 @@ fn main() {
     // --stats: analyze a rendered image and report metrics
     if let Some(path) = &args.stats {
         print_image_stats(path);
+        return;
+    }
+
+    // --fit: make a scene out of a picture. Pure CPU — no device, no scene to
+    // load, and nothing downstream knows this ran; the output is an ordinary
+    // scene file that the next invocation opens like any other.
+    if let Some(image) = &args.fit {
+        let crop = match args.fit_crop.as_deref() {
+            None => None,
+            Some("card") => Some(fit::target::ART_BOX),
+            Some(spec) => {
+                let parts: Vec<&str> = spec.split(',').collect();
+                let vals: Option<Vec<f32>> =
+                    parts.iter().map(|p| p.trim().parse::<f32>().ok()).collect();
+                match vals {
+                    Some(v) if v.len() == 4 => Some([v[0], v[1], v[2], v[3]]),
+                    _ => {
+                        eprintln!(
+                            "--fit-crop wants `card` or four fractions L,T,R,B, not '{}'",
+                            spec
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+        let opts = fit::Options {
+            image: image.clone(),
+            out: args.fit_out.clone(),
+            target: fit::target::Opts {
+                density: args.fit_density,
+                weight: args.fit_weight,
+                crop,
+                ..Default::default()
+            },
+            solve: fit::solve::Config {
+                maps: args.fit_maps,
+                iters: args.fit_iters,
+                points: args.fit_points,
+                seed: args.seed.unwrap_or(0),
+                depth: args.fit_depth.clamp(0.0, 1.0),
+                axis_mode: match args.fit_axis.trim().to_ascii_lowercase().as_str() {
+                    "plane" => fit::solve::AxisMode::InPlane,
+                    "view" | "z" => fit::solve::AxisMode::Fixed(glam::Vec3::Z),
+                    spec => {
+                        let v: Option<Vec<f32>> =
+                            spec.split(',').map(|p| p.trim().parse().ok()).collect();
+                        match v {
+                            Some(v) if v.len() == 3 => fit::solve::AxisMode::Fixed(
+                                glam::Vec3::new(v[0], v[1], v[2]),
+                            ),
+                            _ => {
+                                eprintln!(
+                                    "--fit-axis wants `plane`, `view` or X,Y,Z, not '{}'",
+                                    spec
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                },
+                symmetry: match args.fit_symmetry.as_deref() {
+                    None => None,
+                    Some(spec) => match crate::symmetry::OrbitKind::parse(spec) {
+                        Ok(k) => Some(k),
+                        Err(e) => {
+                            eprintln!("--fit-symmetry: {}", e);
+                            std::process::exit(1);
+                        }
+                    },
+                },
+                ..Default::default()
+            },
+            color_weight: args.fit_color.clamp(0.0, 1.0),
+            seeds: args.fit_seeds.max(1),
+            target_sheet: args.fit_target.clone(),
+            preview: args.fit_preview.clone(),
+        };
+        if let Err(e) = fit::run(&opts) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
         return;
     }
 
