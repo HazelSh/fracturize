@@ -1492,6 +1492,29 @@ impl App {
         self.path_t = None;
     }
 
+    /// Send the playhead back to the start of the path, and the zoom depth
+    /// counters with it — what a *new document* should get.
+    ///
+    /// Called by both ways a whole scene arrives (`load_scene_file`,
+    /// `adopt_scene`). Neither used to touch the playhead, so opening a scene
+    /// while the camera was flying dropped you two thirds of the way into the
+    /// new scene's path, and on a zoom loop at whatever depth the *previous*
+    /// scene's counter had reached.
+    ///
+    /// Playing-or-stopped is deliberately kept: that's a transport state the
+    /// person set, and a scene that stopped the camera dead on load would be
+    /// its own annoyance. Only the position is reset.
+    fn rewind_camera_playhead(&mut self) {
+        if self.path_t.is_some() {
+            self.path_t = Some(0.0);
+        }
+        self.zoom_level = 0;
+        self.zoom_turns = 0;
+        self.zoom_turns_base = 0;
+        self.zoom_turns_drawn = 0;
+        self.pending_rewrap = 0;
+    }
+
     /// Start / stop the camera flying the path (O, Z, and the toolbar's
     /// transport button). The one motion control there is.
     pub fn toggle_camera_motion(&mut self) {
@@ -3186,6 +3209,7 @@ impl App {
 
         self.camera = scene.camera();
         self.invalidate_default_path();
+        self.rewind_camera_playhead();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
@@ -3734,6 +3758,7 @@ impl App {
         }
         self.camera = scene.camera();
         self.invalidate_default_path();
+        self.rewind_camera_playhead();
         self.point_size = scene.point_size;
         self.color_falloff = scene.color_falloff;
         self.color_contrast = scene.color_contrast;
