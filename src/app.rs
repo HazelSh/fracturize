@@ -2284,12 +2284,22 @@ impl App {
         }
     }
 
+    /// How close the wheel may bring the eye, this frame.
+    ///
+    /// An infinite zoom answers this itself and the answer is "much closer
+    /// than you think": the eye is meant to keep descending, and `wrap` folds
+    /// it back into the band every frame, so the band — not a constant — is
+    /// what bounds it. See [`crate::renorm::Renorm::scroll_floor`].
+    fn scroll_floor(&self) -> f32 {
+        self.zoom().map_or(crate::camera::MIN_ORBIT_DISTANCE, |z| z.scroll_floor())
+    }
+
     pub fn zoom_in(&mut self) {
-        self.camera.zoom(1.0);
+        self.camera.zoom(1.0, self.scroll_floor());
     }
 
     pub fn zoom_out(&mut self) {
-        self.camera.zoom(-1.0);
+        self.camera.zoom(-1.0, self.scroll_floor());
     }
 
     /// Mouse wheel: zoom, always. **Alt**+wheel over a hovered gizmo adjusts
@@ -2322,7 +2332,7 @@ impl App {
         }
         self.cancel_camera_glide();
         self.show_zoom_cursor(steps);
-        self.camera.zoom(steps);
+        self.camera.zoom(steps, self.scroll_floor());
         self.invalidate_default_path();
     }
 

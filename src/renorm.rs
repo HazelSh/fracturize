@@ -278,6 +278,41 @@ const DEFAULT_OCTAVE_FALLOFF: f32 = 0.0;
 /// also sees it, and is the check that matches what a person perceives.
 const DEFAULT_EDGE_GUARD: f32 = 1.0;
 
+/// Relative slack on both edges of the band before [`Renorm::wrap`] fires.
+///
+/// **A scene's authored camera distance is exactly `band`**, because `band` is
+/// *defined* as that distance — so the one framing every zoom scene is
+/// guaranteed to sit at is the one edge of the band. `wrap` used to hold the
+/// eye in the half-open `[band·scale, band)`, which excludes precisely that
+/// point, so a camera parked where the author put it wrapped outward every
+/// frame.
+///
+/// On its own that would be harmless: the two descriptions are the same
+/// picture, which is the whole construction. What is not harmless is that the
+/// default turntable resamples the camera from a spline every frame, and the
+/// result lands an ULP or two either side of `band` depending on where in the
+/// orbit it is. Measured on `sierpinski-infinity`, over 584 frames of ordinary
+/// orbiting with no input at all: 391 frames wrapped and 193 did not, purely
+/// on floating-point noise. The eye alternated between 0.1594 and 0.0518 at
+/// random, and since a wrap keeps the *set* and not the *sample* of it, every
+/// flip redrew the entire dot field. Frame-to-frame difference ran 19–21% of
+/// mean level against 2.1% for a non-zoom scene — an eightfold increase in
+/// what looks, on screen, like the whole picture boiling.
+///
+/// That is the same fact as the seam in `NOTES-infinite-zoom.md` ("The floor
+/// wasn't a floor"), arriving through a different door: a wrap costs one
+/// resample, so a wrap that fires on a coin flip costs one every frame. The
+/// buffer carry cancels a wrap the camera *commits* to; it cannot cancel one
+/// the camera keeps changing its mind about.
+///
+/// So the band is closed on both sides with room to spare. The eye may sit a
+/// thousandth outside it, which costs nothing — `band` has no physical meaning
+/// beyond "one period", the picture is identical either side, and a thousandth
+/// of a period is four orders of magnitude more than the jitter it absorbs.
+/// The rule this encodes: **a threshold that a resting state sits exactly on
+/// is not a threshold, it is a coin.**
+const WRAP_SLACK: f32 = 1e-3;
+
 /// `Σ rⁱ` for `i` in `0..n`, with the removable singularity at `r = 1` filled
 /// in. Both pieces of [`Renorm::octave_offset`]'s distribution are geometric,
 /// so this and [`geo_pick`] are the whole of its arithmetic.
@@ -704,7 +739,12 @@ impl Renorm {
 
     /// Keep the eye inside one zoom period, and report how many periods that
     /// took (positive = zoomed in). The camera moves; the picture doesn't.
+    ///
+    /// The edges are slack by [`WRAP_SLACK`], and that is load-bearing rather
+    /// than defensive. See the constant.
     pub fn wrap(&self, cam: &mut OrbitCamera) -> i32 {
+        let inner = self.band * self.scale * (1.0 - WRAP_SLACK);
+        let outer = self.band * (1.0 + WRAP_SLACK);
         let mut levels = 0;
         // A camera dropped in from far outside can need many steps; the cap is
         // only there so a degenerate scene can't hang the frame.
@@ -713,10 +753,10 @@ impl Renorm {
             if !(d > 1e-9) {
                 break; // sitting on the fixed point; there is no "out" from here
             }
-            if d < self.band * self.scale {
+            if d < inner {
                 cam.apply_similarity(self.fixed_point, 1.0 / self.scale, self.rot.inverse());
                 levels += 1;
-            } else if d >= self.band {
+            } else if d > outer {
                 cam.apply_similarity(self.fixed_point, self.scale, self.rot);
                 levels -= 1;
             } else {
@@ -797,6 +837,20 @@ impl Renorm {
             scale: self.scale.powi(n as i32),
             turn: self.twist * n as f32,
         }
+    }
+
+    /// How close the wheel may bring the eye while this zoom is active.
+    ///
+    /// Not a limit on the framing, because there isn't one: [`Self::wrap`]
+    /// folds the eye back into the band every frame, so the eye's distance is
+    /// already bounded below by `band · scale` however hard the wheel is
+    /// turned. This exists only so a single enormous scroll event cannot reach
+    /// zero — where the direction "out" stops being defined and `wrap` gives
+    /// up — before the fold gets its turn. A thousandth of the band's inner
+    /// edge is thirty scroll clicks past anything reachable, and `wrap` climbs
+    /// back from far further out than that.
+    pub fn scroll_floor(&self) -> f32 {
+        self.band * self.scale * 1e-3
     }
 
     /// How far the map turns in one period, in degrees. Always the shorter way
@@ -1152,6 +1206,82 @@ mod tests {
         assert_eq!(cam.distance, before.distance);
         // Exactly untouched, not merely close: a no-op wrap composes nothing.
         assert_eq!(cam.orientation, before.orientation);
+    }
+
+    /// The framing the author wrote must be a resting place.
+    ///
+    /// `band` *is* the scene's authored camera distance, so this is the one
+    /// framing every zoom scene is certain to visit, and it used to be the one
+    /// distance `wrap` refused to leave alone — the band was half-open and
+    /// excluded exactly it. See [`WRAP_SLACK`].
+    #[test]
+    fn the_authored_distance_does_not_wrap() {
+        let r = renorm(0.5, 15.0);
+        for d in [r.band, r.band * r.scale] {
+            let mut cam = OrbitCamera::from_chart(0.2, 0.1, 0.0, d, r.fixed_point);
+            let before = cam;
+            assert_eq!(r.wrap(&mut cam), 0, "distance {d} is inside the band and must not wrap");
+            assert_eq!(cam.distance, before.distance);
+            assert_eq!(cam.orientation, before.orientation);
+        }
+    }
+
+    /// The failure that made an ordinary orbit boil: a camera resampled from a
+    /// spline lands either side of the band edge on floating-point noise, and
+    /// every flip redraws the whole point cloud. Jitter far larger than any
+    /// spline's must not produce a single wrap.
+    #[test]
+    fn jitter_at_the_band_edge_does_not_flip_the_wrap() {
+        let r = renorm(0.5, 15.0);
+        for i in -64..=64 {
+            // Three orders of magnitude more jitter than the measured spline's.
+            let d = r.band * (1.0 + i as f32 * 1e-6);
+            let mut cam = OrbitCamera::from_chart(0.2, 0.1, 0.0, d, r.fixed_point);
+            assert_eq!(r.wrap(&mut cam), 0, "jitter to {d} wrapped; band is {}", r.band);
+        }
+    }
+
+    /// A scroll floor must never sit inside the band, or the wheel hits a wall
+    /// where the zoom is supposed to be endless — and worse, hits it
+    /// *idempotently*, so the camera settles into a short cycle of distances
+    /// it cannot leave. See `OrbitCamera::zoom`.
+    #[test]
+    fn scrolling_descends_at_a_constant_rate_through_many_wraps() {
+        // sierpinski-infinity's geometry: the band's inner edge (0.0518) sits
+        // three percent above the old hard floor of 0.05, which is less than
+        // half a scroll click.
+        let scene_distance = 0.1594_f32;
+        let spec = ZoomSpec { map: 0, radius: 4.8, levels: 15.0, ..ZoomSpec::default() };
+        let r = Renorm::from_affine(
+            Mat4::from_mat3(Mat3::from_diagonal(Vec3::splat(0.325))),
+            1.0,
+            &spec,
+            scene_distance,
+        )
+        .unwrap();
+
+        // Three steps per event: one wheel notch on a trackpad, and enough to
+        // clear the band's inner edge in a single event.
+        let steps = 3.0_f32;
+        let want = 0.9_f32.powf(steps);
+        let mut cam =
+            OrbitCamera::from_chart(1.6156, 0.0984, 0.0433, scene_distance, r.fixed_point);
+        let mut previous = cam.distance;
+        let mut wraps = 0;
+        for i in 0..40 {
+            cam.zoom(steps, r.scroll_floor());
+            let turns = r.wrap(&mut cam);
+            wraps += turns;
+            // What the *picture* did: the folds are undone so the descent can
+            // be read as one continuous flight.
+            let got = (cam.distance / previous) * r.scale.powi(turns);
+            assert!(
+                (got - want).abs() < 1e-4,
+                "scroll {i}: the picture scaled by {got}, not {want} — the wheel hit a floor",
+            );
+            previous = cam.distance;
+        }
+        assert!(wraps >= 8, "40 scrolls of {steps} steps should cross several periods, got {wraps}");
     }
 
     #[test]

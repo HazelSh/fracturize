@@ -3,7 +3,7 @@ scene    Fixture                                                  fixture.toml
          camera path
 
 notes    3
-         shape   frames at distance 2.04, 2.6x the 0.80 that fills the frame
+         shape   frames at distance 3.40, 4.2x the 0.80 that fills the frame
          render  point_size 0.0018 is over the 0.0011 crisp bound at 1080p
          zoom    edge-guard ramp reaches into the view; raise zoom.radius
 
@@ -44,10 +44,10 @@ colour   mode        palette   3 stops, oklab
          ramp    #0d0a10 #2a1c24 #4b2f3a #6d4352 #92596b #b96f84
                  #d0879b #dc9faf #e8b8c4 #f2d1d9 #fceaee #92898e
 
-camera   yaw         0.5585 rad (  32.0°)
+camera   yaw         0.0000 rad (   0.0°)
          pitch       1.1200 rad (  64.2°)
          roll        0.0000 rad (   0.0°)
-         distance     2.040
+         distance     3.400
          focus     ( 0.000,  0.000,  0.000)
          from the scene
          under infinite zoom, reported in the canonical period as it renders

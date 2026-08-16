@@ -37,6 +37,17 @@ pub const Z_FAR: f32 = 100.0;
 /// Radians of orbit or roll per pixel of drag
 const DRAG_RATE: f32 = 0.006;
 
+/// How close the wheel brings the eye on an ordinary scene: near enough to get
+/// inside the structure, far enough that the near plane is not the thing you
+/// are fighting. Only a default — see [`OrbitCamera::zoom`], which takes the
+/// floor as an argument because a scene with an infinite zoom needs a different
+/// one.
+pub const MIN_ORBIT_DISTANCE: f32 = 0.05;
+
+/// How far out the wheel goes. No scene is bigger than this and the far plane
+/// is at [`Z_FAR`].
+pub const MAX_ORBIT_DISTANCE: f32 = 80.0;
+
 /// Which axis a horizontal orbit drag turns about — the whole of the
 /// difference between the two ways a look control can feel.
 ///
@@ -215,9 +226,29 @@ impl OrbitCamera {
         self.focus += (self.up() * dy - self.right() * dx) * per_pixel;
     }
 
-    /// Scroll zoom: positive = zoom in
-    pub fn zoom(&mut self, steps: f32) {
-        self.distance = (self.distance * 0.9f32.powf(steps)).clamp(0.05, 80.0);
+    /// Scroll zoom: positive = zoom in.
+    ///
+    /// `floor` is the closest the wheel may bring the eye. It is a parameter
+    /// rather than a constant because the answer depends on something this
+    /// type cannot see: under an infinite zoom the eye is *supposed* to keep
+    /// descending, and `Renorm::wrap` folds it back into the band every frame,
+    /// so a fixed floor is not a safety net there but a wall.
+    ///
+    /// It was [`MIN_ORBIT_DISTANCE`] unconditionally, and that predates the
+    /// zoom by a long way. The failure it caused is worth recording because it
+    /// looked nothing like a clamp: a zoom band's inner edge is
+    /// `camera.distance * scale`, so a scene framed at 0.1594 with a 0.325 map
+    /// has its inner edge at 0.0518 — three percent above the old floor, which
+    /// is less than half of one scroll click. Scrolling by one step squeaked
+    /// past it; scrolling by three (a trackpad, or any wheel turned with
+    /// intent) landed on the floor instead of on 0.0450, and the fold then put
+    /// the camera at 0.1538 rather than 0.1486. The picture jumped backwards
+    /// by 15% of a period, once per period, forever — and because the clamp
+    /// makes the sequence idempotent, the camera settled into a cycle of four
+    /// distances that no amount of further scrolling could leave.
+    pub fn zoom(&mut self, steps: f32, floor: f32) {
+        self.distance =
+            (self.distance * 0.9f32.powf(steps)).clamp(floor.max(1e-6), MAX_ORBIT_DISTANCE);
     }
 
     /// Right-drag roll: horizontal drag spins the horizon.
