@@ -537,10 +537,19 @@ slight delay on the pointcount ramp-up after editing?
   - approx(), which decides whether to rewrite a key, used a flat 5e-5 -- larger than the
     entire value at those sizes, so every distinct small point size compared equal and the
     save silently kept the old one. It scales with magnitude now, floored at a thousandth.
- -- the slider floor was 0.0001 and is now the value itself when a scene sits under it
-    (MIN_POINT_SIZE = 1e-6 for the setters). A save at the deep end multiplies the size by
-    the zoom's own scale, so a scene authored at the old floor legitimately lands below it,
-    and clamping there would have put the jump straight back one period down.
+ -- the slider floor was 0.0001, which on this scene was already the far-left stop -- so
+    there was no way down at all, and the smallest dot the control could ask for was still
+    coarse. It is MIN_POINT_SIZE = 1e-6 now, the same constant the [ / ] keys and
+    set_point_size clamp to, read from one place so the range and the clamp can't drift.
+  - the first attempt had the floor *follow the value down* (min(1e-4, size)), which is a
+    trap: the bottom of the travel is then wherever you already are, so the control can only
+    ever go up. That's the "can't get my point size down again" you hit. Fixed floor now.
+  - trade-off, on purpose: the slider spans 4.3 decades instead of 2.3, so the common
+    1e-3..4e-3 range sits in the top third of the travel. [ / ] still step by 1.1x, and the
+    readout is click-to-type when you want an exact number.
+  - still open, the same defect at the other end: [ / ] clamp at 0.1 while the slider stops
+    at 0.02, so a size set by keyboard above 0.02 parks the handle at the far right reading
+    a number it isn't. Left alone -- a too-big point size is self-evident on screen.
  -- on-load, which you asked about: nothing to fix, and here's why for each path.
   - scene load: camera is set *from* the scene, so the reference is the framing being loaded
     and the factor is exactly 1. Consistent by construction, both for open-a-file and for

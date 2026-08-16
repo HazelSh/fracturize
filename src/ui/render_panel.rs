@@ -275,14 +275,17 @@ fn class_heading(ui: &mut egui::Ui, title: &str, tip: &str) {
 
 fn draw_point_size(ui: &mut egui::Ui, app: &mut App) {
     let mut size = app.point_size;
-    // The low end follows the value when the value is under it. A scene saved
-    // deep in a zoom band holds a size below the authored floor on purpose
-    // (see `crate::app::MIN_POINT_SIZE`), and a slider whose range excluded it would
-    // draw its handle at the bottom while reading a different number — then
-    // clamp the scene to the range on the first touch.
-    let lo = 0.0001_f32.min(size);
+    // **The floor is the setters' floor, and it is fixed.** It briefly followed
+    // the value down instead — `min(1e-4, size)` — which is a trap: the bottom
+    // of the travel is then wherever you already are, so the control can only
+    // ever go up. Under a zoom, where the interesting sizes are the small ones,
+    // that reads as "I can't get my point size down again".
+    //
+    // Sharing the constant with `set_point_size` is the point: a slider whose
+    // range and whose setter's clamp are written down in two places is a
+    // control that lies about its own value the moment they differ.
     let resp = ui.add(
-        egui::Slider::new(&mut size, lo..=0.02)
+        egui::Slider::new(&mut size, crate::app::MIN_POINT_SIZE..=0.02)
             .logarithmic(true)
             .text("point size"),
     );

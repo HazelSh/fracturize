@@ -34,7 +34,8 @@ pub fn unix_timestamp() -> u64 {
 /// database, this app has no date dependency, and guessing wrong would put a
 /// confidently incorrect hour on the label. The date and the ordering are
 /// what the label is for.
-/// Floor on the point size the controls will set.
+/// Floor on the point size the controls will set — the `[` / `]` keys, the
+/// panel slider's low end, and `set_point_size`'s clamp, all from here.
 ///
 /// It was 0.0001, which was also the point-size slider's lower bound and was
 /// fine while the number meant one thing. Under an infinite zoom it means a
