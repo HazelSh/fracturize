@@ -612,11 +612,20 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     let enabled = app.is_transform_enabled(i);
     let mut chose = false;
 
-    if ui.button("Duplicate").clicked() {
+    // Icons name the *action*, so the eye is crossed out on the row that says
+    // "Disable" — the opposite of the rail's eye toggle next door, which shows
+    // the transform's current state. Same glyph pair, and the two readings
+    // don't collide: one sits on a verb, the other on a thing.
+    if ui.button((icons::COPY, "Duplicate")).clicked() {
         app.duplicate_transform_at(i);
         chose = true;
     }
-    if ui.button(if enabled { "Disable" } else { "Enable" }).clicked() {
+    let toggle = if enabled {
+        (icons::EYE_SLASH, "Disable")
+    } else {
+        (icons::EYE, "Enable")
+    };
+    if ui.button(toggle).clicked() {
         app.toggle_transform_enabled(i);
         chose = true;
     }
@@ -624,14 +633,14 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     // can't go. Shown disabled rather than hidden: a menu whose items move
     // around is harder to use than one with a greyed row.
     let can_delete = app.scene.transforms.len() > 1;
-    let del = ui.add_enabled(can_delete, egui::Button::new("Delete"));
+    let del = ui.add_enabled(can_delete, egui::Button::new((icons::TRASH, "Delete")));
     if !can_delete {
         del.on_hover_text("A scene needs at least one transform");
     } else if del.clicked() {
         app.delete_transform_at(i);
         chose = true;
     }
-    if ui.button("Rename").clicked() {
+    if ui.button((icons::PENCIL, "Rename")).clicked() {
         app.ui_state.renaming_transform = Some((i, name));
         app.ui_state.panels.transforms_open = true;
         chose = true;
@@ -645,7 +654,7 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     let zoom = zoom_action(app, i);
     let btn = ui.add_enabled(
         zoom.enabled,
-        egui::Button::new(ZOOM_LABEL).selected(zoom.is_zoom),
+        egui::Button::new((icons::ZOOM_IN, ZOOM_LABEL)).selected(zoom.is_zoom),
     );
     let btn = hinted(btn, &mut app.ui_state, zoom.tooltip, zoom.hint);
     if btn.clicked() {
@@ -780,7 +789,7 @@ fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         // Kept even though the header name is click-to-edit: click-to-edit is
         // invisible until you hover the right four words, and this button is
         // what says the gesture exists.
-        let resp = ui.add(egui::Button::new("Rename").small());
+        let resp = ui.add(egui::Button::new((icons::PENCIL, "Rename")).small());
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -797,7 +806,7 @@ fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let is_zoom = zoom.is_zoom;
         let resp = ui.add_enabled(
             zoom.enabled,
-            egui::Button::new(ZOOM_LABEL).small().selected(is_zoom),
+            egui::Button::new((icons::ZOOM_IN, ZOOM_LABEL)).small().selected(is_zoom),
         );
         let resp = hinted(resp, &mut app.ui_state, zoom.tooltip, zoom.hint);
         if resp.clicked() {

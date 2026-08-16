@@ -431,7 +431,7 @@ fn draw_handles(ui: &mut egui::Ui, app: &mut App, strip: egui::Rect) {
             app.ui_state.palette_drag = None;
         }
         resp.context_menu(|ui| {
-            if ui.button("Delete stop").clicked() {
+            if ui.button((super::icons::TRASH, "Delete stop")).clicked() {
                 deleted = Some(i);
                 ui.close();
             }

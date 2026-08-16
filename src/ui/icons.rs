@@ -99,6 +99,19 @@ pub const LOCK_OPEN: &str = "\u{E30A}";
 /// Note this font's PUA is *even*-codepointed — the odd slots between these
 /// are unmapped — so a neighbouring icon is +2, not +1.
 pub const PLUS: &str = "\u{E3D4}";
+/// Rename (context menus) — Phosphor `pencil-simple`, the bare diagonal
+/// pencil. Located the documented way: a contact sheet of the vendored font's
+/// E300–E3E0 rendered with Pillow and read off the page. Picked over its four
+/// neighbours (`pencil`, `pencil-line`, `pencil-circle`, `note-pencil`, all
+/// within E34C–E3B4) because at menu-row size the extra rule or ring under the
+/// nib is the only thing distinguishing them, and it just reads as noise.
+pub const PENCIL: &str = "\u{E3B4}";
+/// Infinite zoom about a transform (context menu, detail pane) — Phosphor
+/// `magnifying-glass-plus`. The plus is the right one of the three: this makes
+/// the scene zoom *in* forever, and the plain glass (E30C) reads as "search",
+/// which is a different thing this UI may yet want.
+pub const ZOOM_IN: &str = "\u{E310}";
+
 /// Duplicate the selected thing (Transforms rail) — Phosphor `copy`, the two
 /// overlapping sheets. Picked over `copy-simple` (E1CC, a single sheet), which
 /// at button size is hard to tell from `file`. `cube` (E1DA) anchors this
