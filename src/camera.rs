@@ -31,7 +31,16 @@ use serde::{Deserialize, Serialize};
 use crate::rot::{Angle, Orientation, Turn, YawPitchRoll};
 
 pub const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_4; // 45°
+/// The near plane for a scene framed far enough out that a constant works.
+/// [`OrbitCamera::near_plane`] is the value actually used and never exceeds
+/// this; see there for why it cannot be a constant.
 pub const Z_NEAR: f32 = 0.1;
+
+/// The near plane as a fraction of the orbit radius. Half a percent of the
+/// framing distance is two hundred times finer than the frame, so what it
+/// clips is deep sub-pixel at any resolution, while `Z_NEAR / (0.005 · d)`
+/// keeps the depth range inside what Depth32Float carries comfortably.
+const NEAR_FRAC: f32 = 0.005;
 pub const Z_FAR: f32 = 100.0;
 
 /// Radians of orbit or roll per pixel of drag
@@ -168,8 +177,51 @@ impl OrbitCamera {
             * Mat4::from_translation(-self.eye())
     }
 
+    /// Where the near plane goes for this framing.
+    ///
+    /// A fraction of the orbit radius rather than a constant, because an
+    /// infinite zoom is a *scale* symmetry and a constant is the one thing a
+    /// scale symmetry cannot contain. The picture at eye distance `d` and the
+    /// picture at `d·s` are required to be the same picture; a near plane
+    /// fixed in world units sits at a different place in the object at each of
+    /// them, so it clips different material and the requirement fails.
+    ///
+    /// What that looked like on `sierpinski-infinity`, whose band runs
+    /// 0.0518–0.1594 and so straddles the old constant of 0.1: at the shallow
+    /// end the near plane cut nothing much, and at the deep end it sat 0.048
+    /// *past* the fixed point, so the whole centre of the picture — the
+    /// infinite regression itself, the thing the scene exists to show — was
+    /// clipped away. Measured as mean brightness by radius from centre, the
+    /// two framings one period apart read:
+    ///
+    /// ```text
+    ///     px from centre     1-2     4-8    16-32   64-128   256-512
+    ///     d = 0.1594      165.88  129.67    71.86    44.55     35.90
+    ///     d = 0.0518       35.33   35.33    35.64    36.75     35.61
+    /// ```
+    ///
+    /// The second row is flat background: the regression is not dim there, it
+    /// is absent. With the plane scaled the two agree to 2% at every radius.
+    ///
+    /// This is the same shape of bug as the scroll floor in [`Self::zoom`],
+    /// and it arrived the same way — the scene was authored at distance
+    /// 0.3703, where the whole band cleared 0.1 and everything worked, and
+    /// reframing it to 0.1594 slid the band down onto a constant that knows
+    /// nothing about it.
+    ///
+    /// Clamped so it can only ever move *closer* than [`Z_NEAR`], never
+    /// further: for any scene framed beyond 20 units this returns exactly the
+    /// old constant, and for everything nearer it can only reveal material
+    /// that was being clipped. The fraction is small enough that what it does
+    /// clip is far below a pixel — half a percent of the framing distance —
+    /// and large enough to keep the depth buffer's range in hand, since points
+    /// write depth so that gizmos can sit behind them.
+    pub fn near_plane(&self) -> f32 {
+        (self.distance * NEAR_FRAC).min(Z_NEAR).max(1e-7)
+    }
+
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(FOV_Y_RADIANS, aspect, Z_NEAR, Z_FAR) * self.view_matrix()
+        Mat4::perspective_rh(FOV_Y_RADIANS, aspect, self.near_plane(), Z_FAR) * self.view_matrix()
     }
 
     pub fn forward(&self) -> Vec3 {
@@ -704,6 +756,45 @@ mod tests {
             expect = expect.then(spin);
         }
         assert_eq!(walked.orientation, expect);
+    }
+
+    /// The near plane has to be a fixed fraction of the framing, or a zoom
+    /// wrap moves it through the object. Two framings one period apart must
+    /// put it at the same place *relative to the picture*.
+    #[test]
+    fn the_near_plane_scales_with_the_framing() {
+        let s = 0.325_f32;
+        let near = |d: f32| OrbitCamera::from_chart(0.0, 0.0, 0.0, d, Vec3::ZERO).near_plane();
+        for d in [0.1594_f32, 4.0, 19.0] {
+            let ratio = near(d * s) / near(d);
+            assert!(
+                (ratio - s).abs() < 1e-5,
+                "at d={d} the near plane scaled by {ratio}, not by the map's {s}",
+            );
+        }
+        // Never further out than the old constant, so it can only ever reveal
+        // material that used to be clipped.
+        for d in [0.01_f32, 1.0, 20.0, 100.0] {
+            assert!(near(d) <= Z_NEAR + 1e-9, "d={d} pushed the near plane past Z_NEAR");
+        }
+        // And for anything framed far enough out, exactly the old constant.
+        assert_eq!(near(100.0), Z_NEAR);
+    }
+
+    /// The failure this came from: `sierpinski-infinity`'s band runs
+    /// 0.0518-0.1594, so a constant near plane of 0.1 fell *inside* it. At the
+    /// deep end the plane sat past the fixed point and clipped the entire
+    /// centre of the picture — the infinite regression itself — away.
+    #[test]
+    fn a_bands_near_plane_never_reaches_the_fixed_point() {
+        let (band, scale) = (0.1594_f32, 0.325_f32);
+        for d in [band, band * scale] {
+            let near = OrbitCamera::from_chart(0.0, 0.0, 0.0, d, Vec3::ZERO).near_plane();
+            assert!(
+                near < d,
+                "at d={d} the near plane is at {near}, at or beyond the fixed point itself",
+            );
+        }
     }
 
     #[test]

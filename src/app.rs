@@ -4887,10 +4887,43 @@ impl App {
         self.pending_screenshot = true;
     }
 
+    /// The point size as it is actually drawn.
+    ///
+    /// Under an infinite zoom this tracks the eye, because a size fixed in
+    /// world units is not wrap-invariant — see `Renorm::point_scale`. Without
+    /// one it is the authored size unchanged.
+    ///
+    /// Everything that reasons about how big a dot lands on screen must go
+    /// through this and not `self.point_size`, the primitive choice below
+    /// included: that decision is a threshold on the projected size, so
+    /// feeding it the unscaled number would flip it partway through a period
+    /// and change renderer mid-flight.
+    pub fn rendered_point_size(&self) -> f32 {
+        let Some(z) = self.zoom() else { return self.point_size };
+        // Against the scene's own framing, not against `band`: `band` is the
+        // orbit radius and the wrap measures the eye's distance from the fixed
+        // point, which are different numbers whenever the focus is off the
+        // fixed point. Referred to the framing the size was chosen at, the
+        // factor is exactly 1 there and moves only as the eye does.
+        let reference = self.scene_reference_eye(z);
+        let eye = (self.camera.eye() - z.fixed_point).length();
+        self.point_size * (eye / reference.max(1e-9))
+    }
+
+    /// How far the eye sits from the zoom's fixed point at the scene's *own*
+    /// framing — the framing an authored `point_size` was chosen against.
+    fn scene_reference_eye(&self, z: &crate::renorm::Renorm) -> f32 {
+        // `OrbitCamera::eye`, without building one: the scene holds the
+        // framing as an orientation, not as the chart the file is written in.
+        let eye = self.scene.camera_focus
+            + self.scene.camera_distance * self.scene.camera_orientation.rotate(glam::Vec3::Z);
+        (eye - z.fixed_point).length()
+    }
+
     /// Use native 1px point primitives (~3x faster) when the projected point
     /// size at the orbit distance would be subpixel anyway
     fn use_point_primitives(&self, screen_height: f32) -> bool {
-        self.point_size * screen_height / self.camera.distance <= 1.5
+        self.rendered_point_size() * screen_height / self.camera.distance <= 1.5
     }
 
     // === Drawing fewer points than we have, when they'd land on top of
@@ -5286,7 +5319,7 @@ impl App {
         let camera = CameraUniforms::new(
             mvp,
             SCREENSHOT_HEIGHT as f32,
-            self.point_size,
+            self.rendered_point_size(),
             aspect,
             1.0,
             haze.0,
@@ -5571,7 +5604,7 @@ impl App {
         let camera = CameraUniforms::new(
             view_proj,
             height as f32,
-            self.point_size,
+            self.rendered_point_size(),
             aspect,
             1.0,
             haze.0,

@@ -839,6 +839,31 @@ impl Renorm {
         }
     }
 
+    /// What to multiply an authored `point_size` by, for an eye this far from
+    /// the fixed point.
+    ///
+    /// A point size fixed in world units is not wrap-invariant, for exactly
+    /// the reason a pinned haze band isn't (see `offline::base_setup`, which
+    /// already auto-ranges the band under a zoom and says why). The wrap
+    /// rescales the camera and leaves the world alone, so a dot of fixed world
+    /// size covers `1/s` as much screen at the deep end of a period as at the
+    /// shallow end — here a factor of 3.08. The structure is scale-invariant;
+    /// the ink drawing it was not, so the picture thickened through every
+    /// period and snapped back at the seam.
+    ///
+    /// Measured on `sierpinski-infinity`, mean brightness by radius at the two
+    /// ends of one period, once the near plane was scaled but this was not:
+    /// 1.21, 1.33, 1.58, 1.66, 1.67 going outward from the centre — dead-on
+    /// agreement only where the structure is dense enough to saturate and
+    /// where the guard has taken everything to zero, and half again too much
+    /// ink everywhere in between. Scaling both, it is 0.99–1.02 throughout.
+    ///
+    /// The authored size means what it always meant *at the framing it was
+    /// authored for*, which is `band` — that being what `band` is.
+    pub fn point_scale(&self, eye_distance: f32) -> f32 {
+        eye_distance / self.band
+    }
+
     /// How close the wheel may bring the eye while this zoom is active.
     ///
     /// Not a limit on the framing, because there isn't one: [`Self::wrap`]

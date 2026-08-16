@@ -373,10 +373,13 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
                 .collect()
         }
         GridMode::Move { cols, rows, step } => {
+            // The base framing's near plane, not the constant: every tile in a
+            // move grid is a nudge off `base`, so they share its scale and
+            // must share its clipping or the sheet is not comparable.
             let proj = Mat4::perspective_rh(
                 crate::camera::FOV_Y_RADIANS,
                 aspect,
-                crate::camera::Z_NEAR,
+                base.near_plane(),
                 crate::camera::Z_FAR,
             );
             let right = base.right();
@@ -786,6 +789,25 @@ fn base_setup(
         println!("haze band auto-ranged (a pinned band is not wrap-invariant under infinite zoom)");
     }
     let (camera, folded) = effective_camera_folded(view.as_ref(), scene, over);
+    // And the same for the ink; see `Renorm::point_scale`.
+    //
+    // Measured against the scene's *own* framing rather than against `band`,
+    // which is the orbit radius and is not the same quantity: a scene whose
+    // focus is off the fixed point — `menger`, whose fixed point is at
+    // (0, -0.495, -0.495) and whose focus is elsewhere — has an eye distance
+    // that differs from its orbit radius, and dividing one by the other
+    // rescaled its default render by a third. Against its own framing the
+    // factor is exactly 1 for every scene as authored, and moves only as the
+    // eye does.
+    let point_size = match scene_zoom(scene).ok().flatten() {
+        Some(z) => {
+            let (authored, _) = effective_camera_folded(None, scene, CameraOverride::default());
+            let reference = (authored.eye() - z.fixed_point).length();
+            point_size * z.point_scale((camera.eye() - z.fixed_point).length())
+                / z.point_scale(reference).max(1e-9)
+        }
+        None => point_size,
+    };
     if !over.is_empty() {
         // So a framing found by flags can be kept without transcription
         println!("{}", CameraOverride::describe(&camera));
