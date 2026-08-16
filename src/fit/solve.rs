@@ -582,7 +582,10 @@ mod tests {
         // search from the density map, the saliency weight and the resampling.
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xdec0de);
         let cloud = super::super::normalize_walk(walk(&truth, 60_000, &mut rng).unwrap());
-        let target = loss::Target::new(&cloud.pos, &cloud.col, n, 0.0, &mut rng);
+        // The blend the fitter actually runs, so the probe measures the
+        // landscape that is really being searched.
+        let target =
+            loss::Target::new(&cloud.pos, &cloud.col, n, 0.0, loss::DEFAULT_GRID_SHARE, &mut rng);
 
         // The noise floor: the exact parameters against themselves, under a
         // stream the target did not come from. No fit can beat this, and a

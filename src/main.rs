@@ -263,6 +263,21 @@ struct Args {
     #[arg(long, value_name = "0-1", default_value_t = 0.0, help_heading = "Likeness")]
     fit_depth: f32,
 
+    /// Share of the loss that compares density grids, 0-1 [0.6]
+    ///
+    /// The transport term compares one-dimensional shadows of the two clouds,
+    /// and very different pictures share their shadows — left to itself it
+    /// reproduces a subject's extent and silhouette and none of its interior.
+    /// This term compares small density grids at four scales, which sees the
+    /// joint distribution and cannot be fooled that way.
+    ///
+    /// Both halves earn their place. Transport is long-range and will drag a
+    /// badly placed map across the frame; two clouds that do not overlap have
+    /// the same grid distance however far apart they are. At 0 or 1 you get
+    /// one of them alone.
+    #[arg(long, value_name = "0-1", default_value_t = fit::loss::DEFAULT_GRID_SHARE, help_heading = "Likeness")]
+    fit_structure: f32,
+
     /// Annealing steps per seed [4000]
     #[arg(long, value_name = "N", default_value_t = 4000, help_heading = "Likeness")]
     fit_iters: usize,
@@ -2207,6 +2222,7 @@ fn main() {
                 ..Default::default()
             },
             color_weight: args.fit_color.clamp(0.0, 1.0),
+            grid_weight: args.fit_structure.clamp(0.0, 1.0),
             seeds: args.fit_seeds.max(1),
             target_sheet: args.fit_target.clone(),
             preview: args.fit_preview.clone(),

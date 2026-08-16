@@ -288,6 +288,9 @@ pub struct Options {
     pub solve: solve::Config,
     /// Fraction of the loss that measures colour rather than position.
     pub color_weight: f32,
+    /// Fraction of the loss that compares density grids rather than
+    /// one-dimensional transport. See [`loss`].
+    pub grid_weight: f32,
     /// Independent fits from different starts. Every one is a legitimate
     /// output and the good one is usually not the best-scoring one, so the
     /// whole ladder gets written and the eye picks.
@@ -331,6 +334,7 @@ pub fn run(opts: &Options) -> Result<(), String> {
         &target.cloud.col,
         opts.solve.points,
         opts.color_weight,
+        opts.grid_weight,
         &mut rng,
     );
 
