@@ -16,7 +16,7 @@
 //! the six path operations goes through `App::commit_edit`.
 
 use crate::app::App;
-use crate::camera::OrbitStyle;
+use crate::camera::{Fov, OrbitStyle};
 
 use super::hints::hinted;
 use super::icons;
@@ -24,6 +24,8 @@ use super::num;
 
 /// Character budget for the `yaw · pitch · focus` readout.
 const FRAMING_CHARS: usize = 46;
+/// Budget for the horizontal-FoV readout beside the FoV slider: `150°h`.
+const FOV_READOUT_CHARS: usize = 5;
 /// Budget for a `N. d=X.XX yaw=X.XX pitch=X.XX` keypoint row.
 const PATH_KEY_CHARS: usize = 36;
 
@@ -91,6 +93,48 @@ pub fn draw_input_prefs(ui: &mut egui::Ui, app: &mut App) {
         if let Some(style) = chosen {
             app.set_orbit_style(style);
         }
+    });
+
+    ui.horizontal(|ui| {
+        // Vertical, because that is what the projection is built from and what
+        // stays put as the window is resized. The readout beside it gives the
+        // horizontal figure, which is the one games usually quote and the one
+        // most people have a number in mind for.
+        let mut fov = app.camera_fov().degrees();
+        let resp = ui.add(
+            egui::Slider::new(&mut fov, Fov::MIN_DEGREES..=Fov::MAX_DEGREES)
+                .fixed_decimals(0)
+                .suffix("°")
+                .text("field of view"),
+        );
+        let aspect = app.surface_size().0 as f32 / app.surface_size().1.max(1) as f32;
+        let natural = app.camera_fov().horizontal_degrees(aspect);
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            format!(
+                "How wide a lens the picture is drawn through, vertically. Saved to \
+                 prefs, so it follows you to the next scene — unless a scene states \
+                 its own `fov`, which it then keeps.\n\n\
+                 Wider exaggerates depth and shrinks the subject; narrower flattens \
+                 it and fills the frame. The geometrically \"correct\" value is the \
+                 angle your screen subtends at your eye — about 30° at a normal \
+                 viewing distance, which is why the 45° default can read flat. Wider \
+                 than that is an ordinary preference; dollying in as you widen is \
+                 what makes the perspective bite.\n\n\
+                 Right now: {:.0}° horizontal in this window. The default is {:.0}°.",
+                natural,
+                crate::camera::DEFAULT_FOV_DEGREES,
+            ),
+            "drag: widen or narrow the lens",
+        );
+        if resp.changed() {
+            app.set_fov_preference(Fov::from_degrees(fov));
+        }
+        // Fixed-width cell: "150°h" is the widest it gets, and a readout that
+        // resizes its own row as you drag the slider above it is the vibration
+        // `ui::num` exists to stop.
+        num::text_cell(ui, &format!("{:>3.0}°h", natural), FOV_READOUT_CHARS);
     });
 
     ui.horizontal(|ui| {

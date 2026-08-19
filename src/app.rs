@@ -634,6 +634,10 @@ fn lerp_camera(a: &OrbitCamera, b: &OrbitCamera, s: f32) -> OrbitCamera {
             .then_body(crate::rot::Turn::from_rotation_vector(turn.as_rotation_vector() * s)),
         distance: a.distance * (b.distance / a.distance).powf(s),
         focus: a.focus.lerp(b.focus, s),
+        // A fly-to moves the camera, not the lens. Both ends are the live
+        // camera's FoV in every caller; taking `a`'s rather than lerping keeps
+        // that true even if one day they aren't.
+        fov: a.fov,
     }
 }
 
@@ -1013,6 +1017,10 @@ impl App {
         vsync: bool,
         scene_path: Option<String>,
         view: Option<View>,
+        // `--fov`. Wins over the view, the scene and the preference alike,
+        // which is what makes it usable as an override for a settings file
+        // you don't want to edit.
+        fov_override: Option<crate::camera::Fov>,
         splat: bool,
         exposure: Option<f32>,
         // `grade` arrives already resolved against the view and the CLI flags
@@ -1143,7 +1151,20 @@ impl App {
         // Read before `prefs` is moved into the struct below.
         let (help_open, browser_open) = (prefs.panels.help_open, prefs.panels.browser_open);
 
-        let camera = scene.camera();
+        // The framing is the scene's; the lens is the scene's only if it
+        // states one. Otherwise it is the person's, from prefs — the windowed
+        // app is the only place prefs may decide this, because a headless
+        // render has to stay reproducible from flags plus scene alone (see
+        // the `threads` note in `main.rs`).
+        let camera = {
+            let mut c = scene.camera();
+            if !scene.camera_fov_authored {
+                if let Some(d) = prefs.fov {
+                    c.fov = crate::camera::Fov::from_degrees(d);
+                }
+            }
+            c
+        };
 
         let mut app = Self {
             gpu,
@@ -1267,6 +1288,13 @@ impl App {
             app.apply_view(&v, false);
         }
 
+        // Last, so it beats the view file as well as the scene and the
+        // preference. `glide_camera_to` in `apply_view` sets a target rather
+        // than the camera, so the lens has to be put on both.
+        if let Some(f) = fov_override {
+            app.set_camera_fov(f);
+        }
+
         app
     }
 
@@ -1292,6 +1320,12 @@ impl App {
         // Point size and haze aren't *places*, so easing them would only make
         // the view look like it arrived twice.
         self.glide_camera_to(target);
+        // A view written before the lens was settable says nothing about it,
+        // and keeping the current one is the honest reading of that: it is
+        // what the person is already looking through.
+        if let Some(d) = v.fov {
+            self.set_camera_fov(crate::camera::Fov::from_degrees(d));
+        }
         self.point_size = v.point_size;
         // Views written before haze became one control carry only the four raw
         // shader values; recover an equivalent amount from them and treat
@@ -1463,7 +1497,13 @@ impl App {
     /// Only for *discrete* framing changes. Drags and scrolls are continuous
     /// and already track the hand, so smoothing them would just add lag —
     /// and any of them cancels a glide in flight (see `cancel_camera_glide`).
-    pub fn glide_camera_to(&mut self, target: OrbitCamera) {
+    pub fn glide_camera_to(&mut self, mut target: OrbitCamera) {
+        // A glide moves the camera, never the lens: several callers build
+        // their target with `OrbitCamera::from_legacy` or a literal, both of
+        // which carry the *default* FoV, and letting that ride in would snap
+        // the field of view back to 45 at the end of every fly-to. Whoever
+        // wants the lens changed says so separately (`set_camera_fov`).
+        target.fov = self.camera.fov;
         // Already there: no glide, or a 200ms pause where nothing happens.
         if target.distance == self.camera.distance
             && target.focus == self.camera.focus
@@ -1919,6 +1959,10 @@ impl App {
             focus: self.camera.focus.to_array(),
             offset: [0.0; 3],
             point_size: self.point_size,
+            // A view reproduces a frame, and the lens is part of the frame.
+            // Always written, so `--view` renders what was on screen even on
+            // a machine whose owner prefers a different one.
+            fov: Some(self.camera.fov.degrees()),
             // The band is resolved rather than stored raw, so a view of an
             // auto-ranged scene renders offline at the framing it was saved
             // at even though the offline path knows nothing about auto-ranging.
@@ -2589,6 +2633,56 @@ impl App {
     }
 
     /// Toggle flightsim-style pitch inversion (persisted across sessions)
+    /// The camera a scene should be framed with as it opens.
+    ///
+    /// The framing is always the scene's. The lens is the scene's **only if it
+    /// states one** — otherwise the person keeps looking through whatever they
+    /// were already looking through, which is their preference at startup,
+    /// `--fov` if they passed one, and the settings slider after that.
+    ///
+    /// Without this, opening any of the shipped scenes (none of which state a
+    /// lens) would snap the FoV back to 45 and there would be no way to keep a
+    /// preference for longer than one scene.
+    fn camera_for(&self, scene: &Scene) -> OrbitCamera {
+        let mut cam = scene.camera();
+        if !scene.camera_fov_authored {
+            cam.fov = self.camera.fov;
+        }
+        cam
+    }
+
+    /// The lens the live camera looks through. Does **not** touch prefs — this
+    /// is the one a view file or `--fov` sets, and neither is a statement
+    /// about what the person wants by default.
+    pub fn set_camera_fov(&mut self, fov: crate::camera::Fov) {
+        self.camera.fov = fov;
+        // A glide in flight carries its own copy of both ends.
+        if let Some(g) = &mut self.camera_glide {
+            g.from.fov = fov;
+            g.to.fov = fov;
+        }
+    }
+
+    /// The settings-window control: change the lens *and* remember it, so it
+    /// follows the person to the next scene and the next launch.
+    ///
+    /// Note what it does not do: it doesn't touch the scene. A FoV reaches a
+    /// scene file only through `--set camera.fov` or a text editor, so that
+    /// working at 90 degrees for an afternoon doesn't quietly rewrite the lens
+    /// of every scene saved along the way.
+    pub fn set_fov_preference(&mut self, fov: crate::camera::Fov) {
+        if self.camera.fov == fov && self.prefs.fov == Some(fov.degrees()) {
+            return;
+        }
+        self.set_camera_fov(fov);
+        self.prefs.fov = Some(fov.degrees());
+        self.prefs.save();
+    }
+
+    pub fn camera_fov(&self) -> crate::camera::Fov {
+        self.camera.fov
+    }
+
     pub fn toggle_invert_pitch(&mut self) {
         self.prefs.invert_pitch = !self.prefs.invert_pitch;
         log::info!(
@@ -3329,7 +3423,7 @@ impl App {
         };
         log::info!("Loading scene: {} ({})", scene.name, path.display());
 
-        self.camera = scene.camera();
+        self.camera = self.camera_for(&scene);
         self.invalidate_default_path();
         self.rewind_camera_playhead();
         self.point_size = scene.point_size;
@@ -3878,7 +3972,7 @@ impl App {
         if scene.author.trim().is_empty() {
             scene.author = self.default_author();
         }
-        self.camera = scene.camera();
+        self.camera = self.camera_for(&scene);
         self.invalidate_default_path();
         self.rewind_camera_playhead();
         self.point_size = scene.point_size;
@@ -5133,7 +5227,20 @@ impl App {
     /// Use native 1px point primitives (~3x faster) when the projected point
     /// size at the orbit distance would be subpixel anyway
     fn use_point_primitives(&self, screen_height: f32) -> bool {
-        self.rendered_point_size() * screen_height / self.camera.distance <= 1.5
+        self.projected_point_pixels(screen_height) <= 1.5
+    }
+
+    /// What the shaders will make of the current point size at the focus, in
+    /// render-target pixels and before any clamp. One place, so the fast path
+    /// above and the readout below cannot drift apart from each other or from
+    /// `CameraUniforms::projected_point_size`.
+    fn projected_point_pixels(&self, screen_height: f32) -> f32 {
+        OrbitCamera::point_pixels(
+            self.rendered_point_size(),
+            self.camera.distance,
+            screen_height,
+            self.camera.fov,
+        )
     }
 
     /// **How big a dot actually lands on screen, in pixels, at the focus** —
@@ -5158,7 +5265,7 @@ impl App {
         if self.use_point_primitives(screen_height) {
             return (1.0, true);
         }
-        let raw = self.rendered_point_size() * screen_height / self.camera.distance.max(1e-9);
+        let raw = self.projected_point_pixels(screen_height);
         let max = crate::gpu::buffers::MAX_POINT_PIXELS;
         (raw.min(max), raw > max)
     }
@@ -5213,7 +5320,8 @@ impl App {
         }
         let Some(stats) = self.attractor else { return valid };
         let depth = (stats.center - self.camera.eye()).length();
-        let r_px = stats.radius * OrbitCamera::pixels_per_world_unit(depth, screen_height);
+        let r_px =
+            stats.radius * OrbitCamera::pixels_per_world_unit(depth, screen_height, self.camera.fov);
         // A disc, not the dust that's actually there — an over-estimate of the
         // covered area, which errs toward not intervening.
         let covered = (std::f32::consts::PI * r_px * r_px).max(1.0);
@@ -5474,7 +5582,9 @@ impl App {
                 } else {
                     t
                 };
-                let cam = self.camera_path().sample(t);
+                // The path carries a framing, never a lens: playing one back must not
+                // change the FoV out from under the person watching.
+                let cam = self.camera_path().sample(t, self.camera.fov);
                 self.camera = cam;
                 // A path key's distance is unwrapped — that's the point, it's
                 // how a path descends nine zoom periods in one straight
@@ -5561,6 +5671,7 @@ impl App {
         let haze = self.haze_uniforms();
         let camera = CameraUniforms::new(
             mvp,
+            self.camera.fov,
             SCREENSHOT_HEIGHT as f32,
             self.rendered_point_size(),
             aspect,
@@ -5846,6 +5957,7 @@ impl App {
         let haze = self.haze_uniforms();
         let camera = CameraUniforms::new(
             view_proj,
+            self.camera.fov,
             height as f32,
             self.rendered_point_size(),
             aspect,

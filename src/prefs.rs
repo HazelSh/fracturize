@@ -54,6 +54,27 @@ pub struct Prefs {
     /// [`OrbitStyle::Trackball`]: crate::camera::OrbitStyle::Trackball
     #[serde(default)]
     pub orbit_style: OrbitStyle,
+    /// Vertical field of view in degrees, 10-150. `None` = never set one,
+    /// take [`crate::camera::DEFAULT_FOV_DEGREES`].
+    ///
+    /// A preference and not scene data because the right answer depends on
+    /// the desk: geometrically it is the angle your screen subtends at your
+    /// eye (about 30 degrees at arm's length from a laptop), and people's
+    /// taste runs much wider than that — 90 is a common games setting.
+    /// Neither number is a property of anybody's artwork.
+    ///
+    /// Read by the window only. A headless `--render` never consults it — the
+    /// same rule [`Self::threads`] follows, and for the same reason: a render
+    /// has to be reproducible from flags plus scene, and a lens changes the
+    /// picture. `--fov` is how the command line says it deliberately.
+    ///
+    /// Loses to a scene that states its own `[camera] fov`, which is the
+    /// opposite way round from [`Self::point_count`] and deliberately so:
+    /// `point_count` describes what *this box* can afford, so the box must
+    /// win, while a FoV changes the picture, so a scene that was composed
+    /// against one keeps it. `--fov` wins over everything.
+    #[serde(default)]
+    pub fov: Option<f32>,
     /// Open/closed state of the Phase 2 panel windows
     #[serde(default)]
     pub panels: PanelPrefs,
@@ -111,6 +132,7 @@ impl Default for Prefs {
         Self {
             invert_pitch: false,
             orbit_style: OrbitStyle::default(),
+            fov: None,
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
             ui_scale: default_ui_scale(),
@@ -170,6 +192,21 @@ mod tests {
         assert!(p.invert_pitch, "the settings that were there must survive");
         assert_eq!(p.orbit_style, OrbitStyle::Trackball, "and the new one takes its default");
         assert_eq!(p.gpu_share, None, "and so does one added later still");
+    }
+
+    #[test]
+    fn the_fov_preference_is_absent_until_someone_sets_one() {
+        // The whole point of `Option` here: an unset preference must not
+        // shadow a scene's own `[camera] fov`, and only `None` can express
+        // "no opinion" — 45.0 would be an opinion that happens to match the
+        // default, and would start winning the moment the default moved.
+        assert_eq!(Prefs::default().fov, None);
+        let s = toml::to_string(&Prefs::default()).expect("prefs must serialize");
+        assert!(!s.contains("fov"), "an unset FoV must not be written: {}", s);
+
+        let p = Prefs { fov: Some(90.0), ..Default::default() };
+        let s = toml::to_string(&p).expect("prefs must serialize");
+        assert_eq!(toml::from_str::<Prefs>(&s).unwrap().fov, Some(90.0));
     }
 
     #[test]

@@ -181,6 +181,7 @@ const CAMERA_FIELDS: &[&str] = struct_fields!(
     focus,
     offset,
     distance,
+    fov,
     yaw,
     pitch,
     roll,

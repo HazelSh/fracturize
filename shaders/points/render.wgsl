@@ -9,7 +9,11 @@ struct Point {
 struct CameraUniforms {
     view_proj: mat4x4<f32>,
     screen_height: f32,
-    point_size: f32,
+    // The scene's point size, already scaled for the field of view on the CPU
+    // (`Fov::point_scale`). Equal to the authored size at the default 45
+    // degree FoV; smaller as the lens widens, because a wider lens shrinks the
+    // whole world on screen and a point has to shrink with it.
+    projected_point_size: f32,
     aspect_ratio: f32,
     min_point_pixels: f32,
     haze_near: f32,
@@ -120,7 +124,7 @@ fn vs_main(
     // scaled for supersampling (`max_point_pixels`, 12 x N) because it means
     // 12 output pixels; the floor deliberately does not scale, since a finer
     // floor is what supersampling is for. See `CameraUniforms`.
-    let base_size = camera.point_size * camera.screen_height / depth;
+    let base_size = camera.projected_point_size * camera.screen_height / depth;
     let size_pixels = clamp(base_size, camera.min_point_pixels, camera.max_point_pixels);
 
     // Convert to NDC size

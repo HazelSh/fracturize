@@ -770,6 +770,17 @@ pub struct CameraDef {
     /// Orbit radius
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance: Option<f64>,
+    /// Vertical field of view in **degrees**, 10-150. Degrees rather than the
+    /// radians every other angle here is written in, because this is the one
+    /// camera number people already have a feel for from elsewhere — a games
+    /// FoV slider is in degrees, and so is every lens chart.
+    ///
+    /// Omitted means "no opinion", which is the usual case and lets the
+    /// person's own preference decide (see [`Scene::camera_fov`]). A scene
+    /// only carries one when someone deliberately puts it there, by hand or
+    /// with `--set camera.fov=90`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov: Option<f64>,
     /// Orbit angle around Y in radians
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yaw: Option<f64>,
@@ -1072,6 +1083,20 @@ pub struct Scene {
     pub camera_focus: Vec3,
     /// Camera orbit radius
     pub camera_distance: f32,
+    /// The lens this scene is composed with — the vertical field of view.
+    ///
+    /// Defaults to [`crate::camera::Fov::default`], and `camera_fov_authored`
+    /// says whether that is the file's opinion or merely the absence of one.
+    /// The distinction matters because a FoV is half preference and half
+    /// composition: a scene that states one has framed itself against it and
+    /// keeps it, while one that says nothing takes whatever the person at the
+    /// desk prefers. See `Prefs::fov`.
+    pub camera_fov: crate::camera::Fov,
+    /// Whether `camera_fov` came from the file's `[camera] fov` or is just the
+    /// default standing in. The same shape as `point_count_defaulted`, and for
+    /// the same reason: only the loader knows, and the precedence rules above
+    /// it need to.
+    pub camera_fov_authored: bool,
     /// Camera framing.
     ///
     /// A quaternion rather than the yaw/pitch/roll the file is written in:
@@ -1092,6 +1117,7 @@ impl Scene {
             orientation: self.camera_orientation,
             distance: self.camera_distance,
             focus: self.camera_focus,
+            fov: self.camera_fov,
         }
     }
 
@@ -1100,6 +1126,12 @@ impl Scene {
         self.camera_orientation = cam.orientation;
         self.camera_distance = cam.distance;
         self.camera_focus = cam.focus;
+        // Deliberately does *not* adopt the FoV, and does not clear
+        // `camera_fov_authored`: the framing is what a person moves, the lens
+        // is a setting they carry between scenes, and folding a preference
+        // into the artwork every time the camera moved is how it would end up
+        // written to disk without anyone asking. `--set camera.fov` and a
+        // hand-edited file are the ways in.
     }
 
     /// An empty canvas: the smallest scene that still renders something, for
@@ -1157,6 +1189,8 @@ impl Scene {
             colormap,
             camera_focus: Vec3::ZERO,
             camera_distance: 3.0,
+            camera_fov: crate::camera::Fov::default(),
+            camera_fov_authored: false,
             camera_orientation: crate::rot::Orientation::from_yaw_pitch_roll(
                 crate::rot::Angle::ZERO,
                 crate::rot::Angle::from_radians(0.3),
@@ -1346,6 +1380,10 @@ impl Scene {
         };
         let camera_offset = cam.offset.map(|f| Vec3::from(f.map(|v| v as f32))).unwrap_or(default_offset);
         let camera_distance = cam.distance.unwrap_or(3.0) as f32;
+        let camera_fov = cam
+            .fov
+            .map(|d| crate::camera::Fov::from_degrees(d as f32))
+            .unwrap_or_default();
         // Fold the legacy eye offset into an on-sphere framing and distance
         let mut folded = crate::camera::OrbitCamera::from_legacy(
             camera_focus,
@@ -1591,6 +1629,8 @@ impl Scene {
             colormap,
             camera_focus,
             camera_distance: folded.distance,
+            camera_fov,
+            camera_fov_authored: cam.fov.is_some(),
             camera_orientation: folded.orientation,
             camera_path,
             zoom,
@@ -1778,6 +1818,17 @@ impl Scene {
                     focus: Some(self.camera_focus.to_array().map(tidy)),
                     offset: None,
                     distance: Some(tidy(self.camera_distance)),
+                    // Half preference, half composition — and the preference
+                    // half is the one that would do damage here. Saving is
+                    // something you do dozens of times while working, and if
+                    // it wrote the FoV then every scene you touched would
+                    // quietly acquire *your* lens and stop honouring anyone
+                    // else's, yours included the next time you changed it.
+                    // `None` also leaves an existing `fov =` line in a
+                    // hand-authored file exactly as it found it (see the merge
+                    // path in `merge_into`), so a scene that does state a lens
+                    // keeps it. Same treatment as `point_count`.
+                    fov: None,
                     // The readable chart where it can name the framing, the
                     // exact rotation vector where it can't — which is only at
                     // the poles, and only reachable at all since the camera
@@ -2199,6 +2250,12 @@ fn merge_scene_into_document(
             .as_table_mut()?;
         set_arr3(camera, "focus", cam.focus?, Some([0.0; 3]));
         set_f64(camera, "distance", cam.distance?, None);
+        // Only ever written when something deliberately set one (`--set
+        // camera.fov`); never removed, so a hand-authored lens survives a
+        // save from the app. See the `fov: None` above.
+        if let Some(f) = cam.fov {
+            set_f64(camera, "fov", f, None);
+        }
         set_f64(camera, "yaw", cam.yaw?, Some(0.0));
         set_f64(camera, "pitch", cam.pitch?, Some(0.0));
         match cam.roll {
@@ -3559,6 +3616,67 @@ color = [0.0, 1.0, 1.0]
             assert!((*ca - *cb).length() < 1e-3);
         }
         assert!((scene.camera_distance - reloaded.camera_distance).abs() < 1e-4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_scene_states_a_lens_only_if_someone_wrote_one() {
+        let dir = std::env::temp_dir().join("fracturize_scene_fov_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, camera: &str| {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "[meta]\nname = \"Fov\"\nauthor = \"test\"\n\n[camera]\ndistance = 3.0\n{}\n\n\
+                     [[transform]]\ntranslation = [0.1, 0.0, 0.0]\nscale = 0.5\ncolor = [1.0, 0.0, 0.0]\n",
+                    camera
+                ),
+            )
+            .unwrap();
+            path
+        };
+
+        // No key: the default stands in, and `camera_fov_authored` is what
+        // tells the app it may substitute the person's preference.
+        let plain = Scene::load(&write("plain.toml", "")).unwrap();
+        assert_eq!(plain.camera_fov, crate::camera::Fov::default());
+        assert!(!plain.camera_fov_authored);
+
+        // A key: degrees, and it survives into the camera the renderer uses.
+        let stated = Scene::load(&write("stated.toml", "fov = 90.0")).unwrap();
+        assert_eq!(stated.camera_fov.degrees(), 90.0);
+        assert!(stated.camera_fov_authored);
+        assert_eq!(stated.camera().fov.degrees(), 90.0);
+
+        // Out of range in the file is clamped, not rejected: a scene that says
+        // `fov = 400` is wrong about one number, not unloadable.
+        let silly = Scene::load(&write("silly.toml", "fov = 400.0")).unwrap();
+        assert_eq!(silly.camera_fov.degrees(), crate::camera::Fov::MAX_DEGREES);
+
+        // Saving never writes one — the preference must not leak into the
+        // artwork — but never removes one either.
+        let out = dir.join("saved-plain.toml");
+        plain.save(&out).unwrap();
+        assert!(
+            !std::fs::read_to_string(&out).unwrap().contains("fov"),
+            "saving must not write a fov into a scene that had none"
+        );
+        let merged = dir.join("stated.toml");
+        stated.save(&merged).unwrap();
+        let text = std::fs::read_to_string(&merged).unwrap();
+        assert!(text.contains("fov = 90"), "an authored fov must survive a save:\n{}", text);
+        assert_eq!(Scene::load(&merged).unwrap().camera_fov.degrees(), 90.0);
+
+        // And moving the camera is not a statement about the lens.
+        let mut moved = stated;
+        let mut cam = moved.camera();
+        cam.fov = crate::camera::Fov::from_degrees(20.0);
+        cam.distance = 9.0;
+        moved.set_camera(&cam);
+        assert_eq!(moved.camera_distance, 9.0);
+        assert_eq!(moved.camera_fov.degrees(), 90.0, "set_camera must not adopt the lens");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

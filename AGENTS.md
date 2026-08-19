@@ -973,6 +973,16 @@ yaw = 0.0                 # orbit angle around Y, radians
 pitch = 0.32              # orbit elevation, radians (positive = above)
 roll = 0.0                # optional: rotation about the view axis, radians
                           # (omitted when level; right-drag sets it in-app)
+# fov = 45                # optional: vertical field of view in DEGREES, 10-150
+                          # (the one camera angle written in degrees, because
+                          # it's the one people quote). Omit it — and almost
+                          # every scene should — and the lens is the person's
+                          # preference: `fov` in prefs.toml, set by the slider
+                          # in the Controls window, defaulting to 45. State one
+                          # only when a scene is *composed* against a
+                          # particular lens; it then wins over that preference,
+                          # and only `--fov` beats it. Saving from the app
+                          # never writes this key and never removes it.
 # rotvec = [x, y, z]      # optional: the exact framing, as a rotation vector
                           # in radians. Wins over yaw/pitch/roll, and is what
                           # gets written for a framing at the poles — where
@@ -1155,7 +1165,11 @@ Scene-design notes learned the hard way:
   `point_size ≤ 1.5 × camera_distance / window_height` or the renderer
   leaves the crisp 1px path at the default view on tall windows and every
   point becomes a multi-pixel billboard — strands turn to chunky ribbons
-  (stellate shipped with 0.0025 and needed 0.0012).
+  (stellate shipped with 0.0025 and needed 0.0012). That bound is written for
+  the default 45° lens; a point holds its world size as the FoV changes, so a
+  wider one shrinks it on screen and the bound relaxes by
+  `tan(22.5°)/tan(fov/2)` (0.41 at 90°). The Render window's `≈N px` readout
+  is always the truth of it.
 - Diffuse volumetric scenes (broad clouds rather than thin filaments) saturate
   small renders into a solid pastel blob: every point is full brightness, so
   once density passes ~1 point/pixel all structure is gone. Judge such scenes

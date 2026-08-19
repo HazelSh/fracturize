@@ -640,6 +640,13 @@ fn view_section(path: &str, v: &View, scene: &Scene, notes: &mut Notes) -> Secti
         Cell::new("point_size", size(v.point_size)),
         Cell::new("scene", size(scene.point_size)),
     ]);
+    s.cells(vec![
+        Cell::new(
+            "fov",
+            v.fov.map_or(word("unset"), |f| format!("{:.0}°", f)),
+        ),
+        Cell::new("scene", format!("{:.0}°", scene.camera_fov.degrees())),
+    ]);
 
     // A view written before haze became one control carries only the raw
     // shader values; the loader recovers an amount from them, so report the
@@ -1203,6 +1210,22 @@ fn camera_section(
     s.pair("roll", angle(chart.roll.radians()));
     s.pair("distance", length(effective.distance));
     s.pair("focus", point(effective.focus));
+    // The lens, and where it came from — which is the part worth printing.
+    // A headless render never reads prefs, so a scene that states no `fov`
+    // renders at the default here however the GUI is set up, and the only way
+    // to see that mismatch coming is to say so.
+    s.cells(vec![
+        Cell::new("fov", format!("{:.0}° vertical", effective.fov.degrees())),
+        Cell::note(match (subject.camera.fov.is_some(), subject.view.and_then(|v| v.1.fov), scene.camera_fov_authored) {
+            (true, _, _) => "--fov".to_string(),
+            (false, Some(_), _) => "the view file".to_string(),
+            (false, None, true) => "the scene's [camera] fov".to_string(),
+            (false, None, false) => format!(
+                "{}° horizontal at 16:9; the default",
+                effective.fov.horizontal_degrees(16.0 / 9.0).round(),
+            ),
+        }),
+    ]);
     s.text(format!(
         "from {}",
         match (subject.view.is_some(), subject.camera.is_empty()) {
@@ -1469,6 +1492,7 @@ mod tests {
             focus: [0.1, 0.2, 0.3],
             offset: [0.0; 3],
             point_size: 0.002,
+            fov: None,
             haze_near: 3.0,
             haze_far: 4.5,
             haze_transmittance: 1.0,
@@ -1527,13 +1551,15 @@ mod tests {
         let v = bare_view();
         let text = report(&Subject::new(&scene, "blank").with_view("views/v.toml", &v));
         for key in [
-            "of scene", "yaw", "pitch", "roll", "distance", "focus", "point_size",
+            "of scene", "yaw", "pitch", "roll", "distance", "focus", "point_size", "fov",
             "haze", "haze band", "color_falloff", "color_contrast", "renderer", "exposure",
         ] {
             assert!(text.contains(key), "missing row {:?} in:\n{}", key, text);
         }
-        // Unset optionals say so rather than disappearing
-        assert_eq!(text.matches("unset").count(), 5, "{}", text);
+        // Unset optionals say so rather than disappearing. Six since the lens
+        // joined them: a view written before `fov` existed states none, and
+        // that is a fact about the view worth printing.
+        assert_eq!(text.matches("unset").count(), 6, "{}", text);
         // and each override says what it replaced
         assert!(text.contains("point_size        0.0020   scene      0.0120"), "{}", text);
         assert!(text.contains("renderer           unset   default  points"), "{}", text);

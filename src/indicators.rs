@@ -342,9 +342,11 @@ pub fn build_path(path: &CameraPath) -> Vec<LineVertex> {
         path.keys.iter().map(|k| k.distance).sum::<f32>() / path.keys.len() as f32;
     let tick = (mean_distance * 0.04).max(1e-3);
 
-    let mut prev = path.sample(0.0).eye();
+    // Eye positions only: where the camera stands is not a function of
+    // its lens, so any FoV gives the same polyline.
+    let mut prev = path.sample(0.0, crate::camera::Fov::default()).eye();
     for i in 1..=samples {
-        let p = path.sample(i as f32 / samples as f32).eye();
+        let p = path.sample(i as f32 / samples as f32, crate::camera::Fov::default()).eye();
         seg(&mut verts, prev, p, PATH_COLOR);
         prev = p;
     }
@@ -352,7 +354,7 @@ pub fn build_path(path: &CameraPath) -> Vec<LineVertex> {
     // come back round, because sample(1.0) wraps to the start.
 
     for key in &path.keys {
-        push_cross(&mut verts, key.to_camera().eye(), tick, PATH_KEY_COLOR);
+        push_cross(&mut verts, key.to_camera(crate::camera::Fov::default()).eye(), tick, PATH_KEY_COLOR);
     }
 
     verts

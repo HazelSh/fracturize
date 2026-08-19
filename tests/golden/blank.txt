@@ -43,6 +43,7 @@ camera   yaw         0.0000 rad (   0.0°)
          roll        0.0000 rad (   0.0°)
          distance     3.000
          focus     ( 0.000,  0.000,  0.000)
+         fov       45° vertical   73° horizontal at 16:9; the default
          from the scene
 
 path     none authored (the default full-turn turntable applies)

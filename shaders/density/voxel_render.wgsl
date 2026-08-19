@@ -11,7 +11,11 @@ struct RenderVoxel {
 struct CameraUniforms {
     mvp: mat4x4<f32>,  // Not used directly, but kept for compatibility
     screen_height: f32,
-    point_size: f32,
+    // The scene's point size, already scaled for the field of view on the CPU
+    // (`Fov::point_scale`). Equal to the authored size at the default 45
+    // degree FoV; smaller as the lens widens, because a wider lens shrinks the
+    // whole world on screen and a point has to shrink with it.
+    projected_point_size: f32,
     aspect_ratio: f32,
     min_point_pixels: f32,
     haze_near: f32,
@@ -75,7 +79,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Calculate point size in NDC
     // Scale with depth like the original renderer
     let scale_factor = 1.2071;
-    let base_size = (camera.point_size * camera.screen_height * scale_factor) / depth;
+    let base_size = (camera.projected_point_size * camera.screen_height * scale_factor) / depth;
     // Modulate size by density - higher density = slightly larger points
     let density_scale = 1.0 + density * 0.5;
     let size_pixels = max(base_size * density_scale, camera.min_point_pixels);

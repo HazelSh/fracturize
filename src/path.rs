@@ -55,7 +55,7 @@
 
 use glam::Vec3;
 
-use crate::camera::OrbitCamera;
+use crate::camera::{Fov, OrbitCamera};
 use crate::rot::{Orientation, Turn};
 
 /// Angular speed of the default orbit, in rad/s — a full turn every ~35s.
@@ -83,11 +83,19 @@ impl PathKey {
         }
     }
 
-    pub fn to_camera(self) -> OrbitCamera {
+    /// The framing as a camera, under the lens `fov`.
+    ///
+    /// A keypoint has no FoV of its own — it is a place to stand, not a lens —
+    /// so whoever is flying the path has to say which one it is being flown
+    /// with. An argument rather than a default so that cannot be forgotten:
+    /// silently defaulting here would make a flight ignore the scene's (and
+    /// the person's) FoV without ever failing.
+    pub fn to_camera(self, fov: Fov) -> OrbitCamera {
         OrbitCamera {
             orientation: self.orientation,
             distance: self.distance,
             focus: self.focus,
+            fov,
         }
     }
 }
@@ -562,8 +570,10 @@ impl CameraPath {
         }
     }
 
-    /// Sample the path at t in [0, 1] (clamped; closed paths wrap seamlessly)
-    pub fn sample(&self, t: f32) -> OrbitCamera {
+    /// Sample the path at t in [0, 1] (clamped; closed paths wrap seamlessly),
+    /// under the lens `fov` — see [`PathKey::to_camera`] for why that is not
+    /// the path's to choose.
+    pub fn sample(&self, t: f32, fov: Fov) -> OrbitCamera {
         let segs = self.segments();
         if segs == 0 {
             return self
@@ -575,7 +585,7 @@ impl CameraPath {
                     distance: 3.0,
                     focus: Vec3::ZERO,
                 })
-                .to_camera();
+                .to_camera(Fov::default());
         }
 
         // Orientation is genuinely periodic, so a looping path needs no
@@ -643,6 +653,7 @@ impl CameraPath {
             orientation,
             distance: cr(|k| k.distance.max(1e-3).ln()).exp(),
             focus: Vec3::new(cr(|k| k.focus.x), cr(|k| k.focus.y), cr(|k| k.focus.z)),
+            fov,
         }
     }
 }
@@ -720,7 +731,7 @@ mod golden {
             let path = resolve(scene.camera_path.as_ref(), &default);
 
             for i in 0..SAMPLES {
-                let cam = path.sample(i as f32 / SAMPLES as f32);
+                let cam = path.sample(i as f32 / SAMPLES as f32, Fov::default());
                 let (e, f, u) = (cam.eye(), cam.forward(), cam.up());
                 let _ = writeln!(
                     out,
@@ -762,7 +773,7 @@ mod golden {
                 let default = CameraPath::full_orbit(&base);
                 let path = resolve(s.camera_path.as_ref(), &default);
                 (0..64)
-                    .map(|i| path.sample(i as f32 / 64.0))
+                    .map(|i| path.sample(i as f32 / 64.0, Fov::default()))
                     .map(|c| (c.eye(), c.up(), c.distance))
                     .collect::<Vec<_>>()
             };
@@ -919,10 +930,10 @@ mod tests {
     /// and it is also what the eye actually does.
     fn swept_about_y(p: &CameraPath, from: f32, to: f32, n: usize) -> f32 {
         let mut total = 0.0;
-        let mut prev = p.sample(from).orientation;
+        let mut prev = p.sample(from, Fov::default()).orientation;
         for i in 1..=n {
             let t = from + (to - from) * i as f32 / n as f32;
-            let cur = p.sample(t).orientation;
+            let cur = p.sample(t, Fov::default()).orientation;
             // World-frame step: cur ∘ prev⁻¹.
             let step = prev.inverse().then(cur);
             total += Orientation::IDENTITY
@@ -1009,7 +1020,7 @@ mod tests {
             let span = if loops == Loop::PingPong { 0.5 } else { 1.0 };
             for (i, k) in p.keys.iter().enumerate() {
                 let t = span * i as f32 / n as f32;
-                let cam = p.sample(t);
+                let cam = p.sample(t, Fov::default());
                 assert!(
                     cam.orientation.angle_to(k.orientation) < 1e-4,
                     "loops={:?} key {} orientation",
@@ -1049,7 +1060,7 @@ mod tests {
             // Compared as angles: the chart reports a representative in
             // (-π, π] and the old scalar spline didn't, so past half a turn
             // the two agree while the numbers differ by exactly 2π.
-            let got = p.sample(t).chart();
+            let got = p.sample(t, Fov::default()).chart();
             let off = got.yaw.shortest_to(Angle::from_radians(want)).abs();
             assert!(off < 1e-4, "t={}: yaw {} vs old spline {}", t, got.yaw.radians(), want);
             assert!((got.pitch.radians() - 0.35).abs() < 1e-4, "pitch must not drift at t={}", t);
@@ -1065,14 +1076,14 @@ mod tests {
     #[test]
     fn closed_path_is_seamless() {
         let p = linear_path(Loop::Closed);
-        let a = p.sample(0.0);
-        let b = p.sample(1.0);
+        let a = p.sample(0.0, Fov::default());
+        let b = p.sample(1.0, Fov::default());
         assert!((a.eye() - b.eye()).length() < 1e-3);
         assert!((a.focus - b.focus).length() < 1e-4);
         // C1 continuity at the seam: second-order one-sided derivative
         // estimates from both sides must agree
         let eps = 1e-3;
-        let f = |t: f32| p.sample(t).eye();
+        let f = |t: f32| p.sample(t, Fov::default()).eye();
         let va = (3.0 * f(1.0) - 4.0 * f(1.0 - eps) + f(1.0 - 2.0 * eps)) / (2.0 * eps);
         let vb = (-3.0 * f(0.0) + 4.0 * f(eps) - f(2.0 * eps)) / (2.0 * eps);
         assert!(
@@ -1120,8 +1131,8 @@ mod tests {
         let long = with(1);
 
         for p in [&short, &long] {
-            assert!(p.sample(0.0).orientation.angle_to(keys[0].orientation) < 1e-4);
-            assert!(p.sample(1.0).orientation.angle_to(keys[1].orientation) < 1e-4);
+            assert!(p.sample(0.0, Fov::default()).orientation.angle_to(keys[0].orientation) < 1e-4);
+            assert!(p.sample(1.0, Fov::default()).orientation.angle_to(keys[1].orientation) < 1e-4);
         }
         let s = swept_about_y(&short, 0.0, 1.0, 256);
         let l = swept_about_y(&long, 0.0, 1.0, 256);
@@ -1167,7 +1178,7 @@ mod tests {
                 Loop::Once,
             )
         };
-        assert!((p.sample(0.5).distance - 2.0).abs() < 1e-3, "got {}", p.sample(0.5).distance);
+        assert!((p.sample(0.5, Fov::default()).distance - 2.0).abs() < 1e-3, "got {}", p.sample(0.5, Fov::default()).distance);
     }
 
     #[test]
@@ -1181,9 +1192,9 @@ mod tests {
                 Loop::Once,
             )
         };
-        assert!(p.sample(0.0).chart().roll.radians().abs() < 1e-4);
-        assert!((p.sample(0.5).chart().roll.radians() - 0.5).abs() < 1e-3);
-        assert!((p.sample(1.0).chart().roll.radians() - 1.0).abs() < 1e-4);
+        assert!(p.sample(0.0, Fov::default()).chart().roll.radians().abs() < 1e-4);
+        assert!((p.sample(0.5, Fov::default()).chart().roll.radians() - 0.5).abs() < 1e-3);
+        assert!((p.sample(1.0, Fov::default()).chart().roll.radians() - 1.0).abs() < 1e-4);
     }
 
     #[test]
@@ -1201,9 +1212,9 @@ mod tests {
                 Loop::Once,
             )
         };
-        let mut prev = p.sample(0.0).forward();
+        let mut prev = p.sample(0.0, Fov::default()).forward();
         for i in 1..=200 {
-            let cam = p.sample(i as f32 / 200.0);
+            let cam = p.sample(i as f32 / 200.0, Fov::default());
             let f = cam.forward();
             assert!(f.is_finite() && cam.up().is_finite(), "basis blew up at t={}", i);
             assert!((cam.up().length() - 1.0).abs() < 1e-3, "basis stopped being unit");
@@ -1211,7 +1222,7 @@ mod tests {
             prev = f;
         }
         // ...and it really did pass over the top.
-        assert!(p.sample(0.5).forward().y < -0.99, "should be looking straight down at the midpoint");
+        assert!(p.sample(0.5, Fov::default()).forward().y < -0.99, "should be looking straight down at the midpoint");
     }
 
     // -- zoom loops --------------------------------------------------------
@@ -1222,7 +1233,7 @@ mod tests {
         // first — because the scene is invariant under the similarity that
         // separates them.
         let path = zoom_loop_path(1, vec![key(0.3, 0.5, 3.6, Vec3::ZERO)]);
-        let (start, end) = (path.sample(0.0), path.sample(SEAM));
+        let (start, end) = (path.sample(0.0, Fov::default()), path.sample(SEAM, Fov::default()));
         let z = path.loops.zoom().unwrap();
         let rot = z.turn.exp();
         let vp_start = start.view_proj(16.0 / 9.0);
@@ -1252,8 +1263,8 @@ mod tests {
     fn a_zoom_loop_is_continuous_across_the_seam() {
         let path = zoom_loop_path(1, vec![key(0.3, 0.5, 3.6, Vec3::ZERO)]);
         let z = path.loops.zoom().unwrap();
-        let carried = z.advance(PathKey::from_camera(&path.sample(SEAM)), -1);
-        let start = PathKey::from_camera(&path.sample(0.0));
+        let carried = z.advance(PathKey::from_camera(&path.sample(SEAM, Fov::default())), -1);
+        let start = PathKey::from_camera(&path.sample(0.0, Fov::default()));
         assert!(
             (carried.distance / start.distance - 1.0).abs() < 1e-3,
             "distance {} vs {}",
@@ -1275,11 +1286,11 @@ mod tests {
         let path = zoom_loop_path(1, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
         assert_eq!(path.segments(), 1, "a single key plus its image is one segment");
         let z = path.loops.zoom().unwrap();
-        let start = path.sample(0.0).orientation;
+        let start = path.sample(0.0, Fov::default()).orientation;
         for i in 0..=20 {
             let t = i as f32 / 20.0 * SEAM;
             let want_dist = 4.0f32.ln() + t * 0.6f32.ln();
-            let got = path.sample(t);
+            let got = path.sample(t, Fov::default());
             assert!(
                 (got.distance.ln() - want_dist).abs() < 1e-3,
                 "t={t}: log-distance {}, constant rate wants {want_dist}",
@@ -1298,7 +1309,7 @@ mod tests {
     #[test]
     fn a_multi_period_zoom_loop_descends_that_many_periods() {
         let path = zoom_loop_path(3, vec![key(0.0, 0.4, 4.0, Vec3::ZERO)]);
-        let ratio = path.sample(SEAM).distance / 4.0;
+        let ratio = path.sample(SEAM, Fov::default()).distance / 4.0;
         assert!((ratio - 0.6f32.powi(3)).abs() < 1e-3, "descended {ratio}x");
     }
 
@@ -1317,7 +1328,7 @@ mod tests {
         assert_eq!(path.segments(), 2, "two keys plus the first key's image is two segments");
 
         for (i, k) in keys.iter().enumerate() {
-            let cam = path.sample(i as f32 / 2.0);
+            let cam = path.sample(i as f32 / 2.0, Fov::default());
             assert!(
                 cam.orientation.angle_to(k.orientation) < 1e-4,
                 "key {i}: framing missed by {}°",
@@ -1330,8 +1341,8 @@ mod tests {
         // ...and the seam still closes under the symmetry, exactly as the
         // one-key loop always has.
         let z = path.loops.zoom().unwrap();
-        let carried = z.advance(PathKey::from_camera(&path.sample(SEAM)), -1);
-        let start = PathKey::from_camera(&path.sample(0.0));
+        let carried = z.advance(PathKey::from_camera(&path.sample(SEAM, Fov::default())), -1);
+        let start = PathKey::from_camera(&path.sample(0.0, Fov::default()));
         assert!(
             (carried.distance / start.distance - 1.0).abs() < 1e-3,
             "distance {} vs {}",
@@ -1373,9 +1384,9 @@ mod tests {
         // The corkscrew itself still happens: segment 0 sweeps its three whole
         // turns of pitch, plus the 0.7 the keys ask for...
         let mut swept_x = 0.0;
-        let mut prev = path.sample(0.0).orientation;
+        let mut prev = path.sample(0.0, Fov::default()).orientation;
         for i in 1..=300 {
-            let cur = path.sample(i as f32 / 900.0).orientation;
+            let cur = path.sample(i as f32 / 900.0, Fov::default()).orientation;
             swept_x += Orientation::IDENTITY
                 .shortest_turn_to(prev.inverse().then(cur))
                 .as_rotation_vector()
@@ -1392,7 +1403,7 @@ mod tests {
 
         // ...and its keys are still hit exactly.
         for (i, k) in path.keys.iter().enumerate() {
-            let cam = path.sample(i as f32 / 3.0);
+            let cam = path.sample(i as f32 / 3.0, Fov::default());
             assert!(
                 cam.orientation.angle_to(k.orientation) < 1e-4,
                 "key {i}: framing missed by {}°",
@@ -1405,7 +1416,7 @@ mod tests {
         let mut worst = 0.0f32;
         for i in 0..=300 {
             let t = 1.0 / 3.0 + (2.0 / 3.0) * i as f32 / 300.0;
-            worst = worst.max(path.sample(t).right().y.abs().asin());
+            worst = worst.max(path.sample(t, Fov::default()).right().y.abs().asin());
         }
         assert!(
             worst.to_degrees() < 3.5,
@@ -1444,11 +1455,11 @@ mod tests {
 
         // And it still closes exactly where the symmetry says.
         let z = path.loops.zoom().unwrap();
-        let carried = z.center + z.turn.exp().rotate((path.sample(0.0).eye() - z.center) * z.scale);
+        let carried = z.center + z.turn.exp().rotate((path.sample(0.0, Fov::default()).eye() - z.center) * z.scale);
         assert!(
-            (path.sample(SEAM).eye() - carried).length() < 1e-3,
+            (path.sample(SEAM, Fov::default()).eye() - carried).length() < 1e-3,
             "ended at {:?}, symmetry says {carried:?}",
-            path.sample(SEAM).eye()
+            path.sample(SEAM, Fov::default()).eye()
         );
     }
 
@@ -1500,8 +1511,8 @@ mod tests {
         let path = resolve(scene.camera_path.as_ref(), &default);
         let z = path.loops.zoom().expect("pythagoras-zoomy closes under its zoom symmetry");
 
-        let start = path.sample(0.0);
-        let end = path.sample(SEAM);
+        let start = path.sample(0.0, Fov::default());
+        let end = path.sample(SEAM, Fov::default());
         // Where the symmetry says a loop has to land.
         let want = z.center + z.turn.exp().rotate((start.eye() - z.center) * z.scale);
         let err = (end.eye() - want).length();
@@ -1534,7 +1545,7 @@ mod tests {
 
         // Out to the last key by halfway...
         let last = *p.keys.last().unwrap();
-        let mid = p.sample(0.5);
+        let mid = p.sample(0.5, Fov::default());
         assert!(mid.orientation.angle_to(last.orientation) < 1e-4, "halfway is the last key");
         assert!((mid.distance - last.distance).abs() < 1e-3);
 
@@ -1543,15 +1554,15 @@ mod tests {
         // are nowhere near each other: there is nothing to close.
         for i in 0..=20 {
             let t = i as f32 / 40.0;
-            let out = p.sample(t);
-            let back = p.sample(1.0 - t);
+            let out = p.sample(t, Fov::default());
+            let back = p.sample(1.0 - t, Fov::default());
             assert!(out.orientation.angle_to(back.orientation) < 1e-4, "t={}", t);
             assert!((out.distance - back.distance).abs() < 1e-4, "t={}", t);
             assert!((out.focus - back.focus).length() < 1e-4, "t={}", t);
         }
 
         // So the last frame runs into the first, with no jump.
-        assert!(p.sample(1.0).orientation.angle_to(p.keys[0].orientation) < 1e-4);
+        assert!(p.sample(1.0, Fov::default()).orientation.angle_to(p.keys[0].orientation) < 1e-4);
     }
 
     #[test]
@@ -1565,7 +1576,7 @@ mod tests {
         assert!(eased.eased(), "a ping-pong eases unless the scene says not to");
 
         let step = |p: &CameraPath, a: f32, b: f32| {
-            p.sample(a).orientation.angle_to(p.sample(b).orientation)
+            p.sample(a, Fov::default()).orientation.angle_to(p.sample(b, Fov::default()).orientation)
         };
         const D: f32 = 0.01;
         let cruise = step(&eased, 0.25 - D / 2.0, 0.25 + D / 2.0);
@@ -1612,7 +1623,7 @@ mod tests {
     fn full_orbit_matches_auto_orbit() {
         let base = OrbitCamera::from_chart(0.7, 0.3, 0.0, 4.0, Vec3::X);
         let p = CameraPath::full_orbit(&base);
-        let mid = p.sample(0.5).chart();
+        let mid = p.sample(0.5, Fov::default()).chart();
         let want = base.chart();
         assert!(
             (Angle::from_radians(want.yaw.radians() + std::f32::consts::PI)
@@ -1621,7 +1632,7 @@ mod tests {
                 < 1e-3
         );
         assert!((mid.pitch.radians() - want.pitch.radians()).abs() < 1e-4);
-        assert!((p.sample(0.5).distance - base.distance).abs() < 1e-3);
+        assert!((p.sample(0.5, Fov::default()).distance - base.distance).abs() < 1e-3);
     }
 
     #[test]
@@ -1661,10 +1672,10 @@ mod tests {
     #[test]
     fn degenerate_paths_are_safe() {
         let empty = CameraPath::new(vec![], Loop::Once);
-        assert!(empty.sample(0.5).distance > 0.0);
+        assert!(empty.sample(0.5, Fov::default()).distance > 0.0);
 
         let single = CameraPath::new(vec![key(1.0, 0.2, 2.0, Vec3::Z)], Loop::Closed);
-        let cam = single.sample(0.7);
+        let cam = single.sample(0.7, Fov::default());
         assert!(cam.orientation.angle_to(single.keys[0].orientation) < 1e-6);
         assert!((cam.focus - Vec3::Z).length() < 1e-6);
     }
@@ -1685,7 +1696,7 @@ mod tests {
         };
 
         let pitched = looped(Route::Exact(Turn::about(Vec3::X, 2.0 * tau)));
-        let c = pitched.sample(0.125);
+        let c = pitched.sample(0.125, Fov::default());
         assert!(
             c.forward().y.abs() > 0.5,
             "an eighth of the way in, a pitch loop should be looking well off the \
@@ -1701,7 +1712,7 @@ mod tests {
         // And it comes back: the keys are still hit exactly.
         for &t in &[0.0f32, 1.0] {
             assert!(
-                pitched.sample(t).orientation.angle_to(here.orientation) < 1e-5,
+                pitched.sample(t, Fov::default()).orientation.angle_to(here.orientation) < 1e-5,
                 "the loop must start and end on its key"
             );
         }
@@ -1710,7 +1721,7 @@ mod tests {
         // world Y — which is the bug this exists to route around.
         let guessed = looped(Route::Turns(2));
         assert!(
-            guessed.sample(0.125).forward().y.abs() < 1e-3,
+            guessed.sample(0.125, Fov::default()).forward().y.abs() < 1e-3,
             "a winding between equal framings has no axis to use but the fallback"
         );
     }

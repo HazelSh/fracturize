@@ -39,6 +39,16 @@ pub struct View {
     pub offset: [f32; 3],
     #[serde(default = "default_view_point_size")]
     pub point_size: f32,
+    /// Vertical field of view in degrees. `#[serde(default)]` so every view
+    /// written before the lens was settable still loads, and `None` there
+    /// means "whatever the scene or the person says" rather than 45 — an old
+    /// view file has no opinion, it simply predates the question.
+    ///
+    /// Written on save, unlike a scene's `[camera] fov`, because a view *is*
+    /// a snapshot of what was on screen: `--view` exists to reproduce a frame
+    /// exactly, and a lens is part of that frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov: Option<f32>,
     /// The four values the shader wants, always written. They are derived
     /// from `haze` below when a view is saved; they remain the wire format
     /// because the offline renderer consumes them directly and because views
@@ -207,6 +217,7 @@ mod tests {
             focus: [0.1, 0.2, 0.3],
             offset: [0.0, 1.0, 0.0],
             point_size: 0.002,
+            fov: Some(90.0),
             haze_near: 3.0,
             haze_far: 4.5,
             haze_transmittance: 0.4,

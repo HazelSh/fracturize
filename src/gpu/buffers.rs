@@ -209,7 +209,19 @@ impl GpuTransform {
 pub struct CameraUniforms {
     pub mvp: [[f32; 4]; 4], // 64 bytes
     pub screen_height: f32, // 4 bytes
-    pub point_size: f32,    // 4 bytes
+    /// The scene's `point_size`, already scaled for the camera's field of view
+    /// — see [`crate::camera::Fov::point_scale`], which is where that factor
+    /// is defined and the only place it is computed.
+    ///
+    /// Pre-scaled on this side rather than handing the shaders the FoV and
+    /// letting them do it, because three shaders splat points and two CPU
+    /// paths have to predict what they will do — the subpixel fast path in
+    /// both renderers, and the Render window's `≈N px` readout. Five copies of
+    /// one trig expression is five chances to disagree, and the CPU copies are
+    /// the ones that decide whether a point is drawn at all. Exactly equal to
+    /// `point_size` at the default 45 degree FoV, so nothing that existed
+    /// before the FoV was settable moves by a bit.
+    pub projected_point_size: f32, // 4 bytes
     pub aspect_ratio: f32,  // 4 bytes (width / height)
     pub min_point_pixels: f32, // 4 bytes - minimum screen size in pixels
     pub haze_near: f32,     // 4 bytes - distance where the haze starts
@@ -290,8 +302,14 @@ pub struct CameraUniforms {
 pub const MAX_POINT_PIXELS: f32 = 12.0;
 
 impl CameraUniforms {
+    /// `fov` must be the field of view `mvp` was built with. It is a separate
+    /// argument rather than something derived from the matrix because the
+    /// matrix is often a *tiled* or nudged one (see `offline::build_tiles`),
+    /// and reading a lens back out of a subfrustum is exactly the kind of
+    /// clever that produces a seam.
     pub fn new(
         mvp: Mat4,
+        fov: crate::camera::Fov,
         screen_height: f32,
         point_size: f32,
         aspect_ratio: f32,
@@ -308,7 +326,7 @@ impl CameraUniforms {
         Self {
             mvp: mvp.to_cols_array_2d(),
             screen_height,
-            point_size,
+            projected_point_size: point_size * fov.point_scale(),
             aspect_ratio,
             min_point_pixels,
             haze_near,
@@ -530,8 +548,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(CameraUniforms, subfrustum), 144);
         // The default is the whole frame, so an untiled render is unchanged.
         let c = CameraUniforms::new(
-            Mat4::IDENTITY, 100.0, 0.01, 1.5, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, [0.0; 3], false,
-            false,
+            Mat4::IDENTITY, crate::camera::Fov::default(), 100.0, 0.01, 1.5, 1.0, 1.0, 2.0,
+            1.0, 1.0, 1.0, [0.0; 3], false, false,
         );
         assert_eq!(c.subfrustum, [1.0, 1.0, 0.0, 0.0]);
     }

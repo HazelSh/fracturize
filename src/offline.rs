@@ -17,7 +17,7 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 use rand::SeedableRng;
 
-use crate::camera::{CameraOverride, OrbitCamera};
+use crate::camera::{CameraOverride, Fov, OrbitCamera};
 use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::points::accumulate::Accumulator;
@@ -328,8 +328,8 @@ impl Sampling {
 
     /// Whether points are small enough for the native 1px point-primitive
     /// path. Measured against the *target* height, not the output height.
-    fn use_point_primitives(&self, point_size: f32, distance: f32) -> bool {
-        point_size * self.target_height() / distance <= 1.5
+    fn use_point_primitives(&self, point_size: f32, distance: f32, fov: Fov) -> bool {
+        OrbitCamera::point_pixels(point_size, distance, self.target_height(), fov) <= 1.5
     }
 }
 
@@ -377,7 +377,7 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
             // move grid is a nudge off `base`, so they share its scale and
             // must share its clipping or the sheet is not comparable.
             let proj = Mat4::perspective_rh(
-                crate::camera::FOV_Y_RADIANS,
+                base.fov.radians(),
                 aspect,
                 base.near_plane(),
                 crate::camera::Z_FAR,
@@ -740,14 +740,22 @@ pub fn effective_camera_folded(
     over: CameraOverride,
 ) -> (OrbitCamera, i32) {
     let mut camera = match view {
-        Some(v) => OrbitCamera::from_legacy(
-            Vec3::from(v.focus),
-            Vec3::from(v.offset),
-            v.distance,
-            v.rotation,
-            v.pitch,
-            v.roll,
-        ),
+        Some(v) => {
+            let mut c = OrbitCamera::from_legacy(
+                Vec3::from(v.focus),
+                Vec3::from(v.offset),
+                v.distance,
+                v.rotation,
+                v.pitch,
+                v.roll,
+            );
+            // A view file records the lens it was saved through; one written
+            // before that existed says nothing about it and defers to the
+            // scene. `--fov` is applied after this, by `over.apply`, so it
+            // still wins.
+            c.fov = v.fov.map(Fov::from_degrees).unwrap_or(scene.camera_fov);
+            c
+        }
         None => scene.camera(),
     };
     // The path, if one was asked for, before the field overrides: `--path-t`
@@ -757,7 +765,7 @@ pub fn effective_camera_folded(
     // answers — with a point on its full orbit.
     if let Some(t) = over.path_t {
         let default = CameraPath::full_orbit(&camera);
-        camera = crate::path::resolve(scene.camera_path.as_ref(), &default).sample(t);
+        camera = crate::path::resolve(scene.camera_path.as_ref(), &default).sample(t, camera.fov);
     }
     // Flags last: they are the most specific thing anyone said.
     over.apply(&mut camera);
@@ -1859,7 +1867,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
     let (cols, rows) = grid.tile_count();
-    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance, base_camera.fov);
 
     let target = TileTarget::new(
         &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
@@ -1890,7 +1898,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // same in each. Grid tiles only re-aim the camera anyway.
         let (haze_near, haze_far) = haze.band(base_camera.distance);
         let camera = CameraUniforms::new(
-            tile.view_proj, sampling.target_height(), point_size, aspect, 1.0,
+            tile.view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
@@ -2226,7 +2234,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     compute.rewrap(&device, &queue, folded);
 
     let aspect = width as f32 / height as f32;
-    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance, base_camera.fov);
 
     // How the output is cut up. One tile whenever the whole histogram fits,
     // which is every render that worked before this existed — and that tile has
@@ -2450,6 +2458,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             // would give tiles of visibly differing texture.
             let camera = CameraUniforms::new(
                 base_camera.view_proj(aspect),
+                base_camera.fov,
                 sampling.target_height(),
                 point_size,
                 aspect,
@@ -3051,7 +3060,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         } else {
             i as f32 / (frames - 1) as f32
         };
-        let mut cam = path.sample(t);
+        let mut cam = path.sample(t, base_camera.fov);
         // The one place the wrap really earns itself: a path whose distance
         // keys span many periods (they interpolate in log space, so that's a
         // constant-rate zoom) is folded back into one period every frame. The
@@ -3076,7 +3085,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         // scene's authored distance.
         let (haze_near, haze_far) = haze.band(cam.distance);
         let camera = CameraUniforms::new(
-            cam.view_proj(aspect), sampling.target_height(), point_size, aspect, 1.0,
+            cam.view_proj(aspect), cam.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
@@ -3087,7 +3096,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         .with_zoom_guard(zoom.as_ref(), cam.eye())
         .with_supersample(sampling.n);
         renderer.upload_camera(&queue, &camera);
-        let use_point_primitives = sampling.use_point_primitives(point_size, cam.distance);
+        let use_point_primitives = sampling.use_point_primitives(point_size, cam.distance, cam.fov);
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
             &mut frame_buf, width, 0, 0,
@@ -3259,7 +3268,7 @@ pub fn render_mutations(
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
-    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance, base_camera.fov);
     let (haze_near, haze_far) = haze.band(base_camera.distance);
     // One framing and one haze band for every tile; only the edge guard is
     // per-variant, because mutating the transforms moves the zoom's fixed
@@ -3269,7 +3278,7 @@ pub fn render_mutations(
     // one tile is.
     let camera = |zoom: Option<&crate::renorm::Renorm>| {
         CameraUniforms::new(
-            view_proj, sampling.target_height(), point_size, aspect, 1.0,
+            view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
@@ -3455,13 +3464,13 @@ pub fn render_sweep(
     let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
     let view_proj = base_camera.view_proj(aspect);
-    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance);
+    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance, base_camera.fov);
     let (haze_near, haze_far) = haze.band(base_camera.distance);
     // Per-variant edge guard: a sweep may be sweeping a zoom parameter, or
     // anything that moves the renormalizing map's fixed point.
     let camera = |zoom: Option<&crate::renorm::Renorm>| {
         CameraUniforms::new(
-            view_proj, sampling.target_height(), point_size, aspect, 1.0,
+            view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
             transparent, scene.color_mode.packs_rgb(),
@@ -3761,8 +3770,8 @@ mod tests {
         // A point subpixel at output but not at 4x accumulation resolution
         // must leave the unfiltered 1px path — that is the whole feature.
         let point_size = 1.5 / 600.0 * 0.9;
-        assert!(one.use_point_primitives(point_size, 1.0));
-        assert!(!four.use_point_primitives(point_size, 1.0));
+        assert!(one.use_point_primitives(point_size, 1.0, Fov::default()));
+        assert!(!four.use_point_primitives(point_size, 1.0, Fov::default()));
         // 0 is coerced to 1 rather than dividing by nothing
         assert_eq!(Sampling::new(0, 600).target_height(), 600.0);
     }

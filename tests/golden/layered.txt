@@ -21,6 +21,7 @@ view     views/v.toml
          distance           4.000
          focus           ( 0.100,  0.200,  0.300)
          point_size        0.0020   scene      0.0018
+         fov                unset   scene    45°
          haze                0.00   scene        0.50
          haze band           auto   ranged from the camera distance
          color_falloff      unset   scene        0.60
@@ -73,6 +74,7 @@ camera   yaw         1.2500 rad (  71.6°)
          roll        0.0000 rad (   0.0°)
          distance     2.500
          focus     ( 0.100,  0.200,  0.300)
+         fov       45° vertical   73° horizontal at 16:9; the default
          from --view, then the camera flags
          the scene's own: yaw 0.0000 pitch 1.1200 distance 3.400
                           focus ( 0.000,  0.000,  0.000)

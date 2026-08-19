@@ -30,7 +30,98 @@ use serde::{Deserialize, Serialize};
 
 use crate::rot::{Angle, Orientation, Turn, YawPitchRoll};
 
-pub const FOV_Y_RADIANS: f32 = std::f32::consts::FRAC_PI_4; // 45°
+/// The vertical field of view every camera started life with, and the one
+/// [`Fov::default`] still hands out. Kept as a named constant rather than
+/// inlined because it is also the *reference* the point size is expressed
+/// against — see [`Fov::point_scale`].
+pub const DEFAULT_FOV_DEGREES: f32 = 45.0;
+
+/// Vertical field of view.
+///
+/// A newtype rather than a bare `f32` because two different things in this
+/// crate want it and they must not disagree: the projection matrix, and the
+/// screen size of a point. It carries radians internally, clamps to a sane
+/// range on the way in, and can only be built through a constructor, so an
+/// out-of-range or non-finite FoV cannot reach a matrix.
+///
+/// # Why it is a preference and not just scene data
+///
+/// The correct FoV for a *screen* is the angle that screen subtends at the
+/// eye: sitting 60cm from a 34cm-tall monitor, that is about 30°, and a
+/// picture drawn at 45° and viewed from further back than its own centre of
+/// projection reads as flattened however good the geometry is. But plenty of
+/// people (and every first-person game's settings screen) prefer a much wider
+/// one, so the number belongs to the person at the desk. It is settable on a
+/// scene all the same, because a scene that was *composed* at a given FoV has
+/// a real claim on it; see `Scene::camera_fov` for who wins.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Fov(f32);
+
+impl Fov {
+    /// Narrow enough for a strong telephoto flattening, and no narrower: past
+    /// this the depth range a `f32` matrix resolves starts to matter.
+    pub const MIN_DEGREES: f32 = 10.0;
+    /// Wide enough for the fisheye stretch to be the point. Past 150° the
+    /// frame edges cost more pixels than the subject and the near plane is
+    /// most of what you see.
+    pub const MAX_DEGREES: f32 = 150.0;
+
+    /// Clamped to [`Self::MIN_DEGREES`]..=[`Self::MAX_DEGREES`]. A non-finite
+    /// input takes the default rather than propagating a NaN into a matrix,
+    /// which is the one failure that would be invisible until the whole frame
+    /// vanished.
+    pub fn from_degrees(degrees: f32) -> Self {
+        if !degrees.is_finite() {
+            return Self::default();
+        }
+        Self(degrees.clamp(Self::MIN_DEGREES, Self::MAX_DEGREES).to_radians())
+    }
+
+    pub fn radians(self) -> f32 {
+        self.0
+    }
+
+    pub fn degrees(self) -> f32 {
+        self.0.to_degrees()
+    }
+
+    /// `tan(fov / 2)`: half the world height visible at unit depth, and the
+    /// only form the projection maths ever actually wants.
+    pub fn tan_half(self) -> f32 {
+        (self.0 * 0.5).tan()
+    }
+
+    /// The horizontal FoV this comes to at `aspect` (width / height), in
+    /// degrees. Nothing renders with it — it exists because it is the number
+    /// people quote, and the one a games FoV slider usually means.
+    pub fn horizontal_degrees(self, aspect: f32) -> f32 {
+        (2.0 * (self.tan_half() * aspect.max(1e-6)).atan()).to_degrees()
+    }
+
+    /// What to multiply a scene's `point_size` by so a point keeps the same
+    /// **world** size as the FoV changes.
+    ///
+    /// The point shaders size a splat as `point_size · screen_height / depth`,
+    /// which is the right answer only where `tan(fov/2) = 1`. That was
+    /// harmless while the FoV was a constant — it just meant `point_size` was
+    /// a world size in units of `2·tan(22.5°)` — but with the FoV settable it
+    /// stops being harmless: widening the lens shrinks the whole picture on
+    /// screen and the points would have stayed put, so the grain of every
+    /// scene would drift with a viewing preference.
+    ///
+    /// Expressed against [`DEFAULT_FOV_DEGREES`] rather than against a true
+    /// world size, so this is exactly 1 at the default and every render ever
+    /// made stays bit-for-bit what it was.
+    pub fn point_scale(self) -> f32 {
+        Self::default().tan_half() / self.tan_half()
+    }
+}
+
+impl Default for Fov {
+    fn default() -> Self {
+        Self(DEFAULT_FOV_DEGREES.to_radians())
+    }
+}
 /// The near plane for a scene framed far enough out that a constant works.
 /// [`OrbitCamera::near_plane`] is the value actually used and never exceeds
 /// this; see there for why it cannot be a constant.
@@ -97,6 +188,10 @@ pub struct OrbitCamera {
     pub distance: f32,
     /// Orbit center / look-at point
     pub focus: Vec3,
+    /// Vertical field of view. Part of the camera because it is part of the
+    /// projection: `view_proj` needs it, and so does anything sizing a point,
+    /// and passing it alongside would let the two disagree.
+    pub fov: Fov,
 }
 
 impl OrbitCamera {
@@ -111,6 +206,7 @@ impl OrbitCamera {
             ),
             distance,
             focus,
+            fov: Fov::default(),
         }
     }
 
@@ -221,7 +317,8 @@ impl OrbitCamera {
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(FOV_Y_RADIANS, aspect, self.near_plane(), Z_FAR) * self.view_matrix()
+        Mat4::perspective_rh(self.fov.radians(), aspect, self.near_plane(), Z_FAR)
+            * self.view_matrix()
     }
 
     pub fn forward(&self) -> Vec3 {
@@ -266,15 +363,29 @@ impl OrbitCamera {
 
     /// How many pixels one world unit spans at depth `distance` from the eye.
     /// The perspective scale factor, in the one form everything here wants it.
-    pub fn pixels_per_world_unit(distance: f32, viewport_height: f32) -> f32 {
+    pub fn pixels_per_world_unit(distance: f32, viewport_height: f32, fov: Fov) -> f32 {
         let d = distance.max(1e-4);
-        viewport_height / (2.0 * d * (FOV_Y_RADIANS * 0.5).tan())
+        viewport_height / (2.0 * d * fov.tan_half())
+    }
+
+    /// How many pixels across a point of world size `point_size` lands at
+    /// `depth`, before either renderer's floor or cap.
+    ///
+    /// **The** formula: the shaders compute this from the pre-scaled size in
+    /// `CameraUniforms::projected_point_size`, and everything on the CPU that
+    /// needs to predict them — the subpixel fast path, the panel's pixel
+    /// readout — comes through here. They were separate copies of
+    /// `size · height / depth` before the FoV was settable, and separate
+    /// copies is precisely how the fast path ends up disagreeing with the
+    /// renderer about whether a point is visible.
+    pub fn point_pixels(point_size: f32, depth: f32, viewport_height: f32, fov: Fov) -> f32 {
+        point_size * fov.point_scale() * viewport_height / depth.max(1e-9)
     }
 
     /// Mouse drag pan: moves the focus in the view plane ("grab the scene")
     pub fn pan(&mut self, dx: f32, dy: f32, viewport_height: f32) {
         // World size of one pixel at the focus distance
-        let per_pixel = 1.0 / Self::pixels_per_world_unit(self.distance, viewport_height);
+        let per_pixel = 1.0 / Self::pixels_per_world_unit(self.distance, viewport_height, self.fov);
         self.focus += (self.up() * dy - self.right() * dx) * per_pixel;
     }
 
@@ -349,6 +460,10 @@ pub struct CameraOverride {
     pub rotvec: Option<Vec3>,
     pub distance: Option<f32>,
     pub focus: Option<Vec3>,
+    /// `--fov`, in degrees on the way in and clamped by [`Fov::from_degrees`].
+    /// The most specific thing anyone can say about the lens, so it wins over
+    /// a view file, a scene's `[camera] fov`, and the preference alike.
+    pub fov: Option<Fov>,
     /// Fly the scene's camera path to `t` in 0..1 and render *that* framing.
     ///
     /// Replaces the whole camera rather than one field of it, so it is applied
@@ -401,6 +516,9 @@ impl CameraOverride {
         }
         if let Some(v) = self.focus {
             cam.focus = v;
+        }
+        if let Some(v) = self.fov {
+            cam.fov = v;
         }
         warning
     }
@@ -548,7 +666,12 @@ mod tests {
                 (OrbitStyle::Trackball, &mut worst_trackball),
                 (OrbitStyle::Turntable, &mut worst_turntable),
             ] {
-                let mut c = OrbitCamera { orientation: start, distance: 3.0, focus: Vec3::ZERO };
+                let mut c = OrbitCamera {
+                    orientation: start,
+                    distance: 3.0,
+                    focus: Vec3::ZERO,
+                    fov: Fov::default(),
+                };
                 c.orbit(dx, dy, style);
                 let got = start.shortest_turn_to(c.orientation).as_rotation_vector();
                 *worst = worst.max((got - reference).length());
@@ -850,6 +973,89 @@ mod tests {
             "a pole framing must be describable: {}",
             CameraOverride::describe(&c)
         );
+    }
+
+    #[test]
+    fn the_default_fov_is_the_one_every_render_was_made_at() {
+        // 45 degrees vertical, which is 72.7 across a 16:9 window. Pinned
+        // because it is the reference `Fov::point_scale` is expressed against:
+        // if this moves, every scene's grain moves with it.
+        assert_eq!(Fov::default().degrees(), 45.0);
+        assert!((Fov::default().horizontal_degrees(16.0 / 9.0) - 72.734).abs() < 0.01);
+        assert_eq!(Fov::default().point_scale(), 1.0);
+    }
+
+    #[test]
+    fn a_fov_cannot_be_built_out_of_range_or_out_of_its_mind() {
+        assert_eq!(Fov::from_degrees(0.0).degrees(), Fov::MIN_DEGREES);
+        assert_eq!(Fov::from_degrees(1e9).degrees(), Fov::MAX_DEGREES);
+        // The one that would otherwise be invisible: a NaN reaching
+        // `perspective_rh` produces a matrix that maps the whole world to
+        // nothing, i.e. a black frame with no error anywhere.
+        assert_eq!(Fov::from_degrees(f32::NAN), Fov::default());
+        assert!(Fov::from_degrees(90.0).radians().is_finite());
+        assert!((Fov::from_degrees(90.0).radians() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_wider_lens_shrinks_the_picture_and_the_points_together() {
+        // The property the FoV is *for*: a point keeps its world size. If the
+        // splat scale and the projection disagreed, grain would drift with a
+        // viewing preference — which is exactly the bug this replaced, where
+        // the shaders sized points as though the FoV were 90 whatever the
+        // matrix said.
+        let p = Vec3::new(0.0, 0.4, 0.0);
+        let (w, h) = (1600.0, 900.0);
+        for degrees in [20.0, 45.0, 90.0, 120.0] {
+            let mut c = cam(0.0, 0.0, 0.0, 3.0, Vec3::ZERO);
+            c.fov = Fov::from_degrees(degrees);
+            let (_, sy) = world_to_screen(p, c.view_proj(w / h), w, h).unwrap();
+            // How far up the screen a fixed world offset lands, and how big a
+            // fixed world point lands, must scale by the same factor.
+            let offset_px = h / 2.0 - sy;
+            let point_px = OrbitCamera::point_pixels(0.1, 3.0, h, c.fov);
+            let ratio = offset_px / point_px;
+            let reference = {
+                let mut c = cam(0.0, 0.0, 0.0, 3.0, Vec3::ZERO);
+                c.fov = Fov::default();
+                let (_, sy) = world_to_screen(p, c.view_proj(w / h), w, h).unwrap();
+                (h / 2.0 - sy) / OrbitCamera::point_pixels(0.1, 3.0, h, c.fov)
+            };
+            assert!(
+                (ratio / reference - 1.0).abs() < 1e-3,
+                "at {}° a point covers {:.4} of the offset it covers at 45°",
+                degrees,
+                ratio / reference,
+            );
+        }
+    }
+
+    #[test]
+    fn point_pixels_agrees_with_the_pixels_per_world_unit_the_gizmos_use() {
+        // Two formulas for the same thing, one FoV-derived and one written
+        // against the shaders' reference. They may differ by the constant
+        // factor that `point_size` has always carried, but not by a function
+        // of the FoV — that would put points and gizmos on different lenses.
+        let ratios: Vec<f32> = [15.0f32, 45.0, 90.0, 140.0]
+            .iter()
+            .map(|&d| {
+                let fov = Fov::from_degrees(d);
+                OrbitCamera::point_pixels(1.0, 2.5, 900.0, fov)
+                    / OrbitCamera::pixels_per_world_unit(2.5, 900.0, fov)
+            })
+            .collect();
+        for r in &ratios {
+            assert!((r - ratios[0]).abs() < 1e-4, "{:?}", ratios);
+        }
+    }
+
+    #[test]
+    fn a_glide_target_never_carries_a_lens() {
+        // `from_chart`/`from_legacy` hand out the default FoV because they are
+        // told a framing and nothing else. Everything that builds a camera
+        // that way and hands it to the app has to leave the lens alone; this
+        // pins the half of that contract that lives here.
+        assert_eq!(OrbitCamera::from_chart(0.3, 0.2, 0.0, 3.0, Vec3::ZERO).fov, Fov::default());
     }
 
     #[test]

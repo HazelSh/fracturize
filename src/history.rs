@@ -330,6 +330,8 @@ mod tests {
             points_per_frame: 1000,
             point_count: 1000,
             point_count_defaulted: false,
+            camera_fov: crate::camera::Fov::default(),
+            camera_fov_authored: false,
             decay: 0.8,
             color_speed: 0.5,
             color_falloff: 0.0,

@@ -321,6 +321,28 @@ struct Args {
     #[arg(long, value_name = "N", default_value_t = 4000, help_heading = "Likeness")]
     fit_iters: usize,
 
+    /// Share of the structure term measured perceptually, 0-1 [0.4]
+    ///
+    /// Every *distributional* comparison of two clouds — transport, Hellinger,
+    /// all of them — is minimised by fog, because they ask whether the mass is
+    /// in the right places and a smooth blur of the subject answers yes. That
+    /// is why driving the old loss down made the pictures hazier rather than
+    /// sharper: the solver was succeeding.
+    ///
+    /// This replaces the structure half with SSIM, which compares *local
+    /// contrast and correlation* rather than local mass, and so scores haze as
+    /// badly as the eye does. At 0 you get the old objective back.
+    /// The useful range is an interior one and both ends fail differently.
+    /// At 0 the objective is purely distributional and its minimiser is fog.
+    /// At 1 it is purely local, which has almost no long-range signal — two
+    /// structures that do not already overlap score the same however far
+    /// apart they are — so the anneal has nothing to descend and barely
+    /// moves. Around 0.4 the transport and Hellinger terms still carry a map
+    /// across the frame while SSIM decides what it has to look like when it
+    /// arrives. Tuned by eye on one reference; worth sweeping per subject.
+    #[arg(long, value_name = "0-1", default_value_t = 0.4, help_heading = "Likeness")]
+    fit_perceptual: f32,
+
     /// Independent fits from different starts [1]
     ///
     /// Every one is a legitimate output and the best-scoring one is often not
@@ -376,6 +398,25 @@ struct Args {
     /// Camera roll about the view axis, in radians [--view, else scene]
     #[arg(long, value_name = "RADIANS", allow_hyphen_values = true, help_heading = "Camera")]
     roll: Option<f32>,
+
+    /// Vertical field of view, in degrees, 10-150 [the scene's, else 45]
+    ///
+    /// The lens rather than the framing: how much of the world the frame
+    /// takes in from where the camera already stands. Wider exaggerates
+    /// depth and shrinks the subject, narrower flattens it and fills the
+    /// frame; 45 vertical is 73 across a 16:9 frame.
+    ///
+    /// Degrees, unlike every other camera angle here, because this is the one
+    /// people already have a number in mind for.
+    ///
+    /// Wins over everything: a --view file's own fov and a scene's
+    /// `[camera] fov`. Without it a render takes the view's, then the
+    /// scene's, then 45 — never the `fov` in prefs.toml, which only the
+    /// window reads, so that a render stays reproducible from flags and scene
+    /// alone. This flag is how a render reproduces what the window shows
+    /// someone whose preference isn't 45.
+    #[arg(long, value_name = "DEGREES", help_heading = "Camera")]
+    fov: Option<f32>,
 
     /// Exact framing, as a rotation vector in radians [--view, else scene]
     ///
@@ -945,6 +986,7 @@ impl Args {
             distance: self.distance,
             roll: self.roll,
             focus: self.focus,
+            fov: self.fov.map(camera::Fov::from_degrees),
             path_t: self.path_t,
         }
     }
@@ -1651,6 +1693,7 @@ impl ApplicationHandler for AppWrapper {
             !self.args.no_vsync,
             self.args.scene.clone(),
             view,
+            self.args.fov.map(camera::Fov::from_degrees),
             self.args.splat,
             self.args.exposure,
             resolve_grade(&self.args, view_for_grade.as_ref()),
@@ -2133,6 +2176,8 @@ fn default_scene() -> Scene {
         points_per_frame: 100_000,
         point_count: 500_000,
         point_count_defaulted: true,
+        camera_fov: camera::Fov::default(),
+        camera_fov_authored: false,
         decay: 0.8,
         color_speed: 0.5,
         color_falloff: 0.0,
@@ -2280,6 +2325,7 @@ fn main() {
             },
             color_weight: args.fit_color.clamp(0.0, 1.0),
             grid_weight: args.fit_structure.clamp(0.0, 1.0),
+            perceptual: args.fit_perceptual.clamp(0.0, 1.0),
             seeds: args.fit_seeds.max(1),
             target_sheet: args.fit_target.clone(),
             preview: args.fit_preview.clone(),

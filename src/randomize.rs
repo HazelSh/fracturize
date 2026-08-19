@@ -307,6 +307,10 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Sc
         points_per_frame: 100_000,
         point_count: 500_000,
         point_count_defaulted: true,
+        // A random flame states no lens, so whoever opens it renders it
+        // through their own — same as a scene file with no `fov` key.
+        camera_fov: crate::camera::Fov::default(),
+        camera_fov_authored: false,
         decay: 0.8,
         color_speed,
         color_falloff,

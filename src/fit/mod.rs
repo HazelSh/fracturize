@@ -276,6 +276,8 @@ pub struct Options {
     /// Fraction of the loss that compares density grids rather than
     /// one-dimensional transport. See [`loss`].
     pub grid_weight: f32,
+    /// Within the structure term, how much is SSIM rather than Hellinger.
+    pub perceptual: f32,
     /// Independent fits from different starts. Every one is a legitimate
     /// output and the good one is usually not the best-scoring one, so the
     /// whole ladder gets written and the eye picks.
@@ -314,14 +316,35 @@ pub fn run(opts: &Options) -> Result<(), String> {
         println!("wrote {path}  (art, subject weight, target density, sampled cloud)");
     }
 
-    let objective = loss::Target::new(
-        &target.cloud.pos,
-        &target.cloud.col,
-        opts.solve.points,
-        opts.color_weight,
-        opts.grid_weight,
-        &mut rng,
-    );
+    // The coarse-to-fine ladder the anneal walks up. `--fit-points` names the
+    // *finest* level; the cheap levels below it are where the exploring
+    // happens. Quartering each time because the density grid is square — a
+    // quarter of the points is half the grid resolution, so the ladder is one
+    // octave per rung.
+    const LADDER_FLOOR: usize = 1024;
+    let mut sizes = vec![opts.solve.points];
+    while sizes.len() < 3 && sizes[sizes.len() - 1] / 4 >= LADDER_FLOOR {
+        sizes.push(sizes[sizes.len() - 1] / 4);
+    }
+    sizes.reverse();
+    let objective: Vec<loss::Target> = sizes
+        .iter()
+        .map(|&n| {
+            loss::Target::new(
+                &target.cloud.pos,
+                &target.cloud.col,
+                n,
+                opts.color_weight,
+                opts.grid_weight,
+                opts.perceptual,
+                &mut rng,
+            )
+        })
+        .collect();
+    if objective.len() > 1 {
+        let rungs: Vec<String> = sizes.iter().map(|n| n.to_string()).collect();
+        println!("ladder: {} points", rungs.join(" -> "));
+    }
 
     // Seeds are independent fits over a shared target, so they are the one
     // thing here worth threading. The target bank is the expensive shared
@@ -329,7 +352,7 @@ pub fn run(opts: &Options) -> Result<(), String> {
     let outcomes: Vec<solve::Outcome> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..opts.seeds.max(1))
             .map(|i| {
-                let objective = &objective;
+                let objective = &objective[..];
                 let cfg = solve::Config {
                     seed: opts.solve.seed.wrapping_add(i as u64),
                     ..opts.solve
@@ -362,7 +385,7 @@ pub fn run(opts: &Options) -> Result<(), String> {
             .map_err(|e| format!("Failed to write {}: {}", path, e))?;
 
         println!(
-            "seed {:>3}: loss {:.4} (from {:.4}, {:.0}× better)  dimension {}  -> {}",
+            "seed {:>3}: loss {:.4} (from {:.4}, {:.1}× better)  dimension {}  accept {:.0}%  -> {}",
             opts.solve.seed.wrapping_add(i as u64),
             outcome.loss,
             outcome.initial_loss,
@@ -371,6 +394,7 @@ pub fn run(opts: &Options) -> Result<(), String> {
                 Some(d) => format!("{d:.2}"),
                 None => "--".to_string(),
             },
+            outcome.accept_rate * 100.0,
             path,
         );
         let shown = normalize_walk(raw);
@@ -488,7 +512,7 @@ mod tests {
                 actual.center,
             );
             // And from far enough to see all of it, without it being a speck.
-            let visible = scene.camera_distance * (crate::camera::FOV_Y_RADIANS * 0.5).tan();
+            let visible = scene.camera_distance * scene.camera_fov.tan_half();
             assert!(
                 visible > half && visible < half * 1.6,
                 "{what}: half-extent {half:.3} framed at half-height {visible:.3}",
