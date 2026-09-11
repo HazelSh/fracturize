@@ -8,7 +8,7 @@ use winit::window::Window;
 
 use crate::camera::{OrbitCamera, OrbitStyle};
 use crate::gpu::lines::LineVertex;
-use crate::gpu::{CameraUniforms, GizmoRenderer, GpuContext, LineRenderer, OverlayTargets, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+use crate::gpu::{CameraUniforms, EmphasisParams, EmphasisRenderer, GizmoRenderer, GpuContext, LineRenderer, OverlayTargets, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::history::{EditSnapshot, History};
 use crate::path::{CameraPath, LoopKind};
 use crate::scene::{Scene, TransformSpec};
@@ -544,6 +544,7 @@ pub enum HelpAction {
     Zoom,
     ToggleSelected,
     ToggleGizmos,
+    ToggleEmphasis,
     SaveView,
     Screenshot,
     SaveScene,
@@ -826,6 +827,14 @@ pub struct App {
     point_compute: PointCompute,
     point_renderer: PointRenderer,
     splat_renderer: SplatRenderer,
+    /// The glow over the material the selected transform moves. Drawn over
+    /// whichever renderer produced the frame; see `src/gpu/points/emphasis.rs`.
+    emphasis_renderer: EmphasisRenderer,
+    /// Whether that glow is wanted at all. It only ever appears in edit mode
+    /// with something selected, so this is the switch for people who would
+    /// rather edit against the picture they are going to keep.
+    pub show_emphasis: bool,
+    emphasis_params: EmphasisParams,
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
     /// Second line buffer for the selected transform's offset/rotation
@@ -1063,6 +1072,14 @@ impl App {
             &point_compute.colormap_buffer,
         );
 
+        let emphasis_renderer = EmphasisRenderer::new(
+            &gpu.device,
+            gpu.format,
+            &point_compute.point_buffer,
+            &point_compute.sensitivity_buffer,
+            &point_compute.stats_buffer,
+        );
+
         // --splat / a splat-captured view starts in splat mode; an explicit
         // --exposure wins over the view's saved exposure
         let render_mode = if splat || view.as_ref().is_some_and(|v| v.is_splat()) {
@@ -1214,6 +1231,9 @@ impl App {
             point_compute,
             point_renderer,
             splat_renderer,
+            emphasis_renderer,
+            show_emphasis: true,
+            emphasis_params: EmphasisParams::default(),
             gizmo_renderer,
             line_renderer,
             indicator_renderer,
@@ -4541,6 +4561,49 @@ impl App {
         );
     }
 
+    /// The transform the emphasis should be measuring this frame.
+    ///
+    /// Edit mode only, and only with something selected — in view mode there is
+    /// no transform under the cursor and the glow would just be a stain on the
+    /// artwork. Turning `show_emphasis` off is the way to edit against the
+    /// picture you are going to keep.
+    fn emphasis_target(&self) -> Option<u32> {
+        if !self.show_emphasis || !self.show_gizmos {
+            return None;
+        }
+        self.selected_transform.map(|i| i as u32)
+    }
+
+    /// Point the chaos pass at that transform, and make sure the glow is
+    /// reading the buffer the chaos pass is writing.
+    fn sync_emphasis(&mut self) {
+        let target = self.emphasis_target();
+        self.point_compute.set_emphasis(&self.gpu.device, &self.gpu.queue, target);
+        self.emphasis_renderer.rebind(
+            &self.gpu.device,
+            &self.point_compute.point_buffer,
+            &self.point_compute.sensitivity_buffer,
+            &self.point_compute.stats_buffer,
+        );
+    }
+
+    /// Whether the ring still holds points that predate the current emphasis
+    /// target — measured against a transform that is no longer the one being
+    /// asked about, and therefore not drawn at all until they are replaced.
+    fn emphasis_filling(&self) -> bool {
+        self.point_compute.emphasis_target().is_some()
+            && self.point_compute.emphasis_window().1 < self.point_compute.buffer_capacity
+    }
+
+    /// Turn the emphasis glow on or off.
+    pub fn toggle_emphasis(&mut self) {
+        self.show_emphasis = !self.show_emphasis;
+        log::info!(
+            "Emphasis: {}",
+            if self.show_emphasis { "on" } else { "off" }
+        );
+    }
+
     /// Recreate the GPU pipelines after the transform count changed.
     /// The chaos game restarts from warmup.
     fn rebuild_pipelines(&mut self) {
@@ -4568,6 +4631,16 @@ impl App {
             self.gpu.format,
             &self.point_compute.point_buffer,
             &self.point_compute.colormap_buffer,
+        );
+        // A fresh `PointCompute` is back to the stand-in sensitivity buffer,
+        // so the glow has to be built against that one or it reads a buffer
+        // nothing writes.
+        self.emphasis_renderer = EmphasisRenderer::new(
+            &self.gpu.device,
+            self.gpu.format,
+            &self.point_compute.point_buffer,
+            &self.point_compute.sensitivity_buffer,
+            &self.point_compute.stats_buffer,
         );
         self.gizmo_renderer = GizmoRenderer::new(
             &self.gpu.device,
@@ -5839,6 +5912,7 @@ impl App {
             HelpAction::Zoom => if shift { self.zoom_out() } else { self.zoom_in() },
             HelpAction::ToggleSelected => self.toggle_selected_transform(),
             HelpAction::ToggleGizmos => self.toggle_gizmos(),
+            HelpAction::ToggleEmphasis => self.toggle_emphasis(),
             HelpAction::CameraMotion => self.toggle_camera_motion(),
             HelpAction::PathKey => {
                 if shift {
@@ -5907,7 +5981,20 @@ impl App {
 
         // Advance circular buffer and get valid point count. What we *draw*
         // can be less — see `drawn_points` for the collapsed-attractor case.
-        self.point_compute.advance_frame(&self.gpu.queue, self.frame_dt);
+        //
+        // The emphasis is settled first, because what the chaos pass measures
+        // this frame is part of the params this upload writes.
+        self.sync_emphasis();
+        if self.emphasis_filling() {
+            // The ring still holds points measured against a different
+            // transform. Churning at the fill rate replaces them in about a
+            // second instead of thirteen, and changes nothing about the
+            // picture while it does — same scene, same walkers, same
+            // distribution, just dealt faster.
+            self.point_compute.advance_fill(&self.gpu.queue);
+        } else {
+            self.point_compute.advance_frame(&self.gpu.queue, self.frame_dt);
+        }
         let point_count = self.drawn_points(height as f32);
 
         // wgpu 29: `get_current_texture` returns `CurrentSurfaceTexture`
@@ -5952,6 +6039,9 @@ impl App {
             .rewrap_in(&self.gpu.queue, &mut encoder, self.pending_rewrap);
         self.pending_rewrap = 0;
         self.point_compute.dispatch(&mut encoder);
+        // Re-measure the reference the glow normalizes against, over the
+        // points that dispatch just wrote included.
+        self.point_compute.dispatch_emphasis_stats(&mut encoder);
 
         // === STEP 2: RENDER POINTS ===
         let haze = self.haze_uniforms();
@@ -6049,6 +6139,34 @@ impl App {
                     self.use_point_primitives(height as f32),
                 );
             }
+        }
+
+        // === STEP 2.4: LIGHT UP WHAT THE SELECTED TRANSFORM MOVES ===
+        //
+        // After the cloud and before the gizmos: it is light added to the
+        // finished picture, and it belongs under the handles you are about to
+        // grab rather than over them.
+        let (run_start, run_len) = self.point_compute.emphasis_window();
+        if run_len > 0 {
+            self.emphasis_renderer.upload_camera(&self.gpu.queue, &camera);
+            self.emphasis_renderer.upload_params(
+                &self.gpu.queue,
+                &EmphasisParams {
+                    run_start,
+                    run_len,
+                    capacity: self.point_compute.buffer_capacity,
+                    background: self.scene.background.to_array(),
+                    ..self.emphasis_params
+                },
+            );
+            self.emphasis_renderer.render(
+                &self.gpu.device,
+                &mut encoder,
+                &color_view,
+                width,
+                height,
+                run_len,
+            );
         }
 
         // === STEP 2.5/2.6/3: THE IN-WORLD UI, MULTISAMPLED ===

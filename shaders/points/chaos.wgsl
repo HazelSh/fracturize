@@ -57,9 +57,15 @@ struct WalkerState {
     current_rgb_g: f32,
     current_rgb_b: f32,
     rng_state: vec4<u32>,
+    // How far this walker's current point would move if the transform under
+    // the cursor were nudged — as a *vector*, because it has to be carried
+    // through the maps that come after, and only a vector can be. See the
+    // emphasis block in `main`. Zero, and untouched, unless the emphasis is on.
+    tangent: vec3<f32>,
+    _pad_tangent: f32,
 }
 
-// Must match PointComputeParams in buffers.rs (192 bytes)
+// Must match PointComputeParams in buffers.rs (208 bytes)
 struct ComputeParams {
     num_transforms: u32,
     num_walkers: u32,
@@ -81,7 +87,16 @@ struct ComputeParams {
     // buffer is 390,625 workgroups of 256, and a dispatch dimension stops at
     // 65,535 — see `rewrap_in`. Read by nothing else.
     rewrap_stride: u32,
-    // Thirteen scalars, so three words of padding before the vec4s. The band's
+    // Point emphasis: 1 while the render is lighting up the material that
+    // `emphasis_target` moves, and the circular run of the point buffer that
+    // has been written since that target was chosen. Outside the run the
+    // sensitivity values belong to a different transform, so nothing — the
+    // stats pass or the glow pass — may read them. See src/gpu/points/emphasis.rs.
+    emphasis_enabled: u32,
+    emphasis_target: u32,
+    emphasis_run_start: u32,
+    emphasis_run_len: u32,
+    // Seventeen scalars, so three words of padding before the vec4s. The band's
     // outer edge is faded at *render* time now (see guard_weight() in
     // points/splat.wgsl); it cannot be done here, because this buffer is
     // filled over ~800 frames and a camera-dependent deal would mix that many
@@ -103,6 +118,14 @@ struct ComputeParams {
 // A transform's own run is `group_start .. group_start + group_count`, and
 // element 0 of any run is the identity. See src/symmetry.rs.
 @group(0) @binding(4) var<storage, read> group_elements: array<mat4x4<f32>>;
+// Per-point emphasis: |tangent| at the moment the point was written, parallel
+// to `points`. A sixteen-byte stand-in is bound here while the emphasis is
+// off, so every write to it is behind `params.emphasis_enabled`.
+@group(0) @binding(5) var<storage, read_write> sensitivity: array<f32>;
+// [0] = EMA of the mean sensitivity over the run, [1] = 1 once that mean has
+// been seeded. Written by `emphasis_stats`, read by the glow pass, which needs
+// a reference to normalize against and cannot have one until the points exist.
+@group(0) @binding(6) var<storage, read_write> stats: array<f32>;
 
 const PI: f32 = 3.14159265358979;
 
@@ -470,6 +493,144 @@ fn rewrap(@builtin(global_invocation_id) global_id: vec3<u32>) {
     points[idx].position = params.zoom_fixed.xyz + carry(u, m);
 }
 
+// One application of a transform: pre-affine, variation blend, post-affine,
+// then the symmetry group element. Pulled out of `main` so that the emphasis
+// probe can be pushed through the *identical* map — same transform, same
+// variation branches, same group element — because it shares the walker's RNG
+// state at the moment of the step and so makes every draw the same way.
+//
+// The draw order is exactly what it was when this was written inline, which is
+// what keeps every render that existed before the emphasis unchanged — checked
+// by rendering a scene from before and after and differencing: every pixel of
+// every channel identical. (The PNG *files* differ; they carry a timestamp.)
+struct MapResult {
+    pos: vec3<f32>,
+    group_pick: u32,
+}
+
+fn map_point(t_idx: u32, p: vec3<f32>, rng: ptr<function, vec4<u32>>) -> MapResult {
+    // Pre-affine, then weighted variation blend, then post-affine
+    let affine = (transforms[t_idx].matrix * vec4<f32>(p, 1.0)).xyz;
+    let varied = apply_variations(t_idx, affine, rng);
+    var out = (transforms[t_idx].post_affine * vec4<f32>(varied, 1.0)).xyz;
+
+    // Then the symmetry group, composed on the OUTSIDE of the whole map.
+    //
+    // For a finite group G and maps {f}, the IFS {g∘f : g∈G} has an
+    // attractor that is exactly G-symmetric, because hG = G for any h in G.
+    // Drawing g uniformly here is not an approximation of that map set: it
+    // *is* it. Picking f with weight w and then g uniformly samples the
+    // |G|·N maps {g∘f} with weights w/|G|, so a motif keeps the share it
+    // was written with and the chaos game converges exactly as before.
+    //
+    // The order matters and is the whole reason this sits after
+    // `post_affine` rather than being folded into it: g must apply after
+    // the variation blend, and a variation between two matrices cannot be
+    // commuted past either.
+    var pick = 0u;
+    let group_count = transforms[t_idx].group_count;
+    if group_count > 0u {
+        // min() rather than a modulo: rand_float can return values that
+        // round up to exactly 1.0 in f32, and one walker in a few billion
+        // reading element `count` is a real out-of-bounds.
+        pick = min(u32(rand_float(rng) * f32(group_count)), group_count - 1u);
+        let g = group_elements[transforms[t_idx].group_start + pick];
+        out = (g * vec4<f32>(out, 1.0)).xyz;
+    }
+    return MapResult(out, pick);
+}
+
+// ============================================================================
+// Emphasis: how far does this point move if you nudge one transform?
+// ============================================================================
+//
+// A point in the attractor is the image of a *word* — the sequence of maps the
+// walker happened to draw to get there. Nudge one transform T and the point
+// moves by the first-order sum over every occurrence of T in that word:
+//
+//     δ = Σ_k  J_k · E · [p_k; 1]
+//
+// where p_k is the point going into the k-th occurrence, E is the nudge (a
+// 3×4 perturbation of T's affine part) and J_k is the Jacobian of everything
+// the walker did *after* that occurrence. Two things follow, and they are the
+// whole design:
+//
+//   * The most recent occurrence dominates, because every later map is a
+//     contraction — but not overwhelmingly, and "not overwhelmingly" is
+//     exactly the structure worth seeing. Material that T touched once, long
+//     ago, still shifts; material it never touched does not move at all.
+//   * There is no closed form for J_k with variations in the map, so it is
+//     carried forward instead: one vector per walker, pushed through each
+//     subsequent map by a finite difference along its own direction. That
+//     costs one extra map application per iteration and is exact to first
+//     order for every variation, symmetry group and post-affine in the scene.
+//
+// The nudge E is not something the walker can know — the user has not dragged
+// anything yet — so each occurrence injects a *random* E of unit size, whose
+// displacement has magnitude sqrt(|p|² + 1) (the 1 is the translation column,
+// which acts whatever the point is). Averaged over occurrences this estimates
+// the response to a generic nudge rather than to one particular handle, which
+// is the honest thing to draw when nothing is being dragged yet: it answers
+// "would this move at all", not "which way".
+//
+// The cross terms between occurrences drop out under that average, so what is
+// drawn is E[|δ|²] over nudges — and a point dominated by one recent
+// occurrence, which is most of them, has a magnitude that barely varies at
+// all. The randomness shows up as direction, not as speckle.
+
+// lowbias32 (Chris Wellons): a 32-bit integer hash good enough to draw a
+// direction from, and stateless — the walker's own stream is left untouched so
+// that turning the emphasis on does not change a single point of the picture.
+fn hash_u32(x_in: u32) -> u32 {
+    var x = x_in;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+// A direction, uniform on the sphere: z uniform in [-1, 1] and the azimuth
+// uniform is the standard area-preserving parameterization.
+fn hash_dir(seed: u32) -> vec3<f32> {
+    let a = f32(hash_u32(seed)) / 4294967296.0 * 2.0 * PI;
+    let z = f32(hash_u32(seed ^ 0x9e3779b9u)) / 4294967296.0 * 2.0 - 1.0;
+    let r = sqrt(max(0.0, 1.0 - z * z));
+    return vec3<f32>(r * cos(a), r * sin(a), z);
+}
+
+// Push the tangent through the map that was just applied.
+//
+// `rng_at_step` is the walker's RNG *before* the real step, so the probe draws
+// the same variation branches and the same group element and differs from the
+// real point in nothing but its position.
+fn carry_tangent(
+    t_idx: u32,
+    p_in: vec3<f32>,
+    p_out: vec3<f32>,
+    d: vec3<f32>,
+    rng_at_step: vec4<u32>,
+) -> vec3<f32> {
+    let dl = length(d);
+    if !(dl > 1e-30) {
+        return vec3<f32>(0.0);
+    }
+    // Along the tangent's own direction, so one probe suffices however
+    // anisotropic the map is, at a step scaled to the point's own size —
+    // f32 has about seven digits and the difference has to survive in them.
+    let eps = 1e-3 * max(1.0, length(p_in));
+    var rng_probe = rng_at_step;
+    let probe = map_point(t_idx, p_in + d * (eps / dl), &rng_probe);
+    let carried = (probe.pos - p_out) * (dl / eps);
+    // A diverging variation can send the probe to infinity on its own; a
+    // tangent that has gone bad would otherwise stay bad for the walker's life.
+    if !(dot(carried, carried) < 1e24) {
+        return vec3<f32>(0.0);
+    }
+    return carried;
+}
+
 // Pack a linear RGB triple into 24 bits, 8 per channel.
 //
 // Stored as sqrt(linear), not linear. Eight bits spread evenly over a linear
@@ -499,39 +660,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         walker_states[walker_id].current_rgb_g,
         walker_states[walker_id].current_rgb_b,
     );
+    var tangent = walker_states[walker_id].tangent;
 
     for (var i = 0u; i < params.iterations_per_walker; i++) {
         // Select random transform based on weights
         let r = rand_float(&rng);
         let transform_idx = select_transform(r, params.num_transforms);
 
-        // Pre-affine, then weighted variation blend, then post-affine
-        let affine = (transforms[transform_idx].matrix * vec4<f32>(pos, 1.0)).xyz;
-        let varied = apply_variations(transform_idx, affine, &rng);
-        pos = (transforms[transform_idx].post_affine * vec4<f32>(varied, 1.0)).xyz;
-
-        // Then the symmetry group, composed on the OUTSIDE of the whole map.
-        //
-        // For a finite group G and maps {f}, the IFS {g∘f : g∈G} has an
-        // attractor that is exactly G-symmetric, because hG = G for any h in G.
-        // Drawing g uniformly here is not an approximation of that map set: it
-        // *is* it. Picking f with weight w and then g uniformly samples the
-        // |G|·N maps {g∘f} with weights w/|G|, so a motif keeps the share it
-        // was written with and the chaos game converges exactly as before.
-        //
-        // The order matters and is the whole reason this sits after
-        // `post_affine` rather than being folded into it: g must apply after
-        // the variation blend, and a variation between two matrices cannot be
-        // commuted past either.
-        var group_pick = 0u;
+        // The whole step — affine, variations, post-affine, symmetry — so
+        // that the emphasis probe below can be pushed through the same one.
+        let p_in = pos;
+        let rng_at_step = rng;
+        let step = map_point(transform_idx, pos, &rng);
+        pos = step.pos;
+        let group_pick = step.group_pick;
         let group_count = transforms[transform_idx].group_count;
-        if group_count > 0u {
-            // min() rather than a modulo: rand_float can return values that
-            // round up to exactly 1.0 in f32, and one walker in a few billion
-            // reading element `count` is a real out-of-bounds.
-            group_pick = min(u32(rand_float(&rng) * f32(group_count)), group_count - 1u);
-            let g = group_elements[transforms[transform_idx].group_start + group_pick];
-            pos = (g * vec4<f32>(pos, 1.0)).xyz;
+
+        // Carry the tangent through the map that was just applied, and inject
+        // a fresh nudge whenever the map applied *was* the one being watched.
+        // See the block above `hash_u32` for what this measures.
+        if params.emphasis_enabled != 0u {
+            tangent = carry_tangent(transform_idx, p_in, pos, tangent, rng_at_step);
+            if transform_idx == params.emphasis_target {
+                // The seed mixes the walker's RNG state with the iteration, so
+                // successive occurrences draw independent directions without
+                // touching the stream the picture is made from.
+                tangent += hash_dir(rng_at_step.x ^ (i * 0x2545f491u))
+                    * sqrt(dot(p_in, p_in) + 1.0);
+            }
         }
 
         // Nonlinear variations can diverge or produce NaN; re-seed dead walkers
@@ -542,6 +698,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 rand_float(&rng) * 2.0 - 1.0,
                 rand_float(&rng) * 2.0 - 1.0,
             );
+            // A re-seeded walker has no history, so it has no sensitivity
+            // either: whatever the tangent said was about a point that is gone.
+            tangent = vec3<f32>(0.0);
         }
 
         // Blend color toward transform's color. Both channels advance at the
@@ -572,8 +731,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Write point to buffer, renormalized onto the visible scale band when
         // infinite zoom is on (this is the only thing zoom changes)
         var out_pos = pos;
+        var out_sens = length(tangent);
         if params.zoom_enabled != 0u {
             out_pos = renormalize(pos, &rng);
+            // The renormalizing map is a similarity about the fixed point, so
+            // it carries a displacement by exactly the factor it carried the
+            // offset by — and the emphasis has to be about where the point was
+            // *drawn*, not where the chaos game happened to be running.
+            let r_in = length(pos - params.zoom_fixed.xyz);
+            let r_out = length(out_pos - params.zoom_fixed.xyz);
+            if r_in > 1e-20 {
+                out_sens *= r_out / r_in;
+            }
         }
 
         // Both encodings ride in the one word: the colormap index in the low
@@ -582,6 +751,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // that recolours the existing buffer — no refill, no stall.
         let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
         points[output_idx] = Point(out_pos, color_idx | (pack_rgb(color_rgb) << 8u));
+        // Behind the flag because the buffer bound here is a sixteen-byte
+        // stand-in when the emphasis is off — see `sensitivity` above.
+        if params.emphasis_enabled != 0u {
+            sensitivity[output_idx] = out_sens;
+        }
     }
 
     // Save walker state for next frame
@@ -591,4 +765,73 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     walker_states[walker_id].current_rgb_g = color_rgb.g;
     walker_states[walker_id].current_rgb_b = color_rgb.b;
     walker_states[walker_id].rng_state = rng;
+    walker_states[walker_id].tangent = tangent;
+}
+
+// The reference the glow normalizes against: the mean sensitivity over the
+// points that belong to the current target.
+//
+// Sensitivity is a distance in world units, and the distances a scene is made
+// of span whatever range the author chose — so there is no constant that could
+// turn one into a brightness. The mean of the population itself is the only
+// reference that holds across scenes, and it costs one strided pass over a
+// sample of the ring: 65,536 points, one workgroup, once a frame.
+//
+// Smoothed, because the sample moves as the ring churns and an unsmoothed
+// reference makes the whole image breathe. Seeded on the first frame that has
+// anything to measure rather than eased up from zero, so the glow arrives at
+// the right brightness instead of flaring.
+const STATS_SAMPLES: u32 = 65536u;
+var<workgroup> stat_sum: array<f32, 256>;
+var<workgroup> stat_n: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn emphasis_stats(@builtin(local_invocation_id) local_id: vec3<u32>) {
+    let lane = local_id.x;
+    var sum = 0.0;
+    var n = 0.0;
+
+    let run = params.emphasis_run_len;
+    if run > 0u {
+        // Strided over the *run*, never over the whole ring: outside it the
+        // values were written for a different transform.
+        let stride = max(1u, run / STATS_SAMPLES);
+        let taken = run / stride;
+        var k = lane;
+        while k < taken {
+            let idx = (params.emphasis_run_start + k * stride) % params.buffer_capacity;
+            let s = sensitivity[idx];
+            if s > 0.0 {
+                sum += s;
+                n += 1.0;
+            }
+            k += 256u;
+        }
+    }
+
+    stat_sum[lane] = sum;
+    stat_n[lane] = n;
+    workgroupBarrier();
+
+    var half_width = 128u;
+    while half_width > 0u {
+        if lane < half_width {
+            stat_sum[lane] += stat_sum[lane + half_width];
+            stat_n[lane] += stat_n[lane + half_width];
+        }
+        workgroupBarrier();
+        half_width >>= 1u;
+    }
+
+    if lane == 0u && stat_n[0] > 0.0 {
+        let mean = stat_sum[0] / stat_n[0];
+        if mean > 0.0 {
+            if stats[1] < 0.5 {
+                stats[0] = mean;
+                stats[1] = 1.0;
+            } else {
+                stats[0] = mix(stats[0], mean, 0.1);
+            }
+        }
+    }
 }

@@ -16,7 +16,7 @@ const WORKGROUP_SIZE: u32 = 256;
 /// Anything wider than this has to spill into a second dispatch dimension.
 const MAX_WORKGROUPS_PER_DIM: u32 = 65_535;
 
-/// Per-walker state (48 bytes, one per parallel walker)
+/// Per-walker state (64 bytes, one per parallel walker)
 /// Must match WGSL WalkerState struct
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -28,6 +28,11 @@ pub struct WalkerState {
     pub _pad2: f32,
     pub _pad3: f32,
     pub rng_state: [u32; 4],
+    /// How far this walker's point moves per unit nudge of the transform the
+    /// emphasis is watching, carried forward through every map since. Zero and
+    /// untouched while the emphasis is off; see `carry_tangent` in chaos.wgsl.
+    pub tangent: [f32; 3],
+    pub _pad4: f32,
 }
 
 impl WalkerState {
@@ -52,6 +57,8 @@ impl WalkerState {
             _pad2: 0.0,
             _pad3: 0.0,
             rng_state: state,
+            tangent: [0.0; 3],
+            _pad4: 0.0,
         }
     }
 }
@@ -135,6 +142,24 @@ pub struct PointCompute {
     pub write_offset: u32,
     pub warmup_frames: u32,
     pub current_frame: u32,
+    /// Points written since the last reset, never wrapped. The emphasis needs
+    /// to know which slice of the ring belongs to the transform it is watching,
+    /// and a wrapped offset cannot tell "one lap ago" from "just now".
+    pub written_total: u64,
+    /// Per-point sensitivity, parallel to `point_buffer` — or a 16-byte
+    /// stand-in while the emphasis is off, which is most of the time. Four
+    /// bytes a point is a quarter again on top of the point ring, and this is a
+    /// renderer whose whole constraint is VRAM, so it is allocated on the first
+    /// frame that asks for it and kept thereafter.
+    pub sensitivity_buffer: wgpu::Buffer,
+    /// [mean, warm]: the reference the glow normalizes against. See
+    /// `emphasis_stats` in chaos.wgsl.
+    pub stats_buffer: wgpu::Buffer,
+    stats_pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    /// Which transform the emphasis is measuring, and `written_total` when it
+    /// was chosen.
+    emphasis: Option<(u32, u64)>,
     /// Infinite-zoom renormalization applied to every emitted point, if the
     /// scene asked for one (see `renorm.rs`). Rebuilt on transform edits.
     pub zoom: Option<crate::renorm::Renorm>,
@@ -322,6 +347,22 @@ impl PointCompute {
             mapped_at_creation: false,
         });
 
+        // The emphasis buffers. The big one is not allocated until something
+        // asks for it (see `set_emphasis`); until then this stand-in keeps the
+        // binding legal, and the shader never writes through it.
+        let sensitivity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point_sensitivity_placeholder"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("emphasis_stats_buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Colormap buffer
         let colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("colormap_buffer"),
@@ -388,6 +429,28 @@ impl PointCompute {
                     },
                     count: None,
                 },
+                // Per-point sensitivity (emphasis)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Emphasis normalization stats
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -415,8 +478,18 @@ impl PointCompute {
             cache: None,
         });
 
-        // All buffers are fixed for the lifetime of the pipeline, so the bind
-        // group can be created once instead of per frame
+        let stats_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("emphasis_stats_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("emphasis_stats"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Every buffer but the sensitivity one is fixed for the lifetime of the
+        // pipeline, so the bind group is built once here and only rebuilt when
+        // the emphasis swaps the stand-in for the real thing.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("point_compute_bind_group"),
             layout: &bind_group_layout,
@@ -441,6 +514,14 @@ impl PointCompute {
                     binding: 4,
                     resource: group_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: sensitivity_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: stats_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -463,6 +544,12 @@ impl PointCompute {
             write_offset: 0,
             warmup_frames,
             current_frame: 0,
+            written_total: 0,
+            sensitivity_buffer,
+            stats_buffer,
+            stats_pipeline,
+            bind_group_layout,
+            emphasis: None,
             zoom: None,
             seed,
         }
@@ -514,6 +601,12 @@ impl PointCompute {
     }
 
     fn advance_with_iters(&mut self, queue: &wgpu::Queue, current_iters: u32) -> u32 {
+        let pending = self.num_walkers * current_iters;
+        // Counting this dispatch, because the chaos pass is encoded before
+        // anything reads a sensitivity and the points it is about to write are
+        // as much part of the run as the ones already there.
+        let (run_start, run_len) = self.emphasis_run(pending);
+
         // Upload params with current write offset and iteration count
         let params = PointComputeParams {
             num_transforms: self.num_transforms,
@@ -521,17 +614,112 @@ impl PointCompute {
             iterations_per_walker: current_iters,
             write_offset: self.write_offset,
             buffer_capacity: self.buffer_capacity,
+            emphasis_enabled: u32::from(self.emphasis.is_some()),
+            emphasis_target: self.emphasis.map_or(0, |(t, _)| t),
+            emphasis_run_start: run_start,
+            emphasis_run_len: run_len,
             ..PointComputeParams::zeroed()
         }
         .with_zoom(self.zoom.as_ref());
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
         // Advance for next frame
-        self.write_offset =
-            (self.write_offset + self.num_walkers * current_iters) % self.buffer_capacity;
+        self.write_offset = (self.write_offset + pending) % self.buffer_capacity;
+        self.written_total += pending as u64;
         self.current_frame += 1;
 
         self.valid_point_count()
+    }
+
+    /// Which transform the emphasis is measuring, if any.
+    pub fn emphasis_target(&self) -> Option<u32> {
+        self.emphasis.map(|(t, _)| t)
+    }
+
+    /// Start and length of the ring's run of points that belong to the current
+    /// emphasis target — what the glow pass is allowed to draw. Empty when the
+    /// emphasis is off.
+    pub fn emphasis_window(&self) -> (u32, u32) {
+        self.emphasis_run(0)
+    }
+
+    fn emphasis_run(&self, pending: u32) -> (u32, u32) {
+        let Some((_, mark)) = self.emphasis else {
+            return (0, 0);
+        };
+        let written = (self.written_total + pending as u64).saturating_sub(mark);
+        let len = written.min(self.buffer_capacity as u64) as u32;
+        ((mark % self.buffer_capacity as u64) as u32, len)
+    }
+
+    /// Point the emphasis at a transform, or turn it off.
+    ///
+    /// Changing the target does not disturb the picture: the points already in
+    /// the ring are still the same points, they just no longer carry a
+    /// sensitivity anyone may read. So the run resets to empty and the glow
+    /// grows back in as the ring churns — which is honest, and much better than
+    /// a second of glow that belongs to the transform you just stopped looking
+    /// at. Callers that want it back quickly should churn at the fill rate.
+    pub fn set_emphasis(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, target: Option<u32>) {
+        if self.emphasis_target() == target {
+            return;
+        }
+        match target {
+            None => self.emphasis = None,
+            Some(t) => {
+                self.ensure_sensitivity_buffer(device);
+                self.emphasis = Some((t, self.written_total));
+                // The reference described a population that is no longer being
+                // measured; seeding it again is a frame's work.
+                queue.write_buffer(&self.stats_buffer, 0, bytemuck::cast_slice(&[0.0f32; 4]));
+            }
+        }
+    }
+
+    /// Allocate the real per-point sensitivity buffer, once, and rebind.
+    fn ensure_sensitivity_buffer(&mut self, device: &wgpu::Device) {
+        let wanted = self.buffer_capacity as u64 * 4;
+        if self.sensitivity_buffer.size() >= wanted {
+            return;
+        }
+        log::info!(
+            "Emphasis: allocating {:.1} MB of per-point sensitivity",
+            wanted as f64 / (1024.0 * 1024.0)
+        );
+        self.sensitivity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point_sensitivity_buffer"),
+            size: wanted,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("point_compute_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.point_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.transform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.walker_states_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.group_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.sensitivity_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.stats_buffer.as_entire_binding() },
+            ],
+        });
+    }
+
+    /// Re-measure the reference the glow normalizes against. One workgroup,
+    /// once a frame, and only while the emphasis is on.
+    pub fn dispatch_emphasis_stats(&self, encoder: &mut wgpu::CommandEncoder) {
+        if self.emphasis.is_none() {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("emphasis_stats_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.stats_pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
     }
 
     /// Dispatches needed to replace every point in the ring once, at the fill
@@ -687,6 +875,12 @@ impl PointCompute {
     pub fn reset(&mut self, queue: &wgpu::Queue) {
         self.write_offset = 0;
         self.current_frame = 0;
+        self.written_total = 0;
+        // Every point the emphasis had measured is about to be overwritten.
+        if let Some((t, _)) = self.emphasis {
+            self.emphasis = Some((t, 0));
+            queue.write_buffer(&self.stats_buffer, 0, bytemuck::cast_slice(&[0.0f32; 4]));
+        }
 
         // Re-initialize walker states, from the same seed: a reset restarts
         // the *same* stream, which is what makes a rebuild reproducible.
@@ -788,6 +982,6 @@ mod tests {
 
     #[test]
     fn test_walker_state_size() {
-        assert_eq!(std::mem::size_of::<WalkerState>(), 48, "WalkerState must be 48 bytes to match WGSL struct");
+        assert_eq!(std::mem::size_of::<WalkerState>(), 64, "WalkerState must be 64 bytes to match WGSL struct");
     }
 }

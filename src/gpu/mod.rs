@@ -23,4 +23,4 @@ pub use gizmo::GizmoRenderer;
 pub use lines::{LineRenderer, LineVertex};
 pub use overlay::OverlayTargets;
 pub use timing::GpuTimer;
-pub use points::{Filter, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+pub use points::{EmphasisParams, EmphasisRenderer, Filter, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};

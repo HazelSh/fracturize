@@ -9,10 +9,12 @@ pub mod accumulate;
 pub mod compute;
 pub mod density;
 pub mod downsample;
+pub mod emphasis;
 pub mod renderer;
 pub mod splat;
 
 pub use compute::PointCompute;
 pub use downsample::Filter;
+pub use emphasis::{EmphasisParams, EmphasisRenderer};
 pub use renderer::{PointRenderer, DEPTH_FORMAT};
 pub use splat::SplatRenderer;

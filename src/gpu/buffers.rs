@@ -421,7 +421,7 @@ pub struct Point {
     pub color_idx: u32,
 }
 
-/// Compute parameters for the simple chaos game (192 bytes)
+/// Compute parameters for the simple chaos game (208 bytes)
 ///
 /// The `zoom_*` block is the infinite-zoom renormalization (see `renorm.rs`);
 /// it is all zeroes and `zoom_enabled = 0` for ordinary scenes. `mat3x3` is
@@ -455,8 +455,20 @@ pub struct PointComputeParams {
     /// point buffer is 390,625 workgroups of 256, and a dispatch dimension
     /// stops at 65,535. Read only by that entry point.
     pub rewrap_stride: u32,
+    /// 1 while the point emphasis is on: the chaos pass then carries a tangent
+    /// per walker and writes a sensitivity per point. Off, none of the four is
+    /// read and the sensitivity binding is a four-byte stand-in.
+    pub emphasis_enabled: u32,
+    /// The transform the emphasis is measuring — the selected one.
+    pub emphasis_target: u32,
+    /// The circular run of the point ring written since that target was chosen:
+    /// start index and length. Outside it the sensitivities belong to whatever
+    /// was selected before, so the stats pass and the glow pass both skip them,
+    /// and the glow grows in over a lap rather than being briefly wrong.
+    pub emphasis_run_start: u32,
+    pub emphasis_run_len: u32,
     /// std140 pads the scalar run out to the following vec4's alignment.
-    /// **Thirteen scalars, so this is three words, not one** — get it wrong and
+    /// **Seventeen scalars, so this is three words, not one** — get it wrong and
     /// the `vec4`s below land somewhere else and the zoom silently renders
     /// from garbage rather than failing to compile.
     ///
@@ -556,20 +568,29 @@ mod tests {
 
     #[test]
     fn test_point_compute_params_size() {
-        // std140: 12 scalars + 4 pad (64) + two vec4 (32) + two mat3x3 as
+        // std140: 17 scalars + 3 pad (80) + two vec4 (32) + two mat3x3 as
         // padded columns (48 each)
         assert_eq!(
             std::mem::size_of::<PointComputeParams>(),
-            192,
-            "PointComputeParams must be 192 bytes to match ComputeParams in chaos.wgsl"
+            208,
+            "PointComputeParams must be 208 bytes to match ComputeParams in chaos.wgsl"
         );
         // The vec4s have to start where std140 puts them. A wrong pad is not a
         // compile error in either language — it is a zoom rendered from
         // whatever happened to be at the offset instead.
         assert_eq!(
             std::mem::offset_of!(PointComputeParams, zoom_fixed),
-            64,
+            80,
             "the scalar run must pad out to a 16-byte boundary"
+        );
+        // The emphasis block was appended to the scalars rather than taking pad
+        // words: there were only three left and it needed four, so the run grew
+        // by a whole 16-byte step and the vec4s moved with it. Both numbers
+        // above are that move; neither is arbitrary.
+        assert_eq!(
+            std::mem::offset_of!(PointComputeParams, emphasis_enabled),
+            52,
+            "the emphasis block must follow rewrap_stride"
         );
         // `rewrap_stride` took the first of the pad words rather than being
         // appended, so every render made before it existed is unaffected. Size

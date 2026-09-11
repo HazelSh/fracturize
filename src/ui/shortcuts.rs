@@ -183,6 +183,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         &[
             ("H / ? / F1", "toggle this window", Some(HelpAction::ToggleHelp)),
             ("G / Tab", "toggle transform gizmos + labels", Some(HelpAction::ToggleGizmos)),
+            ("M", "toggle the glow on what the selected transform moves", Some(HelpAction::ToggleEmphasis)),
             ("Esc", "cancel: close a menu, a dialog, the browser, or the selection", None),
         ],
     ),

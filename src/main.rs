@@ -1927,6 +1927,9 @@ impl ApplicationHandler for AppWrapper {
                             "g" | "G" => {
                                 app.toggle_gizmos();
                             }
+                            "m" | "M" => {
+                                app.toggle_emphasis();
+                            }
                             "h" | "H" | "?" => {
                                 app.toggle_help();
                             }
