@@ -1266,7 +1266,12 @@ impl App {
             scene,
             scene_path,
             buffer_capacity,
-            selected_transform: Some(0),
+            // Nothing selected until you pick something. A scene arrives as a
+            // picture, not as an open inspector: selecting transform 0 on load
+            // put a gizmo and (since the emphasis) a lit region on screen that
+            // nobody had asked for, on every scene, before anyone had looked
+            // at it.
+            selected_transform: None,
             transform_enabled: vec![true; num_transforms],
             selected_variation: 0,
             matrix_generation: 0,
@@ -3464,7 +3469,9 @@ impl App {
             .map(|n| n as u32)
             .unwrap_or(scene.point_count as u32);
         self.transform_enabled = vec![true; scene.transforms.len()];
-        self.selected_transform = Some(0);
+        // A loaded scene is something to look at first; nothing is selected
+        // until you select it. See the note in `App::new`.
+        self.selected_transform = None;
         self.selected_variation = 0;
         self.drag = Drag::None;
         self.hovered = None;
@@ -4001,7 +4008,9 @@ impl App {
         self.haze_amount = scene.haze;
         self.exposure = scene.exposure;
         self.transform_enabled = vec![true; scene.transforms.len()];
-        self.selected_transform = Some(0);
+        // As for a loaded scene, and doubly so for a blank one, which has no
+        // transform 0 to select. See the note in `App::new`.
+        self.selected_transform = None;
         self.selected_variation = 0;
         self.drag = Drag::None;
         self.hovered = None;
@@ -6155,6 +6164,8 @@ impl App {
                     run_start,
                     run_len,
                     capacity: self.point_compute.buffer_capacity,
+                    // Gather the glow the way the picture under it was drawn.
+                    splat_mode: u32::from(matches!(self.render_mode, RenderMode::Splat)),
                     background: self.scene.background.to_array(),
                     ..self.emphasis_params
                 },

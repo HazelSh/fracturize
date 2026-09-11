@@ -1,12 +1,22 @@
 //! The emphasis pass: a glow over the material the selected transform moves.
 //!
-//! Two passes over whichever frame the point or splat renderer produced — one
-//! that accumulates sensitivity and coverage per pixel, one that composites
-//! them — so that lighting up the sensitive material costs neither render mode
-//! a line of shader and costs nothing at all when nothing is selected. What it
-//! draws is measured by the chaos pass (see the emphasis block in
+//! An overlay on whichever frame the point or splat renderer produced, so that
+//! lighting up the sensitive material costs neither render mode a line of
+//! shader and costs nothing at all when nothing is selected. What it draws is
+//! measured by the chaos pass (see the emphasis block in
 //! `shaders/points/chaos.wgsl`) and normalized against the mean over the same
 //! points, which `PointCompute::dispatch_emphasis_stats` re-measures each frame.
+//!
+//! Three draws: one accumulates sensitivity and coverage per pixel, then two
+//! fullscreen triangles recede the unlit material and brighten the lit. Two,
+//! because one blend cannot both mix toward a colour and multiply what is
+//! already in the frame, and both of those are needed — see `fs_dim` and
+//! `fs_brighten` in the shader.
+//!
+//! It samples the frame the way the frame was drawn: the footprint and the
+//! weighting are the *active* renderer's, splat's or the point renderer's, so
+//! the glow is a summary of the picture on screen rather than a second,
+//! differently-drawn cloud laid over it.
 //!
 //! `shaders/points/emphasis.wgsl` carries the reasoning for why a *mean* is the
 //! only summary of a pixel that works here; it is the heart of the thing.
@@ -23,42 +33,53 @@ pub struct EmphasisParams {
     pub run_start: u32,
     pub run_len: u32,
     pub capacity: u32,
+    /// 1 when the frame under the glow came from the splat renderer, so the
+    /// glow borrows that renderer's footprint and weighting instead of the
+    /// point renderer's.
+    pub splat_mode: u32,
     pub knee: f32,
     pub strength: f32,
-    pub min_pixels: f32,
-    pub size_scale: f32,
-    /// std140 puts the `vec3` below on a 16-byte boundary, and seven scalars
-    /// do not reach one.
-    pub _pad0: f32,
-    pub color: [f32; 3],
+    /// How far the unlit material recedes toward the background, 0..1.
     pub dim: f32,
+    /// How much brighter fully-lit material is made: the multiplier is
+    /// 1 + glow_gain. See `fs_brighten` in the shader.
+    pub glow_gain: f32,
+    pub color: [f32; 3],
+    pub _pad0: f32,
     pub background: [f32; 3],
-    pub _pad: f32,
+    pub _pad1: f32,
 }
 
 /// Multiple of the mean sensitivity at which a point is half lit.
 ///
-/// The populations being separated are one application of the transform apart,
-/// so the useful knee sits a little above the mean: at 1.0 the whole attractor
-/// glows faintly and the answer to "what moves" is "everything".
-pub const DEFAULT_KNEE: f32 = 1.5;
+/// The populations being separated are one application of the transform apart
+/// — a factor of that transform's own contraction, near enough — so the knee
+/// wants to sit *between* two of them rather than on the mean: measured on the
+/// Sierpinski tetrahedron, this puts the material the transform touched last
+/// at 0.8 and the generation before it at 0.2, which reads as a clear answer
+/// with the gradation still visible in it. At 1.0 the whole attractor glows
+/// faintly and the answer to "what moves" is "everything".
+pub const DEFAULT_KNEE: f32 = 1.8;
 
-/// A cool white: the glow reads as light rather than as paint, and the slight
-/// blue keeps it from being mistaken for the scene's own highlights.
+/// A cool white. Only `lift`'s worth of it is ever added — the lit material
+/// keeps its own colour — so this tints the light rather than replacing the
+/// picture, and the slight blue keeps it from reading as the scene's own
+/// highlights.
 pub const GLOW_COLOR: [f32; 3] = [0.80, 0.90, 1.00];
 
 /// The accumulator's format. Float, because it holds a sum of weights with no
 /// bound worth guessing, and the ratio of two of its channels is the answer.
 const ACCUM_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
-/// The accumulator runs at half the frame's width and height.
+/// The accumulator runs at the frame's own resolution.
 ///
-/// The glow is a soft field over a cloud of millions of dots — it has no detail
-/// at the pixel level to lose — and this pass is one quad per point, so what it
-/// costs is fragments. A quarter of them, for a difference that needs a
-/// screenshot and a difference blend to find. Point sizes are in NDC by the
-/// time they reach the rasterizer, so nothing has to be scaled to suit it.
-const ACCUM_DIVISOR: u32 = 2;
+/// It ran at half for one revision, on the reasoning that a soft field has no
+/// pixel-level detail to lose. What it lost instead was the *edges*: a subpixel
+/// dot is a quarter of a texel there, so the coverage the ratio divides by came
+/// out granular and the lit region arrived with a blocky, stair-stepped rim.
+/// Sampling at the renderer's own rate is what puts the glow on the material
+/// rather than near it.
+const ACCUM_DIVISOR: u32 = 1;
 
 impl Default for EmphasisParams {
     fn default() -> Self {
@@ -66,17 +87,15 @@ impl Default for EmphasisParams {
             run_start: 0,
             run_len: 0,
             capacity: 1,
+            splat_mode: 0,
             knee: DEFAULT_KNEE,
             strength: 1.0,
-            // A point can be subpixel and still be the most sensitive thing in
-            // the frame, so the footprint has a floor the dots themselves do not.
-            min_pixels: 1.5,
-            size_scale: 1.2,
-            _pad0: 0.0,
+            dim: 0.72,
+            glow_gain: 1.0,
             color: GLOW_COLOR,
-            dim: 0.7,
+            _pad0: 0.0,
             background: [0.0; 3],
-            _pad: 0.0,
+            _pad1: 0.0,
         }
     }
 }
@@ -90,7 +109,8 @@ struct Accumulator {
 
 pub struct EmphasisRenderer {
     accum_pipeline: RenderPipeline,
-    composite_pipeline: RenderPipeline,
+    dim_pipeline: RenderPipeline,
+    brighten_pipeline: RenderPipeline,
     layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
     bind_group: BindGroup,
@@ -228,41 +248,63 @@ impl EmphasisRenderer {
             cache: None,
         });
 
-        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("emphasis_composite_pipeline"),
-            layout: Some(&composite_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_composite"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_composite"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // Premultiplied: `fs_composite` writes the receding and the
-                    // lighting as one colour and one alpha.
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::COLOR,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // The two halves of the composite: recede, then lift. Same vertex
+        // shader and same bind groups; they differ only in their fragment and
+        // their blend, which is the whole reason it takes two draws — one
+        // blend cannot both mix toward a colour and multiply what is there.
+        let fullscreen = |label: &str, entry: &str, blend: wgpu::BlendState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&composite_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_composite"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::COLOR,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let dim_pipeline = fullscreen(
+            "emphasis_dim_pipeline",
+            "fs_dim",
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        );
+        // out = dst·src + dst. See `fs_brighten`: multiplying is what lets the
+        // lit material get brighter without getting whiter.
+        let multiply_add = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let brighten_pipeline = fullscreen(
+            "emphasis_brighten_pipeline",
+            "fs_brighten",
+            wgpu::BlendState { color: multiply_add, alpha: multiply_add },
+        );
 
         let camera_buffer = create_camera_buffer(device);
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -290,7 +332,8 @@ impl EmphasisRenderer {
 
         Self {
             accum_pipeline,
-            composite_pipeline,
+            dim_pipeline,
+            brighten_pipeline,
             layout,
             composite_layout,
             bind_group,
@@ -387,12 +430,12 @@ impl EmphasisRenderer {
         self.accum = Some(Accumulator { view, bind_group, width: w, height: h });
     }
 
-    /// Accumulate, then composite over `target`.
+    /// Accumulate, then recede and brighten over `target`.
     ///
     /// `instances` is one per point of the run — including the unlit ones,
-    /// which are the denominator of the per-pixel mean. Most of them leave the
-    /// vertex stage as a tiny quad and cost a handful of fragments of a
-    /// quarter-size target; see `ACCUM_DIVISOR`.
+    /// which are the denominator of the per-pixel mean. Each costs one quad
+    /// the size of the dot the renderer under this drew, which is usually a
+    /// pixel or two.
     pub fn render(
         &mut self,
         device: &Device,
@@ -446,9 +489,11 @@ impl EmphasisRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.composite_pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &accum.bind_group, &[]);
+        pass.set_pipeline(&self.dim_pipeline);
+        pass.draw(0..3, 0..1);
+        pass.set_pipeline(&self.brighten_pipeline);
         pass.draw(0..3, 0..1);
     }
 }

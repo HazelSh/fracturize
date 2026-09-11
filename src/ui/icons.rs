@@ -92,6 +92,14 @@ pub const LOCK: &str = "\u{E308}";
 /// Dimension-lock toggle: unlocked — Phosphor `lock-open`, mirror of `LOCK`.
 pub const LOCK_OPEN: &str = "\u{E30A}";
 
+/// Emphasis toggle (toolbar, attached to the mode button) — Phosphor
+/// `lightbulb`. Located the documented way: a contact sheet of the vendored
+/// font's E2D8–E2F0 rendered with Pillow and read off the page, with
+/// `keyboard` (E2D8) and `list` (E2F0) — both already trusted here — closing
+/// the range at either end. The bulb sits between `leaf` and `lightning`,
+/// exactly where this font's alphabetical-by-name PUA ordering puts it.
+pub const LIGHTBULB: &str = "\u{E2DC}";
+
 /// Add a new thing to a list (Transforms rail) — Phosphor `plus`. Located the
 /// same way as the block above: `play` (E3D0, already trusted here) anchors
 /// that stretch of the sheet, and `plus` sits two even codepoints along.

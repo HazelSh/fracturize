@@ -362,6 +362,34 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     // Fixed to the wider of its two captions (`num::icon_button_width`) so
     // toggling it — which changes both the icon and the word — doesn't shift
     // the Play/Pause button beside it.
+    // The emphasis toggle rides *attached* to the mode button rather than
+    // sitting loose in the strip. It does nothing outside edit mode — there is
+    // no selection to be about — so it belongs to that control rather than
+    // beside it, and zero spacing between the two is what says so. Disabled
+    // rather than hidden in view mode: a button that vanishes takes the rest
+    // of the toolbar's layout with it.
+    let spacing = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let resp = ui.add_enabled(
+        app.show_gizmos,
+        egui::Button::selectable(app.show_emphasis && app.show_gizmos, icons::LIGHTBULB),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if !app.show_gizmos {
+            "Lights up what the selected transform moves — edit mode only (M)"
+        } else if app.show_emphasis {
+            "Lighting up what the selected transform moves (M) — click to stop"
+        } else {
+            "Light up what the selected transform moves (M)"
+        },
+        if app.show_emphasis { "click: stop lighting it up" } else { "click: light up what moves" },
+    );
+    if resp.clicked() {
+        app.toggle_emphasis();
+    }
+
     let mode_width =
         num::icon_button_width(ui, &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")]);
     let resp = ui.add(
@@ -388,6 +416,7 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     if resp.clicked() {
         app.toggle_gizmos();
     }
+    ui.spacing_mut().item_spacing.x = spacing;
 
     // Same defect, same fix: "Play" and "Pause" aren't the same width either,
     // so this button used to shift whatever sat to its right when clicked.

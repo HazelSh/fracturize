@@ -73,30 +73,36 @@ struct EmphasisParams {
     run_start: u32,
     run_len: u32,
     capacity: u32,
+    /// 1 when the frame under this was drawn by the splat renderer.
+    ///
+    /// The footprint and the weighting below are then the splat renderer's
+    /// own, rather than the point renderer's — so the glow is a summary of
+    /// *the picture on screen*, sampled the way that picture was, instead of
+    /// a second, differently-drawn cloud laid over it.
+    splat_mode: u32,
     /// Multiple of the mean sensitivity that counts as "this moves": the knee
     /// of the response curve in `lit`.
     knee: f32,
     /// Gain on the composited glow.
     strength: f32,
-    /// Floor on a point's footprint in the accumulator, in pixels of the
-    /// output. A point can be subpixel and still be the most sensitive thing
-    /// in the frame.
-    min_pixels: f32,
-    /// Footprint relative to the point's own projected size.
-    size_scale: f32,
-    _pad0: f32,
-    /// The glow, linear RGB.
-    color: vec3<f32>,
-    /// How far the unlit material is taken down toward the background before
-    /// the glow is put on: 0 leaves the picture alone, 1 erases everything the
-    /// glow does not light. Contrast, not added light, is what makes the answer
-    /// readable — a fractal is often near-white already, and light added to
-    /// white is light you cannot see.
+    /// How far the unlit material is taken down toward the background, 0..1.
     dim: f32,
+    /// How much brighter fully-lit material is made: the *multiplier* is
+    /// 1 + glow_gain, not an amount of white added. See `fs_brighten`.
+    glow_gain: f32,
+    /// Tint of that brightening, linear RGB. Near-white, so it lifts the
+    /// material rather than recolouring it.
+    color: vec3<f32>,
     /// The background, linear RGB: what the unlit material recedes toward.
     background: vec3<f32>,
-    _pad: f32,
+    _pad1: f32,
 }
+
+// The splat renderer's kernel, to the digit — see `shaders/points/splat.wgsl`,
+// which is where these are explained. Sharing the numbers is the point: a
+// summary of a picture has to be gathered the way the picture was.
+const KERNEL_SHARPNESS: f32 = 4.0;
+const KERNEL_NORM: f32 = 1.29;
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
 @group(0) @binding(1) var<uniform> camera: CameraUniforms;
@@ -109,6 +115,10 @@ struct GlowOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) offset: vec2<f32>,
     @location(1) intensity: f32,
+    // The weight this point deposits at the centre of its footprint: 1 for the
+    // point renderer, which draws every dot the same, and the splat renderer's
+    // own energy-conserving peak under `splat_mode`.
+    @location(2) energy: f32,
 }
 
 fn offscreen() -> GlowOutput {
@@ -116,6 +126,7 @@ fn offscreen() -> GlowOutput {
     out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
     out.offset = vec2<f32>(0.0);
     out.intensity = 0.0;
+    out.energy = 0.0;
     return out;
 }
 
@@ -156,14 +167,26 @@ fn vs_glow(
     }
     let ndc = clip.xyz / clip.w;
 
-    // The point's own projected size, widened a little and held to a floor:
-    // the glow has to be findable, and these scenes are often drawn with
-    // subpixel dots. Sizes are in NDC by the time they leave here, so the
-    // accumulator being half-resolution costs nothing to account for.
-    let base = camera.projected_point_size * camera.screen_height / depth * params.size_scale;
-    let size_pixels = clamp(base, params.min_pixels, camera.max_point_pixels * 2.0);
+    // Whatever the renderer under this would have drawn for the same point,
+    // to the same clamps — see `vs_main` in points/render.wgsl and `vs_splat`
+    // in points/splat.wgsl. `half_px` is the footprint's half-extent.
+    let base = camera.projected_point_size * camera.screen_height / depth;
+    var half_px = 0.0;
+    var energy = 1.0;
+    if params.splat_mode != 0u {
+        let radius_px = clamp(0.5 * base, 1.0, camera.max_point_pixels);
+        half_px = radius_px;
+        // Total kernel energy 1, as the splat pass does it: a near point
+        // spread over many pixels weighs the same in total as a far one on a
+        // single pixel, so the ratio in `fs_composite` is a *density*-weighted
+        // mean and matches what the tonemap made of the same material.
+        energy = KERNEL_NORM / (radius_px * radius_px);
+    } else {
+        let size_pixels = clamp(base, camera.min_point_pixels, camera.max_point_pixels);
+        half_px = size_pixels * 0.5;
+    }
 
-    let ndc_size_y = size_pixels / camera.screen_height * 2.0;
+    let ndc_size_y = half_px / camera.screen_height * 2.0;
     let ndc_size_x = ndc_size_y / camera.aspect_ratio;
 
     let offset = vec2<f32>(
@@ -176,21 +199,22 @@ fn vs_glow(
     var out: GlowOutput;
     out.clip_position = vec4<f32>(
         ndc.x * camera.subfrustum.x + camera.subfrustum.z
-            + offset.x * ndc_size_x * 0.5 * camera.subfrustum.x,
+            + offset.x * ndc_size_x * camera.subfrustum.x,
         ndc.y * camera.subfrustum.y + camera.subfrustum.w
-            + offset.y * ndc_size_y * 0.5 * camera.subfrustum.y,
+            + offset.y * ndc_size_y * camera.subfrustum.y,
         ndc.z,
         1.0,
     );
     out.offset = offset;
     out.intensity = lit(sensitivity[idx]);
+    out.energy = energy;
     return out;
 }
 
 // r = Σ lit·w, g = Σ w. Additive, into a two-channel float target.
 @fragment
 fn fs_accumulate(in: GlowOutput) -> @location(0) vec4<f32> {
-    let w = exp(-3.0 * dot(in.offset, in.offset));
+    let w = in.energy * exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
     return vec4<f32>(in.intensity * w, w, 0.0, 0.0);
 }
 
@@ -216,25 +240,47 @@ fn vs_composite(@builtin(vertex_index) idx: u32) -> FullscreenOut {
     return out;
 }
 
-// Take the picture down toward the background, and put the lit material back
-// as light. Written premultiplied for a One / OneMinusSrcAlpha blend, which is
-// the single-pass form of
-//
-//     mix(mix(scene, background, dim), glow, g)
-//
-// — one blend doing both the receding and the lighting, so the frame is read
-// and written once.
-@fragment
-fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let acc = textureSampleLevel(accum, accum_sampler, in.uv, 0.0);
-    // No material at all under this pixel: nothing to dim, nothing to light.
-    if acc.g <= 1e-6 {
-        return vec4<f32>(0.0);
+// How lit this *pixel* is: the mean over the material under it, which is what
+// the accumulator's two channels are for.
+fn pixel_glow(uv: vec2<f32>) -> f32 {
+    let acc = textureSampleLevel(accum, accum_sampler, uv, 0.0);
+    if acc.g <= 0.0 {
+        return 0.0;
     }
-    let mean = acc.r / acc.g;
-    let g = clamp(mean * params.strength, 0.0, 1.0);
+    return clamp(acc.r / acc.g * params.strength, 0.0, 1.0);
+}
 
-    let alpha = 1.0 - (1.0 - g) * (1.0 - params.dim);
-    let rgb = (1.0 - g) * params.dim * params.background + g * params.color;
-    return vec4<f32>(rgb, alpha);
+// Step one: take the unlit material down toward the background.
+//
+// Premultiplied, for a One / OneMinusSrcAlpha blend, so this is exactly
+// `mix(scene, background, dim·(1-g))`. It costs nothing where there is no
+// material to dim, because the background blended toward the background is
+// the background — so the pass needs no coverage threshold and has no edge to
+// alias along. A threshold is what used to make this blocky.
+@fragment
+fn fs_dim(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let alpha = (1.0 - pixel_glow(in.uv)) * params.dim;
+    return vec4<f32>(alpha * params.background, alpha);
+}
+
+// Step two: make the lit material *brighter*, rather than whiter.
+//
+// The first version of this replaced the lit material with the glow colour and
+// the result was a flat white silhouette — it overwhelmed the picture and hid
+// the structure inside the very region it was pointing at, which is the one
+// place you most want to see it. Adding white instead of replacing had the
+// same defect in miniature: a constant added to everything compresses the
+// contrast it lands on and clips the highlights.
+//
+// Multiplying does not. Under a `Dst` / `One` blend the frame gets
+//
+//     out = dst·src + dst = dst·(1 + glow_gain·g·tint)
+//
+// so lit material is *lifted*, keeping every ratio inside it — the fractal's
+// own structure survives being pointed at — and the near-white tint leaves its
+// hue where the author put it.
+@fragment
+fn fs_brighten(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let lift = params.glow_gain * pixel_glow(in.uv);
+    return vec4<f32>(lift * params.color, 0.0);
 }
