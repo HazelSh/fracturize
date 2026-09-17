@@ -101,7 +101,7 @@
 
 use glam::{Mat3, Mat4, Vec3};
 
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, MAX_ORBIT_DISTANCE};
 use crate::rot::{Orientation, Turn};
 
 /// Octaves of scale rendered below the target radius, if a scene doesn't say.
@@ -864,6 +864,62 @@ impl Renorm {
         eye_distance / self.band
     }
 
+    /// One scroll gesture, as a step along the zoom's own symmetry.
+    ///
+    /// `steps` is wheel notches, positive to zoom in, and the eye's distance
+    /// from the fixed point changes by exactly `0.9^steps` — the same rate
+    /// [`OrbitCamera::zoom`] has always had. What is new is everything else
+    /// the similarity does: the focus is carried about the fixed point and the
+    /// framing is turned by the map's twist, in the same proportion.
+    ///
+    /// **Scrolling was a straight line into a structure that spirals.**
+    /// `OrbitCamera::zoom` scales the orbit radius and touches nothing else,
+    /// so the eye slides down the ray toward the *focus*. That has two costs,
+    /// and the second is the bug Hazel hit on any freshly opened scene:
+    ///
+    /// - The sequence of frames is not the Droste sequence. Each one shows new
+    ///   material arriving at a new angle, rather than the same material
+    ///   magnified, because the camera is not travelling along the symmetry.
+    ///
+    /// - **It stops descending.** With the focus fixed and the radius shrinking
+    ///   geometrically, the eye converges on the focus, not on `p`. So
+    ///   `|eye − p| → |focus − p|`, which is nonzero for every framing that
+    ///   wasn't aimed exactly at the fixed point: the descent asymptotes, the
+    ///   wrap stops firing, and an infinite zoom quietly becomes a finite one.
+    ///   Zooming back out and in again appears to fix it only because the
+    ///   round trip happens to leave the eye somewhere the fold can still
+    ///   reach.
+    ///
+    /// Under `Aᵘ` neither happens: `|eye − p|` scales by `scale^u` exactly, for
+    /// any real `u` and forever, and the picture is the picture magnified.
+    ///
+    /// The rate stays authored in the radial factor rather than in periods,
+    /// which matters for the reason `levels` is in octaves: a period is 0.07
+    /// octaves for a 0.95 spiral and 3.3 for a 0.1 collapse, so a fixed
+    /// periods-per-notch would make one scene creep and the next one leap.
+    /// Converting through `log_scale` gives every scene the same feel in the
+    /// hand and lets each one's own twist ride along.
+    ///
+    /// The clamp is the old `floor`/[`MAX_ORBIT_DISTANCE`] pair rewritten in
+    /// periods, and is a guard against a single enormous event rather than a
+    /// limit on the framing — [`Self::wrap`] runs every frame and bounds the
+    /// eye properly. See [`Self::scroll_floor`] for why reaching zero is the
+    /// one thing that must not happen.
+    pub fn scroll(&self, cam: &mut OrbitCamera, steps: f32) {
+        let d = (cam.eye() - self.fixed_point).length();
+        if !(d > 1e-9) {
+            return; // sitting on the fixed point; there is no direction to go
+        }
+        // Periods that reproduce this many notches of the old radial rate.
+        let u = steps * -(0.9f32.ln()) / self.log_scale;
+        // Room left before a single event could reach the fixed point, or
+        // fling the eye past anything `wrap` should have to climb back from.
+        let room_in = (d / self.scroll_floor()).ln() / self.log_scale;
+        let room_out = (MAX_ORBIT_DISTANCE / d).ln() / self.log_scale;
+        let u = u.clamp(-room_out.max(0.0), room_in.max(0.0));
+        cam.apply_similarity(self.fixed_point, self.scale.powf(u), (self.twist * u).exp());
+    }
+
     /// How close the wheel may bring the eye while this zoom is active.
     ///
     /// Not a limit on the framing, because there isn't one: [`Self::wrap`]
@@ -1266,6 +1322,146 @@ mod tests {
         }
     }
 
+    /// The bug Hazel reported: scrolling in on a freshly opened scene stops
+    /// descending, and going out and back in appears to fix it.
+    ///
+    /// The old `OrbitCamera::zoom` shrank the orbit radius with the focus
+    /// nailed down, so the eye converged on the *focus*. Aim anywhere but
+    /// exactly at the fixed point — which is every scene as authored — and
+    /// `|eye − p|` bottoms out at `|focus − p|` instead of going to zero. The
+    /// fold then has nothing left to fold and the infinite zoom is over.
+    ///
+    /// The focus offset here is small (0.35 against a band of 1.0) precisely
+    /// because the failure does not need a big one; it needs a nonzero one.
+    /// Under the helix `|eye − p|` scales by `scale^u` and the offset is
+    /// irrelevant, which is what this asserts.
+    #[test]
+    fn scrolling_descends_with_the_focus_off_the_fixed_point() {
+        let r = deep_renorm(0.6, 31.0);
+        let steps = 3.0_f32;
+        let want = 0.9_f32.powf(steps);
+
+        // Framed on something beside the fixed point, the ordinary way.
+        let focus = r.fixed_point + Vec3::new(0.21, -0.14, 0.25);
+        let mut cam = OrbitCamera::from_chart(0.9, 0.2, 0.0, r.band, focus);
+
+        let mut previous = (cam.eye() - r.fixed_point).length();
+        let mut wraps = 0;
+        for i in 0..40 {
+            r.scroll(&mut cam, steps);
+            let turns = r.wrap(&mut cam);
+            wraps += turns;
+            let d = (cam.eye() - r.fixed_point).length();
+            // Undo the folds, so the descent reads as one continuous flight.
+            let got = (d / previous) * r.scale.powi(turns);
+            assert!(
+                (got - want).abs() < 1e-4,
+                "scroll {i}: the eye closed on the fixed point by {got}, not {want} \
+                 — the descent is converging on the focus, not on p",
+            );
+            previous = d;
+        }
+        assert!(wraps >= 8, "40 scrolls of {steps} steps should cross several periods, got {wraps}");
+    }
+
+    /// Scrolling exactly one period is the symmetry, to the bit that matters:
+    /// the same picture, one level down.
+    ///
+    /// Stated the way `wrapping_the_camera_does_not_move_the_picture` states
+    /// it, and with the same trap avoided — the transformed point goes with
+    /// the transformed camera, `screen(A(x), A(C)) == screen(x, C)`.
+    #[test]
+    fn one_period_of_scroll_is_the_symmetry() {
+        let r = deep_renorm(0.6, 31.0);
+        let focus = r.fixed_point + Vec3::new(0.21, -0.14, 0.25);
+        let before = OrbitCamera::from_chart(0.9, 0.2, 0.0, r.band, focus);
+
+        // The notches that make one period: 0.9^steps == scale.
+        let steps = r.scale.ln() / 0.9_f32.ln();
+        let mut after = before;
+        r.scroll(&mut after, steps);
+
+        let p = Vec3::new(0.7, -0.4, 0.25);
+        let q = r.fixed_point + r.rot.rotate((p - r.fixed_point) * r.scale);
+        let a = world_to_screen(q, after.view_proj(1.6), 1280.0, 800.0).unwrap();
+        let b = world_to_screen(p, before.view_proj(1.6), 1280.0, 800.0).unwrap();
+        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{:?} vs {:?}", a, b);
+    }
+
+    /// A half period of scroll then another half is one whole one — the flow
+    /// is a genuine power, not a per-event approximation of one.
+    ///
+    /// This is what makes the twist continuous instead of arriving in a lump:
+    /// `Aᵘ` composes for real `u`, so forty small notches and one big one land
+    /// in the same place and the wheel has no preferred step size.
+    #[test]
+    fn scroll_composes_like_a_power() {
+        let r = deep_renorm(0.6, 47.0);
+        let focus = r.fixed_point + Vec3::new(0.1, 0.2, -0.3);
+        let start = OrbitCamera::from_chart(0.4, -0.3, 0.2, r.band, focus);
+
+        let mut once = start;
+        r.scroll(&mut once, 6.0);
+
+        let mut piecemeal = start;
+        for _ in 0..12 {
+            r.scroll(&mut piecemeal, 0.5);
+        }
+
+        assert!(
+            (once.distance - piecemeal.distance).abs() < 1e-5,
+            "{} vs {}",
+            once.distance,
+            piecemeal.distance
+        );
+        assert!((once.focus - piecemeal.focus).length() < 1e-5);
+        assert!(
+            once.orientation.shortest_turn_to(piecemeal.orientation).magnitude() < 1e-4,
+            "framings diverged"
+        );
+    }
+
+    /// The wheel turns the framing on a twisting map, and does not on a
+    /// straight one. The old scroll never turned it at all, which is why the
+    /// descent could not follow a spiral.
+    #[test]
+    fn scroll_carries_the_maps_twist() {
+        let focus = Vec3::new(0.4, 0.2, -0.1);
+        for (twist_deg, turns) in [(0.0_f32, false), (31.0, true)] {
+            let r = deep_renorm(0.6, twist_deg);
+            let mut cam = OrbitCamera::from_chart(0.9, 0.2, 0.0, r.band, r.fixed_point + focus);
+            let before = cam.orientation;
+            // One period's worth, so the turn should be the map's own twist.
+            r.scroll(&mut cam, r.scale.ln() / 0.9_f32.ln());
+            let moved = before.shortest_turn_to(cam.orientation).magnitude().to_degrees();
+            if turns {
+                assert!((moved - twist_deg).abs() < 0.1, "turned {moved}°, wanted {twist_deg}°");
+            } else {
+                assert!(moved < 1e-3, "a map with no twist turned the framing by {moved}°");
+            }
+        }
+    }
+
+    /// One enormous event cannot reach the fixed point, where "out" stops
+    /// being defined and `wrap` gives up. The guard is on the event, not on
+    /// the framing: the next forty notches still descend normally.
+    #[test]
+    fn a_huge_scroll_cannot_reach_the_fixed_point() {
+        let r = deep_renorm(0.6, 31.0);
+        let focus = r.fixed_point + Vec3::new(0.21, -0.14, 0.25);
+        let mut cam = OrbitCamera::from_chart(0.9, 0.2, 0.0, r.band, focus);
+
+        r.scroll(&mut cam, 1.0e6);
+        let d = (cam.eye() - r.fixed_point).length();
+        assert!(d >= r.scroll_floor() * 0.999, "eye at {d}, floor {}", r.scroll_floor());
+        assert!(d.is_finite() && d > 0.0);
+
+        // And the fold still has something to work with.
+        r.wrap(&mut cam);
+        let d = (cam.eye() - r.fixed_point).length();
+        assert!(d >= r.band * r.scale * 0.99 && d < r.band * 1.01, "eye at {d} outside band");
+    }
+
     /// A scroll floor must never sit inside the band, or the wheel hits a wall
     /// where the zoom is supposed to be endless — and worse, hits it
     /// *idempotently*, so the camera settles into a short cycle of distances
@@ -1287,6 +1483,12 @@ mod tests {
 
         // Three steps per event: one wheel notch on a trackpad, and enough to
         // clear the band's inner edge in a single event.
+        //
+        // The focus sits *on* the fixed point here, which is the degenerate
+        // case: it is the one framing where the old radial zoom and the helix
+        // agree, and so the one framing where this test could never have seen
+        // the descent stall. `scrolling_descends_with_the_focus_off_the_fixed_point`
+        // is the same assertion from anywhere else, and is the one that bites.
         let steps = 3.0_f32;
         let want = 0.9_f32.powf(steps);
         let mut cam =
@@ -1294,7 +1496,7 @@ mod tests {
         let mut previous = cam.distance;
         let mut wraps = 0;
         for i in 0..40 {
-            cam.zoom(steps, r.scroll_floor());
+            r.scroll(&mut cam, steps);
             let turns = r.wrap(&mut cam);
             wraps += turns;
             // What the *picture* did: the folds are undone so the descent can

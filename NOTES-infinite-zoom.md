@@ -411,6 +411,90 @@ and both are the ambient rate. Ordinary frames on this renderer have a p95 of
 cannot measure is not a cost you can optimise**, and I went three designs deep
 before checking whether the thing I was removing showed up anywhere.
 
+## The wheel was going the wrong way
+
+*Added 2026-09-11. Hazel: "scrolling, especially scrolling in on a new,
+un-scrolled file, can diverge from the focus and 'break'. Going out and in
+again fixes it."*
+
+Both halves of that are right, and the second half is why it survived so long.
+
+`OrbitCamera::zoom` scaled the orbit radius and touched nothing else, so the
+eye slid down the ray toward the **focus**. Every other part of this feature
+moves the camera by the similarity `A` — `wrap` does, the loop path does,
+`carried_frame` does — and the one control a person actually holds did not. The
+wheel and the renderer had two different notions of "deeper".
+
+The cost I expected was aesthetic: a straight line into a spiral shows new
+material at a new angle each frame instead of the same material magnified, so
+the Droste sequence is simply not what you fly. The cost I did not expect is
+that **it stops**. With the focus nailed down and the radius shrinking
+geometrically, the eye converges on the focus, not on `p`; so `|eye − p|`
+bottoms out at `|focus − p|`, which is nonzero for every framing that was not
+aimed exactly at the fixed point — which is every scene as authored. Then the
+fold gets involved and it is worse than an asymptote. Measured, 200 scroll
+events on a 0.6 map with the focus 0.355 off the fixed point:
+
+```
+    step 0:    |eye−p| = 0.62186     cumulative octaves descended =  1.804
+    step 40:   |eye−p| = 0.98728                                    −1.074
+    step 80:   |eye−p| = 0.98728                                    −1.074
+    step 199:  |eye−p| = 0.98728                                    −1.074
+```
+
+It descends about an octave and a half, comes *back out*, and then locks on a
+single distance that 160 further scroll events cannot move. The wheel is dead.
+The cycle forms because `wrap` carries the focus too: the eye closes on the
+focus, the fold fires, the fold pushes focus and eye both outward by `1/s`, and
+the pair lands where it started. This is the same shape as the scroll-floor bug
+recorded in `OrbitCamera::zoom` — a clamped sequence that is idempotent, so the
+camera settles into a cycle it cannot leave — and I had already written that
+comment, about a different cause, in this same file. Twice now the failure has
+looked like "zoom is broken" and been "the camera reached a fixed point of the
+step function".
+
+"Going out and in again fixes it" is real but is not a fix: nothing about
+scrolling out changes `focus`, so what actually rescues it is the orbit or pan
+that people do on the way, which moves the focus somewhere the fold can still
+reach. The gesture that appears to repair it is a different gesture.
+
+The fix is `Renorm::scroll`, and it is four lines: take the notch count to a
+real number of periods through `log_scale`, and apply `Aᵘ`. `|eye − p|` then
+scales by `scale^u` exactly, for any real `u`, forever, and the focus and the
+framing come along — so the picture is the picture, magnified and turned. The
+rate stays authored in the radial factor rather than in periods, for the same
+reason `levels` is in octaves: a period is 0.07 octaves for a 0.95 spiral and
+3.3 for a 0.1 collapse, and periods-per-notch would make one scene creep while
+the next one leapt. Every scene keeps the feel it has and gains its own twist.
+
+Nothing here is new machinery. `apply_similarity` already moved eye, focus and
+orientation as one similarity; `twist` was already a `Turn` specifically so
+powers would have no branch to get wrong, and `loop_similarity` and
+`carried_frame` were already taking integer powers of it. `Aᵘ` for real `u` is
+the third caller and the only one that needed the exponent not to be an
+integer. The notes above say a one-key zoom loop's spline *is* the continuous
+similarity flow rather than an approximation of one; helical scroll is that
+same flow with the wheel driving `u` instead of `t`.
+
+**The test that existed could not have found this, and it is the static-probe
+mistake again.** `scrolling_descends_at_a_constant_rate_through_many_wraps`
+builds its camera with `focus = r.fixed_point`. That is the one framing where
+the radial zoom and the helix agree — the degenerate case, chosen (by me,
+months ago) because it was the easy one to write down. The bug lives in the
+offset, and the test set the offset to zero. It now runs at the fixed point
+*and* off it, and the off-axis one fails on the very first scroll against the
+old code: the eye closed by 0.795 where 0.729 was owed.
+
+Three things that follow. `--distance` under a zoom is stepping the same wrong
+line — the notes above already observe that "stepping `--distance` walks off
+the path" and invent `--path-t` to work around it, which is this bug wearing a
+different hat, and a distance expressed in periods along the helix would retire
+the workaround. The camera panel's orbit-radius drag still sets `distance`
+directly and so still aims at the focus. And with scroll following a similarity
+rather than a ray, *which* similarity becomes a parameter rather than a
+rewrite — which is the missing half of "zoom toward a point that isn't the
+fixed point", below.
+
 ## Where I'd go next
 
 **Zoom toward a point that isn't the fixed point.** The fixed points of `f`

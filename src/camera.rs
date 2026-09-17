@@ -389,17 +389,23 @@ impl OrbitCamera {
         self.focus += (self.up() * dy - self.right() * dx) * per_pixel;
     }
 
-    /// Scroll zoom: positive = zoom in.
+    /// Plain radial zoom: positive = zoom in. Scales the orbit radius and
+    /// leaves the focus and the framing alone, so the eye slides down the ray
+    /// toward the focus.
     ///
-    /// `floor` is the closest the wheel may bring the eye. It is a parameter
-    /// rather than a constant because the answer depends on something this
-    /// type cannot see: under an infinite zoom the eye is *supposed* to keep
-    /// descending, and `Renorm::wrap` folds it back into the band every frame,
-    /// so a fixed floor is not a safety net there but a wall.
+    /// **Only for scenes with no infinite zoom.** Where there is one, the
+    /// wheel goes through [`crate::renorm::Renorm::scroll`] instead, which
+    /// steps along the symmetry rather than along a ray — this motion aims at
+    /// the focus, and an infinite zoom has to aim at the fixed point or it
+    /// stops descending. That comment has the full account.
+    ///
+    /// `floor` is the closest the wheel may bring the eye. It stayed a
+    /// parameter rather than becoming [`MIN_ORBIT_DISTANCE`] again because the
+    /// answer still depends on something this type cannot see, and because the
+    /// failure below is worth keeping in front of whoever changes it.
     ///
     /// It was [`MIN_ORBIT_DISTANCE`] unconditionally, and that predates the
-    /// zoom by a long way. The failure it caused is worth recording because it
-    /// looked nothing like a clamp: a zoom band's inner edge is
+    /// zoom by a long way. The failure it caused looked nothing like a clamp: a zoom band's inner edge is
     /// `camera.distance * scale`, so a scene framed at 0.1594 with a 0.325 map
     /// has its inner edge at 0.0518 — three percent above the old floor, which
     /// is less than half of one scroll click. Scrolling by one step squeaked

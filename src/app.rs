@@ -2556,22 +2556,29 @@ impl App {
         }
     }
 
-    /// How close the wheel may bring the eye, this frame.
+    /// One notch of the wheel, or one press of Up/Down: move the camera in by
+    /// `steps` (negative is out).
     ///
-    /// An infinite zoom answers this itself and the answer is "much closer
-    /// than you think": the eye is meant to keep descending, and `wrap` folds
-    /// it back into the band every frame, so the band — not a constant — is
-    /// what bounds it. See [`crate::renorm::Renorm::scroll_floor`].
-    fn scroll_floor(&self) -> f32 {
-        self.zoom().map_or(crate::camera::MIN_ORBIT_DISTANCE, |z| z.scroll_floor())
+    /// Under an infinite zoom this is a step along the symmetry itself — see
+    /// [`crate::renorm::Renorm::scroll`], which also has the account of what
+    /// the plain radial version got wrong. Without one there is no symmetry to
+    /// follow and the ordinary dolly is exactly right.
+    ///
+    /// Everything that steps the framing comes through here, so the two
+    /// notions of "deeper" cannot drift apart.
+    fn zoom_steps(&mut self, steps: f32) {
+        match self.zoom().copied() {
+            Some(z) => z.scroll(&mut self.camera, steps),
+            None => self.camera.zoom(steps, crate::camera::MIN_ORBIT_DISTANCE),
+        }
     }
 
     pub fn zoom_in(&mut self) {
-        self.camera.zoom(1.0, self.scroll_floor());
+        self.zoom_steps(1.0);
     }
 
     pub fn zoom_out(&mut self) {
-        self.camera.zoom(-1.0, self.scroll_floor());
+        self.zoom_steps(-1.0);
     }
 
     /// Mouse wheel: zoom, always. **Alt**+wheel over a hovered gizmo adjusts
@@ -2604,7 +2611,7 @@ impl App {
         }
         self.cancel_camera_glide();
         self.show_zoom_cursor(steps);
-        self.camera.zoom(steps, self.scroll_floor());
+        self.zoom_steps(steps);
         self.invalidate_default_path();
     }
 
