@@ -1,0 +1,96 @@
+# Kintsugi — a celadon bowl, broken once and mended in gold.
+#
+# Kintsugi is the Japanese repair of broken pottery with gold lacquer, where
+# the break is not hidden but made the most precious part of the object. It is
+# also, exactly, CRAFT §3.6: "symmetry gets you a form; one map outside the
+# group gets you a picture." The bowl is a Cyc8 orbit (three motifs, 24 maps).
+# The crack is the one map in no group at all.
+#
+# HOW THE SEAM IS BUILT, because it took three wrong answers to find:
+#   - a thin *needle* (the §3.2 stem trick) rendered as gold sticks poking
+#     out of the glaze — straight, and not on the surface;
+#   - a *sheet* thin in one axis, placed freely, stood off the wall as shards;
+#   - what works: `crack` is a copy of `rim` turned 11.25° about the axis —
+#     half the Cyc8 step, so it lands exactly on the joint between two rim
+#     tiles — squashed tangentially to 0.02, then turned 40° about the wall's
+#     normal so it runs diagonally instead of straight down. Because it is a
+#     thin copy of the whole bowl, it lies *in* the wall, and every sub-bowl
+#     inherits the same break at every scale: the gold needles in the glaze.
+#   Face-on (this framing) the seam is a gold-filled panel — kintsugi's
+#   replaced-shard style; edge-on (yaw ≈ 0) it is a hairline. Orbit it.
+#
+# Colour is `mix`, so the walker carries RGB rather than an index: pale rim,
+# deep jade body, darker foot, and the global color_speed of 0.7 is what turns
+# those three into shading. The crack has its own speed of 0.9 so the gold
+# arrives nearly pure instead of as cream.
+#
+# Render with splat. No grade: gamma > 1 flattens the translucent glaze into
+# opaque porcelain.
+#   fracturize -s scenes/kintsugi.toml --splat --effort medium -r renders/kintsugi.png
+
+[meta]
+name = "Kintsugi"
+author = "Claude Opus 5.5"
+point_size = 0.0014
+color_speed = 0.7
+color_mode = "mix"
+haze = 0.35
+exposure = 1.0
+background = [0.018, 0.014, 0.012]   # warm charcoal, a lacquer tray
+
+[camera]
+focus = [0.0, 0.3, 0.0]
+distance = 3.0
+yaw = 0.82
+pitch = 0.5
+
+[[symmetry]]
+group = "Cyc8"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["rim", "body", "foot"]
+
+# The flared lip: eight copies of the bowl, tipped outward.
+[[transform]]
+name = "rim"
+translation = [0.0, 0.55, 0.95]
+scale = [0.36, 0.30, 0.36]
+rotation = [-28.0, 0.0, 0.0]
+color = [0.66, 0.84, 0.74]
+weight = 1.0
+
+# The belly, offset half a step so its lobes sit under the rim's joints.
+# Raised to meet the rim and stretched tall: lower and shorter (y -0.15,
+# 0.26) it left a band of empty space between the tiers that side-on views
+# read as two stacked rings rather than one wall.
+[[transform]]
+name = "body"
+translation = [0.0, 0.0, 0.55]
+scale = [0.28, 0.36, 0.28]
+rotation = [-45.0, 22.5, 0.0]
+color = [0.10, 0.26, 0.24]
+weight = 0.6
+
+# The foot ring, tucked up under the raised body so the wall runs unbroken to
+# it. Heavier than this and its images start to litter the rim with loose
+# discs.
+[[transform]]
+name = "foot"
+translation = [0.0, -0.3, 0.28]
+scale = [0.16, 0.12, 0.16]
+rotation = [0.0, 11.25, 0.0]
+color = [0.05, 0.12, 0.12]
+weight = 0.15
+
+# The break. 10% of the walk. Its *support* is fixed the moment its weight is
+# above zero (see CRAFT §3.6's measurement); weight only decides how bright
+# the gold is.
+# rotvec = Ry(11.25°) · Rx(-28°) · Rz(40°): rim's rotation, moved onto the
+# joint, then turned within the wall. translation is rim's, turned 11.25°.
+[[transform]]
+name = "crack"
+translation = [0.1853, 0.55, 0.9317]
+scale = [0.02, 0.30, 0.36]
+rotvec = [-0.401, 0.3554, 0.7298]
+color = [1.0, 0.62, 0.12]
+color_speed = 0.9
+weight = 0.2

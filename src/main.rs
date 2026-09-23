@@ -2,6 +2,7 @@ mod app;
 mod avif;
 mod checkpoint_file;
 mod camera;
+mod derive;
 mod fit;
 mod haze;
 mod grade_file;
@@ -20,6 +21,7 @@ mod trace;
 mod pick;
 mod scene;
 mod set;
+mod stats;
 mod sweep;
 mod symmetry;
 mod tile;
@@ -548,7 +550,7 @@ struct Args {
     /// sheet or an animation, which would each want a separate accumulation run
     /// per tile or frame. Set those with --points, which is the density knob
     /// they share one fill of.
-    #[arg(long, value_enum, value_name = "PRESET", hide_possible_values = true, help_heading = "Offline render")]
+    #[arg(long, value_name = "PRESET", value_parser = parse_effort, help_heading = "Offline render")]
     effort: Option<Effort>,
 
     /// Point buffer capacity — more points is denser [--effort, else scene]
@@ -923,6 +925,35 @@ struct Args {
     #[arg(short, long, help_heading = "Inspecting")]
     info: bool,
 
+    /// Print a new [[transform]] block made from an existing map, and exit
+    ///
+    /// The map as the scene has it (after any -S), turned by --turn and spun
+    /// by --spin, written exactly as a save would write it — degrees where
+    /// they reproduce the matrix, rotvec where they don't — ready to paste.
+    /// It edits nothing. The common use is CRAFT's conforming defect: a motif
+    /// carried part of a group step round its symmetry axis, so it lands on a
+    /// joint between two copies instead of on one.
+    #[arg(long, value_name = "NAME|INDEX", help_heading = "Inspecting")]
+    derive: Option<String>,
+
+    /// With --derive: turn the whole map about a world axis, repeatable [none]
+    ///
+    /// About an axis through the origin, so the translation turns too: a
+    /// motif under Cyc8 turned `y:45` is the next copy of its orbit, and
+    /// `y:22.5` sits halfway between two. AXIS is x, y, z or X,Y,Z.
+    #[arg(long, value_name = "AXIS:DEG", value_parser = derive::parse_axis_turn,
+          help_heading = "Inspecting")]
+    turn: Vec<derive::AxisTurn>,
+
+    /// With --derive: spin the map about its own axis, repeatable [none]
+    ///
+    /// In the map's own frame, translation kept, and before its rotation —
+    /// so a squashed axis spins with it. `z:40` on a map thin along x turns
+    /// that thin sheet 40 degrees within its own plane.
+    #[arg(long, value_name = "AXIS:DEG", value_parser = derive::parse_axis_turn,
+          help_heading = "Inspecting")]
+    spin: Vec<derive::AxisTurn>,
+
     /// List the built-in palette library, one per line, and exit
     #[arg(long, help_heading = "Inspecting")]
     palettes: bool,
@@ -943,10 +974,13 @@ struct Args {
 
     /// Analyze a rendered image and report statistics
     ///
-    /// Reads a PNG file and reports: mean/max luminance, percentage of clipped
-    /// (white) and empty (black) pixels, and a color-index histogram. This
-    /// catches the monochrome-palette failure mode (a spike in the histogram)
-    /// that is invisible in the picture itself.
+    /// Reports mean/max luminance, clipped (white) pixels, how much of the
+    /// frame is empty ground, and the lit pixels' hues grouped into families.
+    /// "Empty" is measured against the scene's own background, read from the
+    /// scene every render embeds in its PNG (else the commonest border
+    /// colour). A single narrow hue family is flagged, because that is what
+    /// the pinned-colour-index failure (CRAFT §2.3) looks like; two families,
+    /// like a base colour and an accent, are not.
     #[arg(long, value_name = "IMAGE", help_heading = "Inspecting")]
     stats: Option<std::path::PathBuf>,
 
@@ -1209,154 +1243,6 @@ fn print_palette_library(color: bool) {
     );
 }
 
-/// Analyze a rendered image and print statistics about it.
-///
-/// Reports luminance distribution, clipping, and color-index histogram.
-/// The color histogram catches the monochrome-palette failure mode that is
-/// invisible in the picture itself (CRAFT §2.3's trap).
-fn print_image_stats(path: &std::path::Path) {
-    let img = match image::open(path) {
-        Ok(i) => i.to_rgba8(),
-        Err(e) => {
-            eprintln!("Failed to open '{}': {}", path.display(), e);
-            std::process::exit(1);
-        }
-    };
-
-    let (w, h) = img.dimensions();
-    let total = (w * h) as f64;
-    if total == 0.0 {
-        eprintln!("Image has zero pixels");
-        std::process::exit(1);
-    }
-
-    println!("stats    {}", path.display());
-    println!("         {}x{} ({:.1}M pixels)", w, h, total / 1e6);
-
-    // Luminance analysis
-    let mut sum_lum = 0.0f64;
-    let mut max_lum = 0.0f32;
-    let mut clipped = 0u64; // R=G=B=255
-    let mut empty = 0u64; // R=G=B=0 and A>0 (black), or A=0 (transparent)
-
-    // Color histogram (quantized to 16 bins for readability)
-    let mut hue_hist = [0u64; 16];
-    let mut saturation_sum = 0.0f64;
-    let mut saturated_pixels = 0u64;
-
-    for pixel in img.pixels() {
-        let [r, g, b, a] = pixel.0;
-        let rf = r as f32 / 255.0;
-        let gf = g as f32 / 255.0;
-        let bf = b as f32 / 255.0;
-
-        // Relative luminance (sRGB)
-        let lum = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
-        sum_lum += lum as f64;
-        max_lum = max_lum.max(lum);
-
-        if r == 255 && g == 255 && b == 255 {
-            clipped += 1;
-        }
-        if (r == 0 && g == 0 && b == 0) || a == 0 {
-            empty += 1;
-        }
-
-        // Hue and saturation for color distribution
-        let max_c = rf.max(gf).max(bf);
-        let min_c = rf.min(gf).min(bf);
-        let delta = max_c - min_c;
-
-        if delta > 0.05 {
-            // Has some color
-            saturated_pixels += 1;
-            saturation_sum += (delta / max_c.max(0.001)) as f64;
-
-            let hue = if max_c == rf {
-                60.0 * (((gf - bf) / delta) % 6.0)
-            } else if max_c == gf {
-                60.0 * (((bf - rf) / delta) + 2.0)
-            } else {
-                60.0 * (((rf - gf) / delta) + 4.0)
-            };
-            let hue = if hue < 0.0 { hue + 360.0 } else { hue };
-            let bin = ((hue / 360.0 * 16.0) as usize).min(15);
-            hue_hist[bin] += 1;
-        }
-    }
-
-    let mean_lum = sum_lum / total;
-    let clipped_pct = clipped as f64 / total * 100.0;
-    let empty_pct = empty as f64 / total * 100.0;
-
-    println!();
-    println!("lumin    mean {:.3}   max {:.3}", mean_lum, max_lum);
-    println!(
-        "         clipped {:>5.1}%   empty {:>5.1}%",
-        clipped_pct, empty_pct
-    );
-
-    if clipped_pct > 5.0 {
-        println!("         note: >5% clipped — consider lowering exposure");
-    }
-    if empty_pct > 80.0 {
-        println!("         note: >80% empty — attractor may be too small in frame");
-    }
-
-    // Color distribution
-    println!();
-    if saturated_pixels > 0 {
-        let mean_sat = saturation_sum / saturated_pixels as f64;
-        println!(
-            "color    mean saturation {:.2}   colored pixels {:>5.1}%",
-            mean_sat,
-            saturated_pixels as f64 / total * 100.0
-        );
-
-        // Find peaks in hue histogram
-        let max_bin = *hue_hist.iter().max().unwrap_or(&0);
-        if max_bin > 0 {
-            let threshold = max_bin / 4;
-            let peaks: Vec<usize> = hue_hist
-                .iter()
-                .enumerate()
-                .filter(|&(_, &c)| c > threshold)
-                .map(|(i, _)| i)
-                .collect();
-
-            if peaks.len() <= 2 && saturated_pixels as f64 / total > 0.1 {
-                println!(
-                    "         note: color concentrated in {} bin{} — may be monochrome trap",
-                    peaks.len(),
-                    if peaks.len() == 1 { "" } else { "s" }
-                );
-            }
-
-            // Print histogram as sparkline
-            let sparkline: String = hue_hist
-                .iter()
-                .map(|&c| {
-                    let level = (c as f64 / max_bin as f64 * 7.0) as usize;
-                    ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][level.min(7)]
-                })
-                .collect();
-            println!("         hue histogram: {}", sparkline);
-            // Tick letters sit under the bin their hue actually lands in:
-            // 16 bins of 22.5°, so red 0° -> 0, yellow 60° -> 2, green
-            // 120° -> 5, cyan 180° -> 8, blue 240° -> 10, magenta 300° -> 13.
-            let mut ticks = [b' '; 16];
-            for (hue_deg, letter) in
-                [(0, b'R'), (60, b'Y'), (120, b'G'), (180, b'C'), (240, b'B'), (300, b'M')]
-            {
-                ticks[hue_deg * 16 / 360] = letter;
-            }
-            println!("                        {}", String::from_utf8_lossy(&ticks).trim_end());
-        }
-    } else {
-        println!("color    no saturated pixels (grayscale or empty)");
-    }
-}
-
 /// The scene a run starts from: `--scene`, else `--blank`, `--random`, or the
 /// built-in default. One place, so `--info` reports on exactly what `--render`
 /// would draw.
@@ -1498,13 +1384,45 @@ const DEFAULT_SUPERSAMPLE: u32 = 2;
 
 /// Size tiers for offline rendering.
 ///
+/// Parse `--effort`, and turn a pre-rename tier name into directions.
+///
+/// The ladder was `draft|low|medium|high|ultra` (point counts) and is now named
+/// for samples per pixel. Years of docs, scene comments and shell history still
+/// say `--effort low`, and clap's bare "invalid value" sends the reader off to
+/// `--help` to work out what happened. The old names are not aliased: they meant
+/// a buffer size and the new ones mean a density, so no mapping is exact, and a
+/// silent one would render something other than what the command says.
+fn parse_effort(s: &str) -> Result<Effort, String> {
+    const TIERS: &str = "tiny (1 sample/px), small (10), medium (100), large (1000), huge (10000)";
+    match s.to_ascii_lowercase().as_str() {
+        "tiny" => Ok(Effort::Tiny),
+        "small" => Ok(Effort::Small),
+        "medium" => Ok(Effort::Medium),
+        "large" => Ok(Effort::Large),
+        "huge" => Ok(Effort::Huge),
+        old @ ("draft" | "low" | "high" | "ultra" | "converged" | "overnight") => {
+            let nearest = match old {
+                "draft" | "low" => "small",
+                "high" | "ultra" => "large",
+                _ => "huge",
+            };
+            Err(format!(
+                "`{old}` is a tier name from before the rename; try `--effort {nearest}`. \
+                 Tiers are named for samples per pixel: {TIERS}. The old names were point \
+                 counts, so none maps exactly."
+            ))
+        }
+        _ => Err(format!("expected one of {TIERS}")),
+    }
+}
+
 /// Named for **size and nothing else**. The previous ladder had `draft` and
 /// `ultra` and then an accumulating tier that wanted calling `overnight` or
 /// `converged`, and both of those names were promises the program cannot keep:
 /// a duration depends on the machine (this runs on a GTX 1080 *and* a T490),
 /// and "converged" asserts an outcome the user might have their own reasons to
 /// push past. A size says what you asked for and nothing about what you get.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Effort {
     Tiny,
     Small,
@@ -1514,6 +1432,17 @@ enum Effort {
 }
 
 impl Effort {
+    /// The name as typed on the command line: `small`, not `Small`.
+    fn name(self) -> &'static str {
+        match self {
+            Effort::Tiny => "tiny",
+            Effort::Small => "small",
+            Effort::Medium => "medium",
+            Effort::Large => "large",
+            Effort::Huge => "huge",
+        }
+    }
+
     /// Target **samples per output pixel** — the tier's actual meaning.
     ///
     /// Round decades from 1 to 10,000: four orders of magnitude across five
@@ -2238,7 +2167,7 @@ fn main() {
 
     // --stats: analyze a rendered image and report metrics
     if let Some(path) = &args.stats {
-        print_image_stats(path);
+        stats::print(path);
         return;
     }
 
@@ -2341,6 +2270,24 @@ fn main() {
     }
 
     // --info: read a scene and say what it is, without opening a device
+    if let Some(reference) = &args.derive {
+        let scene = load_scene(&args);
+        match derive::run(&scene, reference, &args.turn, &args.spin) {
+            Ok(block) => {
+                print!("{block}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if (!args.turn.is_empty() || !args.spin.is_empty()) && args.derive.is_none() {
+        eprintln!("--turn and --spin need --derive <map>: they say how to make a new map from it");
+        std::process::exit(1);
+    }
+
     if args.info {
         let source = args
             .scene
@@ -2407,6 +2354,7 @@ fn main() {
                 None => None,
             },
             !args.no_labels,
+            (args.width, args.height),
         ) {
             Ok(_) => return,
             Err(e) => {
@@ -2432,17 +2380,45 @@ fn main() {
             || args.view.as_ref().is_some_and(|p| {
                 View::load(p).map(|v| v.is_splat()).unwrap_or(false)
             });
-        let accumulating = args.spp.is_some() || (args.effort.is_some() && splat_render);
+        // Accumulation renders one still. Anything that renders many images —
+        // a contact sheet, a mutation or sweep sheet, an animation — shares one
+        // fill of the ring per tile or run, so there a tier is a *ring size*,
+        // exactly as it is for the points renderer. An explicit --spp still
+        // reaches those paths and is still refused there, because the person
+        // typed it; a tier they typed for its size is not a request to
+        // accumulate, and refusing it blamed a flag nobody had typed.
+        let many_images = args.orbit_grid.is_some()
+            || args.move_grid.is_some()
+            || args.mutations.is_some()
+            || !args.sweep.is_empty()
+            || crate::video::Format::from_path(std::path::Path::new(out)).is_some();
+        let tier_accumulates = splat_render && !many_images;
+        let accumulating = args.spp.is_some() || (args.effort.is_some() && tier_accumulates);
         let effort_points = args.effort.map(|e| e.points(pixels, accumulating));
-        let effort_spp = args.effort.and_then(|e| splat_render.then(|| e.spp()));
+        let effort_spp = args.effort.and_then(|e| tier_accumulates.then(|| e.spp()));
         if let Some(e) = args.effort {
-            if !splat_render && !e.reachable_without_accumulating(pixels) {
+            if splat_render && many_images && args.spp.is_none() && args.points.is_none() {
                 eprintln!(
-                    "note: --effort {:?} is {} samples/px, which at {}x{} needs a {}M point \
-                     buffer — past the {}M cap. The points renderer has no histogram to \
-                     accumulate into, so this renders at the cap. Use --splat for the real tier.",
-                    e, e.spp(), args.width, args.height,
+                    "note: --effort {} renders this as a {:.1}M point buffer per image \
+                     (~{} samples/px) rather than accumulating: accumulation makes one still, \
+                     and this output is several images.",
+                    e.name(),
+                    e.points(pixels, false) as f64 / 1e6,
+                    (e.points(pixels, false) as u64 / pixels.max(1)).max(1),
+                );
+            }
+            if !tier_accumulates && !e.reachable_without_accumulating(pixels) {
+                eprintln!(
+                    "note: --effort {} is {} samples/px, which at {}x{} needs a {}M point \
+                     buffer — past the {}M cap, so this renders at the cap. {}",
+                    e.name(), e.spp(), args.width, args.height,
                     e.spp() as u64 * pixels / 1_000_000, 100,
+                    if splat_render {
+                        "Only a single still accumulates past it."
+                    } else {
+                        "The points renderer has no histogram to accumulate into; \
+                         use --splat for the real tier."
+                    },
                 );
             }
         }

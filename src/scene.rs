@@ -1373,7 +1373,10 @@ impl Scene {
         let camera_focus = cam.focus.map(|f| Vec3::from(f.map(|v| v as f32))).unwrap_or(Vec3::ZERO);
         // Fully-legacy camera blocks (no yaw/pitch) default to the historical
         // slightly-elevated eye; files that specify yaw/pitch get no offset
-        let default_offset = if cam.yaw.is_none() && cam.pitch.is_none() {
+        // — and a `rotvec` framing is not legacy at all. It used to take the
+        // offset too, which the rotvec then overrode for the *orientation*
+        // but not the distance: `distance = 3.0` loaded as sqrt(10).
+        let default_offset = if cam.yaw.is_none() && cam.pitch.is_none() && cam.rotvec.is_none() {
             Vec3::new(0.0, 1.0, 0.0)
         } else {
             Vec3::ZERO
@@ -1915,6 +1918,21 @@ impl Scene {
     ///
     /// [`Self::save`] uses it as its fallback and as the transform-array donor
     /// for the comment-preserving merge, so the two can't drift.
+    /// One transform as a `[[transform]]` block, written exactly as a save
+    /// would write it: degrees where they reproduce the matrix and `rotvec`
+    /// where they don't, variations inline. `--derive` prints this.
+    pub fn transform_toml(&self, i: usize) -> Result<String, String> {
+        #[derive(Serialize)]
+        struct One<'a> {
+            transform: [&'a TransformDef; 1],
+        }
+        let file = self.to_scene_file();
+        let def = file.transforms.get(i).ok_or("transform index out of range")?;
+        let text = toml::to_string(&One { transform: [def] })
+            .map_err(|e| format!("Failed to serialize transform: {}", e))?;
+        Ok(inline_variation_tables(&text).unwrap_or(text))
+    }
+
     pub fn to_toml_string(&self) -> Result<String, String> {
         let file = self.to_scene_file();
         let fresh = toml::to_string(&file)
@@ -2256,13 +2274,35 @@ fn merge_scene_into_document(
         if let Some(f) = cam.fov {
             set_f64(camera, "fov", f, None);
         }
-        set_f64(camera, "yaw", cam.yaw?, Some(0.0));
-        set_f64(camera, "pitch", cam.pitch?, Some(0.0));
-        match cam.roll {
-            Some(r) => set_f64(camera, "roll", r, Some(0.0)),
-            // Rolled back to level: drop the key rather than write `roll = 0`
+        // One framing, in whichever of its two forms `to_scene_file` chose,
+        // and the other form removed. `rotvec` wins over yaw/pitch/roll on
+        // load, so leaving a stale one beside freshly written angles made the
+        // save a silent no-op; and a `?` on yaw here used to abandon the whole
+        // comment-preserving merge for any scene framed at a pole.
+        match cam.rotvec {
+            Some(v) => {
+                set_arr3(camera, "rotvec", v, None);
+                for k in ["yaw", "pitch", "roll"] {
+                    camera.remove(k);
+                }
+            }
             None => {
-                camera.remove("roll");
+                camera.remove("rotvec");
+                set_f64(camera, "yaw", cam.yaw?, Some(0.0));
+                set_f64(camera, "pitch", cam.pitch?, Some(0.0));
+                // Both absent is not "both zero": it is the legacy block that
+                // gets the old raised eye folded in (see the loader). So a
+                // level, unyawed framing must still say one of them out loud.
+                if !camera.contains_key("yaw") && !camera.contains_key("pitch") {
+                    set_value(camera, "pitch", toml_edit::Value::from(tidy(cam.pitch? as f32)));
+                }
+                match cam.roll {
+                    Some(r) => set_f64(camera, "roll", r, Some(0.0)),
+                    // Rolled back to level: drop the key rather than write `roll = 0`
+                    None => {
+                        camera.remove("roll");
+                    }
+                }
             }
         }
         // Folded into yaw/pitch/distance at load; leaving it would
@@ -2436,7 +2476,18 @@ fn merge_scene_into_document(
                 }
                 ScaleDef::PerAxis(a) => set_arr3(t, "scale", a, None),
             }
-            set_arr3(t, "rotation", def.rotation, Some([0.0; 3]));
+            // Same rule as the camera's: write the form `to_scene_file` chose
+            // and drop the other, because `rotvec` wins on load.
+            match def.rotvec {
+                Some(v) => {
+                    set_arr3(t, "rotvec", v, None);
+                    t.remove("rotation");
+                }
+                None => {
+                    t.remove("rotvec");
+                    set_arr3(t, "rotation", def.rotation, Some([0.0; 3]));
+                }
+            }
             set_arr3(t, "color", def.color, None);
             set_f64(t, "weight", def.weight, Some(1.0));
             if let Some(cv) = def.color_value {
@@ -3455,6 +3506,105 @@ variations = { swirl = 0.35, linear = 0.65 }
         assert!(!content.contains("[transform.variations]"), "{}", content);
         Scene::load(&out).unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save over an existing file, reload, and hand back the reloaded scene.
+    fn save_and_reload(src: &str, tag: &str, edit: impl FnOnce(&mut Scene)) -> Scene {
+        let dir = std::env::temp_dir()
+            .join(format!("fracturize_rotvec_save_{}_{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.toml");
+        std::fs::write(&path, src).unwrap();
+        let mut scene = Scene::load(&path).unwrap();
+        edit(&mut scene);
+        scene.save(&path).unwrap();
+        let back = Scene::load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        back
+    }
+
+    const ROTVEC_SCENE: &str = r#"[meta]
+name = "Rotvec"
+
+[camera]
+distance = 3.0
+rotvec = [0.0, 0.0, 1.5]
+
+[[transform]]
+name = "a"
+translation = [0.1, 0.2, 0.3]
+scale = 0.5
+rotvec = [0.2, 0.3, 0.4]   # the exact form
+color = [1.0, 0.5, 0.2]
+
+[[transform]]
+name = "b"
+translation = [0.0, 0.0, 0.0]
+scale = 0.4
+rotation = [10.0, 0.0, 0.0]
+color = [0.2, 0.5, 1.0]
+"#;
+
+    fn with_rotation(m: Mat4, r: crate::rot::Orientation) -> Mat4 {
+        let mut trs = crate::rot::Trs::of(m);
+        trs.rotation = r;
+        trs.matrix()
+    }
+
+    fn close(a: Mat4, b: Mat4) -> bool {
+        a.abs_diff_eq(b, 1e-4)
+    }
+
+    #[test]
+    fn an_untouched_rotvec_survives_a_save() {
+        let (mut m, mut cam) = (Mat4::IDENTITY, crate::rot::Orientation::IDENTITY);
+        let back = save_and_reload(ROTVEC_SCENE, "untouched", |s| {
+            m = s.transforms[0].matrix;
+            cam = s.camera_orientation;
+        });
+        assert!(close(back.transforms[0].matrix, m));
+        assert!(back.camera_orientation.angle_to(cam) < 1e-4);
+    }
+
+    /// The file says `rotvec`, the edit lands somewhere the degrees can name.
+    /// Writing `rotation` alone would leave the old rotvec in the file, and
+    /// rotvec wins on load: the edit would silently not have happened.
+    #[test]
+    fn an_edit_away_from_a_rotvec_lands() {
+        let r = crate::rot::Orientation::from_xyz_degrees([20.0, 0.0, 0.0]);
+        let mut want = Mat4::IDENTITY;
+        let back = save_and_reload(ROTVEC_SCENE, "away", |s| {
+            s.transforms[0].matrix = with_rotation(s.transforms[0].matrix, r);
+            want = s.transforms[0].matrix;
+        });
+        assert!(close(back.transforms[0].matrix, want), "{:?} vs {:?}", back.transforms[0].matrix, want);
+    }
+
+    /// And the other way: a transform written in degrees edited to a rotation
+    /// the degrees can't reproduce. The rotvec has to be written, or the save
+    /// writes `rotation = [0, 0, 0]` and the rotation is lost.
+    #[test]
+    fn an_edit_to_a_pole_rotation_lands() {
+        let r = crate::rot::Orientation::from_axis_angle(glam::Vec3::Y, std::f32::consts::FRAC_PI_2);
+        let mut want = Mat4::IDENTITY;
+        let back = save_and_reload(ROTVEC_SCENE, "pole", |s| {
+            s.transforms[1].matrix = with_rotation(s.transforms[1].matrix, r);
+            want = s.transforms[1].matrix;
+        });
+        assert!(close(back.transforms[1].matrix, want), "{:?} vs {:?}", back.transforms[1].matrix, want);
+    }
+
+    #[test]
+    fn a_camera_leaving_a_rotvec_framing_lands() {
+        let r = crate::rot::Orientation::from_xyz_degrees([0.0, 30.0, 0.0]);
+        let mut want = crate::rot::Orientation::IDENTITY;
+        let back = save_and_reload(ROTVEC_SCENE, "camera", |s| {
+            let mut cam = s.camera();
+            cam.orientation = r;
+            s.set_camera(&cam);
+            want = s.camera_orientation;
+        });
+        assert!(back.camera_orientation.angle_to(want) < 1e-3);
     }
 
     #[test]

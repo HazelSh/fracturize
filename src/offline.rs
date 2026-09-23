@@ -1544,6 +1544,7 @@ pub fn retonemap(
     bit_depth: BitDepth,
     sweep: Option<GradeSweep>,
     labels: bool,
+    max_tile: (u32, u32),
 ) -> Result<Outcome, String> {
     let t_start = Instant::now();
     let buf = crate::grade_file::GradeBuffer::read(path)?;
@@ -1628,8 +1629,20 @@ pub fn retonemap(
     // buffer existing at all.
     let steps = sweep.map_or(1, |s| s.steps.max(1));
     let (cols, rows) = grid_shape(steps);
-    let (sheet_w, sheet_h) = (width * cols, height * rows);
+    // A sweep's tiles fit inside --width x --height, like every other sheet's.
+    // The buffer is the size of the render it came from, so a 4K render
+    // swept nine ways was a 12K sheet nobody could open. Only ever smaller:
+    // enlarging a tonemapped image adds no information. A single re-grade
+    // keeps the buffer's own size, since reproducing the source render byte
+    // for byte is its contract.
+    let (tile_w, tile_h) = match sweep {
+        Some(_) => fit_within(width, height, max_tile),
+        None => (width, height),
+    };
+    let (sheet_w, sheet_h) = (tile_w * cols, tile_h * rows);
     let mut sheet = vec![0u16; (sheet_w * sheet_h * 4) as usize];
+    let mut scratch =
+        if (tile_w, tile_h) == (width, height) { Vec::new() } else { vec![0u16; (width * height * 4) as usize] };
     let bind_group = renderer.tonemap_bind_group(&device, &linear_view);
 
     for i in 0..steps {
@@ -1655,11 +1668,23 @@ pub fn retonemap(
         target.copy_out(&mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
         let (col, row) = (i as u32 % cols, i as u32 / cols);
-        target.read_into_sheet(&device, &mut sheet, sheet_w, col, row);
+        if scratch.is_empty() {
+            target.read_into_sheet(&device, &mut sheet, sheet_w, col, row);
+        } else {
+            target.read_into_sheet(&device, &mut scratch, width, 0, 0);
+            let small = downscale_srgb16(&scratch, width, height, tile_w, tile_h);
+            for y in 0..tile_h as usize {
+                let dst = ((row * tile_h) as usize + y) * sheet_w as usize * 4
+                    + (col * tile_w) as usize * 4;
+                let src = y * tile_w as usize * 4;
+                sheet[dst..dst + tile_w as usize * 4]
+                    .copy_from_slice(&small[src..src + tile_w as usize * 4]);
+            }
+        }
         if sweep.is_some() {
             println!("tile [row {}, col {}]: {}", row, col, label);
             if labels {
-                label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, &label);
+                label_tile(&mut sheet, sheet_w, sheet_h, tile_w, tile_h, col, row, &label);
             }
         }
     }
@@ -1669,8 +1694,14 @@ pub fn retonemap(
     let t_done = Instant::now();
     match sweep {
         Some(sw) => println!(
-            "Re-graded {} tiles of {}x{}, {} from {} to {} -> {}",
-            steps, width, height, sw.axis.label(), sw.from, sw.to, out_path.display(),
+            "Re-graded {} tiles of {}x{}{}, {} from {} to {} -> {}",
+            steps, tile_w, tile_h,
+            if (tile_w, tile_h) == (width, height) {
+                String::new()
+            } else {
+                format!(" (buffer {}x{}, scaled to fit --width/--height)", width, height)
+            },
+            sw.axis.label(), sw.from, sw.to, out_path.display(),
         ),
         None => println!(
             "Re-graded {}x{} (exposure {}, gamma {}, threshold {}, vibrancy {}) -> {}",
@@ -1680,6 +1711,45 @@ pub fn retonemap(
     }
     print_timing(t_start, t_setup, t_setup, t_render, t_done);
     Ok(Outcome::Complete)
+}
+
+/// The largest size with `w:h`'s aspect that fits inside `max`, never larger
+/// than `w x h` itself.
+fn fit_within(w: u32, h: u32, max: (u32, u32)) -> (u32, u32) {
+    let k = (max.0 as f64 / w as f64).min(max.1 as f64 / h as f64).min(1.0);
+    (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
+}
+
+/// Shrink an sRGB-encoded RGBA16 image, filtering in linear light.
+///
+/// For the same reason the render's own reconstruction filter runs before the
+/// encode (see "Supersampling" in AGENTS.md): averaging encoded values darkens
+/// every edge between a bright filament and the ground. Colour is
+/// premultiplied by alpha across the filter so a transparent render's edges
+/// don't pick up the colour of pixels that aren't there. Triangle, not
+/// lanczos, for the ringing reason given there.
+fn downscale_srgb16(src: &[u16], w: u32, h: u32, tw: u32, th: u32) -> Vec<u16> {
+    let decode = |v: u16| {
+        let c = v as f32 / 65535.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let mut lin = image::Rgba32FImage::new(w, h);
+    for (i, px) in lin.pixels_mut().enumerate() {
+        let a = src[i * 4 + 3] as f32 / 65535.0;
+        let [r, g, b] = [0, 1, 2].map(|c| decode(src[i * 4 + c]) * a);
+        *px = image::Rgba([r, g, b, a]);
+    }
+    let small = image::imageops::resize(&lin, tw, th, image::imageops::FilterType::Triangle);
+    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    for px in small.pixels() {
+        let [r, g, b, a] = px.0;
+        let un = |c: f32| if a > 0.0 { c / a } else { 0.0 };
+        for c in [un(r), un(g), un(b)] {
+            out.push((linear_to_srgb(c) * 65535.0).round() as u16);
+        }
+        out.push((a.clamp(0.0, 1.0) * 65535.0).round() as u16);
+    }
+    out
 }
 
 /// The tidiest grid for `n` tiles: as square as possible, wider than tall.

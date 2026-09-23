@@ -92,13 +92,61 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
         return set_in_transform(doc, rest, value, path).map(record);
     }
 
+    // `[meta]` and `[camera]` mean "all defaults" when absent, so setting into
+    // one invents it, exactly as setting an absent key inside one does. The
+    // other sections are switches: a `[zoom]` or `[palette]` table *turns the
+    // feature on*, so inventing one to hold a single key would change far more
+    // than the key.
+    if matches!(section, "meta" | "camera") && doc.get(section).is_none() {
+        doc.insert(section, Item::Table(Table::new()));
+    }
     let table = doc
         .get_mut(section)
         .and_then(Item::as_table_mut)
         .ok_or_else(|| {
             format!("--set '{path}': this scene has no [{section}] table to set into")
         })?;
-    set_path(&mut TableRef::Table(table), rest, value, path).map(record)
+    if section == "camera" {
+        refuse_shadowed(table, rest, path, "the camera")?;
+    }
+    set_path(&mut TableRef::Table(table), rest, value, path, section).map(record)
+}
+
+/// Refuse to set a framing or rotation that a `rotvec` beside it overrides.
+///
+/// `rotvec` wins over `rotation` on a transform and over yaw/pitch/roll on the
+/// camera, so without this the override lands in the file, the loader ignores
+/// it, and nine sweep tiles come out identical — the silent no-op this module
+/// exists to rule out.
+fn refuse_shadowed(table: &Table, rest: &[&str], path: &str, what: &str) -> Result<(), String> {
+    let shadowed: &[&str] = if what == "the camera" { &["yaw", "pitch", "roll"] } else { &["rotation"] };
+    if table.contains_key("rotvec") && shadowed.contains(&rest[0]) {
+        return Err(format!(
+            "--set '{path}': {what} is written as `rotvec`, which wins over `{}`, so this \
+             would change nothing. Set the rotvec instead (a rotation vector, in radians).",
+            rest[0]
+        ));
+    }
+    Ok(())
+}
+
+/// The value a key has when the file leaves it out, for the keys that can be
+/// *indexed* — so `camera.focus.y` or `transform.a.rotation.z` works on a scene
+/// that never wrote the array down. Scalars need nothing: setting an absent
+/// scalar just writes it. Must agree with the serde defaults in `scene.rs`;
+/// `implied_defaults_match_the_loader` checks that it does.
+fn implied_default(section: &str, key: &str) -> Option<Value> {
+    let arr = |v: [f64; 3]| Value::Array(v.into_iter().collect());
+    match (section, key) {
+        ("camera", "focus") => Some(arr([0.0; 3])),
+        ("transform", "rotation" | "post_translation" | "post_rotation") => Some(arr([0.0; 3])),
+        ("transform", "scale" | "post_scale") => Some(arr([1.0; 3])),
+        ("meta", "background") => {
+            let b = crate::scene::DEFAULT_BACKGROUND;
+            Some(arr([b.x as f64, b.y as f64, b.z as f64]))
+        }
+        _ => None,
+    }
 }
 
 /// Derive a struct's real field list, and *prove* it's the real one.
@@ -388,7 +436,8 @@ fn set_in_transform(
     };
 
     let table = arr.get_mut(idx).expect("index checked above");
-    set_path(&mut TableRef::Table(table), rest, value, path)
+    refuse_shadowed(table, rest, path, "this transform's rotation")?;
+    set_path(&mut TableRef::Table(table), rest, value, path, "transform")
 }
 
 /// A container we can descend through: either a real `[table]` or an inline
@@ -430,6 +479,7 @@ fn set_path(
     segs: &[&str],
     value: Value,
     path: &str,
+    section: &str,
 ) -> Result<Option<String>, String> {
     let (key, rest) = segs.split_first().expect("non-empty by construction");
 
@@ -444,8 +494,30 @@ fn set_path(
         // Creating `variations` on a transform that has none is a legitimate
         // edit, and the only container we invent — every other path must
         // already exist, or the user has mistyped something.
+        //
+        // It starts as `{ linear = 1.0 }`, not `{}`, because that is what an
+        // absent table *means*: the loader reads no `variations` as classic
+        // affine. An empty table would make `variations.swirl=0.6` replace the
+        // map's whole linear part with 0.6 of swirl, when what was typed reads
+        // as adding swirl to the map that was there. `variations.linear=0`
+        // alongside it gets the replacement, if that is what's wanted.
         if *key == "variations" && container.get_value(key).is_none() {
-            container.put(key, Value::InlineTable(InlineTable::new()));
+            let mut t = InlineTable::new();
+            if rest[0] != "linear" {
+                t.insert("linear", Value::from(1.0));
+            }
+            container.put(key, Value::InlineTable(t));
+        } else if container.get_value(key).is_none() {
+            if let Some(d) = implied_default(section, key) {
+                container.put(key, d);
+            }
+        }
+        // A uniform `scale = 0.3` indexed by axis becomes the per-axis form it
+        // is shorthand for, so `scale.x` works whichever way the file wrote it.
+        if matches!(*key, "scale" | "post_scale") {
+            if let Some(v) = container.get_value(key).and_then(|v| v.as_float().or(v.as_integer().map(|i| i as f64))) {
+                container.put(key, Value::Array([v, v, v].into_iter().collect()));
+            }
         }
     }
 
@@ -456,7 +528,7 @@ fn set_path(
 
     match existing {
         Value::InlineTable(mut it) => {
-            let was = set_path(&mut TableRef::Inline(&mut it), rest, value, path)?;
+            let was = set_path(&mut TableRef::Inline(&mut it), rest, value, path, key)?;
             container.put(key, Value::InlineTable(it));
             Ok(was)
         }
@@ -784,5 +856,80 @@ variations = { swirl = 0.35, linear = 0.65 }
         let a = record(&["meta.haze=0.4", "meta.haze=0.6"]);
         assert_eq!(a[0].from.as_deref(), Some("0.1"));
         assert_eq!(a[1].from.as_deref(), Some("0.4"));
+    }
+
+    // --- keys the file leaves out still have values, and can be indexed ---
+
+    fn scene_of(src: &str) -> crate::scene::SceneFile {
+        toml::from_str(src).expect("parses as a scene")
+    }
+
+    #[test]
+    fn indexes_an_array_the_file_left_out() {
+        // SCENE's [camera] has no focus; the default is the origin.
+        assert!(set(&["camera.focus.y=0.3"]).contains("focus = [0.0, 0.3, 0.0]"));
+        let out = set(&["transform.a.rotation.z=40"]);
+        assert_eq!(scene_of(&out).transforms[0].rotation, [0.0, 0.0, 40.0]);
+    }
+
+    #[test]
+    fn indexing_a_uniform_scale_expands_it() {
+        let out = set(&["transform.a.scale.x=0.02"]);
+        assert_eq!(
+            scene_of(&out).transforms[0].scale.to_vec3(),
+            glam::Vec3::new(0.02, 0.6, 0.6)
+        );
+    }
+
+    #[test]
+    fn a_missing_camera_table_is_invented() {
+        let src = SCENE.replace("[camera]\ndistance = 3.0\n", "");
+        let (out, _) = apply_recording(&src, &["camera.focus.x=1.5".into()]).unwrap();
+        assert_eq!(scene_of(&out).camera.unwrap().focus, Some([1.5, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn an_invented_variations_table_keeps_the_implicit_linear() {
+        let out = set(&["transform.a.variations.swirl=0.6"]);
+        let v = scene_of(&out).transforms[0].variations.clone().unwrap();
+        assert_eq!(v.get("linear"), Some(&1.0), "{out}");
+        assert_eq!(v.get("swirl"), Some(&0.6), "{out}");
+        // ...but setting linear itself doesn't write it twice
+        let out = set(&["transform.a.variations.linear=0.4"]);
+        let v = scene_of(&out).transforms[0].variations.clone().unwrap();
+        assert_eq!(v.len(), 1, "{out}");
+    }
+
+    #[test]
+    fn a_rotation_shadowed_by_rotvec_is_an_error() {
+        let src = SCENE.replace("scale = 0.6\n", "scale = 0.6\nrotvec = [0.0, 1.0, 0.0]\n");
+        let e = apply_recording(&src, &["transform.a.rotation.y=10".into()]).unwrap_err();
+        assert!(e.contains("rotvec"), "{e}");
+        // the rotvec itself is fine to set
+        assert!(apply_recording(&src, &["transform.a.rotvec.y=0.5".into()]).is_ok());
+        let src = SCENE.replace("distance = 3.0\n", "distance = 3.0\nrotvec = [0.1, 0.0, 0.0]\n");
+        let e = apply_recording(&src, &["camera.yaw=1.0".into()]).unwrap_err();
+        assert!(e.contains("rotvec"), "{e}");
+    }
+
+    /// `implied_default` restates serde defaults from scene.rs; this is what
+    /// catches them drifting apart.
+    #[test]
+    fn implied_defaults_match_the_loader() {
+        let bare = scene_of(
+            "[meta]\nname = \"t\"\n[camera]\ndistance = 3.0\n[[transform]]\ntranslation = [0.0, 0.0, 0.0]\ncolor = [1.0, 1.0, 1.0]\n",
+        );
+        let as3 = |v: Value| -> [f64; 3] {
+            let a = v.as_array().unwrap();
+            [0, 1, 2].map(|i| a.get(i).unwrap().as_float().unwrap())
+        };
+        assert_eq!(as3(implied_default("meta", "background").unwrap()), bare.meta.background);
+        let t = &bare.transforms[0];
+        assert_eq!(as3(implied_default("transform", "rotation").unwrap()), t.rotation);
+        let s = as3(implied_default("transform", "scale").unwrap());
+        assert_eq!(glam::Vec3::from(s.map(|v| v as f32)), t.scale.to_vec3());
+        // camera.focus: None loads as the origin (scene.rs, `unwrap_or(Vec3::ZERO)`)
+        assert_eq!(bare.camera.unwrap().focus, None);
+        assert_eq!(as3(implied_default("camera", "focus").unwrap()), [0.0; 3]);
     }
 }

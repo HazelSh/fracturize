@@ -27,6 +27,8 @@ src/
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
+  derive.rs      # --derive: print a map turned about a world axis / spun about its own
+  stats.rs       # --stats: image numbers, empty measured against the recorded background
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
@@ -1704,7 +1706,7 @@ fracturize --scene scenes/sierpinski.toml --zoom 0
 # tune the band; --zoom-levels / --zoom-radius / --zoom-guard / --zoom-falloff
 # all need --zoom
 fracturize --scene scenes/lsys_kelp.toml --zoom trunk --zoom-levels 16 \
-  --render /tmp/t.png --effort low --width 640 --height 400
+  --render /tmp/t.png --effort small --width 640 --height 400
 
 # is the wrap seamless? Step the camera down through two zoom periods and
 # compare consecutive frames. `--distance` is folded back into the canonical
@@ -2143,6 +2145,14 @@ under-rendering. Note one lap of the ring is the granularity, so small tiers
 overshoot — `--effort tiny` at 400x300 reports 8 spp, not 1, and reports it
 truthfully.
 
+Accumulation makes **one still**, so anything that renders several images — an
+orbit/move grid, a mutation or sweep sheet, an animation — takes a tier the way
+the points renderer does: as the nearest point buffer, per image, with a note.
+It used to convert the tier to `--spp` first and then refuse it, so the one
+command CRAFT tells you to run in its first paragraph (`--effort … --splat` on a
+sheet) failed, blaming a flag nobody had typed. An explicit `--spp` on a sheet
+is still refused; that one was asked for.
+
 ## Accumulation: `--spp`, and the sample ceiling it removes
 
 The ordinary render splats the point ring **once**, so the distinct samples in
@@ -2159,7 +2169,7 @@ persistent 64-bit fixed-point histogram, and the samples are then free to be
 overwritten. Quality is bounded by time, not by VRAM.
 
 ```
-fracturize -s scenes/blossom.toml --splat --effort converged -r out.png
+fracturize -s scenes/blossom.toml --splat --spp 8000 -r out.png
 fracturize -s scenes/blossom.toml --splat --spp 20000 -r out.png
 ```
 
@@ -2175,9 +2185,9 @@ deterministic cancels. blossom, 960x540, `--supersample 2`, 16-bit:
 | 8000 | 3.5e-5               |
 
 Textbook 1/sqrt(N) — every 4x in samples halves the noise, with no plateau
-anywhere in range. `--effort converged` is 8000 spp for that reason: ~100x
-below one 8-bit code (1/255 = 3.9e-3), ~35 s at 1080p on the reference desktop.
-The tier is **not** called "overnight"; the measurement says the hardware does
+anywhere in range. 8000 spp (the old `converged` tier; `huge` is 10000 now) is
+~100x below one 8-bit code (1/255 = 3.9e-3), ~35 s at 1080p on the reference
+desktop. No tier is called "overnight"; the measurement says the hardware does
 not need a night. `--spp` is there for anyone who wants to spend one anyway.
 
 ### Things that will bite
@@ -2767,6 +2777,39 @@ Four hold `src/info.rs` together, and anything added should follow them:
   built to provide. Prose goes through `wrap()`; a footnote goes at the end of
   its section, never welded to the header.
 
+### Deriving a map: `--derive`
+
+`--derive <map>` prints a new `[[transform]]` block built from an existing one
+and exits; it edits nothing. `--turn AXIS:DEG` turns the whole map about a world
+axis through the origin (translation included — "k/n of the way round its
+group"), `--spin AXIS:DEG` spins it about its own axis (translation kept, scale
+spun with it). Both repeat; turns compose on the left and spins on the right, so
+only the order within each list matters. `-S` applies first, so a derived map
+can also be squashed or recoloured in the same command. The block is written by
+`Scene::transform_toml`, the save path's own serializer: degrees where they
+reproduce the matrix, `rotvec` where they don't.
+
+It prints rather than adding a scene key on purpose. A load-time `turn` key
+would have to survive every save the GUI makes — baked away it loses what the
+author wrote, kept it means un-turning every edit before writing — and a pasted
+block is just a transform.
+
+### Reading a picture: `--stats`
+
+`--stats <png>` reports on a rendered image: luminance and clipping, how much of
+the frame is **empty ground**, and the lit pixels' hues grouped into families
+(circular runs of occupied bins in a 16-bin histogram). Two things it does that
+a pixel census wouldn't:
+
+- **empty is measured against the background**, read from the scene the render
+  embedded in its PNG (`fracturize:scene`), else the commonest border colour —
+  and it says which. Counting pure black reported 0% empty on any scene with a
+  chosen background, which is most of them (CRAFT §2.5). Colour statistics are
+  taken over lit pixels only, so the ground's tint isn't counted as a hue.
+- **the monochrome note fires on one narrow family**, which is what a pinned
+  colour index (CRAFT §2.3) looks like. Two separated families — a base and an
+  accent — are a two-colour picture, not a defect.
+
 ### Framing from the command line
 
 `--yaw --pitch --distance --roll --focus x,y,z` override the camera, winning
@@ -2776,7 +2819,7 @@ doesn't require authoring a view file for it. When any of them is given,
 scene:
 
 ```
-fracturize --scene scenes/octahedron.toml --distance 4 --pitch 0.4   --render /tmp/o.png --effort low --width 400 --height 300
+fracturize --scene scenes/octahedron.toml --distance 4 --pitch 0.4   --render /tmp/o.png --effort small --width 400 --height 300
 ```
 
 Under infinite zoom the printed distance may not be the one you asked for: the
@@ -2791,9 +2834,13 @@ defaults, and `yaw` is accepted as an alias for the field the format calls
 stealing — and exits, printing a timing breakdown (`setup | chaos fill | render |
 encode+save | total`) to stdout so you can budget effort. Options:
 
-- `--effort draft|low|medium|high|ultra` — named presets for point count +
-  accumulation: draft 1M/4, low 4M/16, medium 12M/48, high 40M/128, ultra
-  100M/256. Explicit `--points N` / `--accumulate N` override the preset.
+- `--effort tiny|small|medium|large|huge` — a target of 1/10/100/1000/10000
+  samples per output pixel (see "Size tiers"). Under `--splat` a single still
+  accumulates to it; anything rendering several images (grids, mutation and
+  sweep sheets, animations) and the points renderer get the point buffer
+  nearest it instead, with a note on stderr. The pre-rename names
+  (`draft|low|high|ultra|converged`) are refused with the nearest new tier.
+  Explicit `--points N` / `--spp N` override the tier.
   Point count is a *render* property, not a scene property: the scene's
   `point_count` is just the interactive default (16 bytes/point of GPU memory).
 - `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
@@ -2855,7 +2902,7 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   twice for a 2D grid: the first varies across columns, the second down rows.
   Composes with `--set`, which sets the base every tile starts from.
 - Sweeps need `--scene`, and **each tile refills the point buffer** (the swept
-  parameter changes the IFS), so prefer `--effort draft|low`. Unlike mutation
+  parameter changes the IFS), so prefer `--effort tiny|small`. Unlike mutation
   sheets no variant files are written: a tile is fully described by one flag,
   and that flag is printed per tile, ready to paste.
 
@@ -2913,7 +2960,7 @@ grid/mutation sheets. Options:
   QP encodes on the way in with nothing to flush. The Render job dialog
   estimates from whichever figure matches the chosen format; preview cheap
   first with
-  `--width 480 --height 270 --fps 12 --effort low`.
+  `--width 480 --height 270 --fps 12 --effort tiny`.
   Verify output with `ffprobe` / extract frames with `ffmpeg`.
 
 **Mutation sheets** (evolutionary exploration): `--mutations N` renders the
@@ -2923,29 +2970,29 @@ variant is saved as `<out>.mutN.toml` and its operator list printed per tile
 sheet, pick a tile, and load/iterate on its TOML. `--seed` reproduces a
 sheet (the used seed is always printed), `--mutation-strength` scales the
 perturbations (default 1.0). Unlike camera grids, each tile refills the point
-buffer, so prefer `--effort draft|low`. The same operators run in-app on `U`.
+buffer, so prefer `--effort tiny|small`. The same operators run in-app on `U`.
 
 ```
-# quick look at a new scene from all sides (fast: use draft + small tiles)
+# quick look at a new scene from all sides (fast: use tiny + small tiles)
 fracturize --scene scenes/koru.toml --render /tmp/koru_orbit.png \
-  --effort draft --orbit-grid 4x2 --width 480 --height 270
+  --effort tiny --orbit-grid 4x2 --width 480 --height 270
 
 # test a slight camera move around a saved framing
 fracturize --scene scenes/koru.toml --view views/koru-123.toml \
-  --render /tmp/koru_move.png --effort low --move-grid 3x3 --width 320 --height 180
+  --render /tmp/koru_move.png --effort small --move-grid 3x3 --width 320 --height 180
 
 # final frame
 fracturize --scene scenes/glasshouse.toml --view views/glasshouse-123.toml \
-  --render renders/glasshouse_4k.png --width 3840 --height 2160 --effort high
+  --render renders/glasshouse_4k.png --width 3840 --height 2160 --effort large
 
 # evolve: original + 8 mutations, reproducible
 fracturize --scene scenes/koru.toml --render /tmp/koru_evo.png \
-  --effort draft --mutations 8 --seed 42 --width 320 --height 180
+  --effort tiny --mutations 8 --seed 42 --width 320 --height 180
 
 # roll random flames offline; --seed makes any roll reproducible, and the
 # seed used is always printed so a good one can be recovered
-fracturize --random --render /tmp/roll.png --effort low --width 480 --height 270
-fracturize --random --seed 7 --render /tmp/roll7.png --effort high
+fracturize --random --render /tmp/roll.png --effort small --width 480 --height 270
+fracturize --random --seed 7 --render /tmp/roll7.png --effort large
 
 # animated loop of a camera path (scenes/winze.toml authors one; see its
 # header comments) — preview small/cheap, then commit to the real encode

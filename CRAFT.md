@@ -11,7 +11,7 @@ the Apophysis / flam3 / DeviantArt era and have been re-tested here where possib
 where a piece of lore didn't survive contact with this engine, that's noted.
 
 Reproductions of the measurements are in the sections that state them. Render
-everything with `--effort low --splat --width ~340`: a contact sheet costs **under a
+everything with `--effort small --splat --width ~340`: a contact sheet costs **under a
 second** on the reference desktop, so the loop is look-change-look, not plan-commit-hope.
 
 The loop, concretely: `--sweep <path>=<a:b>` varies one scene value across a
@@ -273,7 +273,7 @@ engine that transforms the finished attractor. (§6.1)
   C=transform.facet-3.variations.absfold
   fracturize -s scenes/rimefall.toml -r sweep.png \
     --sweep "$A+$B+$C=0.05:0.55" --sweep-steps 4 \
-    --effort low --splat --exposure 1.3 --width 320 --height 320
+    --effort small --splat --exposure 1.3 --width 320 --height 320
   ```
 
 ### 3.5 Variations that spray **[lore]**
@@ -290,7 +290,7 @@ scale 1.1–1.2 with small rotations gives the classic gnarl swirls.
 
 ---
 
-### 3.6 Symmetry plus one — the defect is the picture **[claim — dose not yet measured]**
+### 3.6 Symmetry plus one — the defect is the picture **[measured once, on one ring]**
 
 Rotational symmetry is the cheapest way off the fuzz wall. Fuzz is what you get when
 the maps' rotations don't close — compose enough incoherent rotations and you are
@@ -328,19 +328,32 @@ The defect is what puts density variance back on a support that the group made
 uniform — a spine, a seed at the centre, a single off-axis map that the group then
 propagates. Without it you have wallpaper: never fuzz, never interesting.
 
-**The dose is unmeasured, and do not assume it is a whisper.** §3.2's stem wants
-1–2%; the one data point here points much higher. `rose_window` is three petals at
-120° about Y (weight 1.5 each) plus an on-axis core at weight 1.0 — **18% of the
-walk** — and it is one of the better-looking scenes in the repo. My guess is that
-the two cases differ because the stem is a *degenerate* map (it collapses the plane
-to a line, so a little goes a long way) while a core is an ordinary contraction, but
-that is a guess.
+**The dose, measured — and it is the wrong question.** A clean `Cyc6` ring
+(one motif at `s = 0.42`, 12° tilt) plus one off-axis map at the same scale,
+weight swept so the defect's share runs 0, 0.5, 2, 5, 10, 20, 30 and 50% of the
+walk:
 
-**The experiment — one scene and one sweep sheet:** build a clean `C5` or `C6` ring
-(five or six maps at equal weight, identical but for the rotation), then sweep a
-single extra off-axis map's weight from 0.5% to 30% of the walk. Record where it
-stops reading as wallpaper and where it starts eating the symmetry. Put the number
-here and delete this paragraph.
+```
+ 0%    the ring — wallpaper, exactly as predicted
+ 0.5%  the defect's whole copy is ALREADY THERE, as a ghost
+ 2-5%  a deliberate inclusion; the ring reads intact       <- the band
+10%    the defect's colour starts filling the ring's cells
+20%+   the symmetry is being eaten; by 50% it is gone
+```
+
+The surprise is the second row. **The support changes discontinuously at any
+weight above zero** — the attractor contains every map with non-zero weight,
+whatever its weight — so what a defect *adds* is decided by its geometry the
+moment it exists, and its share is only a brightness dial on that fixed
+structure. "How much defect?" is really "how bright should the thing the
+defect already made be?", which is why the stem wants 1-2% and `rose_window`'s
+core wants 18% without contradiction: they are different structures asking for
+different exposure, not different doses of one medicine.
+
+So author the defect's *shape* first (§9, `kintsugi`: where it sits decides
+whether it reads as a seam, a shard or a lump), and dial its weight last, by
+eye. Reproduce with any ring and `--sweep transform.<defect>.weight=0,0.005,0.02,0.05,0.11,0.25,0.43,1.0`.
+One ring at one scale is one measurement; the 2-5% band may move with `s`.
 
 ---
 
@@ -577,16 +590,14 @@ and `todo.txt`'s lighting question is really a question about which room to live
 
 **What's still missing, in order of what it would buy:**
 
-1. **No numeric feedback on the rendered image.** Judging "washed out", "clipping",
-   "too sparse" by eye means a visual round trip per exposure guess. A `--stats`
-   printing mean/max luminance, % clipped pixels, % empty pixels, and the
-   **colour-index histogram** would catch the monochrome failure in §2.3 instantly —
-   that histogram is a spike, and a spike is invisible in the picture. This is the
-   most agent-shaped affordance missing.
-2. **`--info` knows every contraction but doesn't compute the similarity
-   dimension** (§2.1), the single best predictor of the look. It also prints
-   per-transform contraction but not the *resolved* `color_speed`, which is what
-   exposes the expanding-map trap.
+1. ~~No numeric feedback on the rendered image~~ — `--stats <png>` now prints
+   luminance, clipping, how much of the frame is empty *ground* (measured
+   against the scene's own background, read from the render's embedded scene),
+   and the lit pixels' hues grouped into families. It flags one narrow family,
+   which is what §2.3's pinned index looks like, and leaves a base-plus-accent
+   picture alone.
+2. ~~`--info` doesn't compute the similarity dimension~~ — it does now, orbit
+   counted, and prints each map's resolved colour `speed`.
 3. **No crossover.** `--mutations` is half the genetic loop; there's no way to breed
    two scenes together, which is what Electric Sheep actually did.
 
@@ -599,6 +610,39 @@ is one notch behind it.
 
 Append findings here. Date them, say what you measured, keep the failures — a
 recorded dead end is worth as much as a recipe.
+
+- **2026-09-23, Opus 5.5. A defect that lies *in* the surface, and §3.6's dose.**
+  `scenes/kintsugi.toml`: a `Cyc8` bowl (rim, body, foot) mended in gold by one
+  map outside the group. The dose result is in §3.6. The authoring result is
+  about *where* a defect goes, because the first three placements failed:
+
+  - a degenerate **needle** (`scale = [0.04, 0.55, 0.04]`, the §3.2 stem) gives
+    gold sticks through the glaze. Bending it with `julia` / `swirl` /
+    `sinusoidal` spread the flecks around but they stayed sticks, and `julia`
+    sprayed some off the form;
+  - a freely placed **sheet** (thin on one axis) stood off the wall as shards;
+  - what worked: **copy a motif, move it half a group step, squash it
+    tangentially.** `crack` is `rim` turned 11.25° (half of Cyc8's 45°), so it
+    sits on the joint between two rim tiles, with its tangential axis at 0.02.
+    Being a thin copy of the whole bowl, it lies in the bowl's own wall, and
+    every sub-bowl inherits the same seam at every scale. A further turn about
+    the wall normal (40°) makes it run diagonally, the way a break does.
+    Face-on it reads as a gold panel, edge-on as a hairline.
+
+  General form: **a defect that conforms is a motif moved off the group, not a
+  new shape.** Its images then land on the surface instead of piercing it.
+  The arithmetic took scipy the first time; it is one command now, and prints
+  a block to paste:
+
+  ```sh
+  fracturize -s scenes/kintsugi.toml --derive rim --turn y:11.25 --spin z:40 \
+    -S transform.rim.scale.x=0.02
+  ```
+
+  Also: in `mix` mode a defect's colour arrives at `color_speed` strength, so at
+  0.55 the gold came out cream. A per-map `color_speed = 0.9` on the defect
+  fixes it without touching the rest; the global 0.7 is what turns three
+  similar jades into light and shade.
 
 - **2026-08-09, Opus 5. `repeat` — and the reason it is filed under symmetry
   while not being one.** A repeat is `count` copies stepped by a similarity
