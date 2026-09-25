@@ -1,0 +1,133 @@
+# A Fracturize scene, as a GBNF grammar for llama.cpp.
+#
+# The lexical rules (numbers, strings, arrays) are the official TOML ABNF
+# (github.com/toml-lang/toml, toml.abnf) translated to GBNF, then narrowed:
+# no inf/nan, no escapes, no hex/octal, bounded digit runs so a small model
+# can't wander off into a 400-digit float.
+#
+# The *structure* is Fracturize's, not generic TOML. That is the point of
+# writing one rather than borrowing one: the scene loader silently ignores
+# unknown keys, so a generic TOML grammar would happily accept
+# `swirl_amount = 0.3` and the model would never learn it did nothing.
+# Here every table and key comes from a list, in a fixed order, so a
+# misspelled key or a duplicate cannot be generated at all.
+#
+# [camera] requires yaw and pitch: without both, the loader adds the legacy
+# raised-eye offset and the distance it reports is not the one written.
+#
+# Covered: [meta], [camera], [palette] (library name), [[symmetry]] groups,
+# [[transform]]. Deliberately left out, to keep the surface small enough for
+# a 2k-token primer: paths, zoom, subscenes, repeats, post-affine, rotvec.
+#
+# Valid against the loader, but not everything the loader checks: a
+# symmetry's applies_to must name real transforms, and that is left to the
+# loader's own error message.
+#
+# author.py uses this in two ways: as-is (root = a whole scene), and inside
+# a reply grammar, where it strips the `root` line and wraps `scene`.
+
+root ::= scene
+
+scene ::= preamble meta camera? palette? symmetry* transform+
+
+# ---- tables ------------------------------------------------------------
+
+preamble ::= ( comment-line | blank-line )*
+
+meta ::= ( "[meta]" nl
+  kv-name kv-author kv-point-size
+  kv-background? kv-color-mode? kv-color-speed? kv-color-falloff?
+  kv-color-contrast? kv-haze? kv-exposure?
+  gap )
+
+camera ::= ( "[camera]" nl
+  kv-distance? kv-yaw kv-pitch kv-focus?
+  gap )
+
+palette ::= ( "[palette]" nl
+  lead "name" eq q palette-name q line-end
+  gap )
+
+symmetry ::= ( "[[symmetry]]" nl
+  lead "group" eq q group-name q line-end
+  ( lead "axis" eq vec3 line-end )?
+  lead "applies_to" eq "[" ws str ( ws "," ws str )* ws "]" line-end
+  gap )
+
+transform ::= ( "[[transform]]" nl
+  ( lead "name" eq str line-end )?
+  lead "translation" eq vec3 line-end
+  ( lead "scale" eq ( num | vec3 ) line-end )?
+  ( lead "rotation" eq vec3 line-end )?
+  lead "color" eq vec3 line-end
+  ( lead "weight" eq num line-end )?
+  ( lead "color_speed" eq num line-end )?
+  ( lead "variations" eq variations line-end )?
+  gap )
+
+# ---- [meta] keys ------------------------------------------------------
+
+kv-name           ::= lead "name" eq str line-end
+kv-author         ::= lead "author" eq str line-end
+kv-point-size     ::= lead "point_size" eq num line-end
+kv-background     ::= lead "background" eq vec3 line-end
+kv-color-mode     ::= lead "color_mode" eq q ( "transforms" | "mix" ) q line-end
+kv-color-speed    ::= lead "color_speed" eq num line-end
+kv-color-falloff  ::= lead "color_falloff" eq num line-end
+kv-color-contrast ::= lead "color_contrast" eq num line-end
+kv-haze           ::= lead "haze" eq num line-end
+kv-exposure       ::= lead "exposure" eq num line-end
+
+# ---- [camera] keys ----------------------------------------------------
+
+kv-distance ::= lead "distance" eq num line-end
+kv-yaw      ::= lead "yaw" eq num line-end
+kv-pitch    ::= lead "pitch" eq num line-end
+kv-focus    ::= lead "focus" eq vec3 line-end
+
+# ---- vocabularies -----------------------------------------------------
+
+variations ::= "{" ws var-entry ( ws "," ws var-entry )* ws "}"
+var-entry  ::= var-name eq num
+
+var-name ::= ( "linear" | "sinusoidal" | "spherical" | "swirl" | "horseshoe"
+  | "polar" | "disc" | "spiral" | "hyperbolic" | "diamond" | "julia"
+  | "bent" | "fisheye" | "bubble" | "cylinder" | "tangent" | "absfold"
+  | "boxfold" | "spherefold" | "bulb" )
+
+palette-name ::= ( "ember" | "lava" | "sunset" | "copper" | "autumn"
+  | "sodium" | "ocean" | "ice" | "cobalt" | "jade" | "fern" | "amethyst"
+  | "bloom" | "peacock" | "neon" | "spectrum" | "ash" | "cyanotype"
+  | "sepia" | "abyss" )
+
+# Cyc2..Cyc24, Dih2..Dih24, and the three polyhedral groups.
+group-name ::= ( "Cyc" | "Dih" ) fold | "Tetra" | "Octa" | "Icosa"
+fold ::= [2-9] | "1" [0-9] | "2" [0-4]
+
+# ---- lexical (after toml.abnf) ----------------------------------------
+
+vec3 ::= "[" ws num ws "," ws num ws "," ws num ws "]"
+
+# TOML float/dec-int, narrowed: optional sign, no leading zeros beyond one,
+# at most 3 integer digits and 6 fractional ones, optional small exponent.
+num  ::= "-"? int-part ( "." [0-9] [0-9]? [0-9]? [0-9]? [0-9]? [0-9]? )? ( [eE] "-"? [0-9] [0-9]? )?
+int-part ::= "0" | [1-9] [0-9]? [0-9]?
+
+str ::= q str-char* q
+str-char ::= [^"\\\x00-\x1F\x7F]
+q ::= "\""
+
+eq ::= ws "=" ws
+ws ::= [ \t]*
+nl ::= "\n"
+
+# Before any key: blank lines or whole-line comments. After any value: an
+# optional trailing comment. Small models like to annotate, and it costs
+# nothing to let them.
+lead ::= ( comment-line | blank-line )* ws
+line-end ::= ws comment? nl
+gap ::= ( comment-line | blank-line )*
+
+comment      ::= "#" [^\n]*
+comment-line ::= ws comment nl
+blank-line   ::= ws nl

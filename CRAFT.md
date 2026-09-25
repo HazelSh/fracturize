@@ -703,7 +703,7 @@ recorded dead end is worth as much as a recipe.
   **The consequence for authoring is that `|G|` and `s` trade off hard, and the
   arithmetic is worth doing before you render.** For one motif,
   `d = ln|G| / ln(1/s)`, so the scale that keeps you in the corridor falls fast
-  as the group grows: for `d ≈ 2.2`, `C5` wants `s ≈ 0.33` and `I` wants
+  as the group grows: for `d ≈ 2.2`, `C5` wants `s ≈ 0.48` and `I` wants
   `s ≈ 0.16`. My first `reliquary` draft was `I` at `s = 0.36` and measured
   `d = 4.08`, occupancy 54%, Λ 1.9 — a solid ball, and `--info` said so before
   I looked at it. Sixty copies of anything is a lot of material.
