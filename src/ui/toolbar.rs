@@ -31,7 +31,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Transforms — list + inspector",
+                "The scene's transforms, and their settings",
                 "toggle the Transforms window",
             );
 
@@ -39,7 +39,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Subscenes — compose other scenes into this one: import, show/hide, share of the points, placement",
+                "Other scenes placed inside this one",
                 "toggle the Subscenes window",
             );
 
@@ -49,7 +49,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Camera — framing, saved views, the camera path",
+                "Camera framing, saved views and the camera path",
                 "toggle the Camera window",
             );
 
@@ -57,7 +57,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Render — renderer, point size + count, color, haze, infinite zoom",
+                "How the fractal is drawn: renderer, points, colour, haze and infinite zoom",
                 "toggle the Render window",
             );
 
@@ -75,8 +75,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Every keybind, in a clickable list — the rows run their binding (H or F1)",
-                    "toggle the keybind reference",
+                    "Keyboard shortcuts, mouse controls and input settings (H or F1)",
+                    "toggle the Controls window",
                 );
                 if resp.clicked() {
                     app.toggle_help();
@@ -113,7 +113,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "New, open, save, and what leaves the app",
+        "New, open, save, screenshot, render and quit",
         "click: the File menu",
     );
 
@@ -123,7 +123,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
         // a slab of empty space.
         ui.set_min_width(168.0);
 
-        if menu_item(ui, app, &format!("{} New blank scene", icons::FILE), "Ctrl+N", "Start over on an empty canvas: two plain half-scale transforms to build on. An edit like any other — one Ctrl+Z brings back what was on screen.") {
+        if menu_item(ui, app, &format!("{} New blank scene", icons::FILE), "Ctrl+N", "Start over on an empty canvas with two plain transforms to build on. Ctrl+Z brings back what you had.") {
             app.new_blank_scene();
         }
         if menu_item(
@@ -131,29 +131,29 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
             app,
             &format!("{} Open…", icons::FOLDER_OPEN),
             "Ctrl+O",
-            "Browse scenes/ and load one. Asks first if this scene has unsaved edits. You can also drop a .toml scene or a .png render on the window.",
+            "Open a scene from the scenes folder. Asks first if there are unsaved changes. You can also drop a scene or a render on the window.",
         ) {
             app.toggle_browser();
         }
-        if menu_item(ui, app, &format!("{} Save", icons::SAVE), "Ctrl+S", "Write the scene — transforms, colours, camera framing, path — back to its TOML file.") {
+        if menu_item(ui, app, &format!("{} Save", icons::SAVE), "Ctrl+S", "Save the scene to its file, including the camera framing and path.") {
             app.save_scene();
         }
-        if menu_item(ui, app, &format!("{} Save as…", icons::SAVE), "Ctrl+Shift+S", "Fork the scene: write it under a new name and keep working on the copy, leaving the original as it was.") {
+        if menu_item(ui, app, &format!("{} Save as…", icons::SAVE), "Ctrl+Shift+S", "Save a copy under a new name and keep working on the copy. The original stays as it was.") {
             super::save_as::open(app);
         }
 
         ui.separator();
 
-        if menu_item(ui, app, &format!("{} Screenshot", icons::CAMERA), "S", "Capture the viewport as it is, to screenshots/.") {
+        if menu_item(ui, app, &format!("{} Screenshot", icons::CAMERA), "S", "Save the picture as it is now to the screenshots folder.") {
             app.request_screenshot();
         }
-        if menu_item(ui, app, &format!("{} Render job…", icons::STACK), "P", "Set up a batch render — still or animation, its own quality settings — with a cost estimate before you agree to it, progress, and a way to stop it.") {
+        if menu_item(ui, app, &format!("{} Render job…", icons::STACK), "P", "Render a high-quality still or animation in the background. Shows how long it'll take before you start, and you can pause or stop it.") {
             super::render_job::open(app);
         }
 
         ui.separator();
 
-        if menu_item(ui, app, &format!("{} Quit", icons::QUIT), "Ctrl+Q", "Leave. Asks first if this scene has unsaved edits.") {
+        if menu_item(ui, app, &format!("{} Quit", icons::QUIT), "Ctrl+Q", "Quit Fracturize. Asks first if there are unsaved changes.") {
             app.request_quit();
         }
     });
@@ -316,7 +316,7 @@ fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
         &mut app.ui_state,
         match &next_undo {
             Some(l) => format!("Undo “{}” (Ctrl+Z)", l),
-            None => "Nothing to undo yet — edits appear here as you make them".to_string(),
+            None => "Nothing to undo".to_string(),
         },
         "click: undo the last edit",
     );
@@ -330,7 +330,7 @@ fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
         &mut app.ui_state,
         match &next_redo {
             Some(l) => format!("Redo “{}” (Ctrl+Shift+Z or Ctrl+Y)", l),
-            None => "Nothing to redo — undo something first".to_string(),
+            None => "Nothing to redo".to_string(),
         },
         "click: redo the last undone edit",
     );
@@ -369,7 +369,7 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        format!("{}\n\nClick to rename the scene or set its author.", path),
+        format!("{}\n\nClick to change the scene's name or author.", path),
         "click: edit the scene's name and author",
     );
 
@@ -388,7 +388,7 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
                 hinted(
                     resp,
                     &mut app.ui_state,
-                    "Shown here, and used for screenshot / render / view filenames",
+                    "Shown here, and used to name screenshots, renders and views",
                     "type: rename the scene",
                 );
             });
@@ -403,8 +403,8 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
                 hinted(
                     resp,
                     &mut app.ui_state,
-                    "Written into the scene file. Remembered as the default for scenes \
-                     you start from here (a blank canvas, a random flame).",
+                    "Saved in the scene file, and filled in for you on new scenes you \
+                     start here.",
                     "type: set the author",
                 );
             });
@@ -471,7 +471,7 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Points the chaos game keeps in flight — click for the slider",
+        "How many points are drawn. Click to change it",
         "click: open the point count slider",
     );
     egui::Popup::menu(&resp)
@@ -504,11 +504,11 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         if !app.show_gizmos {
-            "Lights up what the selected transform moves — edit mode only (M)"
+            "Light up the points the selected transform moves (M). Only in edit mode"
         } else if app.show_emphasis {
-            "Lighting up what the selected transform moves (M) — click to stop"
+            "Lighting up the points the selected transform moves (M). Click to stop"
         } else {
-            "Light up what the selected transform moves (M)"
+            "Light up the points the selected transform moves (M)"
         },
         if app.show_emphasis { "click: stop lighting it up" } else { "click: light up what moves" },
     );
@@ -533,9 +533,9 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         if app.show_gizmos {
-            "Transform gizmos + name labels are showing (G) — click to switch to view mode"
+            "Edit mode: gizmos and names are showing (G). Click for view mode"
         } else {
-            "Transform gizmos + name labels are hidden (G) — click to switch to edit mode"
+            "View mode: gizmos and names are hidden (G). Click for edit mode"
         },
         if app.show_gizmos { "click: switch to view mode" } else { "click: switch to edit mode" },
     );
@@ -560,9 +560,9 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         if moving {
-            "Stop the camera moving (O, or Z for a path)"
+            "Stop the camera (O, Z or Space)"
         } else {
-            "Start the camera moving (O, or Z for a path)"
+            "Fly the camera along its path (O, Z or Space)"
         },
         if moving {
             "click: stop the camera"

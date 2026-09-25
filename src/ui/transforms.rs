@@ -2,7 +2,7 @@
 //! click-to-select, right-click context menu) plus a selected-transform
 //! inspector implementing the plan's "Inspector: Mat4 <-> TRS" design —
 //! position/rotation/scale fields when the matrix decomposes faithfully, a
-//! raw matrix grid + "Orthogonalize -> TRS" fallback when it doesn't (shear —
+//! raw matrix grid + "Remove shear" fallback when it doesn't (shear —
 //! and only shear; a mirrored matrix decomposes exactly and keeps the fields,
 //! flagged with a "mirrored" readout), plus weight/color/variation editing.
 //!
@@ -133,7 +133,7 @@ fn row_data(app: &App, i: usize) -> RowData {
         weight: spec.weight,
         enabled: app.is_transform_enabled(i),
         summary: format!(
-            "p=({:.2},{:.2},{:.2}) s={:.2} [{}]\nclick: select · right-click: menu",
+            "Position ({:.2}, {:.2}, {:.2}) · scale {:.2}\nVariations: {}",
             p.x,
             p.y,
             p.z,
@@ -217,7 +217,7 @@ fn draw_layer_picker(ui: &mut egui::Ui, app: &mut App) {
     let current = app.current_layer();
     let label = |app: &App, k: usize| {
         if k == 0 {
-            format!("{} (own maps)", app.scene.layer_name(0))
+            format!("{} (this scene)", app.scene.layer_name(0))
         } else {
             app.scene.layer_name(k).to_string()
         }
@@ -239,8 +239,8 @@ fn draw_layer_picker(ui: &mut egui::Ui, app: &mut App) {
         hinted(
             resp,
             &mut app.ui_state,
-            "Which subscene's maps to list. Each subscene is its own IFS; its maps are edited in its own space",
-            "click: choose the subscene whose maps are listed",
+            "Choose whose transforms to list: this scene's own, or a subscene's",
+            "click: choose which transforms to list",
         );
         if let Some(k) = chosen {
             // Listing a layer's maps is not selecting it as a whole, so the
@@ -305,7 +305,7 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
                         if n == 0 {
                             ui.add_space(4.0);
                             let why = if app.ui_state.transform_filter.trim().is_empty() {
-                                "This layer has no maps of its own. Add one, or pick a subscene above."
+                                "This scene has no transforms of its own. Add one, or pick a subscene above."
                             } else {
                                 "Nothing matches that filter."
                             };
@@ -336,7 +336,7 @@ fn draw_list_actions(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Add a fresh transform (Shift+A)",
+            "Add a new transform (Shift+A)",
             "click: add a new transform",
         );
         if resp.clicked() {
@@ -367,11 +367,11 @@ fn draw_list_actions(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
             resp,
             &mut app.ui_state,
             if selected.is_none() {
-                "Delete a transform (Del) — select one first"
+                "Select a transform to delete it (Del)"
             } else if can_delete {
                 "Delete the selected transform (Del)"
             } else if app.scene.is_composite() {
-                "A subscene needs at least one map — remove the subscene instead"
+                "A subscene needs at least one transform. To remove the whole subscene, use the Subscenes window"
             } else {
                 "A scene needs at least one transform"
             },
@@ -474,12 +474,12 @@ fn draw_tab(
                         eye_resp,
                         &mut app.ui_state,
                         if row.enabled {
-                            "Disable this transform (Enter)\n\nAlt+click to solo it — \
-                             everything else off, and alt+click again to bring them back."
+                            "Disable this transform (Enter)\n\nAlt+click to show only \
+                             this one. Alt+click again to bring the others back."
                         } else {
-                            "Enable this transform (Enter)\n\nAlt+click to solo it."
+                            "Enable this transform (Enter)\n\nAlt+click to show only this one."
                         },
-                        "click: toggle enabled · alt+click: solo",
+                        "click: enable or disable · alt+click: show only this one",
                     );
                     if eye_resp.clicked() {
                         // Alt+click on a visibility control means *solo* in
@@ -606,7 +606,7 @@ fn draw_tab(
         bar_resp,
         &mut app.ui_state,
         format!(
-            "Chaos-game weight: {}. Drag sideways to change it.",
+            "Weight {}: how often this transform is picked. Drag sideways to change it.",
             super::num::fixed(row.weight, 2)
         ),
         "drag: adjust this transform's weight",
@@ -688,7 +688,7 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     let del = ui.add_enabled(can_delete, egui::Button::new((icons::TRASH, "Delete")));
     if !can_delete {
         del.on_hover_text(if app.scene.is_composite() {
-            "A subscene needs at least one map — remove the subscene instead"
+            "A subscene needs at least one transform. To remove the whole subscene, use the Subscenes window"
         } else {
             "A scene needs at least one transform"
         });
@@ -720,7 +720,7 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     chose
 }
 
-/// What the "Zoom about this" control should say and do for transform `i`.
+/// What the "Zoom into this" control should say and do for transform `i`.
 ///
 /// Shared by the context menu and the detail pane's action row: the same
 /// operation wherever you find the transform, rather than two copies of a
@@ -748,7 +748,7 @@ pub fn transform_label(app: &App, i: usize) -> String {
 /// `Button::selected` rather than a tick in the text: the UI font has no
 /// U+2713, so a "✓" prefix rendered as a missing-glyph box — and a highlight
 /// says *selected* more directly than a character does anyway.
-const ZOOM_LABEL: &str = "Zoom about this";
+const ZOOM_LABEL: &str = "Zoom into this";
 
 pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
     let is_zoom = app.zoom_map() == Some(i);
@@ -756,10 +756,7 @@ pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
         return ZoomAction {
             is_zoom,
             enabled: false,
-            tooltip: "Infinite zoom doesn't compose with subscenes yet: it renormalizes every \
-                      point about one map's fixed point, and a subscene's points are placed in \
-                      a space that map knows nothing about"
-                .to_string(),
+            tooltip: "Infinite zoom doesn't work in a scene with subscenes yet".to_string(),
             hint: "click: make this the scene's zoom map",
         };
     }
@@ -771,33 +768,31 @@ pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
     let octaves = |r: &crate::renorm::Renorm| r.log_scale / std::f32::consts::LN_2;
     let tooltip = match (is_zoom, &built) {
         (true, Ok(r)) => format!(
-            "This is the scene's zoom map: {:.2} octaves per zoom period, centred on \
-             its fixed point ({:.2}, {:.2}, {:.2}). Click to turn infinite zoom off.",
-            octaves(r),
+            "Infinite zoom is centred on this transform, at ({:.2}, {:.2}, {:.2}). \
+             The picture repeats every {:.2} octaves of zoom.\n\n\
+             Click to turn infinite zoom off.",
             r.fixed_point.x,
             r.fixed_point.y,
             r.fixed_point.z,
+            octaves(r),
         ),
         // Editing a transform can break the map it used to be. Say so rather
         // than silently greying the only control that could undo it.
         (true, Err(why)) => format!(
-            "This is the scene's zoom map, but it no longer renormalizes: {}\n\n\
+            "Infinite zoom is set to this transform, but it can't zoom any more: {}\n\n\
              Click to turn infinite zoom off.",
             why
         ),
         (false, Ok(r)) => format!(
-            "Render this scene as the set invariant under this map: {:.2} octaves \
-             per zoom period, no largest or smallest feature, zoom that never runs \
-             out. The zoom centre is the map's fixed point, ({:.2}, {:.2}, {:.2}).",
-            octaves(r),
+            "Zoom in forever toward this transform's centre, at ({:.2}, {:.2}, {:.2}). \
+             The picture repeats every {:.2} octaves of zoom, so there is no bottom.",
             r.fixed_point.x,
             r.fixed_point.y,
             r.fixed_point.z,
+            octaves(r),
         ),
         (false, Err(why)) => format!(
-            "{}\n\nInfinite zoom needs a pure affine map that contracts on all three \
-             axes; it renders the attractor as the unbounded set invariant under that \
-             map, so there is no largest or smallest feature and zoom never runs out.",
+            "Can't zoom into this: {}",
             why
         ),
     };
@@ -817,7 +812,7 @@ pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
 /// behind a right-click.
 ///
 /// A control you can only reach by guessing that a context menu exists is one
-/// most people never find: "Zoom about this" is the entire entry point to
+/// most people never find: "Zoom into this" is the entire entry point to
 /// infinite zoom, and from this window there was nothing to suggest it was
 /// there at all. Enable/Disable and Rename were in the same position.
 ///
@@ -826,7 +821,7 @@ pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
 /// list — which one you have selected is incidental to them.
 fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let enabled = app.is_transform_enabled(idx);
-    // Wrapped: "✓ Zoom about this" is a wide label, and the pane is resizable
+    // Wrapped: "Zoom into this" is a wide label, and the pane is resizable
     // down to where three buttons no longer fit on one line.
     ui.horizontal_wrapped(|ui| {
         let resp = ui.add(egui::Button::new(if enabled { "Disable" } else { "Enable" }).small());
@@ -834,12 +829,11 @@ fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             resp,
             &mut app.ui_state,
             if enabled {
-                "Stop the chaos game choosing this transform — it keeps its weight \
-                 and settings, it just stops contributing (Enter)"
+                "Turn this transform off. Its settings are kept (Enter)"
             } else {
-                "Let the chaos game choose this transform again (Enter)"
+                "Turn this transform back on (Enter)"
             },
-            "click: toggle enabled",
+            "click: enable or disable",
         );
         if resp.clicked() {
             app.toggle_transform_enabled(idx);
@@ -860,9 +854,8 @@ fn draw_transform_actions(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Edit this transform's name, up in the header. Clicking the name \
-             itself does the same; double-clicking its tab in the rail edits \
-             it there instead.",
+            "Rename this transform. You can also click its name above, or \
+             double-click its tab in the list.",
             "click: rename this transform",
         );
         if resp.clicked() {
@@ -1008,7 +1001,7 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     let Some(idx) = app.selected_transform() else {
         ui.add_space(4.0);
         ui.label(
-            egui::RichText::new("Select a transform above to edit it here.")
+            egui::RichText::new("Select a transform from the list to edit it.")
                 .weak()
                 .italics(),
         );
@@ -1254,9 +1247,9 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Make this map a motif of a symmetry group — every copy of it under \
-             the group is added to the attractor",
-            "click: enrol this map in a symmetry group",
+            "Repeat this transform in a symmetric pattern: turned copies around \
+             an axis, or around a polyhedron",
+            "click: add symmetry to this transform",
         );
         if resp.clicked() {
             // C3 about Y: the smallest group with something to look at, and
@@ -1272,8 +1265,8 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         }
         ui.label(
             egui::RichText::new(
-                "One map under a group is |G| maps in the attractor — and stays \
-                 one row here, one entry in the file, and one thing to drag.",
+                "The copies are drawn for you. You still edit only this one \
+                 transform.",
             )
             .weak()
             .small(),
@@ -1298,7 +1291,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     // rather than in a tooltip.
     ui.label(
         egui::RichText::new(format!(
-            "{} · {} copies · {} motif{} = {} maps{}",
+            "{} · {} copies of {} transform{} = {}{}",
             if mirror { format!("{} + mirror", kind.label()) } else { kind.label() },
             order,
             motifs,
@@ -1307,7 +1300,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             // Said on the badge and not only in a tooltip, because it is the
             // one fact that changes what the picture will do: a group makes the
             // attractor exactly invariant, a repeat only makes it repetitive.
-            if kind.is_group() { "" } else { " · repeats, not symmetric" },
+            if kind.is_group() { "" } else { " · not a true symmetry" },
         ))
         .strong()
         .small(),
@@ -1326,42 +1319,44 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         .option(
             Variety::Cyclic,
             "Cyc",
-            "Cyclic (C\u{2099}): n-fold rotation about one axis — the mandala",
-            "click: n-fold rotation about an axis",
+            "Cyclic: n copies turned around one axis, like a mandala",
+            "click: n copies around an axis",
         )
         .option(
             Variety::Dihedral,
             "Dih",
-            "Dihedral (D\u{2099}): n-fold rotation plus a half-turn flip, so the \
-             form has no top and bottom",
-            "click: n-fold rotation plus a flip",
+            "Dihedral: like cyclic, plus a half-turn flip, so the shape has no \
+             top or bottom",
+            "click: n copies around an axis, plus a flip",
         )
         .option(
             Variety::Tetrahedral,
             "Tetra",
-            "Tetrahedral (T): the 12 rotations of a tetrahedron",
+            "Tetrahedral: 12 copies, one for each way a tetrahedron can be turned \
+             and look the same",
             "click: tetrahedral group (12 copies)",
         )
         .option(
             Variety::Octahedral,
             "Octa",
-            "Octahedral (O): the 24 rotations of a cube",
+            "Octahedral: 24 copies, one for each way a cube can be turned and look \
+             the same",
             "click: octahedral group (24 copies)",
         )
         .option(
             Variety::Icosahedral,
             "Icosa",
-            "Icosahedral (I): the 60 rotations of an icosahedron — the largest \
-             finite rotation group there is",
+            "Icosahedral: 60 copies, one for each way an icosahedron can be turned \
+             and look the same",
             "click: icosahedral group (60 copies)",
         )
         .option(
             Variety::Repeat,
             "Repeat",
-            "Repeat: n copies stepped by a turn, a slide and a shrink — a helix, \
-             a spiral, a row. The only one here that is not a group: it makes \
-             the attractor repetitive, not symmetric",
-            "click: n copies along a step",
+            "Repeat: n copies, each turned, moved and shrunk a step further than \
+             the last. Makes helices, spirals and rows. Unlike the others, this \
+             isn't a true symmetry",
+            "click: a row of stepped copies",
         )
         .show(ui)
     {
@@ -1389,14 +1384,12 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             resp,
             &mut app.ui_state,
             if kind.fold().is_some() {
-                "How many copies around the axis. Every copy is the same map, \
-                 so this costs nothing but arithmetic"
+                "How many copies around the axis"
             } else if kind.repeat().is_some() {
-                "A repeat sets its own count below — this is the fold count of \
-                 the cyclic and dihedral groups"
+                "Only for Cyc and Dih. A repeat sets its count under copies, below"
             } else {
-                "The polyhedral groups have a fixed size — Tetra is 12, Octa is \
-                 24, Icosa is 60. Pick Cyc or Dih to choose a fold count"
+                "Tetra, Octa and Icosa have a fixed number of copies (12, 24 and \
+                 60). Pick Cyc or Dih to choose your own"
             },
             "drag: how many copies around the axis",
         );
@@ -1415,10 +1408,9 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Add the central inversion, doubling the group: every copy gains a \
-             twin through the origin. Changes no contraction, so it does not \
-             move the dimension",
-            "click: double the group with a central inversion",
+            "Double the copies: each one gets a mirror-image twin on the \
+             opposite side of the origin",
+            "click: add mirrored twins",
         );
         if resp.changed() {
             rebuild = Symmetry::new(kind, axis, m, color).ok();
@@ -1452,13 +1444,12 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                     resp.inner,
                     &mut app.ui_state,
                     if aimable {
-                        "The axis the copies turn about. Drawn in the viewport \
-                         with one spoke per fold"
+                        "The axis the copies turn around. The viewport draws it \
+                         with one spoke per copy"
                     } else {
-                        "The polyhedral groups have no single axis — their \
-                         symmetry axes come in threes, fours and fives at fixed \
-                         angles. The viewport draws the group's solid instead. \
-                         Pick Cyc or Dih to aim an axis"
+                        "Tetra, Octa and Icosa turn around several fixed axes, \
+                         so there is no single one to aim. The viewport shows \
+                         their solid instead. Pick Cyc or Dih to set an axis"
                     },
                     "drag: aim the symmetry axis",
                 );
@@ -1491,8 +1482,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "How many copies, counting the motif itself. Each one is the \
-                 previous one stepped again",
+                "How many copies, including the original",
                 "drag: how many copies",
             );
             if resp.changed() {
@@ -1505,8 +1495,8 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Degrees about the axis per copy. 137.5 is the golden angle — \
-                 the one that never lines a copy up with an earlier one",
+                "How far each copy turns around the axis. 137.5° is the golden \
+                 angle, which never lines a copy up with an earlier one",
                 "drag: degrees per copy",
             );
             changed |= resp.changed();
@@ -1523,8 +1513,8 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "How far each copy slides from the last. Along the axis this \
-                     is a helix; across it, a fan",
+                    "How far each copy moves from the last. Along the axis this \
+                     makes a helix; across it, a fan",
                     "drag: slide per copy",
                 );
                 changed |= resp.changed();
@@ -1539,10 +1529,10 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Size multiplier per copy. Capped at 1: a step that grows makes \
-                 the far copies expansive and the walk runs away. Start from the \
-                 far end instead",
-                "drag: size multiplier per copy",
+                "How much each copy shrinks (1 = not at all). Copies can't grow, \
+                 because growing copies make the fractal fly apart. For a row that \
+                 grows, start from its big end",
+                "drag: how much each copy shrinks",
             );
             changed |= resp.changed();
         });
@@ -1568,26 +1558,26 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         // 100% symmetric is CRAFT §3.6's unrecoverable case. Breaking the
         // symmetry a little is not an advanced option; it is the second thing
         // you do, so it is the second button here.
-        let resp = ui.button("Add a map outside this group");
+        let resp = ui.button("Add a transform outside the group");
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Add a plain transform with no symmetry. A wholly symmetric scene \
-             has a flat measure by construction — one map off the group is what \
-             gives it something to look at",
-            "click: add an unsymmetric map (the deliberate defect)",
+            "Add a plain transform with no symmetry. A fully symmetric scene \
+             tends to look even and flat; one transform that breaks the pattern \
+             gives it somewhere for the eye to go",
+            "click: add a transform without symmetry",
         );
         if resp.clicked() {
             app.add_transform(true);
         }
 
-        let resp = ui.button("Withdraw");
+        let resp = ui.button("Remove symmetry");
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Take this map out of its group. It stays exactly where it is; its \
-             copies stop being drawn",
-            "click: remove this map from its symmetry group",
+            "Take this transform out of its group. It stays where it is; only \
+             its copies disappear",
+            "click: remove symmetry from this transform",
         );
         if resp.clicked() {
             app.set_transform_symmetry(idx, None);
@@ -1614,7 +1604,7 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Add a matrix applied after this map's variations (fold-then-rotate)",
+            "Add a second position, rotation and scale, applied after the variations",
             "click: add a post-affine transform to this map",
         );
         if resp.clicked() {
@@ -1622,9 +1612,9 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
         }
         ui.label(
             egui::RichText::new(
-                "Runs after the variations. Only changes anything when a \
-                 non-linear variation is in play — with pure linear it folds \
-                 into Shape. See scenes/fold_lantern.toml.",
+                "Because it comes after the variations, it only makes a \
+                 difference when this transform uses a nonlinear one. For an \
+                 example, see scenes/fold_lantern.toml.",
             )
             .small()
             .weak(),
@@ -1657,7 +1647,7 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
         1,
         6,
         "°",
-        "Post-affine rotation — rotating *after* a fold is what this slot is for",
+        "Post-affine rotation, applied after the variations",
         "drag: adjust post rotation · click: type exact value",
         editing,
     );
@@ -1669,8 +1659,8 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
         hinted(
             resp,
             &mut app.ui_state,
-            "Lock per-axis post scale to change together",
-            "click: toggle uniform post-scale link",
+            "Keep the x, y and z post-affine scale equal",
+            "click: link or unlink the three scales",
         );
     });
     ui.horizontal(|ui| {
@@ -1689,8 +1679,9 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Post-affine scale. This counts toward the map's contraction \
-                 just as Shape's does — the status bar's d moves with it.",
+                "Post-affine scale, applied after the variations. Like the \
+                 scale under Shape, it changes how much this transform shrinks \
+                 things.",
                 "drag: adjust post scale · click: type exact value",
             );
             if resp.changed() {
@@ -1711,7 +1702,7 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Reset this map's post-affine slot to the identity",
+        "Remove this transform's post-affine step",
         "click: clear the post-affine transform",
     );
     if resp.clicked() {
@@ -1749,14 +1740,14 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
     // determinant is the honest source, and it is one bit.
     if cache.mirrored {
         ui.label(
-            egui::RichText::new("mirrored (det < 0)")
+            egui::RichText::new("mirrored")
                 .small()
                 .color(egui::Color32::from_rgb(230, 180, 80)),
         )
         .on_hover_text(
-            "This map reverses handedness. The sign always lands on the x scale \
-             below, whichever axis you flipped — drag any tip handle back through \
-             its origin to undo it.",
+            "This transform is mirrored. The minus sign always shows on the x \
+             scale, whichever axis you flipped. To undo it, drag a tip handle \
+             back through the centre.",
         );
     }
 
@@ -1771,7 +1762,7 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         3,
         7,
         "",
-        "Transform position (drag the gizmo's origin dot)",
+        "Position. In the viewport, drag the gizmo's centre dot",
         "drag: adjust position · click: type exact value",
         editing,
     ) {
@@ -1788,7 +1779,8 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         1,
         6,
         "°",
-        "Transform rotation, XYZ Euler degrees (drag an outer gizmo edge)",
+        "Rotation in degrees about x, then y, then z. In the viewport, drag an \
+         outer edge of the gizmo",
         "drag: adjust rotation · click: type exact value",
         editing,
     ) {
@@ -1801,8 +1793,9 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         hinted(
             resp,
             &mut app.ui_state,
-            "Lock per-axis scale to change together (ctrl+drag any gizmo part)",
-            "click: toggle uniform-scale link",
+            "Keep the x, y and z scale equal. In the viewport, Ctrl+drag the \
+             gizmo does the same",
+            "click: link or unlink the three scales",
         );
 
         // How much smaller this copy is than the grey identity cell drawn in
@@ -1821,8 +1814,9 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         hinted(
             resp,
             &mut app.ui_state,
-            "Contraction: linear size of this copy relative to the grey identity cell (cube root of |det|). Below 1 the IFS converges.",
-            "the transform's contraction against the identity cell",
+            "How big this copy is compared with the grey reference cube. It \
+             needs to be below 1 for the fractal to hold together.",
+            "overall size compared with the reference cube",
         );
     });
     let mut scale_changed_axis: Option<usize> = None;
@@ -1843,7 +1837,7 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Transform scale (ctrl+drag any gizmo part = uniform scale; negative mirrors)",
+                "Scale along this axis. A negative value mirrors it",
                 "drag: adjust scale · click: type exact value",
             );
             if resp.changed() {
@@ -1887,11 +1881,11 @@ fn commit_trs(app: &mut App, idx: usize, cache: &TrsCache, field: &str) {
 }
 
 fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut TrsCache, editing: &mut bool) {
-    ui.label(egui::RichText::new("matrix (non-TRS)").color(egui::Color32::from_rgb(230, 180, 80)));
+    ui.label(egui::RichText::new("sheared").color(egui::Color32::from_rgb(230, 180, 80)));
     ui.label(
         egui::RichText::new(
-            "Sheared: no position/rotation/scale can rebuild this. Edit components \
-             directly, or discard the shear.",
+            "This transform is sheared, so it can't be shown as position, \
+             rotation and scale. Edit the matrix directly, or remove the shear.",
         )
         .small()
         .weak(),
@@ -1915,7 +1909,7 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
                     let resp = hinted(
                         resp,
                         &mut app.ui_state,
-                        "Raw matrix component",
+                        "One entry of the transform's matrix",
                         "drag: adjust matrix component · click: type exact value",
                     );
                     changed |= resp.changed();
@@ -1941,12 +1935,13 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
         );
     }
 
-    let resp = ui.button("Orthogonalize -> TRS");
+    let resp = ui.button("Remove shear");
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Discard shear/mirroring: replace with the nearest scale·rotate·translate matrix",
-        "click: orthogonalize to TRS",
+        "Replace this with the nearest matrix that has no shear, so position, \
+         rotation and scale come back",
+        "click: remove the shear",
     );
     if resp.clicked() {
         app.orthogonalize_transform(idx);
@@ -1977,7 +1972,7 @@ fn draw_weight(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "How often the chaos game picks this map, relative to the others (, / .)",
+            "How often this transform is picked, compared with the others (, and .)",
             "drag: adjust weight · click: type exact value",
         );
         if resp.changed() {
@@ -1992,7 +1987,7 @@ fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     // control that does nothing. What matters instead is *where in the
     // gradient* this transform sits, drawn on the gradient itself.
     if app.scene.color_mode == crate::scene::ColorMode::Palette {
-        ui.label("Color value");
+        ui.label("Place on the gradient");
         super::gradient::transform_color_value(ui, app, idx);
         draw_orbit_color(ui, app, idx);
         return;
@@ -2005,13 +2000,13 @@ fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         (color.z.clamp(0.0, 1.0) * 255.0).round() as u8,
     ];
     ui.horizontal(|ui| {
-        ui.label("Color");
+        ui.label("Colour");
         let resp = ui.color_edit_button_srgb(&mut srgb);
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "This transform's gradient color (J/K/L: hue/saturation/value)",
-            "click: pick a color",
+            "This transform's colour (J, K and L adjust hue, saturation and value)",
+            "click: pick a colour",
         );
         if resp.changed() {
             let new_color = Vec3::new(
@@ -2024,24 +2019,24 @@ fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     });
 
     let mut cv = app.scene.transforms[idx].color_value;
-    let resp = ui.add(egui::Slider::new(&mut cv, 0.0..=1.0).text("color value"));
+    let resp = ui.add(egui::Slider::new(&mut cv, 0.0..=1.0).text("place on gradient"));
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Explicit colormap index override (0-1 around the cyclic gradient)",
-        "drag: adjust colormap index",
+        "Where this transform sits on the colour gradient, from 0 to 1",
+        "drag: move along the gradient",
     );
     if resp.changed() {
         app.set_transform_color_value(idx, cv);
     }
 
     let mut has_override = app.scene.transforms[idx].explicit_color_speed.is_some();
-    let resp = ui.checkbox(&mut has_override, "Override color speed");
+    let resp = ui.checkbox(&mut has_override, "Own colour speed");
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Per-transform color blend speed (wins over global color_speed / color_falloff)",
-        "click: toggle color-speed override",
+        "Give this transform its own colour speed instead of using the scene's",
+        "click: use this transform's own colour speed",
     );
     if resp.changed() {
         if has_override {
@@ -2055,12 +2050,13 @@ fn draw_appearance(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let mut speed = app.scene.transforms[idx]
             .explicit_color_speed
             .unwrap_or(app.scene.color_speed);
-        let resp = ui.add(egui::Slider::new(&mut speed, 0.0..=1.0).text("color speed"));
+        let resp = ui.add(egui::Slider::new(&mut speed, 0.0..=1.0).text("colour speed"));
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Color blend speed (0 = slow/cohesive, 1 = fast/noisy)",
-            "drag: adjust color speed",
+            "How quickly points take on this transform's colour. Low blends \
+             smoothly; high keeps colours distinct but speckled",
+            "drag: adjust colour speed",
         );
         if resp.changed() {
             app.set_transform_explicit_color_speed(idx, Some(speed));
@@ -2088,22 +2084,21 @@ fn draw_orbit_color(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     };
 
     ui.horizontal(|ui| {
-        ui.label("Orbit");
+        ui.label("Copies");
         if let Some(c) = super::radio::radio(&mut app.ui_state, "sym_color", color)
             .option(
                 crate::symmetry::OrbitColor::Shared,
                 "shared",
-                "Every copy takes the motif's own colour — the copies are the \
-                 same map, and this says so",
-                "click: one colour across the orbit",
+                "Every copy has the same colour as the original",
+                "click: every copy the same colour",
             )
             .option(
                 crate::symmetry::OrbitColor::Orbit,
                 "orbit",
-                "Offset the colour index by which group element was drawn. The \
-                 element is redrawn every iteration, so this reads as an \
-                 interference pattern across the form, not as |G| solid petals",
-                "click: colour by the drawn group element",
+                "Colour each point by the copy it last passed through. This \
+                 shows up as a shimmering pattern across the shape, not as \
+                 solid-coloured petals",
+                "click: vary the colour between copies",
             )
             .show(ui)
         {
@@ -2185,8 +2180,8 @@ fn draw_header_name(ui: &mut egui::Ui, app: &mut App, idx: usize, name: &str) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "This transform's label, shown in the rail and on its gizmo. Click to \
-         edit it here; double-clicking its tab in the rail edits it there.",
+        "This transform's name, shown in the list and on its gizmo. Click to \
+         edit it.",
         "click: rename this transform",
     );
     if resp.clicked() {
@@ -2226,8 +2221,8 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             let name_resp = hinted(
                 name_resp,
                 &mut app.ui_state,
-                "Click to target this slot for E/-/= (keeps keyboard cycling in sync)",
-                "click: target this variation slot",
+                "Click to make the - and = keys adjust this variation",
+                "click: point - and = at this variation",
             );
             if name_resp.clicked() {
                 app.set_selected_variation(slot);
@@ -2257,7 +2252,7 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Variation blend weight, Apophysis-style — negative inverts the variation's contribution (- / = on the targeted slot)",
+                    "How much of this variation to blend in. Negative values invert it",
                     "drag: adjust weight · click: type exact value",
                 );
                 if resp.changed() {
@@ -2286,7 +2281,7 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     if !unused.is_empty() {
         let mut chosen: Option<usize> = None;
         let combo_resp = egui::ComboBox::new(("add_variation", idx), "add variation")
-            .selected_text("+ add...")
+            .selected_text("+ add…")
             .show_ui(ui, |ui| {
                 for &slot in &unused {
                     if ui.selectable_label(false, VARIATION_NAMES[slot]).clicked() {

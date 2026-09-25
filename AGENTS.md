@@ -615,7 +615,7 @@ Conventions worth keeping:
   1. Click it. It becomes **disabled and greyed**, reading `waiting (3)`.
   2. It counts down, taking no input at all.
   3. At zero it becomes **enabled again in danger colours**, with a different
-     and more explicit label — `Cancel` → `Abort render`, `Discard` →
+     and more explicit label — `Stop` → `Stop render`, `Discard` →
      `Discard edits`.
   4. **It sits there.** Nothing expires.
   5. **Clicking anywhere else puts it back**, with no other effect.
@@ -704,7 +704,7 @@ Conventions worth keeping:
   the gizmo pass depth-tests against the same buffer right after.
 - **Inspector fields are Mat4 <-> TRS.** A matrix that doesn't decompose
   faithfully (shear, or a mirrored det<0 matrix) routes to a raw 3x4 grid
-  plus an "Orthogonalize -> TRS" button. Mutations produce such matrices, so
+  plus a "Remove shear" button. Mutations produce such matrices, so
   this path is load-bearing, not a corner case.
 - **Variation weights may be negative** (Apophysis-style: the blend is
   `out += w * f(p)`), and a row stays put at 0 so a drag can pass through it.
@@ -1984,7 +1984,7 @@ haze deliberately — haze is the other half of whether the band's edge is
 visible. Changing any of it re-forms the point cloud, since every point's
 octave is drawn from them. The status bar reads `zoom +N`.
 
-**Zoom about this** stays on a transform's row and gizmo context menus, and in
+**Zoom into this** stays on a transform's row and gizmo context menus, and in
 the inspector's action row, as shortcuts for the map you already have selected.
 
 From the CLI, on any scene, without editing it:

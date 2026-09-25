@@ -114,15 +114,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         if app.scene.color_mode == ColorMode::Palette {
-            "The gradient this scene renders through. Double-click to add a control point."
+            "The scene's colour gradient. Double-click it to add a colour stop."
         } else {
-            "The colormap built from the per-transform colours. Read-only here — edit the \
-             colours in the Transforms window, or switch to palette mode."
+            "The gradient made from the transforms' colours. To change it, edit the \
+             colours in the Transforms window, or switch to palette."
         },
         if app.scene.color_mode == ColorMode::Palette {
-            "double-click: add a control point"
+            "double-click: add a colour stop"
         } else {
-            "the colormap the transform colours produce"
+            "the gradient made from the transforms' colours"
         },
     );
 
@@ -160,33 +160,30 @@ fn draw_mode_row(ui: &mut egui::Ui, app: &mut App) {
     let mode = app.scene.color_mode;
 
     ui.horizontal(|ui| {
-        ui.label("Color");
+        ui.label("Colour");
         let chosen = super::radio::radio(&mut app.ui_state, "color_mode", mode)
             .option(
                 ColorMode::Transforms,
                 "transforms",
-                "Colour from the per-transform RGBs, spread evenly around the gradient. \
-                 Keeps each transform's identity — the mode for reading IFS structure. \
-                 Note the spacing is 1/N, so adding a transform recolours them all.",
+                "Each transform brings its own colour, so you can see which part of \
+                 the fractal each one makes. Adding or removing a transform shifts all \
+                 the colours slightly.",
                 "click: colour from the transform colours",
             )
             .option(
                 ColorMode::Palette,
                 "palette",
-                "Colour through an independent gradient, Apophysis-style. Doesn't depend \
-                 on the transform count, and the gradient is a portable asset you can \
-                 restyle a finished flame with.",
+                "Colour from a gradient of your choice, as in Apophysis. Good for \
+                 restyling a finished flame.",
                 "click: colour through a palette",
             )
             .option(
                 ColorMode::Mix,
                 "mix",
-                "Carry the per-transform colours through the walk as a 3-vector instead of a \
-                 gradient position, so they genuinely blend: a walker that came via a red map \
-                 and then a blue one is purple, and tells apart from one that came via two \
-                 magenta maps. Distinct transform *combinations* get distinct colours — the \
-                 thing a 1-D index cannot do. No colormap, so color contrast doesn't apply.",
-                "click: mix the transform colours through the walk",
+                "The transforms' colours mix like paint as points pass through them: \
+                 red then blue gives purple. Different combinations of transforms get \
+                 different colours. There's no gradient, so colour contrast has no effect.",
+                "click: mix the transforms' colours",
             )
             .show(ui);
         if let Some(m) = chosen {
@@ -225,9 +222,8 @@ fn draw_mode_row(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Roll a random gradient — a cosine palette, a colour-harmony scheme, or one \
-                 from the library. Every roll sweeps luminance and has no seam at index 0, \
-                 because the renderer has no lights and the palette is the shading.",
+                "Pick a random gradient. Each one runs from dark to light and back, \
+                 because in this renderer the gradient does the shading.",
                 "click: roll a random palette",
             );
             if resp.clicked() {
@@ -276,8 +272,8 @@ fn draw_mix(ui: &mut egui::Ui, app: &mut App) {
 
     ui.label(
         egui::RichText::new(
-            "Colour is mixed through the walk, not looked up: no colormap, and \
-             color contrast does not apply. Edit the colours in the Transforms window.",
+            "Colours mix as points move between transforms, so there's no gradient \
+             and colour contrast has no effect. Edit the colours in the Transforms window.",
         )
         .weak()
         .small(),
@@ -318,9 +314,9 @@ fn draw_contrast(ui: &mut egui::Ui, app: &mut App, map: &Colormap) {
         hinted(
             resp,
             &mut app.ui_state,
-            "What the fractal actually indexes into: the gradient above after the cyclic \
-             contrast stretch. If your palette looks like only part of itself, this is why.",
-            "the colormap after the contrast stretch",
+            "The gradient as the fractal actually uses it, after colour contrast. If \
+             only part of your palette shows, this is why.",
+            "the gradient after colour contrast",
         );
     }
 
@@ -328,16 +324,15 @@ fn draw_contrast(ui: &mut egui::Ui, app: &mut App, map: &Colormap) {
     let resp = ui.add(
         egui::Slider::new(&mut contrast, 0.25..=16.0)
             .logarithmic(true)
-            .text("color contrast"),
+            .text("colour contrast"),
     );
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Cyclic stretch of the colour index around its centre. Above 1 it spreads a \
-         compressed range back across the gradient — which is what you want after a low \
-         color falloff, and what makes a designed palette look like only an arc of itself \
-         if you leave it high (C / Shift+C)",
-        "drag: adjust color contrast",
+        "Stretches the colours across more of the gradient. Useful after lowering \
+         colour falloff, which squeezes them together. Set too high, only part of \
+         the palette shows (C / Shift+C)",
+        "drag: adjust colour contrast",
     );
     if resp.changed() {
         app.set_color_contrast(contrast);
@@ -356,17 +351,17 @@ fn draw_handles(ui: &mut egui::Ui, app: &mut App, strip: egui::Rect) {
         Some(s) => s.to_vec(),
         None => {
             let kind = match &palette.body {
-                Body::Cosine(_) => "a cosine formula",
-                _ => "256 imported entries",
+                Body::Cosine(_) => "Made from a formula",
+                _ => "Imported",
             };
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{kind} — no handles")).weak());
-                let resp = ui.button("convert to stops");
+                ui.label(egui::RichText::new(format!("{kind}, so it has no stops")).weak());
+                let resp = ui.button("add stops");
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Freeze this gradient into draggable control points, keeping the colours \
-                     it has now. The formula is replaced by the samples.",
+                    "Turn this gradient into colour stops you can drag and edit. The \
+                     colours stay as they are now.",
                     "click: make this palette editable",
                 );
                 if resp.clicked() {
@@ -457,7 +452,7 @@ fn draw_handles(ui: &mut egui::Ui, app: &mut App, strip: egui::Rect) {
 fn draw_selected_stop(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) {
     let Some(idx) = selected else {
         ui.label(
-            egui::RichText::new("click a handle to edit a stop · double-click the strip to add")
+            egui::RichText::new("Click a stop to edit it. Double-click the gradient to add one.")
                 .weak()
                 .small(),
         );
@@ -477,8 +472,7 @@ fn draw_selected_stop(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>)
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "This control point's colour. Picked in sRGB — the same value a colour picker \
-             anywhere else shows — and stored linear for the renderer.",
+            "This stop's colour",
             "click: pick this stop's colour",
         );
         if resp.changed() {
@@ -489,7 +483,7 @@ fn draw_selected_stop(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>)
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Where this stop sits in the gradient (0-1)",
+            "Where this stop sits on the gradient, from 0 to 1",
             "drag: move this stop · click: type an exact position",
         );
         if resp.changed() {
@@ -503,9 +497,9 @@ fn draw_selected_stop(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>)
                 resp,
                 &mut app.ui_state,
                 if count > 2 {
-                    "Remove this control point"
+                    "Remove this stop"
                 } else {
-                    "A gradient needs at least two control points"
+                    "A gradient needs at least two stops"
                 },
                 "click: delete this stop",
             );
@@ -528,8 +522,8 @@ fn draw_palette_controls(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Shift the whole gradient along the colour index. Which transform gets which \
-         colour is an arbitrary choice, so this is the cheapest way to try another one.",
+        "Slide the whole gradient along, so each transform lands on a different \
+         colour. A quick way to try other colourings.",
         "drag: rotate the gradient",
     );
     if resp.changed() {
@@ -543,21 +537,20 @@ fn draw_palette_controls(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Run the gradient backwards. Applied before rotate.",
+            "Run the gradient backwards",
             "click: reverse the gradient",
         );
         if resp.changed() {
             app.edit_palette("Reverse palette", None, |p| p.reverse = reverse);
         }
 
-        let resp = ui.checkbox(&mut cyclic, "cyclic");
+        let resp = ui.checkbox(&mut cyclic, "wrap");
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Whether index 255 wraps back to 0. The renderer's lookup wraps and the contrast \
-             stretch assumes it, so cyclic is the norm; imported flam3 palettes are authored \
-             for a clamped 0-255 range and may have a seam.",
-            "click: toggle cyclic wrap",
+            "Make the end of the gradient blend back into its start. Usually on. \
+             Palettes imported from flam3 weren't made to wrap, and may show a seam.",
+            "click: wrap the gradient around",
         );
         if resp.changed() {
             app.edit_palette("Palette wrap", None, |p| p.cyclic = cyclic);
@@ -570,11 +563,11 @@ fn draw_palette_controls(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 match space {
-                    Interpolate::Rgb => "Blend control points in linear RGB — what flam3 and \
-                                         the transform ring do. Complementary stops pass \
-                                         through grey.",
-                    Interpolate::Oklab => "Blend in Oklab: perceptually even, and no muddy \
-                                           midpoint between opposite hues.",
+                    Interpolate::Rgb => "Blend between stops the simple way, as flam3 \
+                                         does. Opposite colours pass through grey.",
+                    Interpolate::Oklab => "Blend between stops so the change looks even to \
+                                           the eye, with no muddy grey between opposite \
+                                           colours.",
                 },
                 "click: change the blend space",
             );
@@ -616,9 +609,8 @@ pub fn transform_color_value(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Where this transform sits in the palette. The walker's colour index eases toward \
-         this value each time the transform is applied, at a rate set by color speed / \
-         falloff — so it is a target, not the colour the transform paints.",
+        "Where this transform sits on the gradient. Points drift toward this colour \
+         each time they pass through the transform, so it's a pull, not a paint colour.",
         "drag: move this transform along the gradient",
     );
     if resp.dragged() || resp.clicked() {
@@ -629,12 +621,12 @@ pub fn transform_color_value(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     }
 
     let mut cv = app.scene.transforms[idx].color_value;
-    let resp = ui.add(egui::Slider::new(&mut cv, 0.0..=1.0).text("color value"));
+    let resp = ui.add(egui::Slider::new(&mut cv, 0.0..=1.0).text("place on gradient"));
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "This transform's position in the gradient (0-1 around the cyclic colormap)",
-        "drag: adjust colormap index",
+        "Where this transform sits on the gradient, from 0 to 1",
+        "drag: move along the gradient",
     );
     if resp.changed() {
         app.set_transform_color_value(idx, cv);

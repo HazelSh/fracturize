@@ -48,8 +48,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                                 resp,
                                 &mut app.ui_state,
                                 format!(
-                                    "Redo forward to after \"{}\"\n\nRedo rows go away the \
-                                     moment you make a new edit.",
+                                    "Redo up to and including “{}”\n\nThese greyed rows \
+                                     disappear as soon as you make a new edit.",
                                     label
                                 ),
                                 "click: redo to this point",
@@ -72,7 +72,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                             let resp = hinted(
                                 resp,
                                 &mut app.ui_state,
-                                format!("Undo back to before \"{}\"", label),
+                                format!("Undo back to before “{}”", label),
                                 "click: undo to this point",
                             );
                             if resp.clicked() {
@@ -102,10 +102,10 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                             hinted(
                                 resp,
                                 &mut app.ui_state,
-                                "History is capped by entry count and by memory. Scenes with \
-                                 very many transforms make large snapshots, so the memory cap \
-                                 bites first — at least ten steps are always kept.",
-                                "older history was dropped to stay inside the memory cap",
+                                "The history has a size limit. Scenes with many transforms \
+                                 use more memory per step, so they keep fewer steps (always \
+                                 at least ten).",
+                                "older edits were dropped to save memory",
                             );
                         }
                     });

@@ -156,14 +156,14 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 }
             }
             let hint = if carried {
-                "Which way the world is pointing. Click a ball to look down that \
-                 axis — solid is the positive end, hollow the negative.\n\nThe \
-                 zoom carries it: each period turns the camera by the map's \
-                 rotation, so the cross keeps turning with the descent instead \
-                 of snapping back at the seam."
+                "Which way the world's axes point. Click a ball to look along \
+                 that axis. Solid balls are the positive ends, hollow ones the \
+                 negative.\n\nUnder infinite zoom the cross keeps turning as you \
+                 zoom, following the zoom's own twist."
             } else {
-                "Which way the world is pointing. Click a ball to look down that \
-                 axis — solid is the positive end, hollow the negative."
+                "Which way the world's axes point. Click a ball to look along \
+                 that axis. Solid balls are the positive ends, hollow ones the \
+                 negative."
             };
             super::hints::hinted(
                 resp,

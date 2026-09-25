@@ -10,26 +10,26 @@ use super::UiState;
 
 /// Dragging a gizmo's origin dot
 pub const HINT_ORIGIN: &str =
-    "drag: move in view plane (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
+    "drag: move across the screen (shift: fine) · ctrl+drag: scale evenly · alt+scroll: weight";
 /// Hovering an *unselected* transform's origin dot — the only part of one that
 /// is on offer, and it only selects (see `pick::pick_gizmo`)
 pub const HINT_SELECT: &str =
-    "click: select this transform · alt+scroll: chaos weight";
+    "click: select this transform · alt+scroll: weight";
 /// Any part of a whole subscene's gizmo but its rotate controls
 pub const HINT_SUBSCENE: &str =
     "drag: move the whole subscene · tip or ctrl+drag: resize it · alt+scroll: its share of the points";
 /// Dragging a gizmo's axis endpoint handle
 pub const HINT_TIP: &str =
-    "drag: scale this axis (shift: fine, ctrl: snap 0.1) · drag past the origin to mirror";
+    "drag: stretch along this axis (shift: fine, ctrl: steps of 0.1) · drag past the centre to mirror";
 /// Dragging an origin→axis gizmo edge
 pub const HINT_AXIS: &str =
-    "drag: slide along axis (shift: fine) · ctrl+drag: uniform scale · alt+scroll: chaos weight";
+    "drag: move along this axis (shift: fine) · ctrl+drag: scale evenly · alt+scroll: weight";
 /// Dragging an outer gizmo edge
 pub const HINT_ROT_EDGE: &str =
-    "drag: rotate around axis (shift: fine, ctrl: snap 15°) · alt+scroll: chaos weight";
+    "drag: rotate (shift: fine, ctrl: 15° steps) · alt+scroll: weight";
 /// Dragging the ring around the selected gizmo
 pub const HINT_ROLL: &str =
-    "drag: roll against the camera view (shift: fine, ctrl: snap 15°) · alt+scroll: chaos weight";
+    "drag: turn it flat to the screen (shift: fine, ctrl: 15° steps) · alt+scroll: weight";
 /// Nothing hinted, nothing hovered: the bare-viewport default
 pub const HINT_VIEWPORT: &str =
     "drag: orbit · shift/middle-drag: pan · right-drag: roll · scroll: zoom";

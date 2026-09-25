@@ -51,7 +51,7 @@ fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
                 ui.menu_button((icons::PLUS, "Import scene"), |ui| {
                     let files = app.importable_scenes();
                     if files.is_empty() {
-                        ui.label(egui::RichText::new("No scene files in scenes/").weak());
+                        ui.label(egui::RichText::new("No scenes found in the scenes folder").weak());
                     }
                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                         for f in files {
@@ -70,13 +70,13 @@ fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if zoomed {
-                "This scene has infinite zoom, which doesn't compose with subscenes yet — turn it off in the Render window first"
+                "Subscenes don't work with infinite zoom yet. Turn infinite zoom off in the Render window first"
             } else if full {
-                "A scene holds at most 15 subscenes"
+                "A scene can hold at most 15 subscenes"
             } else {
-                "Add another scene's attractor to this one. It keeps its own maps and colour, and gets an equal share of the points"
+                "Place another scene inside this one. It keeps its own transforms and colours, and gets an equal share of the points"
             },
-            "click: choose a scene file to compose into this one",
+            "click: choose a scene to place in this one",
         );
         if let Some(f) = picked {
             app.ui_state.import_error = app.import_subscene(&f).err();
@@ -88,9 +88,9 @@ fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if selected.is_some() {
-                "Remove the selected subscene and its maps (undoable). A file it was borrowed from is untouched"
+                "Remove the selected subscene from this scene. Its own scene file isn't touched"
             } else {
-                "Remove a subscene — select one in the list first"
+                "Select a subscene to remove it"
             },
             "click: remove the selected subscene",
         );
@@ -110,8 +110,8 @@ fn draw_layers(ui: &mut egui::Ui, app: &mut App) {
     if !app.scene.is_composite() {
         ui.label(
             egui::RichText::new(
-                "An ordinary scene: one attractor. Import a scene to compose another \
-                 beside it — each keeps its own walkers, so neither is mixed into the other.",
+                "Import a scene to place it alongside this one. The two stay \
+                 separate fractals and never blend into each other.",
             )
             .small()
             .weak(),
@@ -137,11 +137,11 @@ fn draw_layers(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 if can {
-                    "Show or hide this layer (its points go to the others). Alt+click: solo it; again: show all"
+                    "Show or hide this. Hidden, its points go to the others.\n\nAlt+click to show only this one; alt+click again to show them all"
                 } else {
-                    "The only visible layer can't be hidden — show another first"
+                    "Something has to stay visible. Show another one first"
                 },
-                "click: show/hide · alt+click: solo",
+                "click: show or hide · alt+click: show only this one",
             );
             if resp.clicked() {
                 if ui.input(|i| i.modifiers.alt) {
@@ -154,7 +154,7 @@ fn draw_layers(ui: &mut egui::Ui, app: &mut App) {
             // Name: selects. A subscene is selected as a whole (its gizmo
             // moves all of it); the scene's own layer just lists its maps.
             let name = if k == 0 {
-                format!("{} (own maps)", app.scene.layer_name(0))
+                format!("{} (this scene)", app.scene.layer_name(0))
             } else {
                 app.scene.layer_name(k).to_string()
             };
@@ -165,11 +165,11 @@ fn draw_layers(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 if k == 0 {
-                    "The scene's own maps. Select to list them in the Transforms window"
+                    "This scene's own transforms. Click to list them in the Transforms window"
                 } else {
-                    "Select this subscene as a whole: its gizmo moves, turns and resizes the entire attractor. The Transforms window lists its maps"
+                    "Select this subscene. Its gizmo in the viewport moves, turns and resizes the whole thing, and the Transforms window lists its transforms"
                 },
-                "click: select this layer",
+                "click: select this",
             );
             if resp.clicked() {
                 app.select_layer(k);
@@ -186,15 +186,15 @@ fn draw_layers(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Share of the point budget, relative to the other layers. The points go where the share says — a small subscene needs less for the same density",
-                "drag: this layer's share of the points",
+                "How many of the points this one gets, compared with the others. A small subscene needs fewer to look as dense",
+                "drag: change its share of the points",
             );
             if resp.changed() {
                 app.set_layer_share(k, share);
             }
 
             let pct = if visible && sizes[k] > 0 && total > 0.0 { app.scene.layer_share(k) / total * 100.0 } else { 0.0 };
-            num::small_cell(ui, &format!("{:>5.1}% {:>3} maps", pct, sizes[k]), 15);
+            num::small_cell(ui, &format!("{:>5.1}%  {:>3} transforms", pct, sizes[k]), 22);
             ui.end_row();
         }
     });
@@ -206,7 +206,7 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
         if app.scene.is_composite() {
             ui.label(
                 egui::RichText::new(
-                    "Select a subscene to place it. The scene's own maps have no placement — they are its frame.",
+                    "Select a subscene to move, turn or resize it.",
                 )
                 .small()
                 .weak(),
@@ -237,7 +237,7 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Click to rename. The name is how -S subscene.<name>… and --info refer to it",
+                "Click to rename",
                 "click: rename this subscene",
             );
             if resp.clicked() {
@@ -268,14 +268,14 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
         ui.label("at");
         for (axis, v) in ["x", "y", "z"].iter().zip(t.iter_mut()) {
             let resp = num::drag(ui, 7, 3, egui::DragValue::new(v).speed(0.005).prefix(format!("{} ", axis)));
-            let resp = hinted(resp, &mut app.ui_state, "Where the subscene sits, in the scene's space", "drag: move the subscene");
+            let resp = hinted(resp, &mut app.ui_state, "Where the subscene sits in the scene", "drag: move the subscene");
             changed |= resp.changed();
         }
         ui.end_row();
         ui.label("turn");
         for (axis, v) in ["x", "y", "z"].iter().zip(e.iter_mut()) {
             let resp = num::drag(ui, 7, 1, egui::DragValue::new(v).speed(0.5).suffix("°").prefix(format!("{} ", axis)));
-            let resp = hinted(resp, &mut app.ui_state, "The subscene's rotation, XYZ degrees", "drag: turn the subscene");
+            let resp = hinted(resp, &mut app.ui_state, "The subscene's rotation, in degrees about x, then y, then z", "drag: turn the subscene");
             if resp.changed() {
                 changed = true;
                 turned = true;
@@ -287,7 +287,7 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Uniform, on purpose: a subscene is placed by a similarity, which keeps every map inside it editable. To squash one, squash its maps",
+            "The subscene's size. It scales evenly in every direction; to stretch it one way, scale its transforms instead",
             "drag: resize the subscene",
         );
         changed |= resp.changed();
@@ -312,20 +312,20 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
             .option(
                 ColorMode::Transforms,
                 "transforms",
-                "Its maps' own colours around a ring",
-                "click: colour this subscene by its maps",
+                "Each of its transforms brings its own colour",
+                "click: colour this subscene by its transforms",
             )
             .option(
                 ColorMode::Palette,
                 "palette",
-                "Its own gradient (edit it in its file, or under [subscene.palette])",
+                "Colour from its own gradient. To edit the gradient, edit the subscene's scene file",
                 "click: colour this subscene through a gradient",
             )
             .option(
                 ColorMode::Mix,
                 "mix",
-                "Its maps' colours mixed as RGB along the walk",
-                "click: mix this subscene's map colours",
+                "Its transforms' colours mix like paint as points pass through them",
+                "click: mix this subscene's colours",
             )
             .show(ui);
         if let Some(m) = chosen {
@@ -336,10 +336,10 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
     // Where it came from.
     let sub = &app.scene.subscenes[k - 1];
     let from = match (&sub.file, &sub.base) {
-        (Some(f), Some(_)) => format!("from {} — saved as a reference while its maps are unedited", f),
+        (Some(f), Some(_)) => format!("from {}, linked until you edit it", f),
         _ => match &sub.source {
-            Some(src) => format!("inline, imported from {}", src),
-            None => "inline".to_string(),
+            Some(src) => format!("a copy of {}, saved in this scene", src),
+            None => "saved in this scene".to_string(),
         },
     };
     let by = sub.author.as_deref().map(|a| format!(" · by {}", a)).unwrap_or_default();

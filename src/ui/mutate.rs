@@ -33,7 +33,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "How strongly a mutation perturbs the scene — this button and U alike (remembered)",
+                "How much each mutation changes the scene, from this button or U",
                 "drag: change mutation strength",
             );
 
@@ -42,7 +42,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Apply a random mutation (U). One Ctrl+Z takes it back.",
+                    "Change the scene a little, at random (U). Ctrl+Z takes it back.",
                     "click: mutate the scene",
                 );
                 if resp.clicked() {

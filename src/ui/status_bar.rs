@@ -86,11 +86,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     let height = app.surface_size().1 as f32;
                     if let Some((drawn, _)) = app.withheld_points(height) {
                         resp.on_hover_text(format!(
-                            "Drawing {:.1}M of them.\n\nThis scene's attractor is small \
-                             enough on screen that the rest would land on pixels already \
-                             covered — they'd cost frame time and change nothing. The \
-                             chaos game still runs on the whole buffer, and brightness is \
-                             normalized, so this is invisible except in the frame rate.",
+                            "Only {:.1}M of these are being drawn.\n\nThe fractal is so \
+                             small on screen right now that more points would only land on \
+                             pixels that are already covered. Drawing fewer keeps the frame \
+                             rate up and doesn't change the picture.",
                             drawn as f32 / 1e6,
                         ));
                         num::text_cell(
@@ -126,14 +125,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                             ZOOM_CHARS,
                         )
                         .on_hover_text(format!(
-                            "Infinite zoom about transform {} — {:.2} octaves per \
-                             period, {:.0}x total.\n\n\
-                             The attractor is rendered as the set invariant under \
-                             that map, so it has no largest or smallest feature. \
-                             Scrolling in past the bottom of the band folds the \
-                             camera back to the top of it; the picture is \
-                             identical, so this counter is the only thing that \
-                             moves.",
+                            "Infinite zoom into transform {}. The picture repeats \
+                             every {:.2} octaves; you're zoomed {:.0}× in.\n\n\
+                             Because the picture repeats exactly, this counter is \
+                             the only way to tell how deep you are.",
                             z.map,
                             z.log_scale / std::f32::consts::LN_2,
                             (1.0f32 / z.scale).powi(app.zoom_level.abs().min(30)),
@@ -187,13 +182,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     );
                     num::text_cell(ui, &text, FPS_CLUSTER_CHARS)
                     .on_hover_text(
-                        "ui: CPU cost of building this frame's panels.\n\
-                         wait: time parked waiting for the display to take the \
-                         last frame.\n\n\
-                         With vsync on, most of the frame budget *should* be \
-                         wait — that's headroom. If the frame time climbs while \
-                         wait stays high, the bottleneck is outside the app \
-                         (compositor, driver, another GPU client), not the UI.",
+                        "Frames per second, then the average and slowest (p99) \
+                         frame times.\n\
+                         ui: time spent drawing the panels.\n\
+                         wait: time spent waiting for the screen to be ready.\n\n\
+                         With vsync on, a high wait is good: it's spare time. If \
+                         frame times climb while wait stays high, something \
+                         outside Fracturize is slowing things down.",
                     );
 
                     // Similarity dimension + lacunarity: the two numbers that
@@ -244,11 +239,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     if ui
                         .add(egui::Button::new(lock_rich).small().frame(false))
                         .on_hover_text(if lock_on {
-                            "Dimension lock ON — editing one scale adjusts all others to hold d fixed.\n\
-                             Click to unlock."
+                            "Dimension lock is on: changing one transform's scale adjusts \
+                             the others to keep d the same.\n\
+                             Click to turn it off."
                         } else {
-                            "Dimension lock OFF — scales are independent.\n\
-                             Click to lock: editing one scale will adjust all others to preserve d."
+                            "Dimension lock is off.\n\
+                             Click to turn it on: changing one transform's scale will then \
+                             adjust the others to keep d the same."
                         })
                         .clicked()
                     {
@@ -296,26 +293,24 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                             })
                             .response;
                         resp.on_hover_text(
-                                "Similarity dimension (d) and lacunarity (Λ).\n\n\
-                                 Dimension predicts visual density:\n\
-                                 • dust (<1.7): sparse, may disappear at low point counts\n\
-                                 • lace (1.7–2.1): intricate surface structure\n\
-                                 • shell (2.1–2.6): volumetric but hollow\n\
-                                 • solid (2.6–3.0): fills space\n\
-                                 • overfull (>3.0): overlapping copies, uniform measure\n\n\
-                                 Lacunarity is how much clumpier than a random scatter\n\
-                                 the measure is, averaged over four scales:\n\
-                                 • Λ ≈ 1: no gaps to read — a smooth, structureless measure\n\
-                                 • Λ ≈ 2: menger, flat by construction\n\
-                                 • Λ ≈ 10: wellspiral — structure at every scale\n\
-                                 • Λ > 40: glasshouse, blossom\n\n\
-                                 The pair is what locates you: low d with high Λ is lace,\n\
-                                 high d with Λ near 1 is the mush wall — it fills space\n\
-                                 and has nothing in it.",
+                                "Dimension (d) and lacunarity (Λ): two numbers that \
+                                 describe the fractal's texture.\n\n\
+                                 Dimension says how densely it fills space:\n\
+                                 • dust (below 1.7): sparse; may vanish with few points\n\
+                                 • lace (1.7 to 2.1): intricate, surface-like\n\
+                                 • shell (2.1 to 2.6): has volume, but hollow\n\
+                                 • solid (2.6 to 3.0): fills space\n\
+                                 • overfull (above 3.0): copies overlap and even out\n\n\
+                                 Lacunarity says how clumpy it is, with gaps at many sizes:\n\
+                                 • around 1: smooth, no gaps (menger is about 2)\n\
+                                 • around 10: detail at every scale (wellspiral)\n\
+                                 • above 40: very clumpy (glasshouse, blossom)\n\n\
+                                 Low d with high Λ looks like lace. High d with Λ near 1\n\
+                                 is a featureless fog.",
                             );
                     } else {
                         ui.label(egui::RichText::new("d n/a").weak())
-                            .on_hover_text("No valid contracting transforms — dimension undefined.");
+                            .on_hover_text("Can't work out a dimension: no transform shrinks things");
                     }
 
                     // The left side goes last, into whatever the readouts

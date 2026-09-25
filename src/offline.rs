@@ -587,7 +587,7 @@ fn fill_points(
                 c.progress(i + 1, total_frames);
                 if c.should_stop() {
                     c.log(format!(
-                        "stopped at frame {} of {} — keeping the {} points accumulated so far",
+                        "stopped at frame {} of {}; keeping the {} points so far",
                         i + 1,
                         total_frames,
                         point_count
@@ -2461,7 +2461,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         );
         if let Some(c) = &control {
             c.log(String::from(
-                "fp16 accumulation: bright cores under-counted (no FLOAT32_BLENDABLE)",
+                "reduced precision on this GPU (no FLOAT32_BLENDABLE): the brightest areas may clip",
             ));
         }
     }
@@ -2766,7 +2766,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             if stopping {
                 let got = (prior_samples + pass_laps as f64 * capacity as f64) / pixels;
                 let msg = format!(
-                    "stopped after {} of {} laps — keeping the {:.0} samples/px accumulated",
+                    "stopped after {} of {} laps; keeping the {:.0} samples/px so far",
                     pass_laps, laps, got,
                 );
                 println!("{}", msg);
@@ -3164,7 +3164,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
                     return Err(CANCELLED.to_string());
                 }
                 c.log(format!(
-                    "stopped after {} of {} frames — muxing the {:.1}s that rendered",
+                    "stopped after {} of {} frames; saving the {:.1}s rendered so far",
                     rendered,
                     frames,
                     rendered as f32 / anim.fps as f32,

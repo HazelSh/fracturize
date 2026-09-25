@@ -48,7 +48,7 @@ pub enum ArmState {
 ///    already knows from download and install dialogs — it says "not yet, and
 ///    here is exactly how long".
 /// 3. At zero it becomes enabled again in **danger colours**, with a different
-///    and more explicit label (`Cancel` → `Abort render`). The second click is
+///    and more explicit label (`Stop` → `Stop render`). The second click is
 ///    on a control that has visibly *become available*, not on one that was
 ///    silently pretending to be unavailable.
 /// 4. **It then sits there.** Nothing expires. An arm window is a clock
@@ -107,7 +107,7 @@ impl Arm {
 /// be borrowed mutably. It is two words; copying it is free.
 ///
 /// `idle` is the resting label (`Cancel`); `danger` is the confirm label
-/// (`Abort render`). Deliberately different words: the confirm is a different
+/// (`Stop render`). Deliberately different words: the confirm is a different
 /// act from the request, and reusing the label would invite the second click to
 /// be made on the memory of the first.
 pub fn danger_button(
@@ -162,15 +162,15 @@ pub fn danger_button(
         match state {
             ArmState::Idle => idle_tip.to_string(),
             ArmState::Counting(_) => format!(
-                "{}\n\nAvailable in a moment. Click anywhere else to call it off.",
+                "{}\n\nReady in a moment. Click anywhere else to cancel.",
                 danger_tip
             ),
-            ArmState::Ready => format!("{}\n\nClick anywhere else to call it off.", danger_tip),
+            ArmState::Ready => format!("{}\n\nClick anywhere else to cancel.", danger_tip),
         },
         match state {
-            ArmState::Idle => "click: arm this, then confirm",
-            ArmState::Counting(_) => "waiting — click anywhere else to call it off",
-            ArmState::Ready => "click: confirm · click anywhere else: call it off",
+            ArmState::Idle => "click, then click again to confirm",
+            ArmState::Counting(_) => "wait a moment · click anywhere else: cancel",
+            ArmState::Ready => "click: confirm · click anywhere else: cancel",
         },
     );
 
@@ -233,8 +233,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     };
 
     let verb = match &pending {
-        Pending::Quit => "quitting".to_string(),
-        Pending::Load(p) => format!("opening {}", p.display()),
+        Pending::Quit => "quit".to_string(),
+        Pending::Load(p) => format!("open {}", p.display()),
     };
     // Say what the button does, not just what it throws away — the two acts
     // are one click here, and "Discard" alone doesn't say you're also leaving.
@@ -251,7 +251,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         ui.heading("Unsaved changes");
         ui.add_space(4.0);
         ui.label(format!(
-            "“{}” has edits that aren't written to disk. They'll be lost by {}.",
+            "“{}” has unsaved changes. If you {} now, they'll be lost.",
             scene, verb
         ));
 
@@ -264,8 +264,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color));
             ui.label(
                 egui::RichText::new(
-                    "Nothing has been lost yet. Try “Save as…” somewhere else, \
-                     or Cancel and sort it out.",
+                    "Nothing has been lost. Try Save as… to save it somewhere \
+                     else, or Cancel.",
                 )
                 .small()
                 .weak(),
@@ -279,7 +279,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Write the scene to its file, then continue",
+                "Save the scene first, then continue",
                 "click: save, then continue",
             );
             if resp.clicked() {
@@ -300,8 +300,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Throw the edits away and continue. There is no undo for this.",
-                "click: discard the edits",
+                "Lose the unsaved changes and continue. This can't be undone.",
+                "click: discard the changes",
             );
             if resp.clicked() {
                 resolve = Some(Resolution::Discard);
@@ -311,7 +311,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Go back to the scene and leave it open",
+                "Go back to the scene",
                 "click: go back",
             );
             if resp.clicked() {

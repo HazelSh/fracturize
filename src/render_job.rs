@@ -160,7 +160,7 @@ impl JobKind {
                 crate::video::Format::Avif => "AVIF animation",
                 crate::video::Format::Mp4 => "MP4 animation",
             },
-            JobKind::ViewDescriptor => "view descriptor",
+            JobKind::ViewDescriptor => "view file",
         }
     }
 
@@ -415,8 +415,8 @@ impl JobParams {
         }
         if self.point_buffer_bytes() > max_buffer_bytes {
             return Some(format!(
-                "{} points needs a {} point buffer, over this GPU's {} limit for a single \
-                 buffer. Render fewer points, or split the work.",
+                "{} points need a {} buffer, more than this GPU allows in one buffer \
+                 ({}). Use fewer points.",
                 self.points,
                 human_bytes(self.point_buffer_bytes()),
                 human_bytes(max_buffer_bytes),
@@ -1209,7 +1209,7 @@ mod tests {
         // 16 M points = 256 MiB exactly: allowed.
         assert!(still(16_777_216, 100, 100).rejection(limit).is_none());
         let over = still(16_777_217, 100, 100).rejection(limit);
-        assert!(over.is_some_and(|m| m.contains("over this GPU")), "should name the limit");
+        assert!(over.is_some_and(|m| m.contains("more than this GPU allows")), "should name the limit");
     }
 
     #[test]

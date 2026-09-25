@@ -2009,7 +2009,7 @@ impl App {
             .collect();
         let clean = clean.trim_matches('-').to_string();
         if clean.is_empty() {
-            return Err("a view needs a name".to_string());
+            return Err("A view needs a name".to_string());
         }
         let target =
             std::path::PathBuf::from(format!("views/{}-{}.toml", self.scene_slug(), clean));
@@ -2610,7 +2610,7 @@ impl App {
             sub.visible = show(i + 1);
         }
         self.sync_transforms_to_gpu();
-        let label = if already { "Show all layers".to_string() } else { format!("Solo {}", self.scene.layer_name(k)) };
+        let label = if already { "Show all".to_string() } else { format!("Show only {}", self.scene.layer_name(k)) };
         self.commit_edit(label, None, before);
     }
 
@@ -2686,14 +2686,14 @@ impl App {
     /// unedited import saves as four lines and never copies the artwork.
     pub fn import_subscene(&mut self, path: &Path) -> Result<(), String> {
         if self.scene.zoom.is_some() {
-            return Err("this scene has infinite zoom, which doesn't compose with subscenes yet".into());
+            return Err("Subscenes don't work with infinite zoom yet. Turn infinite zoom off first".into());
         }
         if self.scene.layer_count() >= crate::subscene::MAX_LAYERS {
-            return Err(format!("a scene holds at most {} subscenes", crate::subscene::MAX_LAYERS - 1));
+            return Err(format!("A scene can hold at most {} subscenes", crate::subscene::MAX_LAYERS - 1));
         }
         let sub = Scene::load(path)?;
         if sub.is_composite() {
-            return Err(format!("{} is itself a composite; nesting isn't supported yet", path.display()));
+            return Err(format!("{} has subscenes of its own, and subscenes can't be nested yet", path.display()));
         }
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         // Relative to where this scene lives, which is what `file =` means.
@@ -5012,7 +5012,7 @@ impl App {
 
     /// Replace a transform's matrix wholesale — the inspector's TRS fields
     /// (recomposed from position/rotation/scale), the non-TRS matrix grid,
-    /// and "Orthogonalize -> TRS" all funnel through this.
+    /// and "Remove shear" all funnel through this.
     pub fn set_transform_matrix(
         &mut self,
         idx: usize,
@@ -5105,7 +5105,7 @@ impl App {
             format!("Symmetry {} → {}", was, now)
         } else {
             format!(
-                "Symmetry {} → {} ({} → {} maps)",
+                "Symmetry {} → {} ({} → {} transforms in total)",
                 was, now, maps_before, maps_after
             )
         };
@@ -5225,14 +5225,14 @@ impl App {
 
     /// Discard any shear/mirroring in a transform's matrix by rebuilding it
     /// from its own (possibly approximate) scale/rotation/translation
-    /// decomposition — the inspector's "Orthogonalize -> TRS" button. Always
+    /// decomposition — the inspector's "Remove shear" button. Always
     /// its own history entry (no coalescing), since it's an explicit,
     /// infrequent action.
     pub fn orthogonalize_transform(&mut self, idx: usize) {
         let Some(spec) = self.scene.transforms.get(idx) else { return };
         let (scale, rotation, translation) = spec.matrix.to_scale_rotation_translation();
         let orthogonalized = Mat4::from_scale_rotation_translation(scale, rotation, translation);
-        self.set_transform_matrix(idx, orthogonalized, format!("Orthogonalize T{}", idx), None);
+        self.set_transform_matrix(idx, orthogonalized, format!("Remove shear T{}", idx), None);
     }
 
     /// Rename a transform (inspector name field / list row's inline rename).
@@ -5295,7 +5295,7 @@ impl App {
         self.scene.colors[idx] = color;
         self.push_colormap();
         self.commit_edit(
-            format!("Recolor T{}", idx),
+            format!("Recolour T{}", idx),
             Some(&format!("insp:t{}:color", idx)),
             before,
         );
@@ -5311,7 +5311,7 @@ impl App {
         self.scene.transforms[idx].color_value = value.clamp(0.0, 1.0);
         self.sync_transforms_to_gpu();
         self.commit_edit(
-            format!("Color value T{}", idx),
+            format!("Gradient position T{}", idx),
             Some(&format!("insp:t{}:color_value", idx)),
             before,
         );
@@ -5327,7 +5327,7 @@ impl App {
         self.scene.transforms[idx].explicit_color_speed = speed;
         self.refresh_color_speeds();
         self.commit_edit(
-            format!("Color speed T{}", idx),
+            format!("Colour speed T{}", idx),
             Some(&format!("insp:t{}:color_speed", idx)),
             before,
         );
@@ -5556,7 +5556,7 @@ impl App {
         };
         log::info!("Color falloff: {:.2} -> {:.2} (lower = finer color detail)", old, self.color_falloff);
         self.refresh_color_speeds();
-        self.commit_edit("Color falloff", Some("color_falloff"), before);
+        self.commit_edit("Colour falloff", Some("color_falloff"), before);
     }
 
     pub fn adjust_color_contrast(&mut self, increase: bool) {
@@ -5564,7 +5564,7 @@ impl App {
         let factor = if increase { 1.15 } else { 1.0 / 1.15 };
         self.color_contrast = (self.color_contrast * factor).clamp(0.25, 16.0);
         log::info!("Color contrast: {:.2}", self.color_contrast);
-        self.commit_edit("Color contrast", Some("color_contrast"), before);
+        self.commit_edit("Colour contrast", Some("color_contrast"), before);
     }
 
     // === Render window (Phase 5) ===
@@ -5604,7 +5604,7 @@ impl App {
         let before = self.edit_snapshot();
         self.color_falloff = falloff.clamp(0.0, 4.0);
         self.refresh_color_speeds();
-        self.commit_edit("Color falloff", Some("color_falloff"), before);
+        self.commit_edit("Colour falloff", Some("color_falloff"), before);
     }
 
     // === Palette =========================================================
@@ -5639,7 +5639,7 @@ impl App {
         self.scene.set_color_mode(mode);
         self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
         self.sync_transforms_to_gpu();
-        self.commit_edit(format!("Color mode: {}", mode.name()), None, before);
+        self.commit_edit(format!("Colour: {}", mode.name()), None, before);
     }
 
     /// Install a gradient (library pick, random roll, or import).
@@ -5684,7 +5684,7 @@ impl App {
     }
 
     pub fn set_palette_stop_color(&mut self, idx: usize, color: Vec3) {
-        self.edit_palette("Recolor palette stop", Some(&format!("pal:col:{idx}")), |p| {
+        self.edit_palette("Recolour palette stop", Some(&format!("pal:col:{idx}")), |p| {
             if let Some(s) = p.stops_mut().and_then(|s| s.get_mut(idx)) {
                 s.color = color;
             }
@@ -5808,7 +5808,7 @@ impl App {
     pub fn set_color_contrast(&mut self, contrast: f32) {
         let before = self.edit_snapshot();
         self.color_contrast = contrast.clamp(0.25, 16.0);
-        self.commit_edit("Color contrast", Some("color_contrast"), before);
+        self.commit_edit("Colour contrast", Some("color_contrast"), before);
     }
 
     /// Points the chaos game keeps in flight. Raising this costs GPU memory
@@ -6002,7 +6002,7 @@ impl App {
         }
         self.sync_transforms_to_gpu();
         self.commit_edit(
-            if already_solo { "Un-solo".to_string() } else { format!("Solo T{}", idx) },
+            if already_solo { "Show all transforms".to_string() } else { format!("Show only T{}", idx) },
             None,
             before,
         );
@@ -6205,7 +6205,7 @@ impl App {
             // it, and says so rather than renormalizing placed points about a
             // map that knows nothing of their placement.
             self.point_compute.zoom = None;
-            self.zoom_error = Some("infinite zoom is off: it doesn't compose with subscenes yet".into());
+            self.zoom_error = Some("Infinite zoom is off, because it doesn't work with subscenes yet".into());
             return;
         }
         match crate::renorm::Renorm::build(&spec, &self.scene.transforms, self.scene.camera_distance)

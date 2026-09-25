@@ -71,23 +71,20 @@ pub fn draw_input_prefs(ui: &mut egui::Ui, app: &mut App) {
             .option(
                 OrbitStyle::Trackball,
                 "trackball",
-                "Horizontal drag yaws about the camera's own up, so a drag does \
-                 the same thing on screen from every framing — step off the path \
-                 anywhere, or open any scene, and the controls feel the same.\n\n\
-                 There's no level-horizon guarantee in exchange: circling drags \
-                 accumulate a little roll, which the roll field reads out and \
-                 \"level\" removes.",
-                "click: screen-relative orbit",
+                "Dragging sideways turns the scene around the screen's own up \
+                 direction, so the controls feel the same wherever you are.\n\n\
+                 The catch: dragging in circles slowly tilts the horizon. The \
+                 Camera window's \"level\" button puts it back.",
+                "click: orbit relative to the screen",
             )
             .option(
                 OrbitStyle::Turntable,
                 "turntable",
-                "Horizontal drag yaws about world up, holding the horizon level \
-                 however the camera is rolled.\n\n\
-                 The classic orbit, and the feel depends on where you're looking: \
-                 near straight up or down world up is nearly the view axis, so the \
-                 same drag reads as roll instead of yaw.",
-                "click: world-up orbit, level horizon",
+                "Dragging sideways turns the scene around the world's up \
+                 direction, so the horizon stays level.\n\n\
+                 The catch: looking straight up or down, a sideways drag spins \
+                 the view instead of orbiting.",
+                "click: orbit around world up, horizon stays level",
             )
             .show(ui);
         if let Some(style) = chosen {
@@ -113,16 +110,12 @@ pub fn draw_input_prefs(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             format!(
-                "How wide a lens the picture is drawn through, vertically. Saved to \
-                 prefs, so it follows you to the next scene — unless a scene states \
-                 its own `fov`, which it then keeps.\n\n\
-                 Wider exaggerates depth and shrinks the subject; narrower flattens \
-                 it and fills the frame. The geometrically \"correct\" value is the \
-                 angle your screen subtends at your eye — about 30° at a normal \
-                 viewing distance, which is why the 45° default can read flat. Wider \
-                 than that is an ordinary preference; dollying in as you widen is \
-                 what makes the perspective bite.\n\n\
-                 Right now: {:.0}° horizontal in this window. The default is {:.0}°.",
+                "How wide the camera's lens is, measured top to bottom. Wider \
+                 exaggerates depth; narrower flattens it. Moving the camera in as \
+                 you widen the lens makes the perspective more dramatic.\n\n\
+                 This is your own setting and applies to every scene, unless a \
+                 scene sets its own.\n\n\
+                 In this window that's {:.0}° side to side. The default is {:.0}°.",
                 natural,
                 crate::camera::DEFAULT_FOV_DEGREES,
             ),
@@ -143,7 +136,8 @@ pub fn draw_input_prefs(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Flightsim-style: drag down to tilt the scene's top toward you. Saved to prefs (I)",
+            "Drag down to tilt the top of the scene toward you, like a flight \
+             stick (I)",
             "click: invert mouse pitch",
         );
         if resp.changed() {
@@ -171,8 +165,9 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Orbit radius — the same value scroll and Up/Down change",
-            "drag: dolly the camera in / out",
+            "How far the camera is from what it's looking at. Scrolling and \
+             the Up and Down keys change it too",
+            "drag: move the camera closer or further",
         );
         if resp.changed() {
             app.camera.distance = distance.clamp(0.05, 100.0);
@@ -201,10 +196,10 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if faithful {
-                "Rotation about the view axis — right-drag the viewport does this too"
+                "Tilt the view sideways. Right-dragging the viewport does this too"
             } else {
-                "Looking straight up or down, roll and yaw are the same control — \
-                 right-drag the viewport to spin the view instead"
+                "Not available when looking straight up or down. Right-drag the \
+                 viewport to spin the view instead"
             },
             "drag: roll the camera",
         );
@@ -216,7 +211,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Put the horizon back exactly level",
+            "Make the horizon level again",
             "click: level the camera",
         );
         if resp.clicked() {
@@ -247,7 +242,8 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Write the current framing (plus point size, haze and color) to views/ (V)",
+            "Save the current framing, with the point size, haze and colour \
+             settings, to the views folder (V)",
             "click: save this view",
         );
         if resp.clicked() {
@@ -389,7 +385,7 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Camera path").strong());
         let resp = ui.label(
-            egui::RichText::new(if authored { "(this scene's)" } else { "(default orbit)" })
+            egui::RichText::new(if authored { "(this scene's own)" } else { "(default orbit)" })
                 .small()
                 .weak(),
         );
@@ -399,8 +395,8 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
         // room in exactly the situation where the list was longest.
         if !authored {
             resp.on_hover_text(
-                "A full turn around the current framing — every scene has this \
-                 until it authors keypoints of its own.",
+                "One full turn around the current view. Every scene uses this \
+                 until you add keypoints of your own.",
             );
         }
 
@@ -410,7 +406,7 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 if authored {
-                    "Throw away this scene's keypoints and go back to the default full orbit"
+                    "Delete this scene's keypoints and go back to the default orbit"
                 } else {
                     "Already on the default orbit"
                 },
@@ -425,10 +421,10 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 if authored {
-                    "Append the current framing to this scene's path (Y)"
+                    "Add the current view to the end of the path (Y)"
                 } else {
-                    "Start this scene's own path with the current framing (Y). \
-                     The default orbit keeps flying until there are two keypoints."
+                    "Start a path of your own from the current view (Y). The \
+                     default orbit is used until there are two keypoints."
                 },
                 "click: add a keypoint here",
             );
@@ -502,7 +498,7 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
     if authored && flying_default {
         ui.label(
             egui::RichText::new(
-                "One more keypoint and this flies instead of the default orbit.",
+                "Add one more keypoint to fly this path instead of the default orbit.",
             )
             .small()
             .color(ui.visuals().warn_fg_color),
@@ -522,8 +518,7 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Fly the path in real time (O or Z). While it plays the route isn't \
-             drawn — the camera is standing on it.",
+            "Fly the camera along the path (O, Z or Space)",
             "click: play / stop the camera",
         );
         if resp.clicked() {
@@ -543,8 +538,8 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
             if explicit_seconds {
                 "How long the whole path takes"
             } else {
-                "How long the whole path takes — currently the default of 3s per \
-                 segment travelled; setting it here pins it"
+                "How long the whole path takes. At the moment that's the \
+                 default of 3 seconds between keypoints"
             },
             "drag: set the path duration",
         );
@@ -580,19 +575,17 @@ fn draw_loop(
 
     let zoom_note = match zoom {
         Some((map, octaves)) => format!(
-            "Close the loop under this scene's zoom symmetry (transform {}, {:.2} \
-             octaves per period) instead of by returning to the first key.\n\n\
-             One loop descends a whole period and ends on the frame it started — \
-             the same frame, not a similar one — so the animation plays as a zoom \
-             that never ends. One keypoint is enough, and gives a constant-rate \
-             descent with no seam.",
+            "Loop by zooming in until the picture repeats itself, instead of \
+             flying back to the first keypoint. The animation plays as a zoom \
+             that never ends.\n\n\
+             The zoom centres on transform {}, and repeats every {:.2} octaves. \
+             A single keypoint is enough, and gives a steady zoom with no seam.",
             map, octaves
         ),
-        None => "Loop by descending one zoom period instead of returning to the \
-                 first key, so the animation plays as a zoom that never ends.\n\n\
-                 Needs a scale symmetry to close under, and this scene has none \
-                 yet. The Render window's infinite-zoom section lists every \
-                 transform and says which of them could carry one."
+        None => "Loop by zooming in until the picture repeats itself, so the \
+                 animation plays as a zoom that never ends.\n\n\
+                 This needs infinite zoom, which this scene doesn't use yet. Turn \
+                 it on under infinite zoom in the Render window."
             .to_string(),
     };
 
@@ -603,27 +596,25 @@ fn draw_loop(
             .option(
                 LoopKind::Once,
                 "once",
-                "Fly from the first keypoint to the last and stop. Eases in and \
-                 out, so it starts and finishes at rest.",
+                "Fly from the first keypoint to the last, then stop. Starts and \
+                 stops gently.",
                 "click: play the path once and stop",
             )
             .option(
                 LoopKind::PingPong,
                 "ping-pong",
-                "Fly out to the last keypoint, then back along the same route to \
-                 the first, forever. The way to loop a path whose ends are \
-                 nowhere near each other — there's nothing to close, because the \
-                 return journey is the outward one reversed. It slows to a stop \
-                 at each end and accelerates back out, so neither turn jolts.",
+                "Fly out to the last keypoint and back again, forever. Good for \
+                 a path whose ends are far apart. It slows down smoothly at each \
+                 end, so the turnarounds don't jolt.",
                 "click: loop out and back along the path",
             )
             .option(
                 LoopKind::Closed,
                 "loop",
-                "Close the path back to its first key, for seamless loops \
-                 (Ctrl+Y). Constant speed, so the seam is invisible. Setting \
-                 this on the default orbit makes it this scene's own path.",
-                "click: loop back round to the first key",
+                "Fly from the last keypoint back to the first, for a seamless \
+                 loop at a steady speed. Choosing this on the default orbit makes \
+                 it this scene's own path.",
+                "click: loop back round to the first keypoint",
             )
             .option_enabled(
                 zoom.is_some(),
@@ -631,12 +622,12 @@ fn draw_loop(
                 "zoom",
                 zoom_note,
                 if zoom.is_some() {
-                    "click: loop by descending one zoom period"
+                    "click: loop as an endless zoom"
                 } else {
                     // No arrow: the UI font has no U+2192, and a missing glyph
                     // in the one line that tells you where to go is worse than
                     // a comma.
-                    "needs a zoom map — Render window, infinite zoom"
+                    "needs infinite zoom: see the Render window"
                 },
             )
             .show(ui);
@@ -651,7 +642,7 @@ fn draw_loop(
         // keypoint list into the transport controls below it.
         let Some((_, octaves)) = zoom else { return };
         let mut periods = current.map_or(1, |z| z.periods);
-        let suffix = if periods == 1 { " period" } else { " periods" };
+        let suffix = if periods == 1 { " repeat" } else { " repeats" };
         let resp = ui.add_enabled(
             current.is_some(),
             egui::DragValue::new(&mut periods).speed(0.05).range(1..=64).suffix(suffix),
@@ -660,14 +651,14 @@ fn draw_loop(
             resp,
             &mut app.ui_state,
             format!(
-                "Zoom periods descended per loop — {:.2} octaves each, so {} of \
-                 them is a factor of {:.0}. More makes a longer fall before it \
-                 repeats; the loop is seamless either way.",
+                "How many times the picture repeats in one loop. Each repeat is \
+                 {:.2} octaves, so {} of them zoom in by a factor of {:.0}. More \
+                 makes a longer fall; the loop is seamless either way.",
                 octaves,
                 periods,
                 2f32.powf(octaves * periods as f32),
             ),
-            "drag: periods descended per loop",
+            "drag: repeats per loop",
         );
         if resp.changed() {
             app.set_path_zoom_periods(periods);

@@ -108,8 +108,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Where to write the scene. A relative path is relative to where fracturize \
-                 was launched; `scenes/` is where the browser (B) looks.",
+                "Where to save the copy. The Scenes window (B) lists what's in the \
+                 scenes folder.",
                 "type: the new scene's filename",
             );
             if resp.changed() {
@@ -139,9 +139,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "The scene's display name — shown in the toolbar, and used for \
-                     screenshot / render / view filenames. Follows the filename until \
-                     you edit it.",
+                    "The scene's name, shown in the toolbar and used to name screenshots, \
+                     renders and views. It follows the filename until you change it.",
                     "type: the new scene's name",
                 );
                 if resp.changed() {
@@ -165,8 +164,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Undo only covers the scene you have open — overwriting a different one \
-                     can't be taken back from in here.",
+                    "Overwriting another scene can't be undone.",
                     "click: confirm overwriting that file",
                 );
                 if resp.changed() {
@@ -174,7 +172,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 }
             } else if !trimmed.ends_with(".toml") && valid {
                 ui.label(
-                    egui::RichText::new("Scene files are .toml; the browser won't list this.")
+                    egui::RichText::new("Scene files end in .toml. Without it, this won't show up in the Scenes window.")
                         .small()
                         .weak(),
                 );
@@ -196,9 +194,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     resp,
                     &mut app.ui_state,
                     if can_save {
-                        "Write the scene here and keep working on this copy"
+                        "Save the copy and keep working on it"
                     } else if exists {
-                        "Confirm the overwrite first"
+                        "Tick \"overwrite it\" first"
                     } else {
                         "Enter a filename"
                     },
@@ -221,7 +219,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 }
 
                 let resp = ui.button((icons::X, "Cancel"));
-                let resp = hinted(resp, &mut app.ui_state, "Leave the scene where it is", "click: cancel");
+                let resp = hinted(resp, &mut app.ui_state, "Don't save a copy", "click: cancel");
                 if resp.clicked() {
                     close = true;
                 }

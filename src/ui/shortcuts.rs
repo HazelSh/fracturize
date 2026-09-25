@@ -64,7 +64,7 @@ fn draw_about(ui: &mut egui::Ui, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Source, scenes, and issues. Opens in your browser.",
+                "Source code, scenes and issues. Opens in your browser.",
                 "click: open the repository in a browser",
             );
         });
@@ -90,102 +90,104 @@ const SECTIONS: &[(&str, &[Row])] = &[
     (
         "Camera",
         &[
-            ("drag", "orbit camera (takes it off the path)", None),
-            ("shift+drag", "pan focus (middle-drag works too)", None),
-            ("right-drag", "roll the camera; over a gizmo, that transform's menu", None),
+            ("drag", "orbit the camera (stops it flying its path)", None),
+            ("shift+drag", "pan (middle-drag works too)", None),
+            ("right-drag", "roll the camera", None),
+            ("right-click gizmo", "that transform's menu", None),
             ("scroll", "zoom", None),
-            ("Up / Down", "zoom in / out (steps the selection when one is made)", Some(HelpAction::Zoom)),
-            ("Home", "put the camera on the selected transform's fixed point", Some(HelpAction::FrameSelected)),
-            ("axis cross", "click a ball, bottom right, to look down that axis", None),
-            ("O / Z / Space", "play / stop the camera flying its path", Some(HelpAction::CameraMotion)),
-            ("I", "invert mouse pitch (saved to prefs)", Some(HelpAction::InvertPitch)),
-            ("V", "save current view to views/", Some(HelpAction::SaveView)),
+            ("Up / Down", "zoom in / out (or step through transforms, if one is selected)", Some(HelpAction::Zoom)),
+            ("Home", "centre the camera on the selected transform", Some(HelpAction::FrameSelected)),
+            ("axis cross", "click a ball (bottom right) to look down that axis", None),
+            ("O / Z / Space", "start / stop the camera flying its path", Some(HelpAction::CameraMotion)),
+            ("I", "invert mouse pitch", Some(HelpAction::InvertPitch)),
+            ("V", "save the current view", Some(HelpAction::SaveView)),
         ],
     ),
     (
         "Camera paths",
         &[
-            ("Y / Shift+Y", "add / remove a camera path keypoint of this scene's own", Some(HelpAction::PathKey)),
-            ("", "how it loops is the Camera window's four-way radio", None),
-            ("", "no keypoints = a full orbit around the framing, flown the same way", None),
+            ("Y / Shift+Y", "add a keypoint here / remove the last one", Some(HelpAction::PathKey)),
+            ("", "set how the path loops in the Camera window", None),
+            ("", "with no keypoints, the path is one full orbit", None),
         ],
     ),
     (
         "Transforms",
         &[
-            ("drag gizmo dot", "select + move in view plane", None),
-            ("drag on-axis edge", "move along that axis", None),
-            ("drag outer edge", "rotate around third axis", None),
-            ("ctrl+drag gizmo", "uniform scale", None),
-            ("shift during a gizmo drag", "fine: a fifth of the travel", None),
-            ("alt+drag outer edge", "snap rotation to 15°", None),
-            ("alt+scroll on gizmo", "adjust that transform's weight", None),
-            ("A / Shift+A", "duplicate selected / add new transform", Some(HelpAction::AddTransform)),
+            ("click gizmo dot", "select that transform", None),
+            ("drag its dot", "move it across the screen", None),
+            ("drag an axis", "move along that axis", None),
+            ("drag outer edge", "rotate", None),
+            ("ctrl+drag dot or axis", "scale evenly", None),
+            ("hold shift while dragging", "fine adjustment", None),
+            ("ctrl+drag outer edge", "rotate in 15° steps", None),
+            ("alt+scroll on gizmo", "change that transform's weight", None),
+            ("A / Shift+A", "duplicate selected / add a new transform", Some(HelpAction::AddTransform)),
             ("Del", "delete selected transform", Some(HelpAction::DeleteTransform)),
             ("Enter", "enable / disable selected transform", Some(HelpAction::ToggleSelected)),
-            (". / ,", "selected weight up / down", Some(HelpAction::Weight)),
+            (". / ,", "selected transform's weight up / down", Some(HelpAction::Weight)),
         ],
     ),
     (
         "Variations",
         &[
-            ("E / Shift+E", "next / prev variation slot", Some(HelpAction::CycleVariation)),
-            ("= / -", "variation weight up / down", Some(HelpAction::VariationWeight)),
+            ("E / Shift+E", "choose the next / previous variation", Some(HelpAction::CycleVariation)),
+            ("= / -", "that variation's weight up / down", Some(HelpAction::VariationWeight)),
         ],
     ),
     (
-        "Color",
+        "Colour",
         &[
-            ("J / Shift+J", "color hue up / down", Some(HelpAction::Hue)),
-            ("K / Shift+K", "color saturation up / down", Some(HelpAction::Sat)),
-            ("L / Shift+L", "color value up / down", Some(HelpAction::Val)),
-            ("D / Shift+D", "finer / coarser color detail (falloff)", Some(HelpAction::ColorFalloff)),
-            ("C / Shift+C", "less / more color contrast", Some(HelpAction::ColorContrast)),
+            ("J / Shift+J", "hue up / down", Some(HelpAction::Hue)),
+            ("K / Shift+K", "saturation up / down", Some(HelpAction::Sat)),
+            ("L / Shift+L", "brightness up / down", Some(HelpAction::Val)),
+            ("D / Shift+D", "finer / coarser colour detail", Some(HelpAction::ColorFalloff)),
+            ("C / Shift+C", "less / more colour contrast", Some(HelpAction::ColorContrast)),
         ],
     ),
     (
         "Renderer",
         &[
-            ("R", "renderer: points / splat (log-density)", Some(HelpAction::RenderMode)),
+            ("R", "switch renderer: points / splat", Some(HelpAction::RenderMode)),
             ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
             ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
-            ("F / Shift+F", "more / less atmospheric haze (depth cue)", Some(HelpAction::HazeIntensity)),
+            ("F / Shift+F", "more / less haze", Some(HelpAction::HazeIntensity)),
             // No key bound any more — Space now plays/stops the camera path
             // (Camera section, above). Left clickable here: re-seeding points
             // is rarely needed now that the renderers are more stable, but
             // still occasionally useful, and this row is its only way in.
-            ("(click)", "re-seed points (reset)", Some(HelpAction::Reset)),
+            ("(click)", "start the points over from scratch", Some(HelpAction::Reset)),
         ],
     ),
     (
         "Explore",
         &[
-            ("U / Shift+U", "random mutation / undo it", Some(HelpAction::Mutate)),
+            ("U / Shift+U", "random mutation / undo", Some(HelpAction::Mutate)),
             ("Ctrl+Z / Ctrl+Shift+Z", "undo / redo any edit", Some(HelpAction::Undo)),
-            ("Ctrl+Y", "redo (the Windows binding, for Apophysis fingers)", None),
-            ("X / Shift+X", "chaos traces: show+re-roll / hide", Some(HelpAction::Traces)),
+            ("Ctrl+Y", "redo", None),
+            ("X / Shift+X", "show new traces / hide them", Some(HelpAction::Traces)),
         ],
     ),
     (
         "Files",
         &[
-            ("Ctrl+O / B", "browse + load scenes", Some(HelpAction::Browse)),
-            ("drop a file", "open a .toml scene, or a .png render's scene", None),
-            ("Ctrl+N", "start over on a blank canvas (undoable)", Some(HelpAction::NewScene)),
-            ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
-            ("Ctrl+Shift+S", "save scene as… (fork it under a new name)", None),
-            ("S", "save screenshot to screenshots/", Some(HelpAction::Screenshot)),
-            ("P", "render job… (stills and animation)", None),
-            ("Ctrl+Q", "quit (asks first if the scene has unsaved edits)", Some(HelpAction::Quit)),
+            ("Ctrl+O / B", "open a scene", Some(HelpAction::Browse)),
+            ("drop a file", "open a scene, or the scene inside a render", None),
+            ("Ctrl+N", "new blank scene (undoable)", Some(HelpAction::NewScene)),
+            ("Ctrl+S", "save the scene", Some(HelpAction::SaveScene)),
+            ("Ctrl+Shift+S", "save a copy under a new name", None),
+            ("S", "save a screenshot", Some(HelpAction::Screenshot)),
+            ("P", "render a still or an animation", None),
+            ("Ctrl+Q", "quit (asks first if there are unsaved edits)", Some(HelpAction::Quit)),
         ],
     ),
     (
         "Overlays",
         &[
             ("H / ? / F1", "toggle this window", Some(HelpAction::ToggleHelp)),
-            ("G / Tab", "toggle transform gizmos + labels", Some(HelpAction::ToggleGizmos)),
-            ("M", "toggle the glow on what the selected transform moves", Some(HelpAction::ToggleEmphasis)),
-            ("Esc", "cancel: close a menu, a dialog, the browser, or the selection", None),
+            ("G / Tab", "switch between edit and view mode", Some(HelpAction::ToggleGizmos)),
+            ("M", "light up what the selected transform moves", Some(HelpAction::ToggleEmphasis)),
+            ("Esc", "close a menu or dialog, or deselect", None),
         ],
     ),
 ];
@@ -229,10 +231,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
-                    "Size of every panel, over and above the display's own scale factor. \
-                     Saved to prefs.\n\n\
-                     Applies when you let go. The viewport is unaffected — this \
-                     is the chrome, not the picture.",
+                    "How big the panels and text are. Takes effect when you let \
+                     go. The picture itself isn't affected.",
                     "drag: resize the panels (applies on release)",
                 );
                 if resp.dragged() {
@@ -251,7 +251,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.separator();
 
             ui.label(
-                egui::RichText::new("Rows with a key binding are clickable — shift+click runs the second variant.")
+                egui::RichText::new("Click a row to use it. Shift+click does the second action, where there is one.")
                     .small()
                     .weak(),
             );
@@ -350,11 +350,11 @@ fn draw_row(
         resp,
         &mut app.ui_state,
         if shift {
-            "Click to run the shift variant of this binding"
+            "Click to do the second action"
         } else {
-            "Click to run this binding · shift+click for the second variant"
+            "Click to do this. Shift+click does the second action, where there is one"
         },
-        "click: run this binding · shift+click: second variant",
+        "click: do this · shift+click: the second action",
     );
 
     resp.clicked().then_some(action).flatten()

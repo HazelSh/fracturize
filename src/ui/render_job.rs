@@ -327,9 +327,9 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
     } else {
         ui.label(
             egui::RichText::new(
-                "Writes a view file describing this exact framing — no render. \
-                 Load it later with --view, or render it from the command line \
-                 on a machine with time to spare.",
+                "Saves this exact framing to a view file, without rendering \
+                 anything. You can load it later, or render it from the command \
+                 line (--view).",
             )
             .small()
             .weak(),
@@ -357,7 +357,7 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
             Ok((path, outcome)) => draw_done_panel(ui, app, &path, outcome),
             Err(e) if e == crate::render_job::CANCELLED => {
                 ui.label(
-                    egui::RichText::new("Cancelled — nothing was written.")
+                    egui::RichText::new("Stopped before any frames were rendered, so nothing was saved.")
                         .color(ui.visuals().weak_text_color())
                         .small(),
                 );
@@ -378,11 +378,11 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if blocked {
-                "That path is a directory. Add a filename to it."
+                "That's a folder. Add a filename to the end."
             } else if named {
-                "Run this job on a second GPU device — the app stays usable while it goes"
+                "Start rendering. You can keep using the app while it runs"
             } else {
-                "Give the output a filename first"
+                "Enter a filename first"
             },
             "click: start the render job",
         );
@@ -428,23 +428,21 @@ const OUTPUTS: [(Mode, crate::video::Format, &str, &str); 4] = [
         Mode::Animation,
         crate::video::Format::Avif,
         "avif",
-        "Fly the camera path and encode an animated AVIF (AV1): loops like a GIF at a \
-         fraction of the size, and plays in a browser. The better file — but many upload \
-         pipelines won't take it.",
+        "An animation along the camera path, as AVIF. Loops like a GIF at a fraction \
+         of the size and plays in browsers, but many websites won't accept it.",
     ),
     (
         Mode::Animation,
         crate::video::Format::Mp4,
         "mp4",
-        "Fly the camera path and encode an MP4 (H.264): bigger than the AVIF, and what \
-         platforms that loop short clips actually accept. Faststart, so it plays while it \
-         downloads.",
+        "An animation along the camera path, as MP4. Bigger than AVIF, but accepted \
+         almost everywhere you might upload it.",
     ),
     (
         Mode::ViewDescriptor,
         crate::video::Format::Avif, // unused for a view file
         "view",
-        "Save the framing to a view file instead of rendering anything",
+        "Save the framing to a view file, without rendering anything",
     ),
 ];
 
@@ -520,8 +518,8 @@ fn draw_filename(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Where the output goes. Directories are created as needed; relative paths \
-         are relative to where fracturize was launched.",
+        "Where to save the result. Missing folders are created. A relative path \
+         starts from the folder Fracturize was launched in.",
         "type: the output filename",
     );
     if resp.changed() {
@@ -560,7 +558,7 @@ enum FilenameTrouble {
 impl FilenameTrouble {
     fn message(self) -> &'static str {
         match self {
-            FilenameTrouble::IsDirectory => "That's a directory — give the render a filename.",
+            FilenameTrouble::IsDirectory => "That's a folder. Add a filename to the end.",
             FilenameTrouble::WillOverwrite => "This file exists and will be overwritten.",
         }
     }
@@ -613,11 +611,10 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
     // gives every frame its own camera, so there is no histogram to carry
     // between them; the points renderer has no histogram at all.
     let why_not = if !form.splat {
-        Some("Accumulation needs the splat renderer — the points renderer has no histogram.")
+        Some("Only available with the splat renderer.")
     } else if form.mode != Mode::Still {
         Some(
-            "Accumulation builds one still into a persistent histogram. Every frame of an \
-             animation has its own camera, so there is nothing to carry between them.",
+            "Only available for stills.",
         )
     } else {
         None
@@ -635,12 +632,11 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             why_not.unwrap_or(
-                "Fold lap after lap into a histogram until the target density is reached. \
-                 Resolution-independent: the same setting means the same density at any \
-                 output size. Stopping early gives a noisier version of the same picture, \
-                 never a darker one.",
+                "Keep adding points until each pixel has had the number of samples you \
+                 ask for below. The same setting gives the same quality at any size, and \
+                 stopping early gives a noisier version of the same picture.",
             ),
-            "click: accumulate to a sample target",
+            "click: render to a sample target",
         );
         if resp.clicked() {
             accumulating = true;
@@ -649,10 +645,9 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Fill the point buffer once and splat it. Cheap and bounded, but the density it \
-             delivers is points ÷ pixels — so the same settings get grainier the larger you \
-             render.",
-            "click: a single pass over the point buffer",
+            "Render the points once. Quick, but the same settings look grainier the \
+             larger the image.",
+            "click: render the points once",
         );
         if resp.clicked() {
             accumulating = false;
@@ -672,10 +667,9 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Target samples per output pixel. Noise falls as 1/√N, so each decade here is \
-             about 3.2x cleaner — and it keeps paying, with no plateau. 100 is a good \
-             working figure; past ~30,000 an 8-bit PNG can no longer hold what the render \
-             has, so save 16-bit.",
+            "Samples per pixel. More is cleaner and slower: 10× the samples is about \
+             3× less noise. 100 is a good everyday value. Above about 30,000, also \
+             tick 16-bit PNG, or the file can't hold the extra detail.",
             "drag: samples per output pixel",
         );
         if resp.changed() {
@@ -688,10 +682,9 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Extra chaos-game frames stirred in after the buffer fills. It moves the walkers \
-             on without adding samples, so it is a convergence knob rather than a density \
-             one — it changes the picture but costs almost nothing.",
-            "drag: extra chaos-game frames",
+            "Extra rounds of the chaos game after the points are filled in. Settles the \
+             points further without adding more of them. Costs almost nothing.",
+            "drag: extra rounds of the chaos game",
         );
         if resp.changed() {
             app.ui_state.render_job.accumulate = accum;
@@ -720,13 +713,11 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         if accumulating {
-            "The chaos game's working set: how much is folded in per lap. It changes how the \
-             work is cut up, not how much there is, so leave it be unless memory is tight — \
-             the sample target above is the quality dial."
+            "How many points are worked on at a time. This doesn't affect quality (the \
+             sample count above does), so leave it alone unless GPU memory is tight."
         } else {
-            "Points for *this job only* — the interactive buffer and your prefs are \
-             untouched, so the app stays as responsive as it was. Here the buffer *is* the \
-             sample count, so this is the quality dial."
+            "How many points to render. More looks better. This only applies to the \
+             render; the live view keeps its own point count."
         },
         "drag: point count for this job",
     );
@@ -747,15 +738,11 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         if accumulating {
-            "The variable-width blur: wide kernels where the histogram is sparse and noisy, \
-             narrow where it is dense and detailed. This is most of what distinguishes an \
-             Apophysis render, and it is not substitutable by more samples — those improve \
-             the whole image proportionally, while this targets exactly the regions still \
-             noisy at a finite budget. Linear end to end, so 0.3 is three tenths of the \
-             effect; try it before 1.0."
+            "Smooths the grainy, sparse parts of the picture while leaving the dense, \
+             detailed parts sharp. Much of what gives Apophysis renders their look. Try \
+             around 0.3 before going to 1.0."
         } else {
-            "Density estimation reads a density off the accumulation histogram, so it needs \
-             an accumulating render. Switch Samples to accumulate."
+            "Set Samples to accumulate to use this."
         },
         "drag: density-estimation strength",
     );
@@ -772,7 +759,7 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         let tiling = match params.tile_plan(limit) {
             Ok(p) if p.is_single() => String::new(),
             Ok(p) => format!(" · {} tiles ({}x{})", p.tiles.len(), p.cols, p.rows),
-            Err(_) => String::from(" · will not fit"),
+            Err(_) => String::from(" · too large"),
         };
         ui.label(
             egui::RichText::new(format!(
@@ -785,10 +772,9 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
             .weak(),
         )
         .on_hover_text(
-            "The histogram is one storage buffer at 32 bytes a texel, and supersampling \
-             squares it. Past this GPU's single-buffer limit the render is split into tiles, \
-             each rendered separately and stitched — which works at any size, but re-runs the \
-             chaos game once per tile.",
+            "How many passes the render will take, and how much GPU memory the image \
+             needs. If it's too big for the graphics card in one piece, it's rendered in \
+             tiles and stitched together, which takes longer.",
         );
 
         // A machine setting among job settings, like `threads` below, and it
@@ -805,10 +791,9 @@ fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "How much of the GPU this render may take. 1.00 is as fast as possible and will \
-             make the desktop stutter; lower values sleep between laps so the compositor gets \
-             a turn. It costs exactly what it says — 0.50 is about twice the wall clock. \
-             Follows you across scenes, saved to prefs; never written to a scene file.",
+            "How much of the graphics card the render may use. At 1.00 it's fastest, but \
+             the desktop may stutter. 0.50 takes about twice as long and leaves room for \
+             everything else. This setting is remembered.",
             "drag: share of the GPU this render may take",
         );
         if resp.changed() {
@@ -868,10 +853,9 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Render the histogram this many times larger in each axis and filter it down. \
-             The largest visible quality win here — an unfiltered render's remaining \
-             harshness is aliasing, not noise, so this beats simply adding points. Costs \
-             roughly N² fill and N² memory. 1 turns it off.",
+            "Render at this many times the size, then scale down. Smooths jagged edges, \
+             and is the biggest quality improvement here. 2× costs about 4× the memory and \
+             time. 1 turns it off.",
             "drag: supersampling factor",
         );
         if resp.changed() {
@@ -909,13 +893,10 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 if ss > 1 {
-                    "Filter half-width in output pixels. At 0.5 with the box kernel this is \
-                     exactly an N x N block average; wider trades detail for smoothness \
-                     uniformly across the whole picture. Below 0.5 the kernel reads only \
-                     the middle of each block — sharper, and aliased, down to a point \
-                     sample."
+                    "How soft the scaling-down is, in pixels. Higher is smoother; lower \
+                     is sharper but more jagged. 0.5 is the default."
                 } else {
-                    "Needs supersampling above 1x — there is nothing to filter down at 1x."
+                    "Only used when supersample is above 1×"
                 },
                 "drag: filter radius",
             );
@@ -931,7 +912,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Render with the log-density splat renderer instead of opaque points",
+            "Use the splat renderer instead of the points renderer",
             "click: toggle the splat renderer for this job",
         );
         if resp.changed() {
@@ -949,7 +930,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Splat exposure for this job",
+                "Brightness, for the splat renderer",
                 "drag: splat exposure",
             );
             if resp.changed() {
@@ -971,11 +952,10 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if still {
-                "Twice the file, the same render — this is only how finely it quantizes. \
-                 Worth it for a keeper: supersampling produces smooth wide gradients, which \
-                 is exactly what 8 bits bands into visible contours."
+                "Save more precise colour, at twice the file size. Worth it for a final \
+                 render: smooth gradients can show visible bands at 8 bits."
             } else {
-                "Stills only — both video codecs take 8-bit frames."
+                "Only available for stills"
             },
             "click: toggle 16-bit PNG output",
         );
@@ -1000,9 +980,9 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if animation {
-                "Not available for animation — neither AV1 nor H.264 carries an alpha plane"
+                "Animations can't have a transparent background"
             } else {
-                "Write an alpha channel for compositing"
+                "Save with a transparent background, for layering over other images"
             },
             "click: toggle transparent output",
         );
@@ -1030,7 +1010,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Duration. Defaults to the camera path's own.",
+                "Length of the animation. Starts at the camera path's own length",
                 "drag: duration",
             );
             if resp.changed() {
@@ -1043,7 +1023,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                format!("{} quality, 0-100. Higher is better and bigger.", codec),
+                format!("{} quality, 0 to 100. Higher looks better and makes a bigger file.", codec),
                 &format!("drag: {} quality", codec),
             );
             if resp.changed() {
@@ -1068,10 +1048,9 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
                 resp,
                 &mut app.ui_state,
                 format!(
-                    "CPU threads for encoding, out of this machine's {}. The default holds \
-                     one back so the desktop stays usable while a long encode runs — the AV1 \
-                     flush alone is ~75x the cost of rendering a frame. Follows you across \
-                     scenes, saved to prefs; never written to a scene file.",
+                    "How many CPU threads to use for encoding, out of this machine's {}. \
+                     The default leaves one free so the desktop stays usable. This \
+                     setting is remembered.",
                     max
                 ),
                 "drag: CPU threads for encoding",
@@ -1106,13 +1085,13 @@ fn draw_inherited(ui: &mut egui::Ui, app: &mut App) {
         parts.push(format!("vibrancy {:.2}", g.vibrancy));
     }
     ui.label(
-        egui::RichText::new(format!("grade: {} — from the Render window", parts.join(" · ")))
+        egui::RichText::new(format!("grade from the Render window: {}", parts.join(" · ")))
             .small()
             .weak(),
     )
     .on_hover_text(
-        "The tonemap grade is a live control, so it is set where you can see it working \
-         rather than here. This job will render with the grade the window is showing.",
+        "Gamma and vibrancy are set in the Render window, where you can see them \
+         working. The render uses whatever is set there.",
     );
 }
 
@@ -1144,14 +1123,13 @@ fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
                 .small(),
             )
             .on_hover_text(
-                "Extrapolated from this session's own measured chaos-game throughput, at a \
-                 different point count and resolution — hence a range rather than a number. \
-                 It gets replaced by a real one once the job has made progress.",
+                "A rough guess based on how fast things have run so far this session. Once \
+                 the render starts, it's replaced by a better one.",
             );
         }
         None => {
             ui.label(
-                egui::RichText::new("Estimated time: unknown until the renderer has warmed up")
+                egui::RichText::new("Estimated time: not known yet")
                     .small()
                     .weak(),
             );
@@ -1220,8 +1198,8 @@ fn draw_done_panel(
                 // is usable, and "run it again" is the whole of the fix.
                 ui.label(
                     egui::RichText::new(
-                        "This is what had accumulated when you stopped it — the same picture, \
-                         noisier. Run the job again to get the full one.",
+                        "This is the picture as it was when you stopped it: the same \
+                         image, but noisier. Run it again for the full quality.",
                     )
                     .small()
                     .weak(),
@@ -1438,8 +1416,7 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Stop the job between frames without losing it. The GPU it holds is its own, \
-             so pausing frees it for the interactive renderer.",
+            "Pause the render without losing progress",
             "click: pause / resume the job",
         );
         if resp.clicked() {
@@ -1449,18 +1426,18 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             }
         }
 
-        // Two stages: `Cancel` arms it, it counts down disabled, then it comes
-        // back as a red `Abort render`. See `ui::confirm::danger_button`.
+        // Two stages: `Stop` arms it, it counts down disabled, then it comes
+        // back as a red `Stop render`. See `ui::confirm::danger_button`.
         if cancelling {
             let resp = ui.add_enabled(
                 false,
-                egui::Button::new(format!("{} Aborting…", icons::TRASH)),
+                egui::Button::new(format!("{} Stopping…", icons::TRASH)),
             );
             hinted(
                 resp,
                 &mut app.ui_state,
-                "The job is stopping. Nothing is written.",
-                "the job is stopping",
+                "Stopping. What has been rendered so far is being saved.",
+                "the render is stopping",
             );
         } else {
             let (arm, fired) = super::confirm::danger_button(
@@ -1468,11 +1445,12 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
                 &mut app.ui_state,
                 cancel_arm,
                 icons::TRASH,
-                "Cancel",
-                "Abort render",
-                "Stop the render and throw it away",
-                "Throw the job away. Nothing is written, and the time it has \
-                 already spent is lost.",
+                "Stop",
+                "Stop render",
+                "Stop the render early and save what it has so far",
+                "Stop now. What's rendered so far is saved, noisier than a \
+                 finished render. An animation stopped before its first frame \
+                 saves nothing.",
             );
             if let Some(job) = app.job_mut() {
                 job.cancel_arm = arm;
@@ -1486,7 +1464,7 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Close this window — the job keeps running, and the status bar keeps the spinner",
+            "Close this window. The render keeps going, and the status bar shows its progress",
             "click: close",
         );
         if resp.clicked() {

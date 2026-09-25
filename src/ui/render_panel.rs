@@ -38,7 +38,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             // Grouped within the window rather than split across windows:
             // splitting would scatter things that belong together by task, and
             // the task is why you opened this panel.
-            class_heading(ui, "Scene", "Saved with the scene by Ctrl+S, and undoable.");
+            class_heading(ui, "Scene", "Saved with the scene (Ctrl+S), and undoable.");
             draw_renderer(ui, app);
             draw_point_size(ui, app);
             draw_color(ui, app);
@@ -50,7 +50,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             class_heading(
                 ui,
                 "View",
-                "Saved with a view file and written into render records — never into the scene.",
+                "Saved in view files and render records, but not in the scene.",
             );
             draw_grade(ui, app);
 
@@ -58,7 +58,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             class_heading(
                 ui,
                 "Preference",
-                "Follows you across scenes, saved to prefs — never written to a scene file.",
+                "Your own setting. It applies to every scene and is never saved in one.",
             );
             point_count(ui, app);
         });
@@ -77,13 +77,14 @@ pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
         .option(
             RenderMode::Points,
             "points",
-            "Opaque depth-tested points — crisp, dusty edges (R)",
+            "Solid points, nearest in front. Crisp and gritty (R)",
             "click: switch to the points renderer",
         )
         .option(
             RenderMode::Splat,
             "splat",
-            "Additive log-density accumulation — smoother tonemapping, exposure applies (R)",
+            "Points glow and add up where they overlap. Smoother, and the exposure \
+             slider applies (R)",
             "click: switch to the splat renderer",
         )
         .show(ui);
@@ -110,12 +111,11 @@ fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if splat {
-                "Splat exposure — the log-density renderer's brightness (W / Shift+W).\n\n\
-                 Saved with the scene, and undoable."
+                "Brightness of the splat renderer (W / Shift+W)"
             } else {
-                "Only applies to the splat renderer"
+                "Only used by the splat renderer"
             },
-            "drag: adjust splat exposure",
+            "drag: adjust exposure",
         );
         if resp.changed() {
             app.set_exposure(exposure);
@@ -185,15 +185,12 @@ fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
             0.5..=6.0,
             true,
             if splat {
-                "Lifts the dim end of the tonemap — most of what people mean by the \
-                 Apophysis look. 1.00 is off, and there is no gamma curve at all below \
-                 this control: just the log and a fixed gain.\n\n\
-                 Logarithmic, because it is a ratio: 2.0 to 2.2 is the same size of change \
-                 as 4.0 to 4.4, and the shader works in 1/gamma."
+                "Brightens the faint parts of the picture. This is most of what people \
+                 mean by the Apophysis look. 1.00 is off."
             } else {
-                "Only applies to the splat renderer — opaque points have no tonemap to grade"
+                "Only used by the splat renderer"
             },
-            "drag: adjust tonemap gamma",
+            "drag: adjust gamma",
         );
 
         // Both remaining knobs act *on the gamma curve*, and at gamma 1 the
@@ -213,13 +210,13 @@ fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
                 0.0..=0.6,
                 false,
                 if graded {
-                    "The toe that stops gamma lifting background speckle into a grey veil: \
-                     coverage below this blends toward a straight line. 0 is off.\n\n\
-                     Measured useful range is 0.05-0.5. Note this is in post-log *coverage*, \
-                     where the whole scale is 0-1 — flam3 has a knob with the same name \
-                     measured in raw density, and the two numbers do not transfer."
+                    "Stops gamma from lifting stray specks into a grey haze over the \
+                     background. The faintest parts, below this level, are left alone. \
+                     0 is off; 0.05 to 0.5 is the useful range.\n\n\
+                     Flam3 has a setting with the same name, but its numbers mean \
+                     something different and don't carry over."
                 } else {
-                    "Needs a gamma curve to flatten — raise gamma above 1.00"
+                    "Raise gamma above 1.00 to use this"
                 },
                 "drag: adjust the gamma threshold",
             );
@@ -232,11 +229,10 @@ fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
                 0.0..=1.0,
                 false,
                 if graded {
-                    "How gamma reaches colour: 1.00 puts the curve through each channel and \
-                     keeps hue, 0.00 applies it to brightness alone and rolls bright cores \
-                     toward white."
+                    "How gamma treats colour. At 1.00 colours keep their hue; at 0.00 \
+                     bright areas fade toward white, the way film does."
                 } else {
-                    "Inert without a gamma curve to route — raise gamma above 1.00"
+                    "Raise gamma above 1.00 to use this"
                 },
                 "drag: adjust vibrancy",
             );
@@ -254,9 +250,9 @@ fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if neutral {
-                "Already neutral — this is the tonemap with no grade on it"
+                "Already neutral"
             } else {
-                "Back to no grade at all: gamma 1, no threshold, full vibrancy"
+                "Reset gamma, gamma threshold and vibrancy to neutral"
             },
             "click: clear the grade",
         );
@@ -300,14 +296,13 @@ fn draw_point_size(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         format!(
-            "World-space point size — smaller is finer and dustier ([ / ]).\n\n\
-             The readout beside it is what that comes to in pixels, measured at the \
-             focus: the same world size is coarse grain on a scene framed at 0.02 and \
-             invisible on one framed at 3.0.{}",
+            "Size of each point. Smaller is finer and dustier ([ / ]).\n\n\
+             The number beside it is roughly how many pixels that comes to at the \
+             current framing.{}",
             if saturated {
-                " Right now it is pinned — the renderer draws 1px points below 1.5px \
-                 and clamps above 12px, so moving the slider won't change what you see. \
-                 Point count is the dial that still does."
+                "\n\nAt this size the slider has no visible effect: points are always \
+                 drawn at least 1 pixel and at most 12 pixels wide. Try changing the \
+                 point count instead."
             } else {
                 ""
             }
@@ -393,11 +388,12 @@ pub fn point_count(ui: &mut egui::Ui, app: &mut App) {
         resp,
         &mut app.ui_state,
         format!(
-            "Points the chaos game keeps in flight — the main quality/performance dial (max {:.0}M on this GPU). \
-             Applies as you drag, a few times a second, so watch the FPS and p99 readouts move.",
+            "How many points are drawn. More looks better and runs slower (up to {:.0}M on \
+             this graphics card). It updates as you drag, so you can watch the frame rate \
+             in the status bar.",
             max_m
         ),
-        "drag: adjust point count — watch the frame stats",
+        "drag: adjust point count",
     );
     if resp.changed() {
         app.request_point_capacity((millions * 1e6).round() as u32);
@@ -405,7 +401,7 @@ pub fn point_count(ui: &mut egui::Ui, app: &mut App) {
 
     if pending.is_some() {
         ui.label(
-            egui::RichText::new("reallocating…")
+            egui::RichText::new("updating…")
                 .small()
                 .weak(),
         );
@@ -422,7 +418,7 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Background colour. Scene data — saved with the scene, and undoable.",
+            "Background colour",
             "click: pick a background colour",
         );
         if resp.changed() {
@@ -435,10 +431,10 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Write an alpha channel in screenshots (S) and render jobs so they can be \
-             composited. The window itself stays opaque — there's nothing behind it to show \
-             through. Not available for .avif output.",
-            "click: toggle transparent output",
+            "Give screenshots (S) and rendered stills a transparent background, for \
+             layering over other images. The window itself stays opaque. Animations \
+             can't be transparent.",
+            "click: transparent background in saved images",
         );
         if resp.changed() {
             app.transparent_render = transparent;
@@ -454,12 +450,13 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
 /// like a broken palette rather than a contrast setting.
 fn draw_color(ui: &mut egui::Ui, app: &mut App) {
     let mut falloff = app.color_falloff;
-    let resp = ui.add(egui::Slider::new(&mut falloff, 0.0..=4.0).text("color falloff"));
+    let resp = ui.add(egui::Slider::new(&mut falloff, 0.0..=4.0).text("colour falloff"));
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Scale-aware color accumulation exponent — 0 disables it, lower is finer color detail (D / Shift+D)",
-        "drag: adjust color falloff",
+        "How much colour detail shows at small scales. Lower brings out finer \
+         detail; 0 turns it off (D / Shift+D)",
+        "drag: adjust colour falloff",
     );
     if resp.changed() {
         app.set_color_falloff(falloff);
@@ -513,11 +510,10 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Aerial perspective: distant material thins toward the background and \
-         loses colour, so you can read which arm is in front. The band it fades \
-         across follows the camera distance automatically (F / Shift+F). The \
-         drag is weighted toward the top of its travel, where dense splat \
-         scenes keep all the visible change.",
+        "Distant parts fade into the background and lose colour, so you can \
+         tell what's in front (F / Shift+F).\n\n\
+         The slider gives more room to the top of its range, where most of \
+         the visible change happens.",
         "drag: adjust haze",
     );
     if resp.changed() {
@@ -531,8 +527,8 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Off: the haze band tracks the camera distance, so it keeps working \
-             as you zoom. On: hold it at fixed world-space distances.",
+            "Off: the haze follows the camera, so it keeps working as you zoom. \
+             On: the haze stays at fixed distances.",
             "click: pin or unpin the haze band",
         );
         if resp.changed() {
@@ -549,7 +545,7 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
         if overridden {
             ui.label(
                 egui::RichText::new(
-                    "auto-ranged: a pinned band can't follow the zoom's wrap",
+                    "Set automatically, because pinning doesn't work with infinite zoom",
                 )
                 .small()
                 .weak(),
@@ -571,7 +567,7 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
                 let changed_near = hinted(
                     resp,
                     &mut app.ui_state,
-                    "World distance where the fade starts",
+                    "Distance where the haze begins",
                     "drag: move the haze's near plane",
                 )
                 .changed();
@@ -585,7 +581,7 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
                 let changed_far = hinted(
                     resp,
                     &mut app.ui_state,
-                    "World distance where the fade reaches full strength",
+                    "Distance where the haze is at full strength",
                     "drag: move the haze's far plane",
                 )
                 .changed();
@@ -653,8 +649,7 @@ fn draw_zoom_map_picker(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Render the attractor as itself — bounded, with a largest feature. \
-             The ordinary way to render an IFS.",
+            "No infinite zoom. The fractal is drawn at its own size, with an edge.",
             "click: turn infinite zoom off",
         );
         if resp.clicked() {
@@ -694,7 +689,7 @@ fn draw_zoom_map_picker(ui: &mut egui::Ui, app: &mut App) {
         app.set_zoom_map(Some(i));
     }
     ui.label(
-        egui::RichText::new("Greyed maps can't carry the symmetry — hover one to see why.")
+        egui::RichText::new("Hover a greyed transform to see why it can't be used.")
             .small()
             .weak(),
     );
@@ -714,7 +709,7 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
     let mut next = spec.clone();
 
     ui.label(egui::RichText::new(format!(
-        "{:.2} octaves per period · {:.0}° twist",
+        "repeats every {:.2} octaves · {:.0}° twist",
         z.log_scale / std::f32::consts::LN_2,
         z.twist_degrees()
     )).small().weak());
@@ -732,12 +727,10 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Octaves over which the outer edge of the picture fades to \
-             nothing, measured against the camera rather than the world. At 0 \
-             the band simply stops, and every wrap drops a recognisable slab \
-             of structure between two frames. Above 0 that material leaves \
-             gradually and at a steady rate as you zoom, and the wrap itself \
-             costs nothing. Wider than the band has room for is clamped.",
+            "How gradually the outer edge of the picture fades out, in octaves. \
+             At 0 there is a hard edge, and chunks of the picture blink out \
+             each time the zoom repeats. Above 0 they fade away smoothly as you \
+             zoom.",
             "drag: widen or narrow the outer fade",
         );
         if resp.changed() {
@@ -745,10 +738,10 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
         }
         ui.label(egui::RichText::new(match z.guard_span() {
             Some((start, end)) => format!(
-                "outer {:.1} octaves guarded, {:.2}x-{:.2}x the eye distance",
+                "fades over {:.1} octaves, {:.2}× to {:.2}× the camera distance",
                 z.guard_width, start, end
             ),
-            None => "hard edge — the wrap will step".to_string(),
+            None => "hard edge: the picture will jump as it repeats".to_string(),
         }).small().weak());
 
         ui.collapsing("band size", |ui| {
@@ -761,11 +754,10 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Outer radius of the band, in camera distances. Not a look \
-                 control: below 2.42 its edge enters the frustum and material \
-                 blinks out at every wrap. Raising it past that only helps a \
-                 scene with haze — the rendered set is scale-invariant, so the \
-                 outermost octave looks the same however far out you put it.",
+                "How far out the picture extends, in camera distances. Below \
+                 2.42 the edge comes into view and parts of the picture blink out \
+                 as the zoom repeats. Going higher only helps if the scene has \
+                 haze.",
                 "drag: resize the band's outer edge",
             );
             if resp.changed() {
@@ -774,7 +766,7 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
             if !z.band_covers_the_view() {
                 ui.label(
                     egui::RichText::new(format!(
-                        "below {:.2} — the edge is inside the picture",
+                        "below {:.2}: the edge is in view",
                         crate::renorm::MIN_RADIUS
                     ))
                     .color(ui.visuals().error_fg_color)
@@ -791,16 +783,15 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Octaves of scale rendered below the outer radius. Deeper means \
-                 you can zoom further before the core empties out, and every \
-                 octave thinner for the same point budget.",
+                "How many octaves deep the picture goes. Deeper keeps the middle \
+                 from emptying out, but spreads the same points more thinly.",
                 "drag: change how deep the band goes",
             );
             if resp.changed() {
                 app.set_zoom_spec(next.clone());
             }
             ui.label(
-                egui::RichText::new(format!("{:.0} zoom periods of this map", z.periods))
+                egui::RichText::new(format!("{:.0} repeats of the zoom", z.periods))
                     .small()
                     .weak(),
             );
@@ -814,13 +805,11 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                "Point budget falling off toward the fixed point — the opposite \
-                 end of the band from the edge fade above, and it thins the \
-                 middle of the picture rather than its rim. Leave at 0 for \
-                 anything that will be flown: it makes neighbouring octaves hold \
-                 different numbers of points, so the density jumps every time the \
-                 camera wraps. Useful for a still, which never wraps.",
-                "drag: bias the point budget inward",
+                "Thins out the middle of the picture, toward the zoom centre. \
+                 Useful for evening out a still image. Leave it at 0 for \
+                 animation, where it makes the density jump each time the zoom \
+                 repeats.",
+                "drag: thin out the middle",
             );
             if resp.changed() {
                 app.set_zoom_spec(next);
