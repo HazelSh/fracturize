@@ -680,8 +680,12 @@ enum Drag {
     Consumed,
     /// Left-drag on a gizmo: edit that transform live
     Gizmo {
+        /// Index into `App::gizmo_specs`: a map, or 0 for a subscene.
         transform: usize,
+        /// The subscene being moved as a whole, when it is one.
+        subscene: Option<usize>,
         mode: GizmoDragMode,
+        /// In scene space, like everything `gizmo_specs` hands out.
         start_matrix: Mat4,
     },
 }
@@ -951,6 +955,13 @@ pub struct App {
 
     /// Selected transform index (Some when text overlay visible)
     selected_transform: Option<usize>,
+    /// A whole subscene selected as one object (a layer, `1..=n`), exclusive
+    /// with `selected_transform`. While set, the gizmo layer shows that
+    /// subscene's placement and nothing else — see `gizmo_specs`.
+    selected_subscene: Option<usize>,
+    /// The layer the Transforms window lists and new maps join. Follows the
+    /// selection; 0 (the scene's own maps) for an ordinary scene, always.
+    current_layer: usize,
     /// Per-transform enabled state
     transform_enabled: Vec<bool>,
     /// Variation slot targeted by the variation-editing keys
@@ -1049,9 +1060,7 @@ impl App {
         // Create point compute pipeline
         let point_compute = PointCompute::new(
             &gpu.device,
-            &scene.transforms,
-            &scene.colors,
-            &scene.colormap,
+            &crate::gpu::points::compute::LayerTable::build(&scene, &[], scene.color_contrast),
             buffer_capacity,
             crate::gpu::points::compute::DEFAULT_SEED,
         );
@@ -1103,8 +1112,9 @@ impl App {
             &gpu.device,
             gpu.format,
             overlay_samples,
-            &scene.transforms,
+            &scene.world_transforms(),
         );
+        let first_layer = scene.first_layer_with_maps();
 
         // Create depth texture
         let (width, height) = gpu.size();
@@ -1272,6 +1282,8 @@ impl App {
             // nobody had asked for, on every scene, before anyone had looked
             // at it.
             selected_transform: None,
+            selected_subscene: None,
+            current_layer: first_layer,
             transform_enabled: vec![true; num_transforms],
             selected_variation: 0,
             matrix_generation: 0,
@@ -1488,15 +1500,20 @@ impl App {
             log::warn!("Nothing selected — click a transform's gizmo or a row in the Transforms window");
             return;
         };
-        let Some(spec) = self.scene.transforms.get(idx) else { return };
-        let m = spec.matrix;
+        if idx >= self.scene.transforms.len() {
+            return;
+        }
+        // The map's fixed point in its own subscene's space, carried into the
+        // scene's — which is where the camera is.
+        let m = self.scene.transforms[idx].matrix;
+        let placement = self.scene.layer_placement(self.scene.transforms[idx].layer as usize);
         let a = glam::Mat3::from_cols(
             m.x_axis.truncate(),
             m.y_axis.truncate(),
             m.z_axis.truncate(),
         );
         let b = m.w_axis.truncate();
-        let p = (glam::Mat3::IDENTITY - a).inverse().mul_vec3(b);
+        let p = placement.transform_point3((glam::Mat3::IDENTITY - a).inverse().mul_vec3(b));
         if !p.is_finite() {
             // A map with an eigenvalue at 1 — a pure translation, say — has no
             // finite fixed point. Say so rather than flying the camera to NaN.
@@ -2336,6 +2353,382 @@ impl App {
     /// directly; this is the same field, so both stay in sync automatically.
     pub fn select_transform(&mut self, idx: Option<usize>) {
         self.selected_transform = idx;
+        if let Some(i) = idx {
+            if let Some(t) = self.scene.transforms.get(i) {
+                self.current_layer = t.layer as usize;
+            }
+            self.leave_subscene_gizmo();
+        }
+    }
+
+    // === Subscenes (see src/subscene.rs) ===
+
+    /// The subscene selected as a whole, if any.
+    pub fn selected_subscene(&self) -> Option<usize> {
+        self.selected_subscene.filter(|&k| k >= 1 && k <= self.scene.subscenes.len())
+    }
+
+    /// The layer the Transforms window is listing.
+    pub fn current_layer(&self) -> usize {
+        self.current_layer.min(self.scene.layer_count() - 1)
+    }
+
+    /// Make a layer current, and — for a subscene — select it as a whole, so
+    /// its gizmo moves the entire attractor. Layer 0 has no placement (it is
+    /// the scene's own frame), so choosing it just lists its maps.
+    pub fn select_layer(&mut self, k: usize) {
+        if k >= self.scene.layer_count() {
+            return;
+        }
+        self.current_layer = k;
+        self.selected_transform = None;
+        let want = (k >= 1).then_some(k);
+        if self.selected_subscene != want {
+            self.selected_subscene = want;
+            self.rebuild_gizmos();
+        }
+    }
+
+    /// Keep the current layer but stop selecting it as a whole.
+    pub fn leave_subscene_selection(&mut self) {
+        self.leave_subscene_gizmo();
+    }
+
+    /// Back to the maps' gizmos, if a subscene's was showing.
+    fn leave_subscene_gizmo(&mut self) {
+        if self.selected_subscene.take().is_some() {
+            self.rebuild_gizmos();
+        }
+    }
+
+    /// Every gizmo the viewport draws and picks, in scene space: each map's
+    /// matrix carried by its subscene's placement — or, with a subscene
+    /// selected as a whole, that subscene's placement alone. Indices into this
+    /// list are what `pick`, the highlight and a `Drag::Gizmo` talk about.
+    pub fn gizmo_specs(&self) -> Vec<TransformSpec> {
+        if let Some(k) = self.selected_subscene() {
+            let mut spec = self.scene.transforms[0].clone();
+            spec.matrix = self.scene.layer_placement(k);
+            spec.post_affine = Mat4::IDENTITY;
+            spec.symmetry = None;
+            return vec![spec];
+        }
+        self.scene.world_transforms()
+    }
+
+    fn gizmo_matrices(&self) -> Vec<Mat4> {
+        self.gizmo_specs().into_iter().map(|t| t.matrix).collect()
+    }
+
+    /// Which gizmo is selected: the one subscene gizmo, or the selected map.
+    pub fn gizmo_selection(&self) -> Option<usize> {
+        match self.selected_subscene() {
+            Some(_) => Some(0),
+            None => self.selected_transform,
+        }
+    }
+
+    /// Per-gizmo enabled state, parallel to `gizmo_specs`.
+    fn gizmo_enabled(&self) -> Vec<bool> {
+        match self.selected_subscene() {
+            Some(_) => vec![true],
+            None => self.transform_enabled.clone(),
+        }
+    }
+
+    /// Name labels for the gizmos: `(scene-space matrix, name, enabled)`.
+    pub fn gizmo_labels(&self) -> Vec<(Mat4, String, bool)> {
+        if let Some(k) = self.selected_subscene() {
+            return vec![(self.scene.layer_placement(k), self.scene.layer_name(k).to_string(), true)];
+        }
+        self.gizmo_specs()
+            .into_iter()
+            .enumerate()
+            .map(|(i, spec)| {
+                let name = self
+                    .scene
+                    .transform_names
+                    .get(i)
+                    .and_then(|n| n.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| format!("T{}", i));
+                (spec.matrix, name, self.is_transform_enabled(i))
+            })
+            .collect()
+    }
+
+    /// Rebuild the gizmo renderer for the current gizmo list — its instance
+    /// count is fixed at construction, and a subscene's gizmo is one instance
+    /// where the maps are many.
+    fn rebuild_gizmos(&mut self) {
+        self.gizmo_renderer = GizmoRenderer::new(
+            &self.gpu.device,
+            self.gpu.format,
+            self.overlay.samples(),
+            &self.gizmo_specs(),
+        );
+        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.gizmo_enabled());
+        self.hovered = None;
+        self.indicator_key = (None, None);
+    }
+
+    /// Show or hide a layer. The last visible layer can't be hidden — a scene
+    /// with nothing to draw is a scene that looks broken.
+    pub fn set_layer_visible(&mut self, k: usize, visible: bool) {
+        if k >= self.scene.layer_count() || self.scene.layer_visible(k) == visible {
+            return;
+        }
+        if !visible
+            && (0..self.scene.layer_count())
+                .filter(|&j| j != k && self.scene.layer_visible(j) && self.scene.layer_sizes()[j] > 0)
+                .count()
+                == 0
+        {
+            log::warn!("{} is the only visible layer", self.scene.layer_name(k));
+            return;
+        }
+        let before = self.edit_snapshot();
+        match k {
+            0 => self.scene.root_visible = visible,
+            k => self.scene.subscenes[k - 1].visible = visible,
+        }
+        self.sync_transforms_to_gpu();
+        let verb = if visible { "Show" } else { "Hide" };
+        self.commit_edit(format!("{} {}", verb, self.scene.layer_name(k)), None, before);
+    }
+
+    /// Whether hiding layer `k` is allowed (it isn't the last visible one).
+    pub fn can_hide_layer(&self, k: usize) -> bool {
+        (0..self.scene.layer_count())
+            .any(|j| j != k && self.scene.layer_visible(j) && self.scene.layer_sizes()[j] > 0)
+    }
+
+    /// Solo a layer: hide every other. Alt-clicking the eye again brings
+    /// everything back, as it does for a transform.
+    pub fn solo_layer(&mut self, k: usize) {
+        if k >= self.scene.layer_count() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let already = (0..self.scene.layer_count()).all(|j| self.scene.layer_visible(j) == (j == k));
+        let show = |j: usize| already || j == k;
+        self.scene.root_visible = show(0);
+        for (i, sub) in self.scene.subscenes.iter_mut().enumerate() {
+            sub.visible = show(i + 1);
+        }
+        self.sync_transforms_to_gpu();
+        let label = if already { "Show all layers".to_string() } else { format!("Solo {}", self.scene.layer_name(k)) };
+        self.commit_edit(label, None, before);
+    }
+
+    /// Set a layer's share of the point budget. Coalesces like a weight drag.
+    pub fn set_layer_share(&mut self, k: usize, share: f32) {
+        if k >= self.scene.layer_count() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let share = share.clamp(0.0, 100.0);
+        match k {
+            0 => self.scene.root_share = share,
+            k => self.scene.subscenes[k - 1].share = share,
+        }
+        self.sync_transforms_to_gpu();
+        self.commit_edit(
+            format!("Share {}", self.scene.layer_name(k)),
+            Some(&format!("share:L{}", k)),
+            before,
+        );
+    }
+
+    /// Move, turn or resize a subscene as a whole.
+    pub fn set_subscene_placement(&mut self, k: usize, placement: crate::subscene::Placement) {
+        if k == 0 || k > self.scene.subscenes.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.subscenes[k - 1].placement = placement;
+        self.bump_matrix_generation();
+        self.sync_transforms_to_gpu();
+        self.commit_edit(
+            format!("Place {}", self.scene.layer_name(k)),
+            Some(&format!("place:L{}", k)),
+            before,
+        );
+    }
+
+    pub fn rename_subscene(&mut self, k: usize, name: &str) {
+        let name = name.trim();
+        if k == 0 || k > self.scene.subscenes.len() || name.is_empty() {
+            return;
+        }
+        if (1..=self.scene.subscenes.len()).any(|j| j != k && self.scene.layer_name(j) == name) {
+            log::warn!("a subscene is already called '{}'", name);
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.subscenes[k - 1].name = name.to_string();
+        self.commit_edit("Rename subscene", Some(&format!("rename:L{}", k)), before);
+    }
+
+    /// Set a subscene's colour source (its own `transforms | palette | mix`).
+    pub fn set_subscene_color_mode(&mut self, k: usize, mode: crate::scene::ColorMode) {
+        if k == 0 || k > self.scene.subscenes.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let colors = self.scene.layer_colors(k);
+        let c = &mut self.scene.subscenes[k - 1].colour;
+        if mode == crate::scene::ColorMode::Palette && c.palette.is_none() {
+            let mut p = crate::palette::Palette::from_transform_colors(&colors);
+            p.name = None;
+            c.palette = Some(p);
+        }
+        c.color_mode = mode;
+        self.push_colormap();
+        self.commit_edit("Subscene colour", None, before);
+    }
+
+    /// Import another scene as a subscene: its maps and colour, placed at the
+    /// origin, with an equal share. Recorded as a `file =` reference, so an
+    /// unedited import saves as four lines and never copies the artwork.
+    pub fn import_subscene(&mut self, path: &Path) -> Result<(), String> {
+        if self.scene.zoom.is_some() {
+            return Err("this scene has infinite zoom, which doesn't compose with subscenes yet".into());
+        }
+        if self.scene.layer_count() >= crate::subscene::MAX_LAYERS {
+            return Err(format!("a scene holds at most {} subscenes", crate::subscene::MAX_LAYERS - 1));
+        }
+        let sub = Scene::load(path)?;
+        if sub.is_composite() {
+            return Err(format!("{} is itself a composite; nesting isn't supported yet", path.display()));
+        }
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        // Relative to where this scene lives, which is what `file =` means.
+        let here = self
+            .scene_path
+            .as_deref()
+            .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::path::PathBuf::from("scenes"));
+        let file = crate::subscene::relative_path(&abs, &here);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or("subscene".into());
+        let mut name = stem.clone();
+        let mut n = 2;
+        while (0..self.scene.layer_count()).any(|k| self.scene.layer_name(k) == name) {
+            name = format!("{}-{}", stem, n);
+            n += 1;
+        }
+        let before = self.edit_snapshot();
+        let layer = self.scene.layer_count() as u16;
+        let base = crate::subscene::FileBase {
+            maps_toml: crate::scene::maps_toml(&sub.transforms, &sub.transform_names, &sub.colors),
+            color_mode: sub.color_mode,
+            color_speed: sub.color_speed,
+            color_falloff: sub.color_falloff,
+            color_contrast: sub.color_contrast,
+            palette_toml: sub.palette.as_ref().map(|p| {
+                crate::palette::spec::PaletteDef::from_palette(p, sub.color_mode == crate::scene::ColorMode::Palette)
+                    .to_table()
+                    .to_string()
+            }),
+        };
+        self.scene.subscenes.push(crate::subscene::Subscene {
+            name: name.clone(),
+            author: Some(sub.author.clone()).filter(|a| a != "Unknown" && !a.is_empty()),
+            file: Some(file),
+            file_abs: Some(abs),
+            base: Some(base),
+            source: None,
+            visible: true,
+            share: 1.0,
+            placement: crate::subscene::Placement::IDENTITY,
+            colour: crate::subscene::LayerColour {
+                color_mode: sub.color_mode,
+                palette: sub.palette.clone(),
+                color_speed: sub.color_speed,
+                color_falloff: sub.color_falloff,
+                color_contrast: sub.color_contrast,
+                colormap: sub.colormap,
+            },
+        });
+        for t in &sub.transforms {
+            let mut t = t.clone();
+            t.layer = layer;
+            self.scene.transforms.push(t);
+        }
+        self.scene.transform_names.extend(sub.transform_names.iter().cloned());
+        self.scene.colors.extend(sub.colors.iter().copied());
+        self.transform_enabled.resize(self.scene.transforms.len(), true);
+        self.scene.regenerate_colormap();
+        self.bump_matrix_generation();
+        self.selected_transform = None;
+        self.selected_subscene = Some(layer as usize);
+        self.current_layer = layer as usize;
+        self.after_scene_shape_change();
+        log::info!("Imported {} as subscene '{}'", path.display(), name);
+        self.commit_edit(format!("Import {}", name), None, before);
+        Ok(())
+    }
+
+    /// Scene files that could be imported as a subscene: `scenes/` and the
+    /// current scene's own directory, minus the current scene itself.
+    pub fn importable_scenes(&self) -> Vec<std::path::PathBuf> {
+        let mut dirs = vec![std::path::PathBuf::from("scenes")];
+        if let Some(dir) = self.scene_path.as_ref().and_then(|p| Path::new(p).parent()) {
+            if !dir.as_os_str().is_empty() {
+                dirs.push(dir.to_path_buf());
+            }
+        }
+        let current = self.scene_path.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let mut files: Vec<std::path::PathBuf> = dirs
+            .iter()
+            .filter_map(|d| fs::read_dir(d).ok())
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .filter(|p| std::fs::canonicalize(p).ok() != current)
+            .collect();
+        files.sort();
+        files.dedup_by(|a, b| std::fs::canonicalize(&*a).ok() == std::fs::canonicalize(&*b).ok());
+        files
+    }
+
+    /// Remove a subscene and its maps. Undoable, like deleting a transform.
+    pub fn remove_subscene(&mut self, k: usize) {
+        if k == 0 || k > self.scene.subscenes.len() {
+            return;
+        }
+        if !self.can_hide_layer(k) && self.scene.layer_visible(k) {
+            log::warn!("{} is the only visible layer", self.scene.layer_name(k));
+            return;
+        }
+        let before = self.edit_snapshot();
+        let name = self.scene.layer_name(k).to_string();
+        fn keep_where<T>(v: &mut Vec<T>, keep: &[bool]) {
+            let mut i = 0;
+            v.retain(|_| {
+                i += 1;
+                keep.get(i - 1).copied().unwrap_or(true)
+            });
+        }
+        let keep: Vec<bool> = self.scene.transforms.iter().map(|t| t.layer as usize != k).collect();
+        keep_where(&mut self.scene.transforms, &keep);
+        keep_where(&mut self.scene.transform_names, &keep);
+        keep_where(&mut self.scene.colors, &keep);
+        keep_where(&mut self.transform_enabled, &keep);
+        for t in &mut self.scene.transforms {
+            if t.layer as usize > k {
+                t.layer -= 1;
+            }
+        }
+        self.scene.subscenes.remove(k - 1);
+        self.selected_subscene = None;
+        self.selected_transform = None;
+        self.current_layer = 0;
+        self.scene.regenerate_colormap();
+        self.bump_matrix_generation();
+        self.after_scene_shape_change();
+        self.commit_edit(format!("Remove {}", name), None, before);
     }
 
     /// Whether a transform is enabled, for the Transforms window's list and
@@ -2515,6 +2908,13 @@ impl App {
     /// pointer is over egui) — status bar tier 2, per the plan.
     pub fn hovered_hint(&self) -> Option<&'static str> {
         use crate::pick::GizmoPart;
+        if self.selected_subscene().is_some() {
+            return self.hovered.map(|hit| match hit.part {
+                GizmoPart::RotEdge(_) => hints::HINT_ROT_EDGE,
+                GizmoPart::Roll => hints::HINT_ROLL,
+                _ => hints::HINT_SUBSCENE,
+            });
+        }
         self.hovered.map(|hit| match hit.part {
             // On an unselected transform the dot only selects, so promising a
             // drag would be a lie — and it's the one part of one that's on
@@ -2595,6 +2995,13 @@ impl App {
     /// artwork. Alt costs one finger and the hint line is right there.
     pub fn on_scroll(&mut self, steps: f32) {
         self.note_pointer_activity();
+        // Over a whole subscene's gizmo, the same lever weighs the subscene:
+        // its share of the points is to it what a weight is to a map.
+        if let (Some(k), Some(_)) = (self.selected_subscene(), self.hovered.filter(|_| self.alt_held)) {
+            let share = self.scene.layer_share(k) * 1.08f32.powf(steps);
+            self.set_layer_share(k, share.max(0.01));
+            return;
+        }
         if let Some(hit) = self.hovered.filter(|_| self.alt_held) {
             self.selected_transform = Some(hit.transform);
             let before = self.edit_snapshot();
@@ -2848,7 +3255,7 @@ impl App {
                 self.camera.roll_by(dx);
                 self.invalidate_default_path();
             }
-            Drag::Gizmo { transform, mode, start_matrix } => {
+            Drag::Gizmo { transform, subscene, mode, start_matrix } => {
                 // The dead zone applies *here* and nowhere else. A gizmo drag
                 // writes to the artwork and lands a history entry, so a twitch
                 // during a click is a real edit you then have to undo; the
@@ -2856,7 +3263,7 @@ impl App {
                 // deliberate one where a few pixels of settling costs nothing —
                 // unlike orbiting, which you do constantly.
                 if self.drag_moved {
-                    self.update_gizmo_drag(transform, mode, start_matrix);
+                    self.update_gizmo_drag(transform, subscene, mode, start_matrix);
                 }
             }
         }
@@ -2929,10 +3336,10 @@ impl App {
 
         let hit = if self.show_gizmos {
             let (w, h) = self.gpu.size();
-            let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
+            let matrices = self.gizmo_matrices();
             crate::pick::pick_gizmo(
                 &matrices,
-                self.selected_transform,
+                self.gizmo_selection(),
                 self.current_view_proj(),
                 self.cursor,
                 w as f32,
@@ -3031,7 +3438,7 @@ impl App {
                 // the thing itself. Rolling the whole camera off a click aimed
                 // at one transform would be a surprise, so rolling only starts
                 // on empty space.
-                if let Some(hit) = self.hovered {
+                if let Some(hit) = self.hovered.filter(|_| self.selected_subscene().is_none()) {
                     self.selected_transform = Some(hit.transform);
                     // Position is filled in by `ui::draw` from egui's own
                     // pointer, which is already in logical points.
@@ -3056,22 +3463,31 @@ impl App {
             if matches!(button, MouseButton::Left)
                 && matches!(self.drag, Drag::Orbit)
                 && !self.drag_moved
-                && self.selected_transform.is_some()
+                && self.gizmo_selection().is_some()
             {
                 self.select_transform(None);
+                self.leave_subscene_gizmo();
                 log::info!("Selection cleared");
             }
-            if let Drag::Gizmo { transform, mode, start_matrix } = self.drag {
-                let spec = &self.scene.transforms[transform];
-                let t = spec.matrix.w_axis.truncate();
+            if let Drag::Gizmo { transform, subscene, mode, start_matrix } = self.drag {
+                let now = self.gizmo_matrices().get(transform).copied().unwrap_or(start_matrix);
+                let t = now.w_axis.truncate();
                 log::info!(
-                    "T{}: p=({:.3},{:.3},{:.3}) s={:.3}",
-                    transform, t.x, t.y, t.z, spec.matrix.x_axis.truncate().length(),
+                    "{}{}: p=({:.3},{:.3},{:.3}) s={:.3}",
+                    if subscene.is_some() { "subscene " } else { "T" },
+                    subscene.unwrap_or(transform), t.x, t.y, t.z, now.x_axis.truncate().length(),
                 );
-                let matrix_changed = spec.matrix != start_matrix;
+                let matrix_changed = now != start_matrix;
                 if matrix_changed {
                     if let Some(before) = self.gizmo_drag_before.take() {
-                        let label = self.gizmo_drag_label(transform, mode);
+                        let label = match subscene {
+                            Some(k) => {
+                                let verb = self.gizmo_drag_label(transform, mode);
+                                let verb = verb.split(' ').next().unwrap_or("Move").to_string();
+                                format!("{} {}", verb, self.scene.layer_name(k))
+                            }
+                            None => self.gizmo_drag_label(transform, mode),
+                        };
                         self.commit_edit(label, None, before);
                     }
                 } else {
@@ -3133,8 +3549,9 @@ impl App {
         let (w, h) = (w as f32, h as f32);
         let view_proj = self.current_view_proj();
 
-        let matrices: Vec<Mat4> = self.scene.transforms.iter().map(|t| t.matrix).collect();
-        let was_selected = self.selected_transform;
+        let matrices = self.gizmo_matrices();
+        let was_selected = self.gizmo_selection();
+        let subscene = self.selected_subscene();
         let hit = pick_gizmo(&matrices, was_selected, view_proj, self.cursor, w, h)?;
 
         // Grabbing an *unselected* transform selects it and stops there. The
@@ -3153,7 +3570,9 @@ impl App {
         self.gizmo_renderer
             .set_highlight(&self.gpu.queue, Some((hit.transform, hit.part)), true);
 
-        self.selected_transform = Some(hit.transform);
+        if subscene.is_none() {
+            self.selected_transform = Some(hit.transform);
+        }
         let m = matrices[hit.transform];
         let origin = m.w_axis.truncate();
         let inv_vp = view_proj.inverse();
@@ -3178,7 +3597,10 @@ impl App {
             hit.part,
             GizmoPart::Tip(_) | GizmoPart::RotEdge(_) | GizmoPart::Roll
         );
-        let mode = if self.ctrl_held && !snappable {
+        // A subscene's scale is uniform (see `subscene::Placement`), so its
+        // tip handles resize the whole thing rather than one axis of it.
+        let uniform_tip = subscene.is_some() && matches!(hit.part, GizmoPart::Tip(_));
+        let mode = if (self.ctrl_held && !snappable) || uniform_tip {
             GizmoDragMode::Scale { start_y: self.cursor.1 }
         } else {
             match hit.part {
@@ -3250,6 +3672,7 @@ impl App {
 
         Some(Drag::Gizmo {
             transform: hit.transform,
+            subscene,
             mode,
             start_matrix: m,
         })
@@ -3257,7 +3680,13 @@ impl App {
 
     /// Recompute the dragged transform's matrix from the grab-time state and
     /// the current cursor, then push it live to the GPU
-    fn update_gizmo_drag(&mut self, transform: usize, mode: GizmoDragMode, start: Mat4) {
+    fn update_gizmo_drag(
+        &mut self,
+        transform: usize,
+        subscene: Option<usize>,
+        mode: GizmoDragMode,
+        start: Mat4,
+    ) {
         let (w, h) = self.gpu.size();
         let (w, h) = (w as f32, h as f32);
         let view_proj = self.current_view_proj();
@@ -3349,14 +3778,28 @@ impl App {
         // scale modes can. Translation and rotation leave the determinant
         // alone, and `hold_dimension_through` returns immediately for them, so
         // this gate saves the work rather than guarding correctness.
+        // A whole subscene: the drag moves its placement, which is a
+        // similarity, so whatever the gizmo produced is read back as one.
+        if let Some(k) = subscene {
+            if let Some(sub) = self.scene.subscenes.get_mut(k - 1) {
+                sub.placement = crate::subscene::Placement::from_matrix(new_matrix);
+            }
+            self.bump_matrix_generation();
+            self.sync_transforms_to_gpu();
+            return;
+        }
+
+        // The gizmo works in scene space; the map lives in its subscene's.
+        let placement = self.scene.layer_placement(self.scene.transforms[transform].layer as usize);
+        let local = if placement == Mat4::IDENTITY { new_matrix } else { placement.inverse() * new_matrix };
         if matches!(
             mode,
             GizmoDragMode::Scale { .. } | GizmoDragMode::ScaleAxis { .. }
         ) {
-            self.hold_dimension_through(transform, new_matrix);
+            self.hold_dimension_through(transform, local);
         }
 
-        self.scene.transforms[transform].matrix = new_matrix;
+        self.scene.transforms[transform].matrix = local;
         self.bump_matrix_generation();
         self.sync_transforms_to_gpu();
     }
@@ -3479,6 +3922,8 @@ impl App {
         // A loaded scene is something to look at first; nothing is selected
         // until you select it. See the note in `App::new`.
         self.selected_transform = None;
+        self.selected_subscene = None;
+        self.current_layer = scene.first_layer_with_maps();
         self.selected_variation = 0;
         self.drag = Drag::None;
         self.hovered = None;
@@ -3832,8 +4277,8 @@ impl App {
         const TRACES: usize = 24;
         const STEPS: usize = 50;
 
-        let mut traces = crate::trace::generate_traces(
-            &self.scene.transforms,
+        let (mut traces, trace_layers) = crate::trace::generate_layer_traces(
+            &self.scene,
             &self.transform_enabled,
             TRACES,
             STEPS,
@@ -3853,13 +4298,14 @@ impl App {
         }
 
         let mut verts = Vec::with_capacity(traces.iter().map(|t| t.len() * 2).sum());
-        for trace in &traces {
+        for (trace, &layer) in traces.iter().zip(&trace_layers) {
+            let colormap = self.scene.layer_colour(layer).2;
             for (i, pair) in trace.windows(2).enumerate() {
                 // Age fade along the trace: oldest segments nearly invisible
                 let age = (i + 1) as f32 / (trace.len() - 1) as f32;
                 let alpha = 0.08 + 0.72 * age * age;
                 for step in pair {
-                    let cm = self.scene.colormap
+                    let cm = colormap
                         [(step.color_val * 255.0).clamp(0.0, 255.0) as usize];
                     verts.push(LineVertex {
                         position: step.pos.to_array(),
@@ -3889,8 +4335,13 @@ impl App {
             } => Some((k, dash_pitch.to_bits(), dash_reach.to_bits())),
             _ => None,
         };
+        // Keyed on the gizmo list's own index, with the subscene folded into
+        // the generation so that switching between a subscene's gizmo and
+        // its maps' (both index 0) still rebuilds.
         let key = (
-            self.selected_transform.map(|i| (i, self.matrix_generation)),
+            self.gizmo_selection().map(|i| {
+                (i, self.matrix_generation ^ ((self.selected_subscene().unwrap_or(0) as u64) << 56))
+            }),
             held_axis,
         );
         if key == self.indicator_key {
@@ -3898,18 +4349,17 @@ impl App {
         }
         self.indicator_key = key;
         let key = key.0;
+        let world = self.gizmo_matrices();
         let mut verts = match key {
-            Some((i, _)) if i < self.scene.transforms.len() => {
-                crate::indicators::build_rotation(self.scene.transforms[i].matrix)
-            }
+            Some((i, _)) if i < world.len() => crate::indicators::build_rotation(world[i]),
             _ => Vec::new(),
         };
 
         // The axis being scaled, extended past both ends of itself.
         if let (Some((i, _)), Some((k, pitch, reach))) = (key, held_axis) {
-            if let Some(spec) = self.scene.transforms.get(i) {
+            if let Some(m) = world.get(i) {
                 verts.extend(crate::indicators::build_axis_extension(
-                    spec.matrix,
+                    *m,
                     k,
                     f32::from_bits(pitch),
                     f32::from_bits(reach),
@@ -3925,14 +4375,16 @@ impl App {
         // indicators — drawing every group in the scene at once would be a
         // thicket, which is the same reason `build` is selection-scoped.
         let mut ghosts: Vec<Mat4> = Vec::new();
-        if let Some((i, _)) = key {
+        if let Some((i, _)) = key.filter(|_| self.selected_subscene().is_none()) {
             if let Some(spec) = self.scene.transforms.get(i) {
                 if let Some(sym) = spec.symmetry.as_ref() {
                     let radius = self.attractor.map_or(1.0, |a| a.radius).max(0.05);
                     verts.extend(crate::indicators::build_symmetry(sym, radius));
                     // Element 0 is the identity, and that copy is already drawn
-                    // solid as the selected transform's own gizmo.
-                    ghosts = sym.orbit(spec.matrix).skip(1).collect();
+                    // solid as the selected transform's own gizmo. The orbit
+                    // is the subscene's own, so it is placed like the map is.
+                    let placement = self.scene.layer_placement(spec.layer as usize);
+                    ghosts = sym.orbit(spec.matrix).skip(1).map(|g| placement * g).collect();
                 }
             }
         }
@@ -3940,9 +4392,7 @@ impl App {
         // The selected gizmo also gets drawn ignoring depth, so a dense
         // attractor can't hide the thing you're editing while `pick.rs` — which
         // has no depth awareness at all — goes on offering it to the cursor.
-        let xray = key
-            .map(|(i, _)| i)
-            .and_then(|i| self.scene.transforms.get(i).map(|spec| (i, spec.matrix)));
+        let xray = key.map(|(i, _)| i).and_then(|i| world.get(i).map(|m| (i, *m)));
         self.gizmo_renderer.set_xray(&self.gpu.queue, xray);
         self.indicator_renderer.set_lines(&self.gpu.device, &verts);
     }
@@ -4018,6 +4468,8 @@ impl App {
         // As for a loaded scene, and doubly so for a blank one, which has no
         // transform 0 to select. See the note in `App::new`.
         self.selected_transform = None;
+        self.selected_subscene = None;
+        self.current_layer = scene.first_layer_with_maps();
         self.selected_variation = 0;
         self.drag = Drag::None;
         self.hovered = None;
@@ -4062,6 +4514,13 @@ impl App {
         if let Some(sel) = self.selected_transform {
             self.selected_transform = Some(sel.min(n.saturating_sub(1)));
         }
+        // Undo can take away the subscene that was selected or listed.
+        if self.selected_subscene.is_some_and(|k| k > self.scene.subscenes.len()) {
+            self.selected_subscene = None;
+        }
+        if self.current_layer >= self.scene.layer_count() {
+            self.current_layer = self.scene.first_layer_with_maps();
+        }
         self.drag = Drag::None;
         self.hovered = None;
         self.rebuild_pipelines();
@@ -4072,7 +4531,9 @@ impl App {
     /// The transform editing keys act on: the explicit selection, or T0
     pub fn selection(&self) -> Option<usize> {
         let n = self.scene.transforms.len();
-        if n == 0 {
+        // With a whole subscene selected the keys have no map to act on;
+        // falling back to T0 would edit something nobody is looking at.
+        if n == 0 || self.selected_subscene().is_some() {
             return None;
         }
         Some(self.selected_transform.unwrap_or(0).min(n - 1))
@@ -4085,6 +4546,9 @@ impl App {
         let (spec, name, color) = if fresh || self.selection().is_none() {
             (
                 TransformSpec {
+                    // A fresh map joins whichever layer the Transforms window
+                    // is showing.
+                    layer: self.current_layer() as u16,
                     matrix: Mat4::from_scale_rotation_translation(
                         Vec3::splat(0.5),
                         glam::Quat::IDENTITY,
@@ -4117,11 +4581,20 @@ impl App {
             (spec, name, self.scene.colors[idx])
         };
 
-        self.scene.transforms.push(spec);
-        self.scene.transform_names.push(name);
-        self.scene.colors.push(color);
-        self.transform_enabled.push(true);
-        self.selected_transform = Some(self.scene.transforms.len() - 1);
+        // At the end of its own layer's run, so the list stays grouped by
+        // layer. For an ordinary scene that is the end, as it always was.
+        let at = self
+            .scene
+            .transforms
+            .iter()
+            .rposition(|t| t.layer <= spec.layer)
+            .map_or(0, |i| i + 1);
+        self.scene.transforms.insert(at, spec);
+        self.scene.transform_names.insert(at, name);
+        self.scene.colors.insert(at, color);
+        self.transform_enabled.insert(at, true);
+        self.selected_transform = Some(at);
+        self.selected_subscene = None;
         self.bump_matrix_generation();
         self.scene.regenerate_colormap();
         self.rebuild_pipelines();
@@ -4133,8 +4606,8 @@ impl App {
     /// Delete the selected transform (keeps at least one)
     pub fn delete_selected_transform(&mut self) {
         let Some(idx) = self.selection() else { return };
-        if self.scene.transforms.len() <= 1 {
-            log::warn!("Cannot delete the last transform");
+        if !self.can_delete_transform(idx) {
+            log::warn!("Cannot delete the last transform of {}", self.scene.layer_name(self.scene.transforms[idx].layer as usize));
             return;
         }
         let before = self.edit_snapshot();
@@ -4149,6 +4622,16 @@ impl App {
         self.rebuild_pipelines();
         log::info!("Deleted transform T{}", idx);
         self.commit_edit("Delete transform", None, before);
+    }
+
+    /// Whether map `idx` may be deleted: not the scene's last, and not a
+    /// subscene's last (remove the subscene instead — an empty subscene is
+    /// one that can't be saved). The scene's own layer may empty out in a
+    /// composite, which is then a pure composite.
+    pub fn can_delete_transform(&self, idx: usize) -> bool {
+        let Some(t) = self.scene.transforms.get(idx) else { return false };
+        let k = t.layer as usize;
+        self.scene.transforms.len() > 1 && (self.scene.layer_sizes()[k] > 1 || (k == 0 && self.scene.is_composite()))
     }
 
     /// Multiply the selected transform's chaos-game weight
@@ -4620,19 +5103,24 @@ impl App {
         );
     }
 
+    /// The chaos pass's view of the scene: its maps grouped by layer, the
+    /// walker split between subscenes, and each layer's colour. Built from the
+    /// live state, so a disabled transform or a hidden subscene is honoured.
+    fn layer_table(&self) -> crate::gpu::points::compute::LayerTable {
+        crate::gpu::points::compute::LayerTable::build(
+            &self.scene,
+            &self.transform_enabled,
+            self.color_contrast,
+        )
+    }
+
     /// Recreate the GPU pipelines after the transform count changed.
     /// The chaos game restarts from warmup.
     fn rebuild_pipelines(&mut self) {
-        crate::scene::resolve_color_speeds(
-            &mut self.scene.transforms,
-            self.scene.color_speed,
-            self.color_falloff,
-        );
+        self.scene.resolve_all_color_speeds(self.color_falloff);
         self.point_compute = PointCompute::new(
             &self.gpu.device,
-            &self.scene.transforms,
-            &self.scene.colors,
-            &self.scene.colormap,
+            &self.layer_table(),
             self.buffer_capacity,
             crate::gpu::points::compute::DEFAULT_SEED,
         );
@@ -4662,7 +5150,7 @@ impl App {
             &self.gpu.device,
             self.gpu.format,
             self.overlay.samples(),
-            &self.scene.transforms,
+            &self.gizmo_specs(),
         );
         // A fresh renderer knows nothing about the selection, so the x-ray slot
         // and the tip handles are off until something tells it again — and
@@ -4670,13 +5158,9 @@ impl App {
         // key so the next frame re-states the selection instead of waiting for
         // one to happen.
         self.indicator_key = (None, None);
-        self.point_compute.update_weights(
-            &self.gpu.queue,
-            &self.scene.transforms,
-            &self.scene.colors,
-            &self.transform_enabled,
-        );
-        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
+        let table = self.layer_table();
+        self.point_compute.update_weights(&self.gpu.queue, &table);
+        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.gizmo_enabled());
         self.refresh_zoom();
         self.frame_count = 0;
         if self.show_traces {
@@ -4688,18 +5172,15 @@ impl App {
     /// restart point accumulation so the fractal re-forms live
     fn sync_transforms_to_gpu(&mut self) {
         // Contraction feeds falloff-derived color speeds, so re-resolve
-        crate::scene::resolve_color_speeds(
-            &mut self.scene.transforms,
-            self.scene.color_speed,
-            self.color_falloff,
-        );
-        self.point_compute.update_weights(
-            &self.gpu.queue,
-            &self.scene.transforms,
-            &self.scene.colors,
-            &self.transform_enabled,
-        );
-        self.gizmo_renderer.update_transforms(&self.gpu.queue, &self.scene.transforms);
+        self.scene.resolve_all_color_speeds(self.color_falloff);
+        let table = self.layer_table();
+        self.point_compute.update_weights(&self.gpu.queue, &table);
+        let specs = self.gizmo_specs();
+        if self.gizmo_renderer.instance_count() == specs.len() as u32 + 1 {
+            self.gizmo_renderer.update_transforms(&self.gpu.queue, &specs);
+        } else {
+            self.rebuild_gizmos();
+        }
         // The renormalizing map may itself have just been dragged
         self.refresh_zoom();
         self.reset();
@@ -4764,17 +5245,9 @@ impl App {
     /// Re-resolve per-transform color speeds from the current falloff and
     /// push them to the GPU, then reset so the point buffer refills quickly
     fn refresh_color_speeds(&mut self) {
-        crate::scene::resolve_color_speeds(
-            &mut self.scene.transforms,
-            self.scene.color_speed,
-            self.color_falloff,
-        );
-        self.point_compute.update_weights(
-            &self.gpu.queue,
-            &self.scene.transforms,
-            &self.scene.colors,
-            &self.transform_enabled,
-        );
+        self.scene.resolve_all_color_speeds(self.color_falloff);
+        let table = self.layer_table();
+        self.point_compute.update_weights(&self.gpu.queue, &table);
         self.reset();
     }
 
@@ -5260,13 +5733,9 @@ impl App {
             if self.transform_enabled[idx] { "enabled" } else { "disabled" },
         );
 
-        self.point_compute.update_weights(
-            &self.gpu.queue,
-            &self.scene.transforms,
-            &self.scene.colors,
-            &self.transform_enabled,
-        );
-        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.transform_enabled);
+        let table = self.layer_table();
+        self.point_compute.update_weights(&self.gpu.queue, &table);
+        self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.gizmo_enabled());
         self.reset();
         let label = if self.transform_enabled[idx] {
             format!("Enable T{}", idx)
@@ -5407,6 +5876,13 @@ impl App {
         if self.point_compute.zoom.is_some() {
             return valid;
         }
+        // Nor for a composite. The budget draws a *prefix* of the ring, and in
+        // a composite each stretch of the ring was written by one layer's
+        // walkers — a prefix would draw some subscenes and drop others. The
+        // measurement is of the wrong thing too: it walks every map as one IFS.
+        if self.scene.is_composite() {
+            return valid;
+        }
         let Some(stats) = self.attractor else { return valid };
         let depth = (stats.center - self.camera.eye()).length();
         let r_px =
@@ -5432,6 +5908,14 @@ impl App {
             self.zoom_error = None;
             return;
         };
+        if self.scene.is_composite() {
+            // The loader refuses this pairing; an in-app edit can still reach
+            // it, and says so rather than renormalizing placed points about a
+            // map that knows nothing of their placement.
+            self.point_compute.zoom = None;
+            self.zoom_error = Some("infinite zoom is off: it doesn't compose with subscenes yet".into());
+            return;
+        }
         match crate::renorm::Renorm::build(&spec, &self.scene.transforms, self.scene.camera_distance)
         {
             Ok(r) => {
@@ -5566,7 +6050,9 @@ impl App {
     fn attractor_fingerprint(&self) -> u64 {
         let mut h = self.matrix_generation
             .wrapping_mul(0x100000001b3)
-            ^ (self.scene.transforms.len() as u64);
+            ^ (self.scene.transforms.len() as u64)
+            // A composite measures the listed layer, so changing it re-measures.
+            ^ ((self.current_layer as u64) << 48);
         for (i, on) in self.transform_enabled.iter().enumerate() {
             if *on {
                 h ^= (i as u64).wrapping_add(1).wrapping_mul(0x9E3779B97F4A7C15);
@@ -5608,11 +6094,32 @@ impl App {
         }
         self.lacunarity_key = key;
         self.lacunarity_measured_at = Instant::now();
-        self.lacunarity =
-            crate::trace::lacunarity_summary(&self.scene.transforms, &self.transform_enabled);
+        let (maps, on) = self.measured_maps();
+        self.lacunarity = crate::trace::lacunarity_summary(&maps, &on);
     }
 
     /// Current lacunarity summary for the status bar.
+    /// The maps the status bar's `d` and `Λ` describe, with their enabled
+    /// state: every map for an ordinary scene (borrowed — L-system scenes run
+    /// to tens of thousands), the current layer's in a composite, where the
+    /// maps of two different attractors have no joint dimension.
+    pub fn measured_maps(&self) -> (std::borrow::Cow<'_, [TransformSpec]>, std::borrow::Cow<'_, [bool]>) {
+        use std::borrow::Cow;
+        if !self.scene.is_composite() {
+            return (Cow::Borrowed(&self.scene.transforms), Cow::Borrowed(&self.transform_enabled));
+        }
+        let k = self.current_layer() as u16;
+        let (maps, on): (Vec<TransformSpec>, Vec<bool>) = self
+            .scene
+            .transforms
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.layer == k)
+            .map(|(i, t)| (t.clone(), self.is_transform_enabled(i)))
+            .unzip();
+        (Cow::Owned(maps), Cow::Owned(on))
+    }
+
     pub fn lacunarity(&self) -> Option<f32> {
         self.lacunarity
     }
@@ -5773,7 +6280,7 @@ impl App {
             self.scene.background.to_array(),
             // A screenshot is a file with an alpha channel worth filling in.
             self.transparent_render,
-            self.scene.color_mode.packs_rgb(),
+            self.scene.packs_rgb(),
         )
         .with_zoom_guard(self.zoom(), self.camera.eye());
 
@@ -6077,7 +6584,7 @@ impl App {
             // The window's swapchain has nothing behind it to composite
             // through, so the live pass is always opaque.
             false,
-            self.scene.color_mode.packs_rgb(),
+            self.scene.packs_rgb(),
         )
         // Every frame, from this frame's eye: that is what makes the zoom's
         // edge guard track the camera instead of the world.

@@ -9,6 +9,11 @@ algorithm, entirely on the GPU. A compute shader runs thousands of parallel "wal
 that iterate through weighted random transforms (affine matrix + nonlinear variation
 blend), writing positions into a circular point buffer that is rendered every frame.
 
+**Adding a feature to the scene format? Read `ADDING-A-SCENE-FEATURE.md`.** It is
+the checklist of every place a scene feature has to reach — file, save, `-S`,
+`--info`, GPU, CPU walkers, GUI, undo, docs — and how to prove each one, with
+subscenes as the worked example.
+
 **Making artwork with it? Read `CRAFT.md` first.** This file is the reference for
 what Fracturize *is*; CRAFT.md is the craft guide for authoring scenes as art —
 measured doses, the numbers that predict a picture before you render it (start with
@@ -27,6 +32,7 @@ src/
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
   randomize.rs   # Random flame generator with a CPU chaos-game quality gate
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
+  subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
   derive.rs      # --derive: print a map turned about a world axis / spun about its own
   stats.rs       # --stats: image numbers, empty measured against the recorded background
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
@@ -38,6 +44,7 @@ src/
     num.rs         # Numeric readouts that don't move: the fixed-width house rule
     confirm.rs     # Click-wait-click Arm, and the unsaved-changes modal
     transforms.rs  # Transform tab rail + selected-transform detail pane
+    subscenes.rs   # Subscenes window: layers, eye, share, import, placement
     explore.rs     # Random flame, mutate + strength, undo/redo, history list
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
@@ -215,6 +222,7 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | drag the ring around the selected gizmo | roll it about the camera's view axis, through its own origin |
 | ctrl+drag the ring | snap the roll to 15° (or the transform's symmetry-group step) |
 | alt+scroll over a gizmo | adjust that transform's chaos weight (probability) — the lever that emphasizes an element without changing structure or color |
+| drag a whole subscene's gizmo | move / turn / resize the entire subscene (select its row in the Subscenes window first); its tips resize uniformly, and alt+scroll over it sets its share of the points |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
 | drag a row's weight bar | change that transform's chaos weight |
@@ -483,7 +491,7 @@ the drawable area, so aspect and picking math are unaffected by which panels
 are open. The toolbar runs
 
 ```
-File | Transforms  Gizmos | Explore | Camera  Render | Undo Redo | quick controls … scene name | Help
+File | Transforms  Subscenes  Gizmos | Explore | Camera  Render | Undo Redo | quick controls … scene name | Help
 ```
 
 ordered by task rather than by module: what am I working on, then how am I
@@ -509,8 +517,9 @@ right for. Undo and redo are the opposite trade, so they get visible buttons.
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
 | Scenes (Ctrl+O, B) | Scene picker; the same selection the arrow keys walk. What File → Open… shows you |
 | Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
+| Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 
-All six persist their open state to prefs, and all six behave alike.
+All seven persist their open state to prefs, and all seven behave alike.
 
 **Panels group by persistence class, with headings that say so.** Three kinds
 of value used to stack with nothing admitting it: session state that evaporates
@@ -1105,6 +1114,23 @@ turn = 137.5              # degrees per copy; 137.5 is the golden angle
 shrink = 0.9              # size multiplier per copy, 0 < shrink <= 1
 applies_to = ["frond"]
 
+# Composition: another attractor beside this one (see "Subscenes"). Each keeps
+# its own walkers, so their maps never mix. Repeatable, up to 15.
+[[subscene]]
+name = "smoke"            # how -S subscene.<name>… and --info refer to it
+                          # (unnamed: the file's stem)
+file = "dragon_smoke.toml"  # borrow another scene's maps and colour, by
+                          # reference, relative to this file — or give the
+                          # block its own [[subscene.transform]]s instead
+share = 1.0               # relative claim on the point budget ([meta] share
+                          # is the scene's own maps' claim)
+visible = true
+translation = [0.0, 1.0, 0.0]   # placement: a similarity, so...
+rotation = [0.0, 0.0, -8.0]     # XYZ degrees (or rotvec = [...])
+scale = 0.8                     # ...uniform only
+# color_mode / color_speed / color_falloff / color_contrast, and a
+# [subscene.palette] table, override the colour the maps came with.
+
 [[transform]]
 name = "whorl"                 # optional label shown in overlays
 translation = [0.0, 0.0, 0.5]
@@ -1275,6 +1301,116 @@ unchanged. Cost is one RNG draw and one matrix multiply.
   iteration it tracks the walker's most recent group element, so it reads as an
   interference pattern through the form rather than as `|G|` solid petals. A
   good look, but not the one the name suggests, so it is opt-in.
+
+## Subscenes
+
+A scene can **compose** other IFS attractors: `[[subscene]]` blocks, each its
+own set of maps with its own colour, placed in the scene by a similarity. The
+model and the reasoning are in `src/subscene.rs`; `scenes/censer.toml` is the
+worked example (a Menger sponge with dragon smoke rising off it).
+
+**A composite is the union of attractors, not one bigger IFS.** Concatenating
+two map lists gives a third attractor that mixes them — a walker that takes a
+fern map and then a lattice map lands somewhere neither contains. So each
+subscene is a *layer* of the one chaos pass: every map carries
+`TransformSpec::layer` (0 = the scene's own, `k` = `subscenes[k-1]`), the 16,384
+walkers are dealt between the visible layers by `share`, and a walker only ever
+draws its own layer's maps.
+
+- **The point budget divides exactly as the walkers do.** Walkers write a fixed
+  stride of the ring, so a share is a fraction of the buffer, not a hint.
+  `subscene::allocate_walkers` is largest-remainder with a floor of one, and a
+  hidden layer, or one whose maps are all disabled, gets none — its points go
+  to the rest. Under the log tonemap share is a gentle brightness lever (0.3 →
+  1.0 moved the smoke's mean luminance 64 → 76 on `censer`); it is mainly a
+  density and grain lever.
+- **Placement is applied as a point is written, never to the walker**, so a
+  subscene moves, turns and resizes without re-deriving one of its maps.
+  **Uniform scale only**: a similarity composed with a TRS map is TRS, so every
+  map inside a placed subscene still decomposes, saves and drags. Per-axis
+  placement would introduce shear the file can't write.
+- **Colour is resolved in the chaos pass for a composite.** A point stores an
+  8-bit colormap index, which can't also say *which layer's* colormap; so a
+  composite looks the index up in its layer's colormap (with that layer's
+  contrast) as it writes, and stores packed RGB — what `mix` mode already
+  stores. Every renderer then draws a composite as a mix-mode scene
+  (`Scene::packs_rgb`) and none of them changed. The price: a colour edit in a
+  composite re-forms the cloud instead of recolouring it in place.
+- **An ordinary scene is one layer with every map and every walker, and renders
+  byte-identically to before.** `ComputeParams::composite == 0` skips placement
+  and colour resolution, and one layer's cumulative weights are the old ones.
+  Verified on four scenes × both renderers against a pre-change binary, and
+  `--info` is unchanged (the golden files still pass).
+
+**In the file.** `file = "other.toml"` borrows another scene's maps, symmetry
+and colour by reference (its camera, zoom, haze and the rest are ignored);
+otherwise the block carries its own `[[subscene.transform]]` and
+`[[subscene.symmetry]]`. `[meta] share` / `visible` are the scene's own maps'
+equivalents. A pure composite needs no `[[transform]]` of its own.
+
+**Saving** keeps an unedited import a reference — four lines, carrying only the
+colour keys that differ from the file's — and writes an *edited* one inline
+with `source = "..."` recording where it came from. The referenced file is
+someone's artwork and is never written to (`subscene::FileBase` is the
+fingerprint that tells the two apart). References are respelled relative to
+wherever the composite is saved, so Save-As into another directory keeps them
+pointing at the same scene. `[[subscene]]` blocks are rebuilt wholesale on save,
+like `[[symmetry]]`, so comments *inside* one are lost.
+
+**Refused, by name, at load:** `file =` plus inline maps; a subscene with no
+maps; two subscenes with one name; a non-positive scale; a subscene that is
+itself a composite (nesting — deferred); `[zoom]` together with subscenes
+(infinite zoom renormalizes about one map's fixed point, which knows nothing of
+a placement — deferred); more than 15; every layer hidden.
+`SubsceneDef` is `deny_unknown_fields`, so a typo'd key is an error too.
+
+**CLI, for authoring by agent:**
+
+- `--info` gains a `layers` section: per layer its share and what that comes to
+  in points, placement, colour, provenance and credit, measured centre and
+  radius *once placed*, similarity dimension, and **density** (points per unit
+  area, relative) — plus how each pair sits (apart, overlapping by N%). Notes
+  flag layers so far apart that framing both makes each small, and a density
+  imbalance over 4x, with the `-S …share=` values that would even it. `shape`
+  measures the union of the visible layers (`trace::measure_layers`), and
+  dimension and lacunarity move to per layer, because two attractors' maps have
+  no joint dimension.
+- `-S subscene.<name>.<field>` sets placement, share, visibility or colour, and
+  `-S subscene.<name>.transform.<ref>.<field>` reaches an inline subscene's
+  maps — so `--sweep` works on subscenes too. A subscene is named by its `name`,
+  or its file's stem, or its index. A borrowed subscene's maps aren't in this
+  file and `-S` says so rather than doing nothing.
+- `--solo <name|index>` draws one layer alone (with every point), placed where
+  the composite puts it. Works with `--info`.
+
+**In the app**: the Subscenes window (toolbar, next to Transforms) lists the
+layers. Clicking a subscene's row selects it **as a whole**: the viewport then
+shows one gizmo — its placement — and dragging it moves, turns and resizes the
+whole attractor (tips resize uniformly; alt+scroll over it sets its share). The
+Transforms window lists one layer at a time (a picker at the top of its rail),
+and a map's gizmo is drawn and dragged in scene space while its inspector
+fields stay in its subscene's own space. Import picks a scene file and adds it
+as a reference with an equal share. Show/hide, share, placement, colour source,
+rename, import and remove are all ordinary undoable edits.
+
+Things that interact with it:
+
+- **The drawn-point budget is bypassed** for a composite: it draws a *prefix* of
+  the ring, and each stretch of the ring belongs to one layer's walkers.
+- **Traces** walk one layer each, dealt by share, placed, coloured through their
+  own layer's colormap.
+- **The status bar's `d` and `Λ`** describe the layer the Transforms window is
+  listing.
+- **Emphasis** maps the selected transform to its GPU slot (the buffer is in
+  layer order); a placed layer scales the sensitivity by its placement.
+- **The layer table is one fact in two languages** — `GpuLayer` (96 bytes) and
+  `Layer` in `points/chaos.wgsl`, with `MAX_LAYERS` = 16 in both;
+  `the_shader_agrees_about_the_layer_table` guards it.
+
+Deferred on purpose: nesting (a composite as a subscene); infinite zoom in a
+composite; editing a subscene's palette stops in the GUI (its colour *source* is
+editable; the gradient is edited in its file or `[subscene.palette]`); and
+per-axis placement, for the shear reason above.
 
 ## Colour: two sources, one colormap
 
@@ -3039,7 +3175,7 @@ app = subprocess.Popen(['./target/release/fracturize', '--scene', scene], env=en
 d = display.Display(':79')                      # python-xlib; there is no xdotool
 ```
 
-Four things that will each cost you a run:
+Five things that will each cost you a run:
 
 - **Capture the Xephyr *root*, not the app's window.** `get_image` on the app's
   own window returns blank — it is a GL surface and its contents are not in the
@@ -3051,6 +3187,10 @@ Four things that will each cost you a run:
 - **Give it time to come up.** The point buffer fills over several seconds and
   a capture taken early is of a half-built picture, which reads exactly like
   the artifact you are hunting.
+- **Keystrokes don't arrive.** Xephyr runs no window manager, so nothing gives
+  the app keyboard focus and XTest key events go nowhere — silently, with no
+  log line. Pointer events are fine. Drive an action through its button (Undo
+  and Redo are on the toolbar), or `set_input_focus` on the app's window first.
 - **To hold the camera still, load a view with `-v`, not a keystroke.** Applying
   a view pauses the orbit as a documented side effect. Toggling camera motion
   with `o` depends on focus having landed where you assumed, and when it

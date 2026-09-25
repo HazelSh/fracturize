@@ -24,11 +24,8 @@ pub fn mutate(scene: &mut Scene, rng: &mut impl Rng, strength: f32) -> Vec<Strin
         apply_random_op(scene, rng, strength, &mut log);
     }
 
-    crate::scene::resolve_color_speeds(
-        &mut scene.transforms,
-        scene.color_speed,
-        scene.color_falloff,
-    );
+    let falloff = scene.color_falloff;
+    scene.resolve_all_color_speeds(falloff);
     scene.regenerate_colormap();
     log
 }

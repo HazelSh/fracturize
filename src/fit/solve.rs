@@ -263,6 +263,7 @@ impl Params {
             .iter()
             .enumerate()
             .map(|(i, m)| TransformSpec {
+                layer: 0,
                 matrix: Mat4::from_scale_rotation_translation(
                     Self::scale_of(m),
                     Quat::from_scaled_axis(self.rotvec_of(m)),

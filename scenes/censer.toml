@@ -1,0 +1,68 @@
+# Censer — smoke rising off a block of carved stone.
+#
+# Two attractors that share nothing: the Menger sponge is twenty affine maps,
+# no variations, a measure so even it is nearly flat (lacunarity ~1.9); the
+# dragon smoke is four maps of horseshoe folds, curling sheets with deep gaps
+# (lacunarity ~7.6). Composed rather than merged — each keeps its own walkers,
+# so neither ever takes a step through the other's maps — which is the only way
+# to hold the two side by side at all. Merged into one IFS they would be one
+# muddy third thing.
+#
+# The first composite scene (the test piece for [[subscene]]). Both subscenes
+# are borrowed by reference, so this file is placement, share and colour only;
+# the maps belong to their authors and are credited in --info.
+#
+# Made for the points renderer (the default). Opaque points are what let the
+# sponge read as stone: every face shows its Menger carpet and hides what is
+# behind it. Splat is additive, so it looks *through* all twenty tunnels at
+# once and the block turns to fog — the smoke is lovely there, the stone isn't.
+# The sponge is turned 35.5° so its tunnels line up with the camera's yaw.
+#
+#   fracturize -s scenes/censer.toml --info          # layers, shares, balance
+#   fracturize -s scenes/censer.toml --solo smoke    # one layer on its own
+#   fracturize -s scenes/censer.toml -r renders/censer.png --effort medium \
+#     --width 900 --height 1200
+
+[meta]
+name = "Censer"
+author = "Claude Opus 5.5"
+point_size = 0.0014
+haze = 0.25
+exposure = 1.6
+background = [0.012, 0.009, 0.008]
+
+[camera]
+focus = [0.0, 0.45, 0.0]
+distance = 4.6
+yaw = 0.62
+pitch = 0.28
+
+# The lattice: stone-cold, in a grey-blue ramp that the sponge's own mix
+# colours would fight the smoke with. Contrast 2 is what separates the carpet's
+# tiers from each other.
+[[subscene]]
+name = "lattice"
+file = "menger.toml"
+share = 1.0
+scale = 1.3
+translation = [0.0, -0.45, 0.0]
+rotation = [0.0, 35.5, 0.0]
+color_mode = "palette"
+color_contrast = 2.0
+
+[subscene.palette]
+interpolate = "oklab"
+stops = [
+  { at = 0.00, color = "#0d1016" },
+  { at = 0.45, color = "#4a5566" },
+  { at = 0.75, color = "#a9b3bf" },
+]
+
+# The smoke, rising from the lattice's top face and leaning away from it.
+[[subscene]]
+name = "smoke"
+file = "dragon_smoke.toml"
+share = 1.0
+scale = 0.8
+translation = [0.05, 1.05, 0.0]
+rotation = [0.0, 0.0, -8.0]

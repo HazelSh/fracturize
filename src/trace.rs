@@ -288,6 +288,51 @@ pub fn generate_traces(
     traces
 }
 
+/// [`generate_traces`] for a scene that may compose subscenes: each trace
+/// walks one layer's maps only — what a GPU walker does — and is carried into
+/// scene space by that layer's placement. Traces are dealt between the visible
+/// layers by share, like the walkers are. Returns each trace's layer alongside
+/// it, so the caller can colour it through the right colormap.
+pub fn generate_layer_traces(
+    scene: &crate::scene::Scene,
+    enabled: &[bool],
+    count: usize,
+    steps: usize,
+    rng: &mut impl Rng,
+) -> (Vec<Vec<TraceStep>>, Vec<usize>) {
+    if !scene.is_composite() {
+        let t = generate_traces(&scene.transforms, enabled, count, steps, rng);
+        let n = t.len();
+        return (t, vec![0; n]);
+    }
+    let shares: Vec<f32> = (0..scene.layer_count())
+        .map(|k| if scene.layer_visible(k) { scene.layer_share(k) } else { 0.0 })
+        .collect();
+    let counts = crate::subscene::allocate_walkers(&shares, count as u32);
+    let (mut traces, mut layers) = (Vec::new(), Vec::new());
+    for (k, n) in counts.into_iter().enumerate() {
+        if n == 0 {
+            continue;
+        }
+        let (maps, on): (Vec<TransformSpec>, Vec<bool>) = scene
+            .transforms
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.layer as usize == k)
+            .map(|(i, t)| (t.clone(), enabled.get(i).copied().unwrap_or(true)))
+            .unzip();
+        let placement = scene.layer_placement(k);
+        for mut trace in generate_traces(&maps, &on, n as usize, steps, rng) {
+            for step in &mut trace {
+                step.pos = placement.transform_point3(step.pos);
+            }
+            traces.push(trace);
+            layers.push(k);
+        }
+    }
+    (traces, layers)
+}
+
 /// Steps sampled when measuring an attractor. Enough for a stable 95th
 /// percentile without being something you'd notice on a scene edit.
 pub const MEASURE_STEPS: usize = 4_000;
@@ -363,6 +408,90 @@ pub fn measure(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Attract
         spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
         occupancy: occupancy(&points, mean, radius),
     })
+}
+
+/// What `measure` finds for each layer of a scene, in scene space, and for the
+/// union of the visible ones.
+pub struct LayerMeasure {
+    /// Per layer, carried by its placement. `None` for a layer whose walk
+    /// doesn't converge (or that has no maps).
+    pub layers: Vec<Option<AttractorStats>>,
+    /// The visible layers together, pooled in proportion to their shares — the
+    /// shape the picture actually has.
+    pub union: Option<AttractorStats>,
+}
+
+/// [`measure`] for a composite: each layer walked on its own maps (a walk over
+/// all of them would measure an IFS nobody draws), placed, and pooled.
+pub fn measure_layers(scene: &crate::scene::Scene) -> LayerMeasure {
+    let mut layers = Vec::new();
+    let mut pooled: Vec<Vec3> = Vec::new();
+    let shares: Vec<f32> = (0..scene.layer_count())
+        .map(|k| if scene.layer_visible(k) { scene.layer_share(k) } else { 0.0 })
+        .collect();
+    let per = allocate_samples(&shares);
+    for k in 0..scene.layer_count() {
+        let maps: Vec<TransformSpec> =
+            scene.transforms.iter().filter(|t| t.layer as usize == k).cloned().collect();
+        let placement = scene.layer_placement(k);
+        let pts = walk_points(&maps, &vec![true; maps.len()]);
+        let stats = pts.as_ref().map(|p| {
+            let placed: Vec<Vec3> = p.iter().map(|&x| placement.transform_point3(x)).collect();
+            stats_of(&placed)
+        });
+        if let (Some(p), Some(n)) = (pts, per.get(k)) {
+            pooled.extend(p.iter().take(*n).map(|&x| placement.transform_point3(x)));
+        }
+        layers.push(stats);
+    }
+    let union = (!pooled.is_empty()).then(|| stats_of(&pooled));
+    LayerMeasure { layers, union }
+}
+
+/// Samples each layer contributes to the pooled union: in proportion to its
+/// share, out of one measurement's worth.
+fn allocate_samples(shares: &[f32]) -> Vec<usize> {
+    crate::subscene::allocate_walkers(shares, MEASURE_STEPS as u32)
+        .into_iter()
+        .map(|n| n as usize)
+        .collect()
+}
+
+/// The walk `measure` takes, as points.
+fn walk_points(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Vec<Vec3>> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
+    let mut walker = Walker::new(transforms, enabled, &mut rng)?;
+    for _ in 0..BURN_IN_STEPS {
+        walker.step(&mut rng);
+    }
+    let mut points = Vec::with_capacity(MEASURE_STEPS);
+    for _ in 0..MEASURE_STEPS {
+        walker.step(&mut rng);
+        if !walker.pos.is_finite() {
+            return None;
+        }
+        points.push(walker.pos);
+    }
+    Some(points)
+}
+
+/// Centre, 95th-percentile radius, spread and occupancy of a point set —
+/// `measure`'s arithmetic, for points from anywhere.
+fn stats_of(points: &[Vec3]) -> AttractorStats {
+    let n = points.len() as f32;
+    let (sum, sum_sq) = points.iter().fold((Vec3::ZERO, Vec3::ZERO), |(s, q), p| (s + *p, q + *p * *p));
+    let mean = sum / n;
+    let var = (sum_sq / n - mean * mean).max(Vec3::ZERO);
+    let mut radii: Vec<f32> = points.iter().map(|p| (*p - mean).length()).collect();
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let radius = radii[(radii.len() as f32 * 0.95) as usize % radii.len()];
+    AttractorStats {
+        center: mean,
+        radius,
+        spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
+        occupancy: occupancy(points, mean, radius),
+    }
 }
 
 /// Fraction of a coarse grid over the attractor's core that holds any point.
@@ -532,6 +661,7 @@ mod tests {
         ]
         .iter()
         .map(|&t| TransformSpec {
+            layer: 0,
             matrix: Mat4::from_scale_rotation_translation(Vec3::splat(0.5), Quat::IDENTITY, t),
             post_affine: Mat4::IDENTITY,
             color_value: 0.5,
@@ -547,6 +677,7 @@ mod tests {
     /// One off-axis contracting map, optionally enrolled in a group.
     fn one_map(symmetry: Option<crate::symmetry::Symmetry>) -> Vec<TransformSpec> {
         vec![TransformSpec {
+            layer: 0,
             matrix: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.5),
                 Quat::IDENTITY,

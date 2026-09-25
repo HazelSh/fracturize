@@ -520,6 +520,11 @@ fn build(subject: &Subject) -> Report {
         sections.push(view_section(path, v, scene, &mut notes));
     }
     sections.push(shape_section(subject, &effective, &mut notes));
+    // Only for composites, like `symmetry` below: an ordinary scene is one
+    // layer, and the `maps` count already says everything this would.
+    if scene.is_composite() {
+        sections.push(subscenes_section(subject, &mut notes));
+    }
     sections.push(maps_section(subject, &resolved, &mut notes));
     // Only for scenes that have one. A block that said "symmetry none" on
     // every one of the forty-odd scenes without it would cost a line each to
@@ -550,6 +555,9 @@ fn scene_section(subject: &Subject, _notes: &Notes) -> Section {
         facts.push(format!("by {}", scene.author));
     }
     facts.push(format!("{} maps", scene.transforms.len()));
+    if scene.is_composite() {
+        facts.push(format!("{} subscenes", scene.subscenes.len()));
+    }
     facts.push(format!("{} colour", scene.color_mode.name()));
     facts.push(match &scene.zoom {
         Some(_) => "zoom on".to_string(),
@@ -711,8 +719,16 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     let scene = subject.scene;
     let mut s = Section::new("shape");
     let enabled = vec![true; scene.transforms.len()];
+    let composite = scene.is_composite();
 
-    let measured = crate::trace::measure(&scene.transforms, &enabled);
+    // A composite's shape is the union of its visible subscenes, each walked
+    // on its own maps and placed. Walking every map as one IFS would measure
+    // a picture nothing draws.
+    let measured = if composite {
+        crate::trace::measure_layers(scene).union
+    } else {
+        crate::trace::measure(&scene.transforms, &enabled)
+    };
     let Some(m) = measured else {
         s.text("the chaos game does not converge");
         s.text("every weight is zero, or the walk runs away");
@@ -741,8 +757,10 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         Cell::new("occupancy", format!("{:>7.1}%", m.occupancy * 100.0)),
     ]);
 
-    // Similarity dimension: the single best predictor of dust/shell/mush
-    let dim = crate::scene::similarity_dimension(&scene.transforms);
+    // Similarity dimension: the single best predictor of dust/shell/mush.
+    // Per subscene in a composite — the maps of two attractors have no joint
+    // dimension — so it is reported in `subscenes` instead.
+    let dim = if composite { None } else { crate::scene::similarity_dimension(&scene.transforms) };
     let dim_str = dim.map_or("n/a".to_string(), |d| format!("{:>8.2}", d));
     let dim_class = match dim {
         Some(d) if d < 1.7 => "dust",
@@ -757,7 +775,7 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     // A scene with all maps at 0.5 contracts 50% per step on average; one with
     // maps at 0.3 and 0.7 contracts faster per step but reaches the same d.
     let total_weight: f32 = scene.transforms.iter().map(|t| t.weight).sum();
-    let compactness = if total_weight > 0.0 {
+    let compactness = if total_weight > 0.0 && !composite {
         let log_sum: f32 = scene
             .transforms
             .iter()
@@ -773,7 +791,11 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     };
 
     // Lacunarity: density variance across scales
-    let lacunarity = crate::trace::lacunarity_summary(&scene.transforms, &enabled);
+    let lacunarity = if composite {
+        None
+    } else {
+        crate::trace::lacunarity_summary(&scene.transforms, &enabled)
+    };
     let lacunarity_str = lacunarity.map_or("n/a".to_string(), |l| format!("{:>5.1}", l));
 
     s.cells(vec![
@@ -792,6 +814,10 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         "the scene sets", scene.camera_distance, scene.point_size
     ));
     s.text("radius is the 95th percentile of the walk's distance from the centre");
+    if composite {
+        s.text("a composite: this is every visible subscene together; dimension");
+        s.text("and lacunarity are per subscene, in `layers` below");
+    }
 
     // Against the framing that would render, not the scene's authored one —
     // with a --view loaded those are different numbers, and the useful one is
@@ -853,6 +879,196 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     s
 }
 
+/// The layers of a composite: what each is, where it sits, what share of the
+/// points it gets, and how big it measures once placed — the numbers an
+/// author needs to balance subscenes against each other without a render.
+///
+/// Every number here that you would act on comes with the flag that acts on it,
+/// as `shape` does: a subscene is reached as `subscene.<name>` by `-S`.
+fn subscenes_section(subject: &Subject, notes: &mut Notes) -> Section {
+    let scene = subject.scene;
+    let mut s = Section::new("layers");
+    let measure = crate::trace::measure_layers(scene);
+    let sizes = scene.layer_sizes();
+    let n = scene.layer_count();
+    let shares: Vec<f32> = (0..n)
+        .map(|k| if scene.layer_visible(k) && sizes[k] > 0 { scene.layer_share(k) } else { 0.0 })
+        .collect();
+    let total_share: f32 = shares.iter().sum();
+    let points = scene.point_count;
+    s.text(format!(
+        "{} layers, {} points dealt between the visible ones by share",
+        n,
+        magnitude(points)
+    ));
+
+    // Points per unit of projected area, so two subscenes can be compared for
+    // how bright and how grainy each will come out. Area as r², which is what
+    // a camera sees of it whatever its dimension.
+    let density = |k: usize| -> Option<f32> {
+        let m = measure.layers[k].as_ref()?;
+        (shares[k] > 0.0 && m.radius > 0.0).then(|| shares[k] / (m.radius * m.radius))
+    };
+
+    for k in 0..n {
+        let name = scene.layer_name(k);
+        let label = if k == 0 { format!("{} (own maps)", name) } else { name.to_string() };
+        let frac = if total_share > 0.0 { shares[k] / total_share } else { 0.0 };
+        let state = if !scene.layer_visible(k) {
+            "hidden"
+        } else if sizes[k] == 0 {
+            "empty"
+        } else {
+            "visible"
+        };
+        s.text(spread(&format!("[{}] {}", k, label), state));
+        s.text(format!(
+            "    maps {:>4}   share {:>6.2}  = {:>5.1}% of the points, ~{}",
+            sizes[k],
+            scene.layer_share(k),
+            frac * 100.0,
+            magnitude((frac * points as f32) as usize)
+        ));
+        if k > 0 {
+            let sub = &scene.subscenes[k - 1];
+            let p = &sub.placement;
+            let deg = p.rotation.to_xyz_degrees();
+            s.text(format!("    at     {}   scale {:.3}", point(p.translation), p.scale));
+            s.text(format!(
+                "    turn   ({:>6.1}, {:>6.1}, {:>6.1})°",
+                degrees(deg[0].to_radians()),
+                degrees(deg[1].to_radians()),
+                degrees(deg[2].to_radians())
+            ));
+            let c = &sub.colour;
+            s.text(format!(
+                "    colour {}, speed {:.2}, falloff {:.2}, contrast {:.2}",
+                c.color_mode.name(),
+                c.color_speed,
+                c.color_falloff,
+                c.color_contrast
+            ));
+            let from = match (&sub.file, &sub.base) {
+                (Some(f), Some(_)) => format!("file = {}", f),
+                _ => match &sub.source {
+                    Some(src) => format!("inline (imported from {})", src),
+                    None => "inline".to_string(),
+                },
+            };
+            let by = sub.author.as_deref().map(|a| format!(", by {}", a)).unwrap_or_default();
+            for line in wrap("    from   ", 11, &format!("{}{}", from, by)) {
+                s.text(line);
+            }
+        }
+        match &measure.layers[k] {
+            Some(m) => {
+                let dim = {
+                    let maps: Vec<crate::scene::TransformSpec> =
+                        scene.transforms.iter().filter(|t| t.layer as usize == k).cloned().collect();
+                    crate::scene::similarity_dimension(&maps)
+                };
+                s.text(format!("    centre {}   radius {:.3}", point(m.center), m.radius));
+                s.text(format!(
+                    "    dimension {}   density {}",
+                    dim.map_or("n/a".to_string(), |d| format!("{:.2}", d)),
+                    density(k).map_or("n/a".to_string(), |d| format!("{:.2}", d / total_share.max(1e-9)))
+                ));
+            }
+            None if sizes[k] > 0 => {
+                s.text("    the chaos game does not converge");
+                notes.add("layers", format!("[{}] {}: the walk does not converge — nothing to draw", k, name));
+            }
+            None => {}
+        }
+        // A handle, spelled the way -S reads it.
+        if k > 0 {
+            s.text(format!("    -S subscene.{}.share=   .translation=[x,y,z]   .scale=", name));
+        }
+    }
+
+    // How the layers sit against each other: overlapping, or apart. Measured
+    // on the 95th-percentile spheres, which is coarse but is what a framing
+    // actually has to fit.
+    let placed: Vec<(usize, &crate::trace::AttractorStats)> = (0..n)
+        .filter(|&k| shares[k] > 0.0)
+        .filter_map(|k| measure.layers[k].as_ref().map(|m| (k, m)))
+        .collect();
+    for (a, (ka, ma)) in placed.iter().enumerate() {
+        for (kb, mb) in placed.iter().skip(a + 1) {
+            let gap = (ma.center - mb.center).length() - ma.radius - mb.radius;
+            let small = ma.radius.min(mb.radius).max(1e-6);
+            let (na, nb) = (scene.layer_name(*ka), scene.layer_name(*kb));
+            if gap > 0.0 {
+                s.text(format!("{} and {} sit apart, {:.2} between them", na, nb, gap));
+                if gap > 2.0 * (ma.radius + mb.radius) {
+                    notes.add(
+                        "layers",
+                        format!(
+                            "{} and {} are far apart ({:.2}) for their size — framing both makes \
+                             each small. Move one closer with -S subscene.<name>.translation",
+                            na, nb, gap
+                        ),
+                    );
+                }
+            } else if -gap >= 2.0 * small {
+                s.text(format!("{} and {} overlap, the smaller wholly inside", na, nb));
+            } else {
+                s.text(format!(
+                    "{} and {} overlap by {:.0}% of the smaller",
+                    na,
+                    nb,
+                    (-gap / (2.0 * small) * 100.0).min(100.0)
+                ));
+            }
+        }
+    }
+
+    // Brightness balance. In the splat renderer a subscene's brightness is its
+    // points per unit area, so a share that ignores size makes the big one
+    // faint and the small one blown out. Say which, and the share that evens
+    // them — shares proportional to r².
+    let dens: Vec<(usize, f32)> = (0..n).filter_map(|k| density(k).map(|d| (k, d))).collect();
+    if dens.len() > 1 {
+        let (lo, hi) = dens.iter().fold((dens[0], dens[0]), |(lo, hi), &x| {
+            (if x.1 < lo.1 { x } else { lo }, if x.1 > hi.1 { x } else { hi })
+        });
+        let ratio = hi.1 / lo.1.max(1e-12);
+        s.text(format!("density: points per unit area; {:.1}x densest to sparsest", ratio));
+        if ratio > 4.0 {
+            let even: Vec<String> = dens
+                .iter()
+                .filter_map(|&(k, _)| {
+                    let r = measure.layers[k].as_ref()?.radius;
+                    let base = measure.layers[dens[0].0].as_ref()?.radius;
+                    let share = scene.layer_share(dens[0].0) * (r / base).powi(2);
+                    Some(if k == 0 {
+                        format!("-S meta.share={:.3}", share)
+                    } else {
+                        format!("-S subscene.{}.share={:.3}", scene.layer_name(k), share)
+                    })
+                })
+                .collect();
+            notes.add(
+                "layers",
+                format!(
+                    "{} gets {:.1}x the points per area of {} — it will render brighter and \
+                     smoother. Even shares: {}",
+                    scene.layer_name(hi.0),
+                    ratio,
+                    scene.layer_name(lo.0),
+                    even.join(" ")
+                ),
+            );
+        }
+    }
+    for k in 0..n {
+        if !scene.layer_visible(k) && sizes[k] > 0 {
+            notes.add("layers", format!("[{}] {} is hidden (visible = false)", k, scene.layer_name(k)));
+        }
+    }
+    s
+}
+
 fn name_of(scene: &Scene, i: usize) -> String {
     scene
         .transform_names
@@ -867,12 +1083,20 @@ fn name_of(scene: &Scene, i: usize) -> String {
 fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Section {
     let scene = subject.scene;
     let mut s = Section::new("maps");
-    let total: f32 = scene.transforms.iter().map(|t| t.weight).sum();
+    // Share of the walk is within a map's own layer: a composite's walkers
+    // never cross from one subscene's maps to another's.
+    let layer_total = |k: u16| -> f32 {
+        scene.transforms.iter().filter(|t| t.layer == k).map(|t| t.weight).sum()
+    };
+    let composite = scene.is_composite();
 
     s.text(format!(
         "{}   share of the walk, contraction, colour as rendered",
         scene.transforms.len()
     ));
+    if composite {
+        s.text("a share is of its own subscene's walk, which is all its walkers see");
+    }
 
     // Whether *any* map uses the post-affine slot. Decided once for the whole
     // block so the per-map schema is uniform within a report — see the `post`
@@ -888,18 +1112,35 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
         .collect();
     let sw = scales.iter().map(|s| s.chars().count()).max().unwrap_or(5).clamp(5, 22);
 
+    let mut last_layer = None;
     for (i, t) in scene.transforms.iter().enumerate() {
+        if composite && last_layer != Some(t.layer) {
+            last_layer = Some(t.layer);
+            let k = t.layer as usize;
+            s.text(match k {
+                0 => format!("-- {} (the scene's own maps)", scene.layer_name(0)),
+                _ => format!("-- {} (subscene {})", scene.layer_name(k), k),
+            });
+        }
         let (_, rot, trans) = t.matrix.to_scale_rotation_translation();
         let (rx, ry, rz) = rot.to_euler(glam::EulerRot::XYZ);
+        let total = layer_total(t.layer);
         let share = if total > 0.0 { t.weight / total * 100.0 } else { 0.0 };
         let c = contraction_of(t);
 
         // The colour a map actually renders as, which is the thing you cannot
         // get from the file: in palette mode the gradient sampled at the map's
         // own index, in the other two the map's own RGB.
-        let rendered = match scene.color_mode {
-            ColorMode::Palette => resolved.sample(t.color_value),
-            _ => scene.colors.get(i).copied().unwrap_or(Vec3::ZERO),
+        let rendered = match (t.layer, scene.color_mode) {
+            (0, ColorMode::Palette) => resolved.sample(t.color_value),
+            (0, _) => scene.colors.get(i).copied().unwrap_or(Vec3::ZERO),
+            (k, _) => {
+                let c = &scene.subscenes[k as usize - 1].colour;
+                match (c.color_mode, &c.palette) {
+                    (ColorMode::Palette, Some(p)) => p.sample(t.color_value),
+                    _ => scene.colors.get(i).copied().unwrap_or(Vec3::ZERO),
+                }
+            }
         };
 
         // A map that expands has no fixed point to walk toward and a map that
@@ -946,7 +1187,11 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
             speed,
             sw = sw
         ));
-        s.text(format!("    move  {}", point(trans)));
+        s.text(format!(
+            "    move  {}{}",
+            point(trans),
+            if composite && t.layer > 0 { "   (in its subscene's space)" } else { "" }
+        ));
         // Always printed, `linear` and all, and on its own line: two reports
         // that diff row for row is the entire reason the fixed-schema
         // convention exists, and a line that appears only sometimes breaks it.
@@ -1174,7 +1419,17 @@ fn colour_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> S
 
     // The palette is the only shading this renderer has, so a flat one is
     // worth saying out loud rather than leaving to be discovered.
-    if swing < 0.15 {
+    // A pure composite has no maps of its own and so no gradient of its own;
+    // each subscene's colour is reported in `layers`.
+    let own_maps = scene.layer_sizes()[0] > 0;
+    if scene.is_composite() {
+        s.text(if own_maps {
+            "the scene's own maps' colour; each subscene's is in `layers`"
+        } else {
+            "no maps of its own; each subscene's colour is in `layers`"
+        });
+    }
+    if swing < 0.15 && own_maps {
         notes.add("colour", format!("the gradient is flat (swing {:.2}) — renders unshaded", swing));
     }
     if scene.color_mode == ColorMode::Transforms && scene.palette.is_some() {

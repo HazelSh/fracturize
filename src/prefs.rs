@@ -31,6 +31,9 @@ pub struct PanelPrefs {
     /// The scene browser. Same reasoning.
     #[serde(default)]
     pub browser_open: bool,
+    /// The Subscenes window (composing several attractors into one scene).
+    #[serde(default)]
+    pub subscenes_open: bool,
 }
 
 fn default_mutate_strength() -> f32 {

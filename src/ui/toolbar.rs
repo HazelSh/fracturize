@@ -34,6 +34,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Transforms window",
             );
 
+            let resp = ui.toggle_value(&mut app.ui_state.panels.subscenes_open, (icons::UNITE, "Subscenes"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Subscenes — compose other scenes into this one: import, show/hide, share of the points, placement",
+                "toggle the Subscenes window",
+            );
+
             let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, (icons::FLASK, "Explore"));
             hinted(
                 resp,

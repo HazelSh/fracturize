@@ -35,7 +35,7 @@ pub fn draw(ctx: &egui::Context, app: &App) {
         egui::Id::new("fracturize_gizmo_labels"),
     ));
     let font = egui::FontId::proportional(FONT_SIZE);
-    let selected = app.selected_transform();
+    let selected = app.gizmo_selection();
     // Hovering a gizmo promotes its label to the same solid backdrop the
     // selected one gets. Bare white text vanishes against a bright attractor,
     // and reading a name is how you decide whether this is the transform you
@@ -43,18 +43,13 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     // the label was hardest to read.
     let hovered = app.hovered_transform();
 
-    for (i, spec) in app.scene.transforms.iter().enumerate() {
-        let origin = spec.matrix.w_axis.truncate();
+    // In scene space: a map in a placed subscene is labelled where it is
+    // drawn, and a subscene selected as a whole is labelled by its name.
+    for (i, (matrix, label, enabled)) in app.gizmo_labels().into_iter().enumerate() {
+        let origin = matrix.w_axis.truncate();
         let Some((sx, sy)) = world_to_screen(origin, view_proj, w as f32, h as f32) else {
             continue;
         };
-        let label = app
-            .scene
-            .transform_names
-            .get(i)
-            .and_then(|n| n.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| format!("T{}", i));
 
         let pos = egui::pos2(sx / ppp + 8.0, sy / ppp - 7.0);
 
@@ -68,7 +63,7 @@ pub fn draw(ctx: &egui::Context, app: &App) {
             painter.rect_filled(rect, 3.0, egui::Color32::from_white_alpha(plate));
             painter.galley(pos, galley, egui::Color32::BLACK);
         } else {
-            let alpha: u8 = if app.is_transform_enabled(i) { 200 } else { 80 };
+            let alpha: u8 = if enabled { 200 } else { 80 };
             // A 1px black shadow, for the same reason the origin dots gained a
             // rim: this text is drawn over whatever the attractor happens to
             // be, and white on a pale fractal is not text. The plated cases

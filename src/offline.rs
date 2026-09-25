@@ -535,9 +535,7 @@ fn fill_points(
 ) -> Result<(PointCompute, u32, Outcome), String> {
     let mut compute = PointCompute::new(
         device,
-        &scene.transforms,
-        &scene.colors,
-        &scene.colormap,
+        &crate::gpu::points::compute::LayerTable::build(&scene, &[], scene.color_contrast),
         scene.point_count as u32,
         chaos_seed,
     );
@@ -1904,7 +1902,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     // chaos game (per-transform speeds), so apply it before compute setup.
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
         scene.color_falloff = f;
-        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+        scene.resolve_all_color_speeds(f);
     }
     let color_contrast = view
         .as_ref()
@@ -1971,7 +1969,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             tile.view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent, scene.color_mode.packs_rgb(),
+            transparent, scene.packs_rgb(),
         )
         // One guard for the whole sheet, off the base framing, for the same
         // reason as the haze band above: grid tiles only re-aim the camera.
@@ -2235,7 +2233,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
         scene.color_falloff = f;
-        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+        scene.resolve_all_color_speeds(f);
     }
     let color_contrast =
         view.as_ref().and_then(|v| v.color_contrast).unwrap_or(scene.color_contrast);
@@ -2276,9 +2274,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
 
     let mut compute = PointCompute::new(
         &device,
-        &scene.transforms,
-        &scene.colors,
-        &scene.colormap,
+        &crate::gpu::points::compute::LayerTable::build(&scene, &[], color_contrast),
         scene.point_count as u32,
         // A resume must deal an *independent* hand. With the original seed the
         // walkers replay their exact trajectory, so every "new" lap deposits a
@@ -2540,7 +2536,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 color_contrast,
                 scene.background.to_array(),
                 transparent,
-                scene.color_mode.packs_rgb(),
+                scene.packs_rgb(),
             )
             .with_zoom_guard(zoom.as_ref(), base_camera.eye())
             .with_supersample(sampling.n)
@@ -3029,7 +3025,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
         scene.color_falloff = f;
-        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+        scene.resolve_all_color_speeds(f);
     }
     let color_contrast = view
         .as_ref()
@@ -3158,7 +3154,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             cam.view_proj(aspect), cam.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent, scene.color_mode.packs_rgb(),
+            transparent, scene.packs_rgb(),
         )
         // After the wrap too, and for the same reason: the guard is a ramp in
         // multiples of the eye distance, so it has to be rebuilt from the
@@ -3300,7 +3296,7 @@ pub fn render_mutations(
 
     if let Some(f) = view.as_ref().and_then(|v| v.color_falloff) {
         scene.color_falloff = f;
-        crate::scene::resolve_color_speeds(&mut scene.transforms, scene.color_speed, f);
+        scene.resolve_all_color_speeds(f);
     }
     let color_contrast = view
         .as_ref()
@@ -3351,7 +3347,7 @@ pub fn render_mutations(
             view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent, scene.color_mode.packs_rgb(),
+            transparent, scene.packs_rgb(),
         )
         .with_zoom_guard(zoom, base_camera.eye())
         .with_supersample(sampling.n)
@@ -3543,7 +3539,7 @@ pub fn render_sweep(
             view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent, scene.color_mode.packs_rgb(),
+            transparent, scene.packs_rgb(),
         )
         .with_zoom_guard(zoom, base_camera.eye())
         .with_supersample(sampling.n)

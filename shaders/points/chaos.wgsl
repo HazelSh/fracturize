@@ -101,8 +101,10 @@ struct ComputeParams {
     // points/splat.wgsl); it cannot be done here, because this buffer is
     // filled over ~800 frames and a camera-dependent deal would mix that many
     // camera positions into one image.
-    _pad1: u32,
-    _pad2: u32,
+    // Two of the three padding words carry the layer table (subscenes; see
+    // src/subscene.rs): how many layers, and whether the scene composes them.
+    num_layers: u32,
+    composite: u32,
     _pad3: u32,
     zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
     zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
@@ -127,6 +129,28 @@ struct ComputeParams {
 // a reference to normalize against and cannot have one until the points exist.
 @group(0) @binding(6) var<storage, read_write> stats: array<f32>;
 
+// One layer of the scene: its own maps, or one subscene's. Must match GpuLayer
+// in src/gpu/points/compute.rs (96 bytes). A walker belongs to the layer whose
+// `walker_end` first exceeds its id, and only ever draws that layer's maps —
+// which is what makes a composite the union of its subscenes' attractors
+// rather than one IFS whose maps mix. An ordinary scene is one layer holding
+// every map and every walker.
+struct Layer {
+    placement: mat4x4<f32>,
+    t_start: u32,
+    t_count: u32,
+    walker_end: u32,
+    mix: u32,
+    contrast: f32,
+    scale: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+const MAX_LAYERS: u32 = 16u;
+@group(0) @binding(7) var<uniform> layers: array<Layer, 16>;
+// 256 entries per layer, layer k's at k * 256. Read only in a composite.
+@group(0) @binding(8) var<storage, read> layer_colormaps: array<vec4<f32>>;
+
 const PI: f32 = 3.14159265358979;
 
 // xorshift128 random number generator
@@ -149,9 +173,10 @@ fn rand_float(s: ptr<function, vec4<u32>>) -> f32 {
 // Binary search over the cumulative weights: first i with r < cum_weight[i].
 // Scenes are typically <10 transforms, but generated ones (L-system ports)
 // reach thousands, where a linear scan dominates the whole chaos pass.
-fn select_transform(r: f32, num_transforms: u32) -> u32 {
-    var lo = 0u;
-    var hi = num_transforms - 1u;
+// Searches one layer's run of the buffer: its cumulative weights are its own.
+fn select_transform(r: f32, start: u32, count: u32) -> u32 {
+    var lo = start;
+    var hi = start + count - 1u;
     while lo < hi {
         let mid = (lo + hi) / 2u;
         if r < transforms[mid].cumulative_weight {
@@ -652,6 +677,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+    // This walker's layer. A handful at most, so a scan.
+    var li = 0u;
+    loop {
+        if li + 1u >= params.num_layers || walker_id < layers[li].walker_end {
+            break;
+        }
+        li += 1u;
+    }
+    let layer = layers[li];
+    // A walker no visible layer claims (every layer hidden) writes nothing.
+    if walker_id >= layer.walker_end || layer.t_count == 0u {
+        return;
+    }
+
     var rng = walker_states[walker_id].rng_state;
     var pos = walker_states[walker_id].current_pos;
     var color_val = walker_states[walker_id].current_color;
@@ -665,7 +704,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var i = 0u; i < params.iterations_per_walker; i++) {
         // Select random transform based on weights
         let r = rand_float(&rng);
-        let transform_idx = select_transform(r, params.num_transforms);
+        let transform_idx = select_transform(r, layer.t_start, layer.t_count);
 
         // The whole step — affine, variations, post-affine, symmetry — so
         // that the emphasis probe below can be pushed through the same one.
@@ -750,7 +789,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // the 24 that were free. So switching colour mode is a uniform flip
         // that recolours the existing buffer — no refill, no stall.
         let color_idx = u32(clamp(color_val, 0.0, 1.0) * 255.0);
-        points[output_idx] = Point(out_pos, color_idx | (pack_rgb(color_rgb) << 8u));
+        var word = color_idx | (pack_rgb(color_rgb) << 8u);
+        // A composite: carry the point into scene space by its layer's
+        // placement, and resolve its colour here, through its layer's own
+        // colormap and contrast — the renderers then draw packed RGB and never
+        // need to know which layer a point came from. See src/subscene.rs.
+        if params.composite != 0u {
+            out_pos = (layer.placement * vec4<f32>(out_pos, 1.0)).xyz;
+            out_sens *= layer.scale;
+            if layer.mix == 0u {
+                // The same cyclic contrast stretch render.wgsl applies.
+                let f = (f32(color_idx) + 0.5) / 256.0;
+                let stretched = fract(0.5 + (f - 0.5) * layer.contrast);
+                let c = layer_colormaps[li * 256u + (u32(stretched * 256.0) & 0xFFu)].rgb;
+                word = color_idx | (pack_rgb(c) << 8u);
+            }
+        }
+        points[output_idx] = Point(out_pos, word);
         // Behind the flag because the buffer bound here is a sixteen-byte
         // stand-in when the emphasis is off — see `sensitivity` above.
         if params.emphasis_enabled != 0u {

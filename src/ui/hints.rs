@@ -15,6 +15,9 @@ pub const HINT_ORIGIN: &str =
 /// is on offer, and it only selects (see `pick::pick_gizmo`)
 pub const HINT_SELECT: &str =
     "click: select this transform · alt+scroll: chaos weight";
+/// Any part of a whole subscene's gizmo but its rotate controls
+pub const HINT_SUBSCENE: &str =
+    "drag: move the whole subscene · tip or ctrl+drag: resize it · alt+scroll: its share of the points";
 /// Dragging a gizmo's axis endpoint handle
 pub const HINT_TIP: &str =
     "drag: scale this axis (shift: fine, ctrl: snap 0.1) · drag past the origin to mirror";

@@ -69,6 +69,10 @@ pub const CAMERA: &str = "\u{E10E}";
 /// Render job… (batch render dialog) — Phosphor `stack`, distinct from
 /// `SLIDERS` (the Render *window*, a different thing you open).
 pub const STACK: &str = "\u{E466}";
+/// The Subscenes window — Phosphor `unite`: two shapes made one, which is
+/// what a composite is (the union of its subscenes' attractors). Not `STACK`,
+/// which already means a render job.
+pub const UNITE: &str = "\u{E87E}";
 /// Undo — Phosphor `arrow-u-up-left`, the hooked "undo" arrow
 pub const UNDO: &str = "\u{E018}";
 /// Redo — Phosphor `arrow-u-up-right`, mirror of `UNDO`

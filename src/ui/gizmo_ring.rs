@@ -59,15 +59,15 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     if !app.show_gizmos {
         return;
     }
-    let Some(idx) = app.selected_transform() else { return };
-    let Some(spec) = app.scene.transforms.get(idx) else { return };
+    let Some(idx) = app.gizmo_selection() else { return };
+    let Some(matrix) = app.gizmo_specs().get(idx).map(|s| s.matrix) else { return };
 
     let (w, h) = app.surface_size();
     if w == 0 || h == 0 {
         return;
     }
     let Some((centre, radius)) =
-        crate::pick::roll_ring(spec.matrix, app.current_view_proj(), w as f32, h as f32)
+        crate::pick::roll_ring(matrix, app.current_view_proj(), w as f32, h as f32)
     else {
         return;
     };

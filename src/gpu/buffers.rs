@@ -476,7 +476,15 @@ pub struct PointComputeParams {
     /// guarded at render time now (`CameraUniforms::guard_*`), because the
     /// deal cannot depend on the camera — this buffer is filled over ~800
     /// frames and would mix that many camera positions into one image.
-    pub _pad: [u32; 3],
+    ///
+    /// Two of those three words now carry the layer table's size and whether
+    /// the scene is a composite (see `crate::subscene`); one is still padding.
+    pub num_layers: u32,
+    /// 1 when the scene composes subscenes: the chaos pass then places each
+    /// point by its layer and resolves its colour to packed RGB. 0 is the chaos
+    /// pass exactly as it was before subscenes.
+    pub composite: u32,
+    pub _pad: u32,
     /// xyz = the map's fixed point, w = target radius
     pub zoom_fixed: [f32; 4],
     /// xyz = the rotation axis of `A`, w = its angle

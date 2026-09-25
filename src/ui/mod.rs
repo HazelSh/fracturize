@@ -35,6 +35,7 @@ pub mod render_panel;
 pub mod save_as;
 pub mod shortcuts;
 pub mod status_bar;
+pub mod subscenes;
 pub mod toolbar;
 pub mod transforms;
 
@@ -133,6 +134,15 @@ pub struct UiState {
     /// The brainstorm calls this "the sleeper feature" — it converts the most
     /// common destructive edit into a safe one.
     pub dimension_lock: bool,
+    /// The selected subscene's rotation as the XYZ degrees its fields show,
+    /// keyed by `(layer, matrix generation)` — the Transforms inspector's
+    /// trick, for the same reason: re-deriving euler angles every frame from a
+    /// rotation you are dragging can hop branches under the pointer.
+    pub subscene_euler: Option<(usize, u64, [f32; 3])>,
+    /// A subscene being renamed in the Subscenes window, and the text so far.
+    pub renaming_subscene: Option<(usize, String)>,
+    /// Why the last import failed, shown in the window until the next attempt.
+    pub import_error: Option<String>,
 }
 
 impl UiState {
@@ -157,6 +167,9 @@ impl UiState {
             palette_drag: None,
             discard_arm: confirm::Arm::default(),
             dimension_lock: false,
+            subscene_euler: None,
+            renaming_subscene: None,
+            import_error: None,
         }
     }
 }
@@ -186,6 +199,7 @@ pub enum WindowKey {
     Keybinds,
     Transforms,
     Camera,
+    Subscenes,
 }
 
 impl WindowKey {
@@ -197,6 +211,7 @@ impl WindowKey {
             Self::Keybinds => "keybinds",
             Self::Transforms => "transforms",
             Self::Camera => "camera",
+            Self::Subscenes => "subscenes",
         }
     }
 
@@ -261,6 +276,11 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::Camera => (
             egui::pos2(right_x, top + 460.0),
             egui::vec2(right_col_w, 320.0),
+        ),
+        // Beside the Transforms window it chooses between.
+        WindowKey::Subscenes => (
+            egui::pos2((right_x - 340.0).max(20.0), top),
+            egui::vec2(320.0, 360.0),
         ),
     }
 }
@@ -339,6 +359,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     transforms::draw(&ctx, app);
     step("transforms", t, &mut timings);
+    let t = std::time::Instant::now();
+    subscenes::draw(&ctx, app);
+    step("subscenes", t, &mut timings);
     let t = std::time::Instant::now();
     camera_panel::draw(&ctx, app);
     step("camera", t, &mut timings);

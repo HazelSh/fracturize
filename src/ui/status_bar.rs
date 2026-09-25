@@ -242,7 +242,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         app.ui_state.dimension_lock = !lock_on;
                     }
 
-                    if let Some(d) = similarity_dimension(&app.scene.transforms) {
+                    if let Some(d) = similarity_dimension(&app.measured_maps().0) {
                         let class = match d {
                             d if d < 1.7 => "dust",
                             d if d < 2.1 => "lace",

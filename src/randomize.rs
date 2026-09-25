@@ -231,6 +231,7 @@ fn random_transform(rng: &mut impl Rng) -> TransformSpec {
     variations[0] = 1.0;
 
     TransformSpec {
+        layer: 0,
         matrix: Mat4::from_scale_rotation_translation(scale, rotation, translation),
         post_affine: Mat4::IDENTITY,
         color_value: 0.5,
@@ -299,6 +300,9 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Sc
     let (color_mode, palette) = random_color_mode(rng);
 
     let mut scene = Scene {
+        subscenes: Vec::new(),
+        root_share: 1.0,
+        root_visible: true,
         name: format!("random-{}", crate::app::unix_timestamp()),
         author: "fracturize random flame".to_string(),
         // Scale the dot size with the attractor: the same point size that

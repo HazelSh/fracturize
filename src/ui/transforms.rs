@@ -152,10 +152,15 @@ fn row_data(app: &App, i: usize) -> RowData {
 fn filtered_indices(app: &App) -> Vec<usize> {
     let n = app.scene.transforms.len();
     let needle = app.ui_state.transform_filter.trim().to_lowercase();
+    // A composite lists one layer at a time: a subscene's maps are a separate
+    // IFS, and interleaving two of them in one rail says the opposite.
+    let layer = app.current_layer();
+    let in_layer = |i: usize| !app.scene.is_composite() || app.scene.transforms[i].layer as usize == layer;
     if needle.is_empty() {
-        return (0..n).collect();
+        return (0..n).filter(|&i| in_layer(i)).collect();
     }
     (0..n)
+        .filter(|&i| in_layer(i))
         .filter(|&i| {
             let name = app
                 .scene
@@ -203,6 +208,49 @@ fn draw_filter(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
+/// Which layer's maps the rail lists — only in a composite, where there is a
+/// choice. The same choice the Subscenes window makes by clicking a row.
+fn draw_layer_picker(ui: &mut egui::Ui, app: &mut App) {
+    if !app.scene.is_composite() {
+        return;
+    }
+    let current = app.current_layer();
+    let label = |app: &App, k: usize| {
+        if k == 0 {
+            format!("{} (own maps)", app.scene.layer_name(0))
+        } else {
+            app.scene.layer_name(k).to_string()
+        }
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let mut chosen = None;
+        let resp = egui::ComboBox::from_id_salt("fracturize_transform_layer")
+            .width(RAIL_WIDTH - 16.0)
+            .selected_text(label(app, current))
+            .show_ui(ui, |ui| {
+                for k in 0..app.scene.layer_count() {
+                    if ui.selectable_label(k == current, label(app, k)).clicked() {
+                        chosen = Some(k);
+                    }
+                }
+            })
+            .response;
+        hinted(
+            resp,
+            &mut app.ui_state,
+            "Which subscene's maps to list. Each subscene is its own IFS; its maps are edited in its own space",
+            "click: choose the subscene whose maps are listed",
+        );
+        if let Some(k) = chosen {
+            // Listing a layer's maps is not selecting it as a whole, so the
+            // viewport keeps showing maps rather than one subscene gizmo.
+            app.select_layer(k);
+            app.leave_subscene_selection();
+        }
+    });
+}
+
 /// How many transforms it takes before the rail grows a filter box.
 const FILTER_THRESHOLD: usize = 12;
 
@@ -235,6 +283,7 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
                 // that doesn't move is the top. Under the list they sat
                 // wherever the list happened to stop, which on a scene with
                 // more transforms than fit was nowhere near it.
+                draw_layer_picker(ui, app);
                 draw_list_actions(ui, app, selected);
                 draw_filter(ui, app);
                 // The list takes the rest of the window. It used to take 320pt
@@ -255,11 +304,12 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
                     .show_rows(ui, TAB_HEIGHT, n, |ui, range| {
                         if n == 0 {
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new("Nothing matches that filter.")
-                                    .small()
-                                    .weak(),
-                            );
+                            let why = if app.ui_state.transform_filter.trim().is_empty() {
+                                "This layer has no maps of its own. Add one, or pick a subscene above."
+                            } else {
+                                "Nothing matches that filter."
+                            };
+                            ui.label(egui::RichText::new(why).small().weak());
                         }
                         for slot in range {
                             let i = visible[slot];
@@ -311,15 +361,17 @@ fn draw_list_actions(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
 
         // The chaos game needs somewhere to send the point, so the last
         // transform can't go — same rule as the context menu's Delete.
-        let can_delete = selected.is_some() && app.scene.transforms.len() > 1;
+        let can_delete = selected.is_some_and(|i| app.can_delete_transform(i));
         let resp = ui.add_enabled(can_delete, egui::Button::new(icons::TRASH).small());
         let resp = hinted(
             resp,
             &mut app.ui_state,
             if selected.is_none() {
                 "Delete a transform (Del) — select one first"
-            } else if app.scene.transforms.len() > 1 {
+            } else if can_delete {
                 "Delete the selected transform (Del)"
+            } else if app.scene.is_composite() {
+                "A subscene needs at least one map — remove the subscene instead"
             } else {
                 "A scene needs at least one transform"
             },
@@ -632,10 +684,14 @@ pub fn context_menu(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     // The chaos game needs somewhere to send a point, so the last transform
     // can't go. Shown disabled rather than hidden: a menu whose items move
     // around is harder to use than one with a greyed row.
-    let can_delete = app.scene.transforms.len() > 1;
+    let can_delete = app.can_delete_transform(i);
     let del = ui.add_enabled(can_delete, egui::Button::new((icons::TRASH, "Delete")));
     if !can_delete {
-        del.on_hover_text("A scene needs at least one transform");
+        del.on_hover_text(if app.scene.is_composite() {
+            "A subscene needs at least one map — remove the subscene instead"
+        } else {
+            "A scene needs at least one transform"
+        });
     } else if del.clicked() {
         app.delete_transform_at(i);
         chose = true;
@@ -696,6 +752,17 @@ const ZOOM_LABEL: &str = "Zoom about this";
 
 pub fn zoom_action(app: &App, i: usize) -> ZoomAction {
     let is_zoom = app.zoom_map() == Some(i);
+    if app.scene.is_composite() && !is_zoom {
+        return ZoomAction {
+            is_zoom,
+            enabled: false,
+            tooltip: "Infinite zoom doesn't compose with subscenes yet: it renormalizes every \
+                      point about one map's fixed point, and a subscene's points are placed in \
+                      a space that map knows nothing about"
+                .to_string(),
+            hint: "click: make this the scene's zoom map",
+        };
+    }
     let built = crate::renorm::Renorm::build(
         &crate::renorm::ZoomSpec { map: i, ..Default::default() },
         &app.scene.transforms,

@@ -776,3 +776,17 @@ recorded dead end is worth as much as a recipe.
   (`background = [r, g, b]`) grounds atmospheric haze, harmonizes with palette
   shadows, and establishes overall tonal depth.
 
+- **2026-09-26, Opus 5.5. Composites (`[[subscene]]`) — the renderer is chosen
+  by the solid, not the flame.** `scenes/censer.toml` puts the Menger sponge
+  (flat measure, Λ ~1.9) under the dragon smoke (sheets, Λ ~7.6). In splat the
+  sponge is fog: splat is additive, so a ray through a sponge crosses all its
+  tunnels at once and the carpet on each face averages away — the §2.1 uniform-
+  measure failure, now with nowhere to hide because the smoke beside it shows
+  what "structure" looks like. In points it is carved stone: opaque points show
+  each face's carpet and hide what's behind. The smoke reads well in both. So a
+  composite with a solid in it wants points, and the flame pays the (small)
+  price. Two smaller findings from the same piece: turning the sponge to the
+  camera's yaw (35.5° here) lines its tunnels up and they read as tunnels; and
+  `share` is a weak brightness lever under the log tonemap (0.3 → 1.0 moved the
+  smoke's mean luminance 64 → 76) — use it for grain and balance, and read the
+  `density` line in `--info`'s `layers` section before rendering.

@@ -115,6 +115,136 @@ fn walker_seed(seed: u64, i: u32) -> u64 {
     (i as u64).wrapping_mul(WALKER_STRIDE) ^ seed.wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 
+/// One layer as the chaos pass sees it. Must match `Layer` in chaos.wgsl
+/// (96 bytes; a uniform array, so the stride is a multiple of 16).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuLayer {
+    /// Scene-space placement, applied to each point as it is written.
+    pub placement: [[f32; 4]; 4],
+    /// This layer's run of the (layer-sorted) transform buffer.
+    pub t_start: u32,
+    pub t_count: u32,
+    /// Walkers `[previous layer's end, walker_end)` belong to this layer.
+    pub walker_end: u32,
+    /// 1 when the layer is in mix mode, so its colour is the walker's mixed
+    /// RGB rather than a lookup in its colormap.
+    pub mix: u32,
+    pub contrast: f32,
+    /// The placement's uniform scale, which carries an emphasis sensitivity.
+    pub scale: f32,
+    pub _pad: [f32; 2],
+}
+
+/// Everything the chaos pass needs to know about a scene's layers, built once
+/// per edit from the scene (see `crate::subscene` for the model).
+///
+/// An ordinary scene is one layer holding every map, with every walker, and no
+/// colour resolution: that is bit for bit the chaos pass that existed before
+/// subscenes, and `composite == false` is what keeps it so.
+pub struct LayerTable {
+    /// Transforms in GPU order — grouped by layer — as scene indices.
+    pub order: Vec<usize>,
+    pub gpu_transforms: Vec<GpuTransform>,
+    pub groups: GroupTable,
+    /// Per layer: the GPU record (walker_end still unset) and its share of
+    /// the walkers, zero when hidden or when none of its maps can fire.
+    pub layers: Vec<(GpuLayer, f32)>,
+    /// `MAX_LAYERS * 256` colormap entries, layer k's at `k * 256`.
+    pub colormaps: Vec<[f32; 4]>,
+    pub composite: bool,
+}
+
+impl LayerTable {
+    /// `enabled` is the app's per-transform on/off state (all on offline);
+    /// `root_contrast` the live value of the scene's own layer's contrast,
+    /// which the app keeps outside the scene.
+    pub fn build(scene: &crate::scene::Scene, enabled: &[bool], root_contrast: f32) -> Self {
+        let transforms = &scene.transforms;
+        let is_on = |i: usize| enabled.get(i).copied().unwrap_or(true);
+        let composite = scene.is_composite();
+        let n_layers = scene.layer_count().min(crate::subscene::MAX_LAYERS);
+
+        let mut order: Vec<usize> = (0..transforms.len()).collect();
+        // Stable, so an ordinary scene (all layer 0) keeps its order exactly.
+        order.sort_by_key(|&i| transforms[i].layer);
+
+        let ordered: Vec<TransformSpec> = order.iter().map(|&i| transforms[i].clone()).collect();
+        let groups = GroupTable::build(&ordered);
+
+        let mut gpu_transforms = Vec::with_capacity(order.len());
+        let mut layers = Vec::with_capacity(n_layers);
+        let mut colormaps = vec![[0.0f32; 4]; crate::subscene::MAX_LAYERS * 256];
+        let mut pos = 0usize;
+        for k in 0..n_layers {
+            let start = pos;
+            while pos < order.len() && transforms[order[pos]].layer as usize == k {
+                pos += 1;
+            }
+            let run = start..pos;
+            let total: f32 = run
+                .clone()
+                .map(|p| if is_on(order[p]) { transforms[order[p]].weight } else { 0.0 })
+                .sum();
+            let mut cumulative = 0.0;
+            for p in run.clone() {
+                let i = order[p];
+                let w = if is_on(i) { transforms[i].weight } else { 0.0 };
+                if total > 0.0 {
+                    cumulative += w / total;
+                }
+                gpu_transforms.push(GpuTransform::new(
+                    &transforms[i],
+                    cumulative,
+                    w,
+                    transform_color(&scene.colors, i),
+                    groups.slices.get(p).copied().unwrap_or((0, 0)),
+                ));
+            }
+            let (mode, contrast, colormap) = scene.layer_colour(k);
+            let contrast = if k == 0 { root_contrast } else { contrast };
+            colormaps[k * 256..(k + 1) * 256].copy_from_slice(colormap);
+            let share = if !composite {
+                // Everything, always — including a scene with every map
+                // switched off, which then does what it always did.
+                1.0
+            } else if scene.layer_visible(k) && total > 0.0 {
+                scene.layer_share(k).max(0.0)
+            } else {
+                0.0
+            };
+            let placement = scene.layer_placement(k);
+            layers.push((
+                GpuLayer {
+                    placement: placement.to_cols_array_2d(),
+                    t_start: start as u32,
+                    t_count: (pos - start) as u32,
+                    walker_end: 0,
+                    mix: u32::from(mode.packs_rgb()),
+                    contrast,
+                    scale: placement.x_axis.truncate().length(),
+                    _pad: [0.0; 2],
+                },
+                share,
+            ));
+        }
+        Self { order, gpu_transforms, groups, layers, colormaps, composite }
+    }
+
+    /// The uniform: layers with their walker ranges dealt.
+    fn gpu_layers(&self, num_walkers: u32) -> [GpuLayer; crate::subscene::MAX_LAYERS] {
+        let shares: Vec<f32> = self.layers.iter().map(|(_, s)| *s).collect();
+        let counts = crate::subscene::allocate_walkers(&shares, num_walkers);
+        let mut out = [GpuLayer::zeroed(); crate::subscene::MAX_LAYERS];
+        let mut end = 0;
+        for (k, ((layer, _), n)) in self.layers.iter().zip(counts).enumerate() {
+            end += n;
+            out[k] = GpuLayer { walker_end: end, ..*layer };
+        }
+        out
+    }
+}
+
 /// Simple chaos game compute pipeline
 /// Writes points directly to a circular buffer
 pub struct PointCompute {
@@ -166,6 +296,14 @@ pub struct PointCompute {
     /// What the walkers were seeded from. Kept so `reset` restarts the same
     /// stream rather than silently falling back to the default.
     pub seed: u64,
+    /// The layer table (see [`LayerTable`]) and the per-layer colormaps a
+    /// composite resolves its colour through.
+    pub layer_buffer: wgpu::Buffer,
+    pub layer_colormap_buffer: wgpu::Buffer,
+    num_layers: u32,
+    composite: bool,
+    /// Scene index -> GPU index, for the emphasis target.
+    gpu_order: Vec<usize>,
 }
 
 /// A transform's colour, or white if the parallel `colors` array is short.
@@ -255,12 +393,11 @@ impl GroupTable {
 impl PointCompute {
     pub fn new(
         device: &wgpu::Device,
-        transforms: &[TransformSpec],
-        // Per-transform linear RGB, parallel to `transforms`. Only read in
-        // `ColorMode::Mix`, but uploaded always: the mode is a uniform flip
-        // at draw time, so the buffer has to be ready for either.
-        colors: &[glam::Vec3],
-        colormap: &[[f32; 4]; 256],
+        // The scene's maps, grouped by layer, with their colours and
+        // colormaps. Per-transform RGB is uploaded whatever the mode: the
+        // mode is a uniform flip at draw time, so the buffer has to be ready
+        // for either.
+        table: &LayerTable,
         buffer_capacity: u32,
         // Seeds the walkers. `DEFAULT_SEED` reproduces every render made before
         // this parameter existed.
@@ -288,28 +425,14 @@ impl PointCompute {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/points/chaos.wgsl").into()),
         });
 
-        // Prepare transform data with cumulative weights
-        let groups = GroupTable::build(transforms);
-        let total_weight: f32 = transforms.iter().map(|t| t.weight).sum();
-        let mut cumulative = 0.0;
-        let gpu_transforms: Vec<GpuTransform> = transforms
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                cumulative += t.weight / total_weight;
-                GpuTransform::new(
-                    t,
-                    cumulative,
-                    t.weight,
-                    transform_color(colors, i),
-                    groups.slices.get(i).copied().unwrap_or((0, 0)),
-                )
-            })
-            .collect();
+        // Transform data, layer by layer, with per-layer cumulative weights
+        let groups = &table.groups;
+        let colormap: &[[f32; 4]; 256] =
+            table.colormaps[..256].try_into().expect("layer 0's colormap");
 
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("transform_buffer"),
-            contents: bytemuck::cast_slice(&gpu_transforms),
+            contents: bytemuck::cast_slice(&table.gpu_transforms),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -367,6 +490,17 @@ impl PointCompute {
         let colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("colormap_buffer"),
             contents: bytemuck::cast_slice(colormap),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let layer_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("layer_table"),
+            contents: bytemuck::cast_slice(&table.gpu_layers(num_walkers)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let layer_colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("layer_colormaps"),
+            contents: bytemuck::cast_slice(&table.colormaps),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -451,6 +585,28 @@ impl PointCompute {
                     },
                     count: None,
                 },
+                // Layer table (subscenes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Per-layer colormaps, for a composite's colour resolution
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -522,6 +678,14 @@ impl PointCompute {
                     binding: 6,
                     resource: stats_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: layer_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: layer_colormap_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -535,7 +699,7 @@ impl PointCompute {
             params_buffer,
             point_buffer,
             colormap_buffer,
-            num_transforms: transforms.len() as u32,
+            num_transforms: table.gpu_transforms.len() as u32,
             num_walkers,
             num_workgroups,
             iterations_per_walker,
@@ -552,6 +716,11 @@ impl PointCompute {
             emphasis: None,
             zoom: None,
             seed,
+            layer_buffer,
+            layer_colormap_buffer,
+            num_layers: table.layers.len() as u32,
+            composite: table.composite,
+            gpu_order: table.order.clone(),
         }
     }
 
@@ -615,7 +784,12 @@ impl PointCompute {
             write_offset: self.write_offset,
             buffer_capacity: self.buffer_capacity,
             emphasis_enabled: u32::from(self.emphasis.is_some()),
-            emphasis_target: self.emphasis.map_or(0, |(t, _)| t),
+            // The emphasis is chosen by scene index; the buffer is in layer order.
+            emphasis_target: self.emphasis.map_or(0, |(t, _)| {
+                self.gpu_order.iter().position(|&j| j == t as usize).unwrap_or(0) as u32
+            }),
+            num_layers: self.num_layers,
+            composite: u32::from(self.composite),
             emphasis_run_start: run_start,
             emphasis_run_len: run_len,
             ..PointComputeParams::zeroed()
@@ -703,6 +877,8 @@ impl PointCompute {
                 wgpu::BindGroupEntry { binding: 4, resource: self.group_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: self.sensitivity_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: self.stats_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: self.layer_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: self.layer_colormap_buffer.as_entire_binding() },
             ],
         });
     }
@@ -827,42 +1003,14 @@ impl PointCompute {
     /// Also re-uploads the symmetry groups, because a live edit can change one
     /// (the panel's group picker) and there is no cheaper place to notice: the
     /// table is 32 KB and this already runs only on edits, never per frame.
-    pub fn update_weights(
-        &self,
-        queue: &wgpu::Queue,
-        transforms: &[TransformSpec],
-        colors: &[glam::Vec3],
-        enabled: &[bool],
-    ) {
-        let groups = GroupTable::build(transforms);
-        let total_weight: f32 = transforms
-            .iter()
-            .zip(enabled.iter())
-            .map(|(t, &on)| if on { t.weight } else { 0.0 })
-            .sum();
-
-        let mut cumulative = 0.0;
-        let gpu_transforms: Vec<GpuTransform> = transforms
-            .iter()
-            .zip(enabled.iter())
-            .enumerate()
-            .map(|(i, (t, &on))| {
-                let effective_weight = if on { t.weight } else { 0.0 };
-                if total_weight > 0.0 {
-                    cumulative += effective_weight / total_weight;
-                }
-                GpuTransform::new(
-                    t,
-                    cumulative,
-                    effective_weight,
-                    transform_color(colors, i),
-                    groups.slices.get(i).copied().unwrap_or((0, 0)),
-                )
-            })
-            .collect();
-
-        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&gpu_transforms));
-        queue.write_buffer(&self.group_buffer, 0, bytemuck::cast_slice(&groups.padded()));
+    pub fn update_weights(&mut self, queue: &wgpu::Queue, table: &LayerTable) {
+        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&table.gpu_transforms));
+        queue.write_buffer(&self.group_buffer, 0, bytemuck::cast_slice(&table.groups.padded()));
+        queue.write_buffer(&self.layer_buffer, 0, bytemuck::cast_slice(&table.gpu_layers(self.num_walkers)));
+        queue.write_buffer(&self.layer_colormap_buffer, 0, bytemuck::cast_slice(&table.colormaps));
+        self.num_layers = table.layers.len() as u32;
+        self.composite = table.composite;
+        self.gpu_order = table.order.clone();
     }
 
     /// Re-upload the colormap after live color edits. Existing points keep
@@ -983,5 +1131,88 @@ mod tests {
     #[test]
     fn test_walker_state_size() {
         assert_eq!(std::mem::size_of::<WalkerState>(), 64, "WalkerState must be 64 bytes to match WGSL struct");
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    /// `GpuLayer` and chaos.wgsl's `Layer` are one struct in two languages,
+    /// and the array length is one number in two languages. WGSL is opaque to
+    /// the compiler, so this is what holds them together.
+    #[test]
+    fn the_shader_agrees_about_the_layer_table() {
+        assert_eq!(std::mem::size_of::<GpuLayer>(), 96);
+        let src = include_str!("../../../shaders/points/chaos.wgsl");
+        let decl = format!("var<uniform> layers: array<Layer, {}>", crate::subscene::MAX_LAYERS);
+        assert!(src.contains(&decl), "chaos.wgsl must declare `{decl}`");
+    }
+
+    fn composite() -> crate::scene::Scene {
+        let mut s = crate::scene::Scene::blank();
+        let mut sub = s.transforms.clone();
+        for t in &mut sub {
+            t.layer = 1;
+        }
+        // Interleave, to check the table groups by layer whatever the order.
+        s.transforms = vec![sub[0].clone(), s.transforms[0].clone(), sub[1].clone(), s.transforms[1].clone()];
+        s.colors = vec![glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z, glam::Vec3::ONE];
+        s.transform_names = vec![None; 4];
+        s.subscenes.push(crate::subscene::Subscene {
+            name: "b".into(),
+            author: None,
+            file: None,
+            file_abs: None,
+            base: None,
+            source: None,
+            visible: true,
+            share: 3.0,
+            placement: crate::subscene::Placement::IDENTITY,
+            colour: crate::subscene::LayerColour {
+                color_mode: crate::scene::ColorMode::Mix,
+                palette: None,
+                color_speed: 0.5,
+                color_falloff: 0.0,
+                color_contrast: 1.0,
+                colormap: s.colormap,
+            },
+        });
+        s
+    }
+
+    #[test]
+    fn layers_are_contiguous_with_their_own_cumulative_weights() {
+        let s = composite();
+        let t = LayerTable::build(&s, &[], 1.0);
+        assert!(t.composite);
+        assert_eq!(t.order, vec![1, 3, 0, 2]);
+        let cum: Vec<f32> = t.gpu_transforms.iter().map(|g| g.cumulative_weight).collect();
+        assert_eq!(cum, vec![0.5, 1.0, 0.5, 1.0]);
+        let g = t.gpu_layers(16384);
+        assert_eq!((g[0].t_start, g[0].t_count, g[0].walker_end), (0, 2, 4096));
+        assert_eq!((g[1].t_start, g[1].t_count, g[1].walker_end), (2, 2, 16384));
+        assert_eq!(g[1].mix, 1);
+    }
+
+    #[test]
+    fn a_hidden_or_silenced_layer_gives_its_walkers_away() {
+        let mut s = composite();
+        s.subscenes[0].visible = false;
+        let g = LayerTable::build(&s, &[], 1.0).gpu_layers(100);
+        assert_eq!((g[0].walker_end, g[1].walker_end), (100, 100));
+        let s = composite();
+        // Both of layer 0's maps switched off.
+        let g = LayerTable::build(&s, &[true, false, true, false], 1.0).gpu_layers(100);
+        assert_eq!((g[0].walker_end, g[1].walker_end), (0, 100));
+    }
+
+    #[test]
+    fn an_ordinary_scene_is_one_layer_with_everything() {
+        let s = crate::scene::Scene::blank();
+        let t = LayerTable::build(&s, &[false, false], 1.0);
+        assert!(!t.composite);
+        let g = t.gpu_layers(16384);
+        assert_eq!((g[0].t_start, g[0].t_count, g[0].walker_end), (0, 2, 16384));
     }
 }

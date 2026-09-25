@@ -22,6 +22,7 @@ mod pick;
 mod scene;
 mod set;
 mod stats;
+mod subscene;
 mod sweep;
 mod symmetry;
 mod tile;
@@ -125,13 +126,22 @@ struct Args {
     /// `camera.distance=4`, `zoom.edge_guard=1`, `palette.rotate=0.2`,
     /// `transform.<name-or-index>.weight=0.5`,
     /// `transform.facet-1.variations.absfold=0.15`,
-    /// `transform.0.translation.y=1.25`. Arrays index by x/y/z or 0/1/2, or
+    /// `transform.0.translation.y=1.25`, `subscene.<name>.share=2`,
+    /// `subscene.<name>.transform.<name-or-index>.weight=0.5`. Arrays index by x/y/z or 0/1/2, or
     /// take a whole value (`transform.a.scale=[0.05,0.6,0.05]`). This is the
     /// general form of --palette and --zoom, and it is what makes a parameter
     /// sweep a shell loop instead of a code-generation task. A path that does
     /// not resolve is an error, never a silent no-op.
     #[arg(short = 'S', long = "set", value_name = "PATH=VALUE", help_heading = "Scene")]
     set: Vec<String>,
+
+    /// Draw one layer of a composite alone, hiding the rest [every layer]
+    ///
+    /// A subscene by name or index; 0 is the scene's own maps. It gets every
+    /// point the scene has, so it renders as it would on its own, placed where
+    /// the composite puts it. Works with --info, which then measures it alone.
+    #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
+    solo: Option<String>,
 
     /// Start from a randomly generated flame instead of a scene file
     ///
@@ -1319,11 +1329,17 @@ fn load_scene(args: &Args) -> Scene {
 fn load_scene_reporting(args: &Args) -> (Scene, Vec<set::Applied>, Option<u64>) {
     match &args.scene {
         Some(path) => {
-            let (scene, applied) =
+            let (mut scene, applied) =
                 Scene::load_reporting(path, &args.set).unwrap_or_else(|e| {
                     eprintln!("Failed to load scene '{}': {}", path, e);
                     std::process::exit(1);
                 });
+            if let Some(layer) = &args.solo {
+                if let Err(e) = scene.solo_layer(layer) {
+                    eprintln!("--solo: {}", e);
+                    std::process::exit(1);
+                }
+            }
             (scene, applied, None)
         }
         None if args.blank => (Scene::blank(), warn_set_cannot_apply(args), None),
@@ -1759,6 +1775,8 @@ impl ApplicationHandler for AppWrapper {
                                 app.toggle_browser();
                             } else if app.selected_transform().is_some() {
                                 app.select_transform(None);
+                            } else if app.selected_subscene().is_some() {
+                                app.leave_subscene_selection();
                             }
                             return;
                         }
@@ -2102,6 +2120,9 @@ fn default_scene() -> Scene {
     );
 
     Scene {
+        subscenes: Vec::new(),
+        root_share: 1.0,
+        root_visible: true,
         name: "Default Sierpinski".to_string(),
         author: "Claude Opus 4.5 (Claude Code 2.0.76)".to_string(),
         point_size: 0.002,
@@ -2126,6 +2147,7 @@ fn default_scene() -> Scene {
         ]
         .iter()
         .map(|&(translation, color_value)| TransformSpec {
+            layer: 0,
             matrix: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.5),
                 glam::Quat::IDENTITY,

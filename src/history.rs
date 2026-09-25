@@ -324,6 +324,9 @@ mod tests {
     /// are cheaply distinguishable.
     fn dummy_scene(weight: f32) -> Scene {
         Scene {
+            subscenes: Vec::new(),
+            root_share: 1.0,
+            root_visible: true,
             name: "Test".to_string(),
             author: "Test".to_string(),
             point_size: 0.002,
@@ -339,6 +342,7 @@ mod tests {
             haze: 0.0,
             exposure: 1.0,
             transforms: vec![TransformSpec {
+                layer: 0,
                 matrix: Mat4::IDENTITY,
                 post_affine: Mat4::IDENTITY,
                 color_value: 0.0,

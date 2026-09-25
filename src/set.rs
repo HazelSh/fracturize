@@ -89,7 +89,10 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
     let rest = &segs[1..];
 
     if section == "transform" {
-        return set_in_transform(doc, rest, value, path).map(record);
+        return set_in_transform(doc.as_table_mut(), rest, value, path).map(record);
+    }
+    if section == "subscene" {
+        return set_in_subscene(doc, rest, value, path).map(record);
     }
 
     // `[meta]` and `[camera]` mean "all defaults" when absent, so setting into
@@ -141,6 +144,7 @@ fn implied_default(section: &str, key: &str) -> Option<Value> {
         ("camera", "focus") => Some(arr([0.0; 3])),
         ("transform", "rotation" | "post_translation" | "post_rotation") => Some(arr([0.0; 3])),
         ("transform", "scale" | "post_scale") => Some(arr([1.0; 3])),
+        ("subscene", "translation" | "rotation") => Some(arr([0.0; 3])),
         ("meta", "background") => {
             let b = crate::scene::DEFAULT_BACKGROUND;
             Some(arr([b.x as f64, b.y as f64, b.z as f64]))
@@ -216,6 +220,8 @@ const META_FIELDS: &[&str] = struct_fields!(
     haze,
     exposure,
     point_count,
+    share,
+    visible,
 );
 /// `#[serde(alias = ...)]` names on `SceneMeta`: real, accepted `[meta]` keys
 /// that have no field of their own (`iters` for `points_per_frame`, `fog`
@@ -283,6 +289,28 @@ const TRANSFORM_FIELDS: &[&str] = struct_fields!(
     post_rotation,
 );
 
+const SUBSCENE_FIELDS: &[&str] = struct_fields!(
+    _assert_subscene_def_exhaustive,
+    crate::subscene::SubsceneDef,
+    name,
+    author,
+    file,
+    source,
+    visible,
+    share,
+    translation,
+    rotation,
+    rotvec,
+    scale,
+    color_mode,
+    color_speed,
+    color_falloff,
+    color_contrast,
+    palette,
+    symmetries,
+    transforms,
+);
+
 /// Check that `path` names a real, settable parameter — independent of any
 /// particular scene file, so `--sweep` can call this before a scene is even
 /// chosen. What still needs the document (does this transform exist, is a
@@ -298,6 +326,38 @@ pub fn validate_path(path: &str) -> Result<(), String> {
         ));
     }
     let section = segs[0];
+    if section == "subscene" {
+        if segs.len() < 3 {
+            return Err(format!(
+                "'{path}': expected a field after the subscene, e.g. subscene.{}.share",
+                segs[1]
+            ));
+        }
+        // The serde names, which are what a path has to spell: the struct
+        // calls them `symmetries`/`transforms`, the file `symmetry`/`transform`.
+        let field = match segs[2] {
+            "transform" => "transforms",
+            "symmetry" => "symmetries",
+            f => f,
+        };
+        check_field("subscene field", &[SUBSCENE_FIELDS], field, path)?;
+        return match segs[2] {
+            // `subscene.<s>.transform.<t>.<field>` is a transform path one level in.
+            "transform" => validate_path(&segs[2..].join(".")).map_err(|_| {
+                format!(
+                    "'{path}': expected subscene.{}.transform.<name-or-index>.<field>, \
+                     with a field a [[transform]] has",
+                    segs[1]
+                )
+            }),
+            "palette" => match segs.get(3) {
+                Some(&k) => check_field("palette field", &[PALETTE_FIELDS], k, path),
+                None => Ok(()),
+            },
+            "symmetry" => Err(format!("'{path}': symmetry blocks can't be set by path")),
+            _ => Ok(()),
+        };
+    }
     if section == "transform" {
         if segs.len() < 3 {
             return Err(format!(
@@ -326,7 +386,7 @@ pub fn validate_path(path: &str) -> Result<(), String> {
         _ => {
             return Err(format!(
                 "'{path}': unknown section '{section}' (expected meta, camera, \
-                 zoom, palette or transform)"
+                 zoom, palette, transform or subscene)"
             ))
         }
     };
@@ -381,9 +441,78 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-/// Resolve `transform.<name-or-index>.<rest>` against the `[[transform]]` array.
-fn set_in_transform(
+/// Resolve `subscene.<name-or-index>.<rest>` against the `[[subscene]]` array.
+/// A subscene is found by its `name`, or by its `file` when it has no name
+/// (which is what it is called until someone names it).
+fn set_in_subscene(
     doc: &mut DocumentMut,
+    segs: &[&str],
+    value: Value,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let (selector, rest) = segs.split_first().expect("validated");
+    let arr = doc
+        .get_mut("subscene")
+        .and_then(Item::as_array_of_tables_mut)
+        .ok_or_else(|| format!("--set '{path}': this scene has no [[subscene]] entries"))?;
+    let label = |t: &Table| {
+        t.get("name")
+            .and_then(|i| i.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                // What the loader calls an unnamed file-backed subscene.
+                let file = t.get("file").and_then(|i| i.as_str())?;
+                std::path::Path::new(file).file_stem().map(|s| s.to_string_lossy().into_owned())
+            })
+    };
+    let file = |t: &Table| t.get("file").and_then(|i| i.as_str()).map(str::to_string);
+    let idx = match selector.parse::<usize>() {
+        Ok(i) if i < arr.len() => i,
+        _ => arr
+            .iter()
+            .position(|t| {
+                label(t).as_deref() == Some(*selector) || file(t).as_deref() == Some(*selector)
+            })
+            .ok_or_else(|| {
+            let names: Vec<String> = arr
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("{i}:{}", label(t).unwrap_or_else(|| "<unnamed>".into())))
+                .collect();
+            format!(
+                "--set '{path}': no subscene named '{selector}'. This scene has {}",
+                names.join(", ")
+            )
+        })?,
+    };
+    let table = arr.get_mut(idx).expect("index checked above");
+    if rest[0] == "transform" {
+        if let Some(file) = table.get("file").and_then(|i| i.as_str()) {
+            return Err(format!(
+                "--set '{path}': subscene '{selector}' borrows its maps from {file}, so \
+                 there are no maps here to set. Set them in that file (or a copy), or \
+                 set this subscene's placement, share or colour instead"
+            ));
+        }
+        return set_in_transform(table, &rest[1..], value, path);
+    }
+    if rest[0] == "palette" && rest.len() > 1 {
+        let pal = table
+            .get_mut("palette")
+            .and_then(Item::as_table_mut)
+            .ok_or_else(|| format!("--set '{path}': subscene '{selector}' has no palette"))?;
+        return set_path(&mut TableRef::Table(pal), &rest[1..], value, path, "palette");
+    }
+    if rest[0] == "rotation" {
+        refuse_shadowed(table, rest, path, "this subscene's rotation")?;
+    }
+    set_path(&mut TableRef::Table(table), rest, value, path, "subscene")
+}
+
+/// Resolve `transform.<name-or-index>.<rest>` against the `[[transform]]` array
+/// of `doc` — the document itself, or a `[[subscene]]` block.
+fn set_in_transform(
+    doc: &mut Table,
     segs: &[&str],
     value: Value,
     path: &str,
@@ -514,7 +643,7 @@ fn set_path(
         }
         // A uniform `scale = 0.3` indexed by axis becomes the per-axis form it
         // is shorthand for, so `scale.x` works whichever way the file wrote it.
-        if matches!(*key, "scale" | "post_scale") {
+        if matches!(*key, "scale" | "post_scale") && section != "subscene" {
             if let Some(v) = container.get_value(key).and_then(|v| v.as_float().or(v.as_integer().map(|i| i as f64))) {
                 container.put(key, Value::Array([v, v, v].into_iter().collect()));
             }

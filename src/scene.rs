@@ -129,6 +129,12 @@ pub struct TransformSpec {
     /// group and the motifs that carry it, so a 120-map scene is still eight
     /// lines to read and to write.
     pub symmetry: Option<crate::symmetry::Symmetry>,
+    /// Which layer of the scene this map belongs to: 0 for the scene's own
+    /// maps, `k` for `Scene::subscenes[k - 1]`. A walker only ever draws maps
+    /// from its own layer, which is what makes a composite the union of its
+    /// subscenes' attractors rather than one mixed-up IFS — see
+    /// `crate::subscene`.
+    pub layer: u16,
 }
 
 /// Resolve each transform's effective color_speed.
@@ -147,12 +153,16 @@ pub struct TransformSpec {
 /// color_contrast at render time).
 pub fn resolve_color_speeds(transforms: &mut [TransformSpec], global_speed: f32, falloff: f32) {
     for t in transforms {
-        t.color_speed = match t.explicit_color_speed {
-            Some(s) => s,
-            None if falloff > 0.0 => 1.0 - t.contraction().powf(falloff),
-            None => global_speed,
-        };
+        resolve_color_speed(t, global_speed, falloff);
     }
+}
+
+fn resolve_color_speed(t: &mut TransformSpec, global_speed: f32, falloff: f32) {
+    t.color_speed = match t.explicit_color_speed {
+        Some(s) => s,
+        None if falloff > 0.0 => 1.0 - t.contraction().powf(falloff),
+        None => global_speed,
+    };
 }
 
 /// Similarity dimension of an IFS: solve Σsᵢᵈ = 1 for d.
@@ -538,6 +548,361 @@ pub fn resolve_transform_ref(
     ))
 }
 
+
+/// Build one layer's maps from their TOML: matrices, variations, colours and
+/// names, with its `[[symmetry]]` blocks resolved onto them. Shared by the
+/// scene's own `[[transform]]`s and every `[[subscene]]`'s, so a subscene's
+/// maps mean exactly what they would mean in a scene of their own. Colour
+/// speeds are left as placeholders for [`resolve_color_speeds`].
+fn build_transforms(
+    defs: &[TransformDef],
+    symmetries: &[SymmetryDef],
+    layer: u16,
+) -> Result<(Vec<TransformSpec>, Vec<Option<String>>, Vec<Vec3>), String> {
+    let num_transforms = defs.len();
+
+    // Collect transform colors for colormap generation
+    let transform_colors: Vec<Vec3> = defs
+        .iter()
+        .map(|t| Vec3::from(t.color.map(|v| v as f32)))
+        .collect();
+
+
+    let transform_names: Vec<Option<String>> = defs
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+
+    let transforms: Vec<TransformSpec> = defs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            // The transform chart is extrinsic XYZ degrees, and stays
+            // that way: redefining it would silently reinterpret every
+            // `rotation = [...]` on disk and in tools/lsystem_to_ifs.py.
+            // An exact `rotvec` wins where a matrix won't survive it.
+            let rotation = match t.rotvec {
+                Some(v) => crate::rot::Turn::from_rotation_vector(Vec3::from(
+                    v.map(|x| x as f32),
+                ))
+                .exp(),
+                None => crate::rot::Orientation::from_xyz_degrees(
+                    t.rotation.map(|v| v as f32),
+                ),
+            };
+
+            let matrix = crate::rot::Trs {
+                scale: t.scale.to_vec3(),
+                rotation,
+                translation: Vec3::from(t.translation.map(|v| v as f32)),
+            }
+            .matrix();
+
+            // Color value: use explicit if provided, otherwise distribute evenly
+            let color_value = t.color_value.map(|v| v as f32).unwrap_or_else(|| {
+                if num_transforms == 1 {
+                    0.5
+                } else {
+                    i as f32 / (num_transforms - 1) as f32
+                }
+            });
+
+            // Placeholder; resolve_color_speeds computes the effective value
+            let speed = t.color_speed.map(|v| v as f32).unwrap_or(default_color_speed() as f32);
+
+            let variations = match &t.variations {
+                Some(table) => parse_variations(table)
+                    .map_err(|e| format!("Transform {}: {}", i, e))?,
+                None => TransformSpec::linear_variations(),
+            };
+
+            // Build post-affine matrix from optional fields (default to identity)
+            let post_affine = if t.post_translation.is_some()
+                || t.post_scale.is_some()
+                || t.post_rotation.is_some()
+            {
+                let post_trans = t
+                    .post_translation
+                    .map(|v| Vec3::from(v.map(|x| x as f32)))
+                    .unwrap_or(Vec3::ZERO);
+                let post_scale = t.post_scale.unwrap_or(ScaleDef::Uniform(1.0)).to_vec3();
+                let post_rot = t
+                    .post_rotation
+                    .map(|v| {
+                        crate::rot::Orientation::from_xyz_degrees(v.map(|x| x as f32))
+                    })
+                    .unwrap_or(crate::rot::Orientation::IDENTITY);
+                crate::rot::Trs {
+                    scale: post_scale,
+                    rotation: post_rot,
+                    translation: post_trans,
+                }
+                .matrix()
+            } else {
+                Mat4::IDENTITY
+            };
+
+            Ok(TransformSpec {
+                matrix,
+                post_affine,
+                color_value,
+                weight: t.weight as f32,
+                color_speed: speed,
+                explicit_color_speed: t.color_speed.map(|v| v as f32),
+                symmetry: None,
+                variations,
+                layer,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+
+    let mut transforms: Vec<TransformSpec> = transforms;
+    apply_symmetries(symmetries, &mut transforms, &transform_names)?;
+    Ok((transforms, transform_names, transform_colors))
+}
+
+/// Resolve a layer's colour source: the `[palette]` presence rule, overridden
+/// by an explicit `color_mode`, and the colormap that comes out of it.
+fn resolve_colour(
+    meta_color_mode: Option<&str>,
+    palette_def: Option<&PaletteDef>,
+    transform_colors: &[Vec3],
+) -> Result<(Option<Palette>, ColorMode, Colormap), String> {
+    let meta_color_mode = meta_color_mode.map(str::to_string);
+    // A `[palette]` table selects palette mode by its presence alone;
+    // `enabled = false` inside it keeps the gradient on file while
+    // rendering the transform ring (the A/B toggle). A malformed palette
+    // is an error rather than a silent fall-back to the other mode — a
+    // scene that quietly rendered the wrong colours would be worse than
+    // one that refused to load.
+    let palette = palette_def
+        .map(|d| d.resolve())
+        .transpose()?;
+    // An explicit `meta.color_mode` wins; otherwise the palette-presence
+    // rule decides. Naming a mode that doesn't exist is an error rather
+    // than a silent fall-back to the default — a typo that quietly
+    // rendered the wrong colours would be worse than one that refused.
+    let color_mode = match &meta_color_mode {
+        Some(name) => ColorMode::parse(name).ok_or_else(|| {
+            format!(
+                "Unknown color_mode '{}'. Available: {}",
+                name,
+                ColorMode::ALL.iter().map(|m| m.name()).collect::<Vec<_>>().join(", ")
+            )
+        })?,
+        None => match (&palette, palette_def.and_then(|d| d.enabled)) {
+            (Some(_), Some(false)) => ColorMode::Transforms,
+            (Some(_), _) => ColorMode::Palette,
+            (None, _) => ColorMode::Transforms,
+        },
+    };
+    let colormap = match (color_mode, &palette) {
+        (ColorMode::Palette, Some(p)) => p.to_colormap(),
+        _ => generate_colormap(&transform_colors),
+    };
+    Ok((palette, color_mode, colormap))
+}
+
+
+/// Load every `[[subscene]]`: its maps (from `file =` or inline), its colour,
+/// and where it sits. Returns the subscenes and their maps, tagged with layers
+/// `1..=n` and ready to append after the scene's own.
+#[allow(clippy::type_complexity)]
+fn load_subscenes(
+    defs: &[crate::subscene::SubsceneDef],
+    base_dir: &Path,
+) -> Result<
+    (Vec<crate::subscene::Subscene>, Vec<TransformSpec>, Vec<Option<String>>, Vec<Vec3>),
+    String,
+> {
+    use crate::subscene::{FileBase, LayerColour, Placement, Subscene, MAX_LAYERS};
+    if defs.len() + 1 > MAX_LAYERS {
+        return Err(format!(
+            "{} subscenes: a scene holds at most {} (its own maps plus {})",
+            defs.len(),
+            MAX_LAYERS - 1,
+            MAX_LAYERS - 1
+        ));
+    }
+    let mut subscenes = Vec::new();
+    let (mut maps, mut names, mut colors) = (Vec::new(), Vec::new(), Vec::new());
+    for (k, def) in defs.iter().enumerate() {
+        let layer = (k + 1) as u16;
+        let label = def
+            .name
+            .clone()
+            .or_else(|| def.file.clone())
+            .unwrap_or_else(|| format!("#{}", k + 1));
+        let err = |e: String| format!("[[subscene]] '{}': {}", label, e);
+
+        // The maps and the colour they would have on their own.
+        let (mut ts, ns, cs, base_colour, file_name, file_author, base) = match &def.file {
+            Some(file) => {
+                if !def.transforms.is_empty() || !def.symmetries.is_empty() {
+                    return Err(err(
+                        "has both `file =` and its own [[subscene.transform]]s. A subscene \
+                         either borrows another scene's maps or carries its own"
+                            .to_string(),
+                    ));
+                }
+                let full = base_dir.join(file);
+                let sub = Scene::load(&full).map_err(|e| err(format!("{}: {}", full.display(), e)))?;
+                if !sub.subscenes.is_empty() {
+                    return Err(err(format!(
+                        "{} is itself a composite. Nesting subscenes isn't supported \
+                         yet — compose its subscenes here directly",
+                        file
+                    )));
+                }
+                let colour = LayerColour {
+                    color_mode: sub.color_mode,
+                    palette: sub.palette.clone(),
+                    color_speed: sub.color_speed,
+                    color_falloff: sub.color_falloff,
+                    color_contrast: sub.color_contrast,
+                    colormap: sub.colormap,
+                };
+                let base = FileBase {
+                    maps_toml: maps_toml(&sub.transforms, &sub.transform_names, &sub.colors),
+                    color_mode: sub.color_mode,
+                    color_speed: sub.color_speed,
+                    color_falloff: sub.color_falloff,
+                    color_contrast: sub.color_contrast,
+                    palette_toml: palette_toml(sub.palette.as_ref(), sub.color_mode),
+                };
+                let author = Some(sub.author.clone()).filter(|a| a != "Unknown" && !a.is_empty());
+                // Unnamed, it is called after its file's stem rather than the
+                // file's own `[meta] name`: that is the name `-S subscene.<name>`
+                // can see, since it works on this file's text alone.
+                let stem = Path::new(file)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned());
+                (sub.transforms, sub.transform_names, sub.colors, colour, stem, author, Some(base))
+            }
+            None => {
+                if def.transforms.is_empty() {
+                    return Err(err(
+                        "has no maps: give it `file = \"other.toml\"` or its own \
+                         [[subscene.transform]]s"
+                            .to_string(),
+                    ));
+                }
+                let (ts, ns, cs) =
+                    build_transforms(&def.transforms, &def.symmetries, layer).map_err(err)?;
+                let colour = LayerColour {
+                    color_mode: ColorMode::Transforms,
+                    palette: None,
+                    color_speed: default_color_speed() as f32,
+                    color_falloff: 0.0,
+                    color_contrast: default_color_contrast() as f32,
+                    colormap: generate_colormap(&cs),
+                };
+                (ts, ns, cs, colour, None, None, None)
+            }
+        };
+
+        // The block's own colour keys override whatever the maps came with.
+        let mut colour = base_colour;
+        if let Some(pd) = &def.palette {
+            colour.palette = Some(pd.resolve().map_err(err)?);
+            colour.color_mode = match pd.enabled {
+                Some(false) => colour.color_mode,
+                _ => ColorMode::Palette,
+            };
+        }
+        if let Some(m) = &def.color_mode {
+            colour.color_mode = ColorMode::parse(m).ok_or_else(|| {
+                err(format!(
+                    "unknown color_mode '{}'. Available: {}",
+                    m,
+                    ColorMode::ALL.iter().map(|m| m.name()).collect::<Vec<_>>().join(", ")
+                ))
+            })?;
+        }
+        if colour.color_mode == ColorMode::Palette && colour.palette.is_none() {
+            return Err(err("color_mode = \"palette\" but there is no [subscene.palette]".to_string()));
+        }
+        if let Some(v) = def.color_speed {
+            colour.color_speed = v as f32;
+        }
+        if let Some(v) = def.color_falloff {
+            colour.color_falloff = (v as f32).max(0.0);
+        }
+        if let Some(v) = def.color_contrast {
+            colour.color_contrast = (v as f32).max(0.0);
+        }
+
+        for t in &mut ts {
+            t.layer = layer;
+        }
+        resolve_color_speeds(&mut ts, colour.color_speed, colour.color_falloff);
+        maps.extend(ts);
+        names.extend(ns);
+        colors.extend(cs);
+        if !(def.share >= 0.0) {
+            return Err(err(format!("share = {} — a share is a weight, 0 or more", def.share)));
+        }
+        subscenes.push(Subscene {
+            name: def.name.clone().or(file_name).unwrap_or(label.clone()),
+            author: def.author.clone().or(file_author),
+            file: def.file.clone(),
+            file_abs: def.file.as_ref().map(|f| {
+                let p = base_dir.join(f);
+                std::fs::canonicalize(&p).unwrap_or(p)
+            }),
+            base,
+            source: def.source.clone(),
+            visible: def.visible,
+            share: def.share as f32,
+            placement: Placement::from_def(def).map_err(err)?,
+            colour,
+        });
+    }
+    let mut seen = std::collections::HashSet::new();
+    for s in &subscenes {
+        if !seen.insert(s.name.as_str()) {
+            return Err(format!(
+                "two subscenes are called '{}'. Names are how `-S subscene.<name>…` and \
+                 --info refer to them, so they must differ — add `name = \"…\"`",
+                s.name
+            ));
+        }
+    }
+    Ok((subscenes, maps, names, colors))
+}
+
+/// One layer's maps and symmetry blocks as TOML, in the save's own spelling —
+/// the fingerprint that says whether a file-backed subscene has been edited.
+pub(crate) fn maps_toml(
+    transforms: &[TransformSpec],
+    names: &[Option<String>],
+    colors: &[Vec3],
+) -> String {
+    #[derive(Serialize)]
+    struct Maps {
+        #[serde(rename = "symmetry")]
+        symmetries: Vec<SymmetryDef>,
+        #[serde(rename = "transform")]
+        transforms: Vec<TransformDef>,
+    }
+    let maps = Maps {
+        symmetries: symmetry_blocks(transforms, names),
+        transforms: transforms
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                transform_def(t, names.get(i).cloned().flatten(), colors.get(i).copied())
+            })
+            .collect(),
+    };
+    toml::to_string(&maps).unwrap_or_default()
+}
+
+/// A palette as the TOML it would save as, for comparing.
+fn palette_toml(p: Option<&Palette>, mode: ColorMode) -> Option<String> {
+    p.map(|p| PaletteDef::from_palette(p, mode == ColorMode::Palette).to_table().to_string())
+}
+
 /// Parse a TOML `variations` table into slot weights
 fn parse_variations(table: &BTreeMap<String, f64>) -> Result<[f32; NUM_VARIATIONS], String> {
     let mut weights = [0.0f32; NUM_VARIATIONS];
@@ -634,6 +999,14 @@ pub struct SceneMeta {
     /// If unset, defaults to 500k.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point_count: Option<usize>,
+    /// The scene's own maps' claim on the point budget, relative to each
+    /// `[[subscene]]`'s `share`. Only meaningful in a composite. Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<f64>,
+    /// Whether the scene's own maps are drawn. Only meaningful in a composite,
+    /// where hiding them leaves the subscenes. Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
 }
 
 fn default_point_size() -> f64 {
@@ -686,7 +1059,7 @@ fn default_decay() -> f64 {
 }
 
 /// Transform definition in TOML (human-readable format)
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct TransformDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -983,8 +1356,13 @@ pub struct SceneFile {
     /// per-transform property and nothing downstream has to know about blocks.
     #[serde(default, rename = "symmetry", skip_serializing_if = "Vec::is_empty")]
     pub symmetries: Vec<SymmetryDef>,
-    #[serde(rename = "transform")]
+    /// The scene's own maps. Optional only because a pure composite — one
+    /// made of nothing but `[[subscene]]`s — has none of its own.
+    #[serde(default, rename = "transform", skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<TransformDef>,
+    /// Other attractors composed into this one; see `crate::subscene`.
+    #[serde(default, rename = "subscene", skip_serializing_if = "Vec::is_empty")]
+    pub subscenes: Vec<crate::subscene::SubsceneDef>,
 }
 
 /// A `[[symmetry]]` block.
@@ -1108,6 +1486,13 @@ pub struct Scene {
     pub camera_path: Option<CameraPath>,
     /// Infinite-zoom renormalization ([zoom]), resolved to a transform index
     pub zoom: Option<crate::renorm::ZoomSpec>,
+    /// Composed attractors, layers `1..=n` (see `TransformSpec::layer`). Empty
+    /// for an ordinary scene, which is then exactly what it always was.
+    pub subscenes: Vec<crate::subscene::Subscene>,
+    /// The scene's own layer's share of the point budget (`[meta] share`).
+    pub root_share: f32,
+    /// Whether the scene's own layer is drawn (`[meta] visible`).
+    pub root_visible: bool,
 }
 
 impl Scene {
@@ -1163,6 +1548,7 @@ impl Scene {
             explicit_color_speed: None,
             symmetry: None,
             variations: TransformSpec::linear_variations(),
+            layer: 0,
         };
         let colormap = generate_colormap(&colors);
         Self {
@@ -1199,6 +1585,9 @@ impl Scene {
             background: DEFAULT_BACKGROUND,
             camera_path: None,
             zoom: None,
+            subscenes: Vec::new(),
+            root_share: 1.0,
+            root_visible: true,
         }
     }
 
@@ -1231,143 +1620,19 @@ impl Scene {
         let scene_file: SceneFile = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse scene file: {}", e))?;
 
-        let num_transforms = scene_file.transforms.len();
-
-        // Collect transform colors for colormap generation
-        let transform_colors: Vec<Vec3> = scene_file
-            .transforms
-            .iter()
-            .map(|t| Vec3::from(t.color.map(|v| v as f32)))
-            .collect();
-
         let global_speed = scene_file.meta.color_speed as f32;
-
-        let transform_names: Vec<Option<String>> = scene_file
-            .transforms
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
-
-        let transforms: Vec<TransformSpec> = scene_file
-            .transforms
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                // The transform chart is extrinsic XYZ degrees, and stays
-                // that way: redefining it would silently reinterpret every
-                // `rotation = [...]` on disk and in tools/lsystem_to_ifs.py.
-                // An exact `rotvec` wins where a matrix won't survive it.
-                let rotation = match t.rotvec {
-                    Some(v) => crate::rot::Turn::from_rotation_vector(Vec3::from(
-                        v.map(|x| x as f32),
-                    ))
-                    .exp(),
-                    None => crate::rot::Orientation::from_xyz_degrees(
-                        t.rotation.map(|v| v as f32),
-                    ),
-                };
-
-                let matrix = crate::rot::Trs {
-                    scale: t.scale.to_vec3(),
-                    rotation,
-                    translation: Vec3::from(t.translation.map(|v| v as f32)),
-                }
-                .matrix();
-
-                // Color value: use explicit if provided, otherwise distribute evenly
-                let color_value = t.color_value.map(|v| v as f32).unwrap_or_else(|| {
-                    if num_transforms == 1 {
-                        0.5
-                    } else {
-                        i as f32 / (num_transforms - 1) as f32
-                    }
-                });
-
-                // Placeholder; resolve_color_speeds computes the effective value
-                let speed = t.color_speed.map(|v| v as f32).unwrap_or(global_speed);
-
-                let variations = match &t.variations {
-                    Some(table) => parse_variations(table)
-                        .map_err(|e| format!("Transform {}: {}", i, e))?,
-                    None => TransformSpec::linear_variations(),
-                };
-
-                // Build post-affine matrix from optional fields (default to identity)
-                let post_affine = if t.post_translation.is_some()
-                    || t.post_scale.is_some()
-                    || t.post_rotation.is_some()
-                {
-                    let post_trans = t
-                        .post_translation
-                        .map(|v| Vec3::from(v.map(|x| x as f32)))
-                        .unwrap_or(Vec3::ZERO);
-                    let post_scale = t.post_scale.unwrap_or(ScaleDef::Uniform(1.0)).to_vec3();
-                    let post_rot = t
-                        .post_rotation
-                        .map(|v| {
-                            crate::rot::Orientation::from_xyz_degrees(v.map(|x| x as f32))
-                        })
-                        .unwrap_or(crate::rot::Orientation::IDENTITY);
-                    crate::rot::Trs {
-                        scale: post_scale,
-                        rotation: post_rot,
-                        translation: post_trans,
-                    }
-                    .matrix()
-                } else {
-                    Mat4::IDENTITY
-                };
-
-                Ok(TransformSpec {
-                    matrix,
-                    post_affine,
-                    color_value,
-                    weight: t.weight as f32,
-                    color_speed: speed,
-                    explicit_color_speed: t.color_speed.map(|v| v as f32),
-                    symmetry: None,
-                    variations,
-                })
-            })
-            .collect::<Result<_, String>>()?;
-
-        let mut transforms = transforms;
-        apply_symmetries(&scene_file.symmetries, &mut transforms, &transform_names)?;
+        let (mut transforms, transform_names, transform_colors) = build_transforms(
+            &scene_file.transforms,
+            &scene_file.symmetries,
+            0,
+        )?;
         resolve_color_speeds(&mut transforms, global_speed, scene_file.meta.color_falloff as f32);
 
-        // A `[palette]` table selects palette mode by its presence alone;
-        // `enabled = false` inside it keeps the gradient on file while
-        // rendering the transform ring (the A/B toggle). A malformed palette
-        // is an error rather than a silent fall-back to the other mode — a
-        // scene that quietly rendered the wrong colours would be worse than
-        // one that refused to load.
-        let palette = scene_file
-            .palette
-            .as_ref()
-            .map(|d| d.resolve())
-            .transpose()?;
-        // An explicit `meta.color_mode` wins; otherwise the palette-presence
-        // rule decides. Naming a mode that doesn't exist is an error rather
-        // than a silent fall-back to the default — a typo that quietly
-        // rendered the wrong colours would be worse than one that refused.
-        let color_mode = match &scene_file.meta.color_mode {
-            Some(name) => ColorMode::parse(name).ok_or_else(|| {
-                format!(
-                    "Unknown color_mode '{}'. Available: {}",
-                    name,
-                    ColorMode::ALL.iter().map(|m| m.name()).collect::<Vec<_>>().join(", ")
-                )
-            })?,
-            None => match (&palette, scene_file.palette.as_ref().and_then(|d| d.enabled)) {
-                (Some(_), Some(false)) => ColorMode::Transforms,
-                (Some(_), _) => ColorMode::Palette,
-                (None, _) => ColorMode::Transforms,
-            },
-        };
-        let colormap = match (color_mode, &palette) {
-            (ColorMode::Palette, Some(p)) => p.to_colormap(),
-            _ => generate_colormap(&transform_colors),
-        };
+        let (palette, color_mode, colormap) = resolve_colour(
+            scene_file.meta.color_mode.as_deref(),
+            scene_file.palette.as_ref(),
+            &transform_colors,
+        )?;
 
         let cam = scene_file.camera.unwrap_or_default();
         let camera_focus = cam.focus.map(|f| Vec3::from(f.map(|v| v as f32))).unwrap_or(Vec3::ZERO);
@@ -1609,7 +1874,34 @@ impl Scene {
             }
         }
 
-        Ok((Scene {
+        // Subscenes are appended after the scene's own maps, one layer each,
+        // so the transform list stays grouped by layer.
+        let base_dir = path.as_ref().parent().map(Path::to_path_buf).unwrap_or_default();
+        let (subscenes, sub_maps, sub_names, sub_colors) =
+            load_subscenes(&scene_file.subscenes, &base_dir)?;
+        if transforms.is_empty() && subscenes.is_empty() {
+            return Err("the scene has no [[transform]]s (and no [[subscene]]s)".to_string());
+        }
+        if !subscenes.is_empty() && zoom.is_some() {
+            return Err("[zoom] and [[subscene]] don't compose yet: infinite zoom renormalizes \
+                        every point about one map's fixed point, and a subscene's points \
+                        are placed in a space that map knows nothing about. Drop one of them"
+                .to_string());
+        }
+        let mut transforms = transforms;
+        transforms.extend(sub_maps);
+        let mut transform_names = transform_names;
+        transform_names.extend(sub_names);
+        let mut transform_colors = transform_colors;
+        transform_colors.extend(sub_colors);
+        let root_visible = scene_file.meta.visible.unwrap_or(true);
+        if !subscenes.is_empty() && !root_visible && subscenes.iter().all(|s| !s.visible) {
+            return Err("every layer of this composite is hidden (visible = false), \
+                        so there is nothing to draw"
+                .to_string());
+        }
+
+        let mut scene = Scene {
             name: scene_file.meta.name,
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
             point_size: scene_file.meta.point_size as f32,
@@ -1637,7 +1929,13 @@ impl Scene {
             camera_orientation: folded.orientation,
             camera_path,
             zoom,
-        }, applied))
+            subscenes,
+            root_share: scene_file.meta.share.map(|v| v as f32).unwrap_or(1.0).max(0.0),
+            root_visible,
+        };
+        // Subscene colormaps are resolved here, from their own maps' colours.
+        scene.regenerate_colormap();
+        Ok((scene, applied))
     }
 
     /// The gradient this scene actually renders through, whichever mode it is
@@ -1649,7 +1947,158 @@ impl Scene {
             (ColorMode::Palette, Some(p)) => p.clone(),
             // A scene in palette mode with no palette is only reachable
             // mid-edit; falling back keeps it rendering rather than white.
-            _ => Palette::from_transform_colors(&self.colors),
+            _ => Palette::from_transform_colors(&self.layer_colors(0)),
+        }
+    }
+
+    /// The colours of layer `k`'s maps, in order. For an ordinary scene,
+    /// layer 0 is every map, so this is `colors` itself.
+    pub fn layer_colors(&self, k: usize) -> Vec<Vec3> {
+        if self.subscenes.is_empty() {
+            return self.colors.clone();
+        }
+        self.transforms
+            .iter()
+            .zip(&self.colors)
+            .filter(|(t, _)| t.layer as usize == k)
+            .map(|(_, c)| *c)
+            .collect()
+    }
+
+    /// Whether this scene composes subscenes. A composite is drawn with its
+    /// colour resolved in the chaos pass (see `crate::subscene`), so it is
+    /// packed RGB whatever each layer's own colour mode is.
+    pub fn is_composite(&self) -> bool {
+        !self.subscenes.is_empty()
+    }
+
+    /// Whether points carry packed RGB rather than a colormap index — what
+    /// every renderer's `color_rgb_mode` has to be told.
+    pub fn packs_rgb(&self) -> bool {
+        self.is_composite() || self.color_mode.packs_rgb()
+    }
+
+    /// Layers in the scene: its own maps plus one per subscene.
+    pub fn layer_count(&self) -> usize {
+        self.subscenes.len() + 1
+    }
+
+    /// A layer's display name: the scene's for layer 0.
+    pub fn layer_name(&self, k: usize) -> &str {
+        match k {
+            0 => &self.name,
+            k => &self.subscenes[k - 1].name,
+        }
+    }
+
+    pub fn layer_visible(&self, k: usize) -> bool {
+        match k {
+            0 => self.root_visible,
+            k => self.subscenes.get(k - 1).is_some_and(|s| s.visible),
+        }
+    }
+
+    pub fn layer_share(&self, k: usize) -> f32 {
+        match k {
+            0 => self.root_share,
+            k => self.subscenes.get(k - 1).map_or(0.0, |s| s.share),
+        }
+    }
+
+    /// Where layer `k` sits in the scene. The scene's own layer *is* the
+    /// scene's frame, so it is always the identity.
+    pub fn layer_placement(&self, k: usize) -> Mat4 {
+        match k {
+            0 => Mat4::IDENTITY,
+            k => self.subscenes.get(k - 1).map_or(Mat4::IDENTITY, |s| s.placement.matrix()),
+        }
+    }
+
+    /// Map `i`'s matrix in scene space: its own matrix, carried by its layer's
+    /// placement. What the gizmos draw and drag.
+    pub fn world_matrix(&self, i: usize) -> Mat4 {
+        let t = &self.transforms[i];
+        self.layer_placement(t.layer as usize) * t.matrix
+    }
+
+    /// Every map with its matrix in scene space (see [`Self::world_matrix`]).
+    /// For an ordinary scene that is the maps themselves.
+    pub fn world_transforms(&self) -> Vec<TransformSpec> {
+        let mut out = self.transforms.clone();
+        if self.is_composite() {
+            for (i, t) in out.iter_mut().enumerate() {
+                t.matrix = self.world_matrix(i);
+            }
+        }
+        out
+    }
+
+    /// Hide every layer but one (`--solo`): a subscene by name or index, or 0
+    /// for the scene's own maps. Returns the layer.
+    pub fn solo_layer(&mut self, reference: &str) -> Result<usize, String> {
+        if !self.is_composite() {
+            return Err("this scene has no subscenes to choose between".to_string());
+        }
+        let k = (0..self.layer_count())
+            .find(|&k| self.layer_name(k) == reference)
+            .or_else(|| reference.parse::<usize>().ok().filter(|&k| k < self.layer_count()))
+            .ok_or_else(|| {
+                let names: Vec<String> =
+                    (0..self.layer_count()).map(|k| format!("{}:{}", k, self.layer_name(k))).collect();
+                format!("no layer '{}'. This scene has {}", reference, names.join(", "))
+            })?;
+        if self.layer_sizes()[k] == 0 {
+            return Err(format!("layer {} ({}) has no maps", k, self.layer_name(k)));
+        }
+        self.root_visible = k == 0;
+        for (i, s) in self.subscenes.iter_mut().enumerate() {
+            s.visible = i + 1 == k;
+        }
+        Ok(k)
+    }
+
+    /// The first layer that has maps — what the Transforms window lists when
+    /// a scene opens. Layer 0 for anything but a pure composite.
+    pub fn first_layer_with_maps(&self) -> usize {
+        let sizes = self.layer_sizes();
+        (0..sizes.len()).find(|&k| sizes[k] > 0).unwrap_or(0)
+    }
+
+    /// Transforms per layer, in layer order.
+    pub fn layer_sizes(&self) -> Vec<usize> {
+        let mut n = vec![0; self.layer_count()];
+        for t in &self.transforms {
+            if let Some(c) = n.get_mut(t.layer as usize) {
+                *c += 1;
+            }
+        }
+        n
+    }
+
+    /// Resolve every map's colour speed from its own layer's settings. The
+    /// scene's own layer takes `root_falloff`, because the app keeps the live
+    /// value of that one outside the scene.
+    pub fn resolve_all_color_speeds(&mut self, root_falloff: f32) {
+        let (root_speed, subs) = (self.color_speed, &self.subscenes);
+        for t in &mut self.transforms {
+            let (speed, falloff) = match t.layer as usize {
+                0 => (root_speed, root_falloff),
+                k => subs
+                    .get(k - 1)
+                    .map_or((root_speed, root_falloff), |s| (s.colour.color_speed, s.colour.color_falloff)),
+            };
+            resolve_color_speed(t, speed, falloff);
+        }
+    }
+
+    /// Layer `k`'s colour source, contrast and resolved colormap.
+    pub fn layer_colour(&self, k: usize) -> (ColorMode, f32, &Colormap) {
+        match k {
+            0 => (self.color_mode, self.color_contrast, &self.colormap),
+            k => {
+                let c = &self.subscenes[k - 1].colour;
+                (c.color_mode, c.color_contrast, &c.colormap)
+            }
         }
     }
 
@@ -1658,6 +2107,14 @@ impl Scene {
     /// the transform ring's spacing is `k/N`, so N changing recolours it.
     pub fn regenerate_colormap(&mut self) {
         self.colormap = self.effective_palette().to_colormap();
+        for k in 1..=self.subscenes.len() {
+            let colors = self.layer_colors(k);
+            let c = &mut self.subscenes[k - 1].colour;
+            c.colormap = match (c.color_mode, &c.palette) {
+                (ColorMode::Palette, Some(p)) => p.to_colormap(),
+                _ => Palette::from_transform_colors(&colors).to_colormap(),
+            };
+        }
     }
 
     /// Switch colour source. Adopting palette mode with no palette in hand
@@ -1668,7 +2125,7 @@ impl Scene {
         if mode == ColorMode::Palette && self.palette.is_none() {
             // (Mix needs nothing adopted: it reads the per-transform RGBs
             // directly, which every scene already has.)
-            let mut p = Palette::from_transform_colors(&self.colors);
+            let mut p = Palette::from_transform_colors(&self.layer_colors(0));
             p.name = None;
             self.palette = Some(p);
         }
@@ -1689,96 +2146,14 @@ impl Scene {
     /// everything the loader and the in-app gizmo editing produce.
     /// Build the serialization structs for the current scene state
     fn to_scene_file(&self) -> SceneFile {
-        let transforms: Vec<TransformDef> = self
-            .transforms
+        // The top level holds the scene's own maps only; each subscene's are
+        // written inside its own block.
+        let (root_specs, root_names, root_colors) = self.layer_maps(0);
+        let transforms: Vec<TransformDef> = root_specs
             .iter()
-            .enumerate()
-            .map(|(i, spec)| {
-                let trs = crate::rot::Trs::of(spec.matrix);
-                let (scale, trans) = (trs.scale, trs.translation);
-                // Degrees while they reproduce the matrix, which is nearly
-                // always; the exact rotation vector for the rest, rather than
-                // writing a chart reading that doesn't reload to what it says.
-                let chartable = trs.is_faithful(spec.matrix)
-                    && crate::rot::Orientation::from_xyz_degrees(trs.rotation.to_xyz_degrees())
-                        .angle_to(trs.rotation)
-                        < 1e-4;
-                let degrees = trs.rotation.to_xyz_degrees();
-
-                let variations: BTreeMap<String, f64> = spec
-                    .variations
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &w)| w != 0.0)
-                    .map(|(slot, &w)| (VARIATION_NAMES[slot].to_string(), tidy(w)))
-                    .collect();
-                let is_pure_linear =
-                    variations.len() == 1 && variations.get("linear") == Some(&1.0);
-
-                let color = self.colors.get(i).copied().unwrap_or(Vec3::ONE);
-                let scale = if approx(scale.x as f64, scale.y as f64)
-                    && approx(scale.x as f64, scale.z as f64)
-                {
-                    ScaleDef::Uniform(tidy(scale.x))
-                } else {
-                    ScaleDef::PerAxis(scale.to_array().map(tidy))
-                };
-
-                // Serialize post-affine only if it's not identity
-                let (post_translation, post_scale, post_rotation) =
-                    if spec.post_affine == Mat4::IDENTITY {
-                        (None, None, None)
-                    } else {
-                        let post_trs = crate::rot::Trs::of(spec.post_affine);
-                        let post_trans = if post_trs.translation.length_squared() > 1e-8 {
-                            Some(post_trs.translation.to_array().map(tidy))
-                        } else {
-                            None
-                        };
-                        let post_scale = if (post_trs.scale - Vec3::ONE).length_squared() > 1e-8 {
-                            let s = post_trs.scale;
-                            Some(if approx(s.x as f64, s.y as f64) && approx(s.x as f64, s.z as f64) {
-                                ScaleDef::Uniform(tidy(s.x))
-                            } else {
-                                ScaleDef::PerAxis(s.to_array().map(tidy))
-                            })
-                        } else {
-                            None
-                        };
-                        let post_rot = if post_trs.rotation.angle_to(crate::rot::Orientation::IDENTITY) > 1e-4 {
-                            Some(post_trs.rotation.to_xyz_degrees().map(tidy))
-                        } else {
-                            None
-                        };
-                        (post_trans, post_scale, post_rot)
-                    };
-
-                TransformDef {
-                    name: self.transform_names.get(i).cloned().flatten(),
-                    translation: trans.to_array().map(tidy),
-                    scale,
-                    rotation: if chartable { degrees.map(tidy) } else { [0.0; 3] },
-                    rotvec: (!chartable).then(|| {
-                        tidy_rotvec(
-                            crate::rot::Orientation::IDENTITY
-                                .shortest_turn_to(trs.rotation)
-                                .as_rotation_vector(),
-                        )
-                    }),
-                    color: color.to_array().map(tidy),
-                    weight: tidy(spec.weight),
-                    color_value: Some(tidy(spec.color_value)),
-                    color_speed: spec.explicit_color_speed.map(tidy),
-                    variations: if is_pure_linear || variations.is_empty() {
-                        None
-                    } else {
-                        Some(variations)
-                    },
-                    post_translation,
-                    post_scale,
-                    post_rotation,
-                }
-            })
+            .zip(&root_names)
+            .zip(&root_colors)
+            .map(|((spec, name), color)| transform_def(spec, name.clone(), Some(*color)))
             .collect();
 
         SceneFile {
@@ -1807,6 +2182,9 @@ impl Scene {
                 // authored file exactly as it found it; loading still honours
                 // it (below prefs, above the default).
                 point_count: None,
+                share: (!self.subscenes.is_empty() && self.root_share != 1.0)
+                    .then(|| tidy(self.root_share)),
+                visible: (!self.root_visible).then_some(false),
             },
             camera: Some({
                 // A 1-key path is a transient in-app authoring state; the
@@ -1893,9 +2271,93 @@ impl Scene {
             // Regrouped from the transforms' own symmetries, so a motif
             // enrolled or withdrawn in the panel comes back out as the right
             // blocks. Motifs sharing a group share a block.
-            symmetries: symmetry_blocks(&self.transforms, &self.transform_names),
+            symmetries: symmetry_blocks(&root_specs, &root_names),
             transforms,
+            subscenes: (1..=self.subscenes.len()).map(|k| self.subscene_def(k)).collect(),
         }
+    }
+
+    /// Layer `k`'s maps, names and colours, in order (clones: this is the
+    /// save path and `--info`, never per frame).
+    pub fn layer_maps(&self, k: usize) -> (Vec<TransformSpec>, Vec<Option<String>>, Vec<Vec3>) {
+        let mut out = (Vec::new(), Vec::new(), Vec::new());
+        for (i, t) in self.transforms.iter().enumerate() {
+            if t.layer as usize == k {
+                out.0.push(t.clone());
+                out.1.push(self.transform_names.get(i).cloned().flatten());
+                out.2.push(self.colors.get(i).copied().unwrap_or(Vec3::ONE));
+            }
+        }
+        out
+    }
+
+    /// Subscene `k` (a layer, `1..=n`) as the `[[subscene]]` block a save
+    /// writes. A file-backed subscene whose maps are unedited stays a `file =`
+    /// reference, carrying only the colour keys that differ from the file's;
+    /// an edited one is written inline, with `source =` recording where it
+    /// came from — the referenced file is someone's artwork and is never
+    /// written to.
+    fn subscene_def(&self, k: usize) -> crate::subscene::SubsceneDef {
+        let sub = &self.subscenes[k - 1];
+        let (specs, names, colors) = self.layer_maps(k);
+        let c = &sub.colour;
+        let linked = sub.base.as_ref().filter(|b| {
+            sub.file.is_some() && b.maps_toml == maps_toml(&specs, &names, &colors)
+        });
+        let palette = |differs: bool| {
+            c.palette
+                .as_ref()
+                .filter(|_| differs)
+                .map(|p| PaletteDef::from_palette(p, c.color_mode == ColorMode::Palette))
+        };
+        let mut def = crate::subscene::SubsceneDef {
+            name: Some(sub.name.clone()),
+            author: sub.author.clone(),
+            file: linked.and(sub.file.clone()),
+            source: if linked.is_some() { None } else { sub.source.clone().or(sub.file.clone()) },
+            visible: sub.visible,
+            share: tidy(sub.share),
+            translation: [0.0; 3],
+            rotation: [0.0; 3],
+            rotvec: None,
+            scale: 1.0,
+            color_mode: None,
+            color_speed: None,
+            color_falloff: None,
+            color_contrast: None,
+            palette: None,
+            symmetries: Vec::new(),
+            transforms: Vec::new(),
+        };
+        sub.placement.write_into(&mut def);
+        match linked {
+            Some(b) => {
+                // Only what differs from the file, so an untouched import is
+                // four lines and a restyled one says exactly what was changed.
+                def.color_mode = (c.color_mode != b.color_mode).then(|| c.color_mode.name().to_string());
+                def.color_speed = (c.color_speed != b.color_speed).then(|| tidy(c.color_speed));
+                def.color_falloff = (c.color_falloff != b.color_falloff).then(|| tidy(c.color_falloff));
+                def.color_contrast = (c.color_contrast != b.color_contrast).then(|| tidy(c.color_contrast));
+                def.palette = palette(
+                    palette_toml(c.palette.as_ref(), c.color_mode) != b.palette_toml,
+                );
+            }
+            None => {
+                def.color_mode = (c.color_mode == ColorMode::Mix).then(|| c.color_mode.name().to_string());
+                def.color_speed = (c.color_speed != default_color_speed() as f32).then(|| tidy(c.color_speed));
+                def.color_falloff = (c.color_falloff != 0.0).then(|| tidy(c.color_falloff));
+                def.color_contrast =
+                    (c.color_contrast != default_color_contrast() as f32).then(|| tidy(c.color_contrast));
+                def.palette = palette(true);
+                def.symmetries = symmetry_blocks(&specs, &names);
+                def.transforms = specs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| transform_def(t, names[i].clone(), Some(colors[i])))
+                    .collect();
+            }
+        }
+        def
     }
 
     /// Save the scene back to a TOML file, decomposing each transform matrix
@@ -1926,9 +2388,13 @@ impl Scene {
         struct One<'a> {
             transform: [&'a TransformDef; 1],
         }
-        let file = self.to_scene_file();
-        let def = file.transforms.get(i).ok_or("transform index out of range")?;
-        let text = toml::to_string(&One { transform: [def] })
+        let spec = self.transforms.get(i).ok_or("transform index out of range")?;
+        let def = transform_def(
+            spec,
+            self.transform_names.get(i).cloned().flatten(),
+            self.colors.get(i).copied(),
+        );
+        let text = toml::to_string(&One { transform: [&def] })
             .map_err(|e| format!("Failed to serialize transform: {}", e))?;
         Ok(inline_variation_tables(&text).unwrap_or(text))
     }
@@ -1938,12 +2404,29 @@ impl Scene {
         let fresh = toml::to_string(&file)
             .map_err(|e| format!("Failed to serialize scene: {}", e))?;
         let fresh = inline_variation_tables(&fresh).unwrap_or(fresh);
-        Ok(rewrite_palette_table(&fresh, file.palette.as_ref()).unwrap_or(fresh))
+        let fresh = rewrite_palette_table(&fresh, file.palette.as_ref()).unwrap_or(fresh);
+        Ok(rewrite_subscene_palettes(&fresh, &file.subscenes).unwrap_or(fresh))
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
-        let file = self.to_scene_file();
-        let fresh = self.to_toml_string()?;
+        // `file =` references are relative to the file they are written in,
+        // so they are respelled for this one — a Save-As into another
+        // directory must not leave them pointing at nothing.
+        let dir = path.as_ref().parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut rebased;
+        let this = if self.subscenes.iter().any(|s| s.file_abs.is_some()) {
+            rebased = self.clone();
+            for s in &mut rebased.subscenes {
+                if let (Some(_), Some(abs)) = (&s.file, &s.file_abs) {
+                    s.file = Some(crate::subscene::relative_path(abs, dir));
+                }
+            }
+            &rebased
+        } else {
+            self
+        };
+        let file = this.to_scene_file();
+        let fresh = this.to_toml_string()?;
 
         let content = fs::read_to_string(path.as_ref())
             .ok()
@@ -1959,6 +2442,96 @@ impl Scene {
         }
         fs::write(path.as_ref(), content)
             .map_err(|e| format!("Failed to write scene file: {}", e))
+    }
+}
+
+
+/// One transform as it is written to a file: degrees where they reproduce the
+/// matrix, `rotvec` where they don't, variations only when not pure linear.
+fn transform_def(spec: &TransformSpec, name: Option<String>, color: Option<Vec3>) -> TransformDef {
+    let trs = crate::rot::Trs::of(spec.matrix);
+    let (scale, trans) = (trs.scale, trs.translation);
+    // Degrees while they reproduce the matrix, which is nearly
+    // always; the exact rotation vector for the rest, rather than
+    // writing a chart reading that doesn't reload to what it says.
+    let chartable = trs.is_faithful(spec.matrix)
+        && crate::rot::Orientation::from_xyz_degrees(trs.rotation.to_xyz_degrees())
+            .angle_to(trs.rotation)
+            < 1e-4;
+    let degrees = trs.rotation.to_xyz_degrees();
+
+    let variations: BTreeMap<String, f64> = spec
+        .variations
+        .iter()
+        .enumerate()
+        .filter(|&(_, &w)| w != 0.0)
+        .map(|(slot, &w)| (VARIATION_NAMES[slot].to_string(), tidy(w)))
+        .collect();
+    let is_pure_linear =
+        variations.len() == 1 && variations.get("linear") == Some(&1.0);
+
+    let color = color.unwrap_or(Vec3::ONE);
+    let scale = if approx(scale.x as f64, scale.y as f64)
+        && approx(scale.x as f64, scale.z as f64)
+    {
+        ScaleDef::Uniform(tidy(scale.x))
+    } else {
+        ScaleDef::PerAxis(scale.to_array().map(tidy))
+    };
+
+    // Serialize post-affine only if it's not identity
+    let (post_translation, post_scale, post_rotation) =
+        if spec.post_affine == Mat4::IDENTITY {
+            (None, None, None)
+        } else {
+            let post_trs = crate::rot::Trs::of(spec.post_affine);
+            let post_trans = if post_trs.translation.length_squared() > 1e-8 {
+                Some(post_trs.translation.to_array().map(tidy))
+            } else {
+                None
+            };
+            let post_scale = if (post_trs.scale - Vec3::ONE).length_squared() > 1e-8 {
+                let s = post_trs.scale;
+                Some(if approx(s.x as f64, s.y as f64) && approx(s.x as f64, s.z as f64) {
+                    ScaleDef::Uniform(tidy(s.x))
+                } else {
+                    ScaleDef::PerAxis(s.to_array().map(tidy))
+                })
+            } else {
+                None
+            };
+            let post_rot = if post_trs.rotation.angle_to(crate::rot::Orientation::IDENTITY) > 1e-4 {
+                Some(post_trs.rotation.to_xyz_degrees().map(tidy))
+            } else {
+                None
+            };
+            (post_trans, post_scale, post_rot)
+        };
+
+    TransformDef {
+        name,
+        translation: trans.to_array().map(tidy),
+        scale,
+        rotation: if chartable { degrees.map(tidy) } else { [0.0; 3] },
+        rotvec: (!chartable).then(|| {
+            tidy_rotvec(
+                crate::rot::Orientation::IDENTITY
+                    .shortest_turn_to(trs.rotation)
+                    .as_rotation_vector(),
+            )
+        }),
+        color: color.to_array().map(tidy),
+        weight: tidy(spec.weight),
+        color_value: Some(tidy(spec.color_value)),
+        color_speed: spec.explicit_color_speed.map(tidy),
+        variations: if is_pure_linear || variations.is_empty() {
+            None
+        } else {
+            Some(variations)
+        },
+        post_translation,
+        post_scale,
+        post_rotation,
     }
 }
 
@@ -2258,6 +2831,18 @@ fn merge_scene_into_document(
         if let Some(pc) = file.meta.point_count {
             set_i64(meta, "point_count", pc as i64, None);
         }
+        match file.meta.share {
+            Some(v) => set_f64(meta, "share", v, None),
+            None => {
+                meta.remove("share");
+            }
+        }
+        match file.meta.visible {
+            Some(v) => set_bool(meta, "visible", v),
+            None => {
+                meta.remove("visible");
+            }
+        }
     }
 
     {
@@ -2451,6 +3036,22 @@ fn merge_scene_into_document(
         doc["symmetry"] = fresh_doc.get("symmetry")?.clone();
     }
 
+    // Subscenes are rebuilt wholesale, like the symmetry blocks and for the
+    // same reason: importing, removing or detaching one changes the block's
+    // shape, and there is no stable key-by-key correspondence to merge along.
+    // The cost is comments written inside a `[[subscene]]` block.
+    doc.remove("subscene");
+    if !file.subscenes.is_empty() {
+        let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
+        doc["subscene"] = fresh_doc.get("subscene")?.clone();
+    }
+    // A pure composite has no maps of its own; drop the array rather than
+    // leave the ones that were edited away.
+    if file.transforms.is_empty() {
+        doc.remove("transform");
+        return Some(doc.to_string());
+    }
+
     let existing_len = doc
         .get("transform")
         .and_then(|t| t.as_array_of_tables())
@@ -2531,6 +3132,27 @@ fn rewrite_palette_table(content: &str, def: Option<&PaletteDef>) -> Option<Stri
     Some(doc.to_string())
 }
 
+/// Each subscene's `[subscene.palette]`, written the way the top-level one is
+/// (`PaletteDef::to_table`: inline stops, one per line) rather than as serde's
+/// `[[subscene.palette.stops]]` sections.
+fn rewrite_subscene_palettes(
+    content: &str,
+    defs: &[crate::subscene::SubsceneDef],
+) -> Option<String> {
+    if defs.iter().all(|d| d.palette.is_none()) {
+        return None;
+    }
+    let mut doc: toml_edit::DocumentMut = content.parse().ok()?;
+    let subs = doc.get_mut("subscene")?.as_array_of_tables_mut()?;
+    for (sub, def) in subs.iter_mut().zip(defs) {
+        if let Some(p) = &def.palette {
+            sub.remove("palette");
+            sub["palette"] = toml_edit::Item::Table(p.to_table());
+        }
+    }
+    Some(doc.to_string())
+}
+
 fn apply_palette_table(doc: &mut toml_edit::DocumentMut, def: Option<&PaletteDef>) {
     let Some(def) = def else {
         doc.remove("palette");
@@ -2548,14 +3170,26 @@ fn apply_palette_table(doc: &mut toml_edit::DocumentMut, def: Option<&PaletteDef
 
 fn inline_variation_tables(content: &str) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = content.parse().ok()?;
-    let transforms = doc.get_mut("transform")?.as_array_of_tables_mut()?;
-    for t in transforms.iter_mut() {
-        if let Some(toml_edit::Item::Table(vars)) = t.get("variations") {
-            let mut inline = vars.clone().into_inline_table();
-            inline.fmt();
-            // Remove first so the fresh key gets clean `key = value` decor
-            t.remove("variations");
-            t["variations"] = toml_edit::value(inline);
+    fn inline_in(arr: &mut toml_edit::ArrayOfTables) {
+        for t in arr.iter_mut() {
+            if let Some(toml_edit::Item::Table(vars)) = t.get("variations") {
+                let mut inline = vars.clone().into_inline_table();
+                inline.fmt();
+                // Remove first so the fresh key gets clean `key = value` decor
+                t.remove("variations");
+                t["variations"] = toml_edit::value(inline);
+            }
+        }
+    }
+    if let Some(arr) = doc.get_mut("transform").and_then(|t| t.as_array_of_tables_mut()) {
+        inline_in(arr);
+    }
+    // A subscene's maps get the same treatment.
+    if let Some(subs) = doc.get_mut("subscene").and_then(|t| t.as_array_of_tables_mut()) {
+        for sub in subs.iter_mut() {
+            if let Some(arr) = sub.get_mut("transform").and_then(|t| t.as_array_of_tables_mut()) {
+                inline_in(arr);
+            }
         }
     }
     Some(doc.to_string())
@@ -2622,6 +3256,7 @@ mod tests {
         contractions
             .iter()
             .map(|&s| TransformSpec {
+                layer: 0,
                 matrix: Mat4::from_scale(Vec3::splat(s)),
                 post_affine: Mat4::IDENTITY,
                 color_value: 0.5,
@@ -4282,4 +4917,208 @@ color = [0.9, 0.5, 0.2]
 /// now lives.
 pub fn generate_colormap(colors: &[Vec3]) -> Colormap {
     Palette::from_transform_colors(colors).to_colormap()
+}
+
+#[cfg(test)]
+mod subscene_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("fracturize-subscene-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const FERN: &str = r#"
+[meta]
+name = "Fern"
+author = "Someone"
+color_speed = 0.7
+
+[[transform]]
+name = "stem"
+translation = [0.0, 0.0, 0.0]
+scale = [0.02, 0.3, 0.02]
+color = [0.2, 0.8, 0.2]
+
+[[transform]]
+name = "leaf"
+translation = [0.0, 0.5, 0.0]
+scale = 0.6
+rotation = [0.0, 0.0, 10.0]
+color = [0.1, 0.5, 0.9]
+"#;
+
+    const COMPOSITE: &str = r#"
+[meta]
+name = "Pair"
+
+[[transform]]
+name = "a"
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+color = [1.0, 0.0, 0.0]
+
+[[transform]]
+name = "b"
+translation = [-0.5, 0.0, 0.0]
+scale = 0.5
+color = [0.0, 0.0, 1.0]
+
+[[subscene]]
+file = "fern.toml"
+share = 3.0
+translation = [2.0, 0.0, 0.0]
+scale = 0.5
+
+[[subscene]]
+name = "dust"
+visible = false
+color_mode = "mix"
+
+[[subscene.transform]]
+name = "d0"
+translation = [0.0, 0.3, 0.0]
+scale = 0.4
+color = [1.0, 1.0, 0.0]
+
+[[subscene.transform]]
+name = "d1"
+translation = [0.0, -0.3, 0.0]
+scale = 0.4
+color = [0.0, 1.0, 1.0]
+"#;
+
+    fn write_pair(tag: &str) -> std::path::PathBuf {
+        let d = dir(tag);
+        fs::write(d.join("fern.toml"), FERN).unwrap();
+        fs::write(d.join("pair.toml"), COMPOSITE).unwrap();
+        d.join("pair.toml")
+    }
+
+    #[test]
+    fn subscenes_load_as_layers_after_the_scenes_own_maps() {
+        let s = Scene::load(write_pair("load")).unwrap();
+        assert_eq!(s.layer_count(), 3);
+        assert_eq!(s.layer_sizes(), vec![2, 2, 2]);
+        let layers: Vec<u16> = s.transforms.iter().map(|t| t.layer).collect();
+        assert_eq!(layers, vec![0, 0, 1, 1, 2, 2]);
+        // A file-backed subscene takes the file's name and credit, and colour.
+        assert_eq!(s.layer_name(1), "fern");
+        assert_eq!(s.subscenes[0].author.as_deref(), Some("Someone"));
+        assert_eq!(s.subscenes[0].colour.color_speed, 0.7);
+        assert_eq!(s.layer_share(1), 3.0);
+        assert!(!s.layer_visible(2));
+        assert_eq!(s.subscenes[1].colour.color_mode, ColorMode::Mix);
+        assert!(s.is_composite() && s.packs_rgb());
+        // The world matrix carries the placement; setting it carries it back.
+        let w = s.world_matrix(3);
+        assert!((w.w_axis.truncate() - Vec3::new(2.0, 0.25, 0.0)).length() < 1e-5);
+        let back = s.layer_placement(1).inverse() * w;
+        assert!(back.abs_diff_eq(s.transforms[3].matrix, 1e-5));
+    }
+
+    #[test]
+    fn an_unedited_import_saves_as_a_reference_and_round_trips() {
+        let p = write_pair("rt");
+        let s = Scene::load(&p).unwrap();
+        s.save(&p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.contains("file = \"fern.toml\""), "{text}");
+        assert!(!text.contains("source ="), "{text}");
+        let back = Scene::load(&p).unwrap();
+        assert_eq!(back.layer_sizes(), s.layer_sizes());
+        assert_eq!(back.to_toml_string().unwrap(), s.to_toml_string().unwrap());
+    }
+
+    #[test]
+    fn an_edited_import_is_written_inline_and_never_into_its_file() {
+        let p = write_pair("edit");
+        let mut s = Scene::load(&p).unwrap();
+        s.transforms[3].weight = 2.5;
+        s.save(&p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("file = "), "{text}");
+        assert!(text.contains("source = \"fern.toml\""), "{text}");
+        assert_eq!(fs::read_to_string(p.with_file_name("fern.toml")).unwrap(), FERN);
+        let back = Scene::load(&p).unwrap();
+        assert_eq!(back.transforms[3].weight, 2.5);
+        assert_eq!(back.layer_name(1), "fern");
+        // The colour it borrowed survives being written out.
+        assert_eq!(back.subscenes[0].colour.color_speed, 0.7);
+    }
+
+    #[test]
+    fn save_as_elsewhere_keeps_references_pointing_at_the_same_scene() {
+        let p = write_pair("saveas");
+        let s = Scene::load(&p).unwrap();
+        let elsewhere = dir("saveas-target").join("deeper").join("pair.toml");
+        s.save(&elsewhere).unwrap();
+        let text = fs::read_to_string(&elsewhere).unwrap();
+        println!("{text}");
+        assert!(!text.contains("file = \"fern.toml\""), "{text}");
+        let back = Scene::load(&elsewhere).unwrap();
+        assert_eq!(back.layer_sizes(), s.layer_sizes());
+        assert_eq!(back.subscenes[0].file_abs, s.subscenes[0].file_abs);
+    }
+
+    #[test]
+    fn a_pure_composite_has_no_maps_of_its_own() {
+        let d = dir("pure");
+        fs::write(d.join("fern.toml"), FERN).unwrap();
+        let p = d.join("pure.toml");
+        fs::write(&p, "[meta]\nname = \"P\"\n[[subscene]]\nfile = \"fern.toml\"\n").unwrap();
+        let s = Scene::load(&p).unwrap();
+        assert_eq!(s.layer_sizes(), vec![0, 2]);
+        s.save(&p).unwrap();
+        let back = Scene::load(&p).unwrap();
+        assert_eq!(back.layer_sizes(), vec![0, 2]);
+    }
+
+    #[test]
+    fn composites_refuse_what_they_cannot_do() {
+        let d = dir("refuse");
+        fs::write(d.join("fern.toml"), FERN).unwrap();
+        let bad = |body: &str| {
+            let p = d.join("bad.toml");
+            fs::write(&p, format!("[meta]\nname = \"B\"\n{body}")).unwrap();
+            Scene::load(&p).err().unwrap_or_default()
+        };
+        assert!(bad("[[subscene]]\nname = \"x\"\n").contains("no maps"));
+        assert!(bad("[[subscene]]\nfile = \"nope.toml\"\n").contains("nope.toml"));
+        assert!(bad("[[subscene]]\nfile = \"fern.toml\"\n[[subscene]]\nfile = \"fern.toml\"\n")
+            .contains("two subscenes are called"));
+        assert!(bad("[[subscene]]\nfile = \"fern.toml\"\nscale = -1\n").contains("positive"));
+        assert!(bad("[[subscene]]\nfile = \"fern.toml\"\nsahre = 2\n").contains("sahre"));
+        // Nesting
+        fs::write(d.join("inner.toml"), "[meta]\nname = \"I\"\n[[subscene]]\nfile = \"fern.toml\"\n").unwrap();
+        assert!(bad("[[subscene]]\nfile = \"inner.toml\"\n").contains("composite"));
+    }
+
+    #[test]
+    fn set_paths_reach_into_subscenes() {
+        let p = write_pair("set");
+        let s = Scene::load_with(
+            &p,
+            &[
+                "subscene.dust.transform.d1.weight=4".to_string(),
+                "subscene.fern.share=0.5".to_string(),
+                "subscene.0.translation.y=1.5".to_string(),
+            ],
+        );
+        // The file-backed one has no `name` key, so it is reached by its
+        // file's stem — the name the loader gives it — or by index.
+        let s = match s {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(s.transforms[5].weight, 4.0);
+        assert_eq!(s.layer_share(1), 0.5);
+        assert!((s.layer_placement(1).w_axis.y - 1.5).abs() < 1e-6);
+        let err = Scene::load_with(&p, &["subscene.fern.transform.0.weight=2".to_string()])
+            .err()
+            .unwrap();
+        assert!(err.contains("borrows its maps"), "{err}");
+    }
 }

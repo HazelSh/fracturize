@@ -843,6 +843,11 @@ impl GizmoRenderer {
         );
     }
 
+    /// Instances drawn: the reference cell plus one per gizmo.
+    pub fn instance_count(&self) -> u32 {
+        self.instance_count
+    }
+
     /// Upload camera uniforms
     pub fn upload_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
