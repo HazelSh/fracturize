@@ -470,7 +470,7 @@ impl Renorm {
         let nonlinear: f32 = t.variations.iter().skip(1).map(|w| w.abs()).sum();
         if nonlinear > 1e-4 {
             return Err(format!(
-                "zoom map {} uses variations ({}); the renormalizing map must be pure affine",
+                "transform {} uses variations ({}); infinite zoom needs a plain affine transform",
                 spec.map,
                 t.variation_summary()
             ));
@@ -479,7 +479,7 @@ impl Renorm {
         // rejecting a transform that is still affine, just scaled.
         let linear_weight = t.variations[0];
         if linear_weight.abs() < 1e-4 {
-            return Err(format!("zoom map {} has no linear component", spec.map));
+            return Err(format!("transform {} has a linear weight of 0, so there's nothing to zoom into", spec.map));
         }
 
         Self::from_affine(t.matrix, linear_weight, spec, reference_distance).map(|mut r| {
@@ -502,15 +502,15 @@ impl Renorm {
 
         let det = a.determinant().abs();
         if det < 1e-12 {
-            return Err("zoom map is singular (zero scale on some axis) and can't be inverted".into());
+            return Err("this transform has zero scale on some axis, so it can't be zoomed into".into());
         }
         // Every direction must contract, or f⁻ᵐ doesn't converge to a shell and
         // the renormalization loop never terminates.
         let sigma_max = largest_singular_value(a);
         if sigma_max >= 0.999 {
             return Err(format!(
-                "zoom map does not contract in every direction (largest scale {:.3}); \
-                 pick a map with scale < 1 on all three axes",
+                "this transform doesn't shrink along every axis (largest scale {:.3}); \
+                 infinite zoom needs a scale below 1 on all three",
                 sigma_max
             ));
         }
@@ -520,7 +520,7 @@ impl Renorm {
             .inverse()
             .mul_vec3(b);
         if !fixed_point.is_finite() {
-            return Err("zoom map has no finite fixed point".into());
+            return Err("this transform has no fixed point to zoom into".into());
         }
 
         let scale = det.powf(1.0 / 3.0);
@@ -1825,7 +1825,7 @@ mod tests {
             Vec3::ZERO,
         );
         let err = Renorm::from_affine(m, 1.0, &ZoomSpec::default(), 1.0).unwrap_err();
-        assert!(err.contains("contract"), "{}", err);
+        assert!(err.contains("shrink along every axis"), "{}", err);
     }
 
     #[test]

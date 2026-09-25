@@ -74,8 +74,8 @@ pub fn parse_axis_turn(s: &str) -> Result<AxisTurn, String> {
 pub fn derive_matrix(m: Mat4, turns: &[AxisTurn], spins: &[AxisTurn]) -> Result<Mat4, String> {
     let mut trs = Trs::of(m);
     if !trs.is_faithful(m) {
-        return Err("this map is sheared, so it has no rotation to turn — \
-                    orthogonalize it first (the Transforms window offers that)"
+        return Err("this map is sheared, so it has no rotation to turn; remove the \
+                    shear first (Remove shear, in the Transforms window)"
             .into());
     }
     for t in turns {

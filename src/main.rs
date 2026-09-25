@@ -132,17 +132,16 @@ struct Args {
     /// `transform.0.translation.y=1.25`, `subscene.<name>.share=2`,
     /// `subscene.<name>.transform.<name-or-index>.weight=0.5`. Arrays index by x/y/z or 0/1/2, or
     /// take a whole value (`transform.a.scale=[0.05,0.6,0.05]`). This is the
-    /// general form of --palette and --zoom, and it is what makes a parameter
-    /// sweep a shell loop instead of a code-generation task. A path that does
-    /// not resolve is an error, never a silent no-op.
+    /// general form of --palette and --zoom. A path that doesn't resolve is an
+    /// error, never silently ignored.
     #[arg(short = 'S', long = "set", value_name = "PATH=VALUE", help_heading = "Scene")]
     set: Vec<String>,
 
-    /// Draw one layer of a composite alone, hiding the rest [every layer]
+    /// Draw one subscene alone, hiding the others [all of them]
     ///
-    /// A subscene by name or index; 0 is the scene's own maps. It gets every
-    /// point the scene has, so it renders as it would on its own, placed where
-    /// the composite puts it. Works with --info, which then measures it alone.
+    /// By name or index; 0 is the scene's own maps. It gets all of the points,
+    /// so it renders as it would on its own, placed where the scene puts it.
+    /// Works with --info, which then measures it alone.
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
     solo: Option<String>,
 
@@ -159,9 +158,9 @@ struct Args {
 
     /// Start from a randomly generated flame instead of a scene file
     ///
-    /// Quality-checked on the CPU before it's handed back, so it always
-    /// renders. Pair with --seed to reproduce a roll (the seed used is
-    /// always logged); combine with --render to explore offline.
+    /// Each roll is checked on the CPU before it's used, so it always renders
+    /// something. The seed is always printed; pass it back with --seed to
+    /// reproduce a roll. Combine with --render to explore offline.
     #[arg(long, conflicts_with = "scene", help_heading = "Scene")]
     random: bool,
 
@@ -177,7 +176,7 @@ struct Args {
 
     /// Start from a blank scene: two plain half-scale transforms
     ///
-    /// Nothing else — for building an IFS up from nothing.
+    /// For building a scene up by hand.
     #[arg(long, conflicts_with_all = ["scene", "random"], help_heading = "Scene")]
     blank: bool,
 
@@ -456,20 +455,16 @@ struct Args {
 
     /// Vertical field of view, in degrees, 10-150 [the scene's, else 45]
     ///
-    /// The lens rather than the framing: how much of the world the frame
-    /// takes in from where the camera already stands. Wider exaggerates
-    /// depth and shrinks the subject, narrower flattens it and fills the
-    /// frame; 45 vertical is 73 across a 16:9 frame.
+    /// The lens, not the framing. Wider exaggerates depth and shrinks the
+    /// subject; narrower flattens it and fills the frame. 45 vertical is 73
+    /// across a 16:9 frame. In degrees, unlike the other camera angles, because
+    /// it's the one people already have a number for.
     ///
-    /// Degrees, unlike every other camera angle here, because this is the one
-    /// people already have a number in mind for.
-    ///
-    /// Wins over everything: a --view file's own fov and a scene's
-    /// `[camera] fov`. Without it a render takes the view's, then the
-    /// scene's, then 45 — never the `fov` in prefs.toml, which only the
-    /// window reads, so that a render stays reproducible from flags and scene
-    /// alone. This flag is how a render reproduces what the window shows
-    /// someone whose preference isn't 45.
+    /// Overrides a --view's fov and the scene's `[camera] fov`. Without it, a
+    /// render uses the view's, then the scene's, then 45. It never reads the
+    /// `fov` preference in prefs.toml, which only the window uses, so renders
+    /// stay reproducible from flags and scene alone; pass this to match a
+    /// window whose preference isn't 45.
     #[arg(long, value_name = "DEGREES", help_heading = "Camera")]
     fov: Option<f32>,
 
@@ -477,11 +472,10 @@ struct Args {
     ///
     /// Wins over --yaw/--pitch/--roll.
     ///
-    /// Those three are a chart, and a chart has poles: looking straight up or
-    /// down, yaw and roll become the same control and neither means anything
-    /// on its own. Since the camera can now be dragged over the pole, those
-    /// framings need a way to be named — this is it. `--render` prints the
-    /// form it lands on, so a framing found by hand can be pasted back.
+    /// Yaw, pitch and roll can't describe a camera looking straight up or
+    /// down, where yaw and roll become the same thing. A rotation vector can.
+    /// `--render` prints whichever form it lands on, so a framing found by
+    /// hand can be pasted back.
     #[arg(
         long,
         value_name = "X,Y,Z",
@@ -491,15 +485,14 @@ struct Args {
     )]
     rotvec: Option<Vec3>,
 
-    /// Render the frame the camera path reaches at `t` in 0..1 [no]
+    /// Frame of the camera path at this point, 0-1, as a still [the base view]
     ///
-    /// The framing the animation would have at that point of its flight,
-    /// as a still. Under infinite zoom this is the only way to name a frame
-    /// of the flight: the descent twists while it scales, so walking
-    /// `--distance` down leaves the path a little further behind every step.
-    /// A scene with no authored path is flown around its full orbit, the same
-    /// one `--render out.mp4` uses. The other camera flags adjust whatever
-    /// this lands on.
+    /// The framing the animation would have at that moment. Under infinite
+    /// zoom this is the only reliable way to name a frame of the flight,
+    /// because the descent twists as it scales and stepping --distance down
+    /// drifts off the path. A scene with no path of its own flies its default
+    /// full orbit, as `--render out.mp4` does. Other camera flags adjust the
+    /// result.
     #[arg(long, value_name = "0-1", help_heading = "Camera")]
     path_t: Option<f32>,
 
@@ -522,19 +515,17 @@ struct Args {
     /// Instead of the per-transform ring: a library name (see --palettes), a
     /// palette file (.toml, or Apophysis .ugr / .gradient / .flame), or
     /// `file.ugr#name` to pick one gradient out of a collection. Overrides the
-    /// scene's own [palette] — restyling a scene shouldn't require editing it,
-    /// same reasoning as --zoom.
+    /// scene's own [palette], so a scene can be restyled without editing it.
     #[arg(long, value_name = "NAME|FILE", help_heading = "Colour")]
     palette: Option<String>,
 
     /// Where point colour comes from: transforms, palette or mix [scene's]
     ///
-    /// `transforms` spreads the per-transform RGBs around a cyclic colormap;
-    /// `palette` indexes an independent gradient (the default for scenes with
-    /// a [palette], and switching to `transforms` keeps the palette so the two
-    /// are A/B-able); `mix` carries the transform colours through the walk as
-    /// RGB so they genuinely blend and transform *combinations* become
-    /// distinguishable.
+    /// `transforms` spreads the transforms' own colours around a cyclic
+    /// colormap. `palette` uses a gradient; it's the default for scenes with a
+    /// [palette], and switching to `transforms` keeps the palette so the two
+    /// can be compared. `mix` blends the transform colours along the walk as
+    /// RGB, so different combinations of transforms get different colours.
     #[arg(long, value_enum, value_name = "MODE", hide_possible_values = true, help_heading = "Colour")]
     color_mode: Option<ColorModeArg>,
 
@@ -562,19 +553,19 @@ struct Args {
 
     /// Interpolate control points in rgb or oklab [the scene's, else rgb]
     ///
-    /// `rgb` is flam3-compatible; `oklab` is perceptually even, with no grey
-    /// midpoints.
+    /// `rgb` matches flam3; `oklab` blends evenly to the eye, with no grey
+    /// midpoints between opposite colours.
     #[arg(long, value_name = "SPACE", help_heading = "Colour")]
     palette_interpolate: Option<String>,
 
     // ------------------------------------------------------- Offline render
     /// Render headlessly and exit — .png, .avif or .mp4 [else a window]
     ///
-    /// A .png path renders stills (and grids); a .avif or .mp4 path renders an
-    /// animation along the scene's [[camera.path]] (or a full-orbit loop when
-    /// the scene has none). .avif is AV1 — small, loops like a GIF; .mp4 is
-    /// H.264, which is what upload pipelines accept.
-    /// Prints camera mapping (for grids) and a timing breakdown to stdout.
+    /// A .png path renders a still or a contact sheet. A .avif or .mp4 path
+    /// renders an animation along the scene's [[camera.path]], or a full orbit
+    /// if it has none. .avif is AV1: small, and loops like a GIF. .mp4 is
+    /// H.264, which upload sites accept. Prints each tile's camera (for
+    /// sheets) and a timing breakdown to stdout.
     #[arg(short, long, value_name = "FILE", help_heading = "Offline render")]
     render: Option<String>,
 
@@ -589,32 +580,25 @@ struct Args {
     /// Size tier: tiny, small, medium, large or huge [the scene's point count]
     ///
     /// Target samples per output pixel: 1, 10, 100, 1000, 10000. Named for
-    /// size only — a duration would depend on the machine and an outcome
-    /// ("converged") would assume you have no reason to go further. Since a
-    /// sample density is resolution-independent, the same tier means the same
-    /// thing at 720p and 4K.
+    /// size only, because a duration would depend on the machine. A sample
+    /// density doesn't depend on resolution, so a tier means the same thing at
+    /// 720p and 4K.
     ///
-    /// For --splat this accumulates, which is the only way to actually deliver
-    /// a density; --spp goes past `huge`. The points renderer has no histogram,
-    /// so there a tier degrades to the nearest point buffer and says so.
+    /// A single --splat still accumulates to the tier; --spp goes past `huge`.
+    /// Everything else (the points renderer, contact sheets, animations) gets
+    /// the point buffer nearest the tier instead, with a note on stderr.
     /// Explicit --points / --spp override it.
-    ///
-    /// Renders one still: because it accumulates, it cannot drive a contact
-    /// sheet or an animation, which would each want a separate accumulation run
-    /// per tile or frame. Set those with --points, which is the density knob
-    /// they share one fill of.
     #[arg(long, value_name = "PRESET", value_parser = parse_effort, help_heading = "Offline render")]
     effort: Option<Effort>,
 
     /// Point buffer capacity — more points is denser [--effort, else scene]
     ///
-    /// The density knob for anything rendering more than one image: contact
-    /// sheets and animations share a single fill of this buffer, which is what
-    /// makes them affordable, and cannot use the accumulating --effort/--spp.
-    /// For a single still, prefer --effort — a buffer capacity is a ceiling on
-    /// the samples in the picture, and a tier is not.
+    /// The density setting for anything that renders more than one image:
+    /// contact sheets and animations share a single fill of this buffer. For a
+    /// single still, prefer --effort or --spp, because a buffer caps the
+    /// samples in the picture and accumulation doesn't.
     ///
-    /// In windowed mode the Render window's value, saved to prefs, sits
+    /// In windowed mode the Render window's value, saved in prefs, sits
     /// between this and the scene's own point_count.
     #[arg(short, long, value_name = "N", help_heading = "Offline render")]
     points: Option<usize>,
@@ -628,7 +612,8 @@ struct Args {
     /// The tonemap is a pure function of this buffer plus a few scalars, so a
     /// saved one can be re-graded with --retonemap in milliseconds instead of
     /// re-rendering. 16 bytes a pixel: 33 MB at 1080p, regardless of how long
-    /// the render took or how much supersampling it used. Splat, single tile.
+    /// the render took or how much supersampling it used. Splat only, and not
+    /// for contact sheets or animations.
     ///
     /// Pass a path, or bare `--grade-out` with no value to write `<render>.fgrade`.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "",
@@ -637,37 +622,32 @@ struct Args {
 
     /// Density estimation amount, 0-1 [0 = off]
     ///
-    /// The variable-width blur: wide kernels where the histogram is sparse and
-    /// noisy, narrow where it is dense and detailed. This is what most
-    /// distinguishes an Apophysis render, and it is not substitutable by more
-    /// samples -- more samples improve the whole image proportionally, while
-    /// this targets exactly the regions still noisy at a finite budget.
+    /// A variable-width blur: wide where the picture is sparse and noisy,
+    /// narrow where it is dense and detailed. Much of what makes an Apophysis
+    /// render look the way it does. More samples don't replace it: they
+    /// improve everything evenly, while this goes where the noise still is.
     ///
-    /// One amount with the internals derived, the way --fog works: the kernel
-    /// is the same at every setting and this is how far it is blended over the
-    /// unsmoothed image, so 0.3 is three tenths of the effect and the scale is
-    /// linear end to end. Needs --splat and an accumulating render (--spp or an
-    /// --effort tier).
+    /// The amount is a straight mix over the unsmoothed image, so 0.3 is three
+    /// tenths of the effect; try that before 1.0. Needs --splat and an
+    /// accumulating render (--spp or an --effort tier).
     #[arg(long, value_name = "AMOUNT", help_heading = "Offline render")]
     density_estimation: Option<f32>,
 
     /// Fraction of the GPU to use, 0.05-1.0 [1.0 = all of it]
     ///
-    /// The chaos game saturates the card, and on a single-GPU desktop that is
-    /// the same card drawing everything else. Below 1.0 the render sleeps
-    /// between laps in proportion, so the compositor gets a turn -- at the cost
-    /// of taking proportionally longer. 0.5 is roughly twice the wall clock for
-    /// a desktop that stays usable.
+    /// The chaos game saturates the GPU, which on a single-GPU desktop is also
+    /// drawing everything else. Below 1.0 the render pauses between laps so the
+    /// desktop gets a turn, and takes longer in proportion: 0.5 is about twice
+    /// as long, with a desktop that stays usable.
     #[arg(long, value_name = "FRACTION", default_value_t = 1.0, help_heading = "Offline render")]
     gpu_share: f32,
 
     /// Save the accumulation histogram, so the render can be resumed [none]
     ///
-    /// Written however the run ends, cancellation included -- an interrupted
-    /// render you cannot resume is just a slower failure. Larger than
-    /// --grade-out: this is the supersampled histogram, 32 bytes a texel, so
-    /// 265 MB at 1080p and --supersample 2. Needs --splat and an accumulating
-    /// render (--spp or an --effort tier).
+    /// Written however the run ends, Ctrl-C included. Larger than --grade-out:
+    /// this is the supersampled histogram, 32 bytes a texel, so 265 MB at
+    /// 1080p and --supersample 2. Needs --splat and an accumulating render
+    /// (--spp or an --effort tier).
     ///
     /// Pass a path, or bare `--checkpoint` to write `<render>.fhist`.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "",
@@ -679,8 +659,8 @@ struct Args {
     /// `--spp` names a *total*, so resuming to a figure you already have does
     /// nothing rather than doubling it. Bare `--resume` with no --spp runs one
     /// more lap. Refuses a checkpoint from a different scene, size or
-    /// supersample factor: adding samples of a different attractor into an
-    /// existing histogram is a silent double exposure.
+    /// supersample factor, since adding those together would silently
+    /// double-expose the image.
     #[arg(long, value_name = "FILE", help_heading = "Offline render")]
     resume: Option<String>,
 
@@ -688,18 +668,15 @@ struct Args {
     ///
     /// Applies --exposure / --gamma / --gamma-threshold / --vibrancy to an
     /// existing linear buffer and writes the PNG named by --render. No scene,
-    /// no GPU work beyond one fullscreen pass. This is how a tonemap question
-    /// gets answered by looking rather than by arguing: render once, grade
-    /// sixteen times.
+    /// and no GPU work beyond one fullscreen pass: render once, then grade as
+    /// many times as you like.
     #[arg(long, value_name = "FILE", help_heading = "Offline render")]
     retonemap: Option<String>,
 
     /// With --retonemap, walk one knob across a contact sheet
     ///
     /// `--grade-sweep gamma --grade-range 1:4 --sweep-steps 9` grades the same
-    /// buffer nine ways into one sheet. This is how a tonemap question gets
-    /// settled by looking: the whole sheet costs one device creation and nine
-    /// fullscreen passes.
+    /// buffer nine ways into one sheet, for the cost of nine fullscreen passes.
     #[arg(long, value_enum, value_name = "AXIS", help_heading = "Offline render")]
     grade_sweep: Option<offline::GradeAxis>,
 
@@ -709,53 +686,48 @@ struct Args {
 
     /// Tonemap gamma, >1 lifts the dim end [1 = off]
     ///
-    /// There is no gamma curve at all without this — just the log and a fixed
-    /// gain — and gamma is most of what people mean by the Apophysis look.
-    /// Pair it with --gamma-threshold: lifting the dim end also lifts the
-    /// single-sample speckle in the background, and the threshold is what
-    /// stops that becoming a grey veil.
+    /// Gamma is most of what people mean by the Apophysis look. Pair it with
+    /// --gamma-threshold: lifting the dim end also lifts stray specks in the
+    /// background into a grey veil, and the threshold stops that.
     #[arg(long, value_name = "G", help_heading = "Offline render")]
     gamma: Option<f32>,
 
     /// Coverage below which gamma flattens to a straight line [0 = off]
     ///
-    /// The toe that keeps --gamma from lifting background speckle into a veil.
-    ///
-    /// Measured useful range is 0.05-0.5, which is *not* flam3's range for the
-    /// nominally same knob: flam3's threshold is in raw density units, this one
-    /// is in post-log coverage, where the whole scale is 0-1. On blossom at
-    /// --gamma 2.5, threshold 0.5 recovers 80% of the lifted background for 5%
-    /// of the bright detail.
+    /// Keeps --gamma from lifting background specks into a veil. Useful range
+    /// 0.05-0.5. Not flam3's scale: flam3 measures its threshold in raw
+    /// density, this one in post-log coverage, which runs 0-1. On blossom at
+    /// --gamma 2.5, 0.5 recovers 80% of the lifted background for 5% of the
+    /// bright detail.
     #[arg(long, value_name = "T", help_heading = "Offline render")]
     gamma_threshold: Option<f32>,
 
     /// How gamma reaches colour: 1 keeps hue, 0 rolls highlights to white [1]
     ///
-    /// Inert at --gamma 1, because there is then no curve to route.
+    /// Has no effect at --gamma 1.
     #[arg(long, value_name = "V", help_heading = "Offline render")]
     vibrancy: Option<f32>,
 
     /// Target samples per output pixel, accumulated without a ceiling
     ///
     /// The ordinary render splats the point buffer once, so its sample count is
-    /// that buffer's capacity and no amount of extra time changes it. With
-    /// --spp the buffer becomes a working set: it is refilled and folded into a
-    /// persistent histogram until the target is met, so quality is bounded by
-    /// time rather than by memory. Needs --splat, and renders one still —
-    /// contact sheets and animations would be one accumulation run per tile.
+    /// the buffer's size however long you wait. With --spp the buffer is
+    /// refilled and added into a histogram until the target is met, so quality
+    /// is limited by time rather than memory. Needs --splat, and renders one
+    /// still, not a contact sheet or animation.
     ///
-    /// Cancelling keeps the work: exposure is normalized by what was actually
-    /// accumulated, so a run stopped at 40% is the same picture, noisier.
+    /// Stopping early keeps the work: exposure is normalized by what was
+    /// actually rendered, so a run stopped at 40% is the same picture, noisier.
     #[arg(long, value_name = "N", help_heading = "Offline render")]
     spp: Option<u32>,
 
     /// Supersampling factor, 1-4 [2]
     ///
-    /// Render the histogram at N x output resolution and filter down. The
-    /// single biggest visible quality win available: at equal sample count a
-    /// supersampled render beats a native one decisively, because what is
-    /// wrong with an unfiltered histogram is aliasing rather than noise. Costs
-    /// roughly N² fill. 1 turns it off.
+    /// Render at N times the output resolution and filter down. The biggest
+    /// visible quality improvement available: what's left wrong with an
+    /// unfiltered render is aliasing, not noise, so at the same sample count
+    /// this clearly beats rendering natively. Costs roughly N² in fill. 1
+    /// turns it off.
     #[arg(long, value_name = "N", help_heading = "Offline render")]
     supersample: Option<u32>,
 
@@ -771,54 +743,48 @@ struct Args {
     /// At 0.5 with --filter box this is exactly an N x N block average. The
     /// tap radius in accumulation pixels is this times --supersample.
     ///
-    /// Above 0.5 trades detail for smoothness; below it the kernel reads only
-    /// part of each block, which sharpens at the price of aliasing — a crop of
-    /// the block rather than an average of it.
+    /// Above 0.5 trades detail for smoothness; below it sharpens, at the cost
+    /// of aliasing.
     #[arg(long, value_name = "PX", help_heading = "Offline render")]
     filter_radius: Option<f32>,
 
     /// Bits per channel in a PNG render: 8 or 16 [8]
     ///
-    /// The render is identical either way — this is only how finely the file
-    /// quantizes it. Worth 16 for a keeper, because supersampling produces
-    /// exactly what 8 bits bands: smooth wide gradients, where the step
-    /// between adjacent codes shows as a contour. Ignored for animation,
-    /// which is 8-bit by codec.
+    /// The render is identical either way; only the file's precision changes.
+    /// Worth 16 for a final render, because supersampling makes smooth wide
+    /// gradients, which 8 bits can show as visible bands. Ignored for
+    /// animation, which is always 8-bit.
     #[arg(long, value_enum, value_name = "BITS", help_heading = "Offline render")]
     bit_depth: Option<offline::BitDepth>,
 
     /// Chaos-game seed — a different sample stream [0]
     ///
-    /// The chaos game is deterministic: the same command has always produced
-    /// byte-identical output, because every walker was seeded from its index
-    /// alone. This is how to ask for an *independent* deal of the same
-    /// attractor — the same picture, sampled differently. Distinct from
-    /// `--seed`, which seeds mutation and `--random`.
+    /// The chaos game is deterministic, so the same command always gives the
+    /// same image. A different seed samples the same attractor independently:
+    /// the same picture with different grain. Separate from `--seed`, which
+    /// seeds mutations and `--random`.
     #[arg(long, value_name = "N", help_heading = "Offline render")]
     chaos_seed: Option<u64>,
 
     /// Report GPU-busy time per chaos dispatch
     ///
-    /// Measurement, not a render setting. Answers whether the chaos loop is
-    /// bound by per-dispatch overhead or by the GPU itself — if the median is
-    /// flat as the batch grows, bigger batches would amortize; if it scales,
-    /// there is nothing to win. Silently does nothing on a device without
-    /// TIMESTAMP_QUERY.
+    /// Measurement, not a render setting: shows whether the chaos loop is
+    /// limited by per-dispatch overhead or by the GPU itself. Does nothing on a
+    /// device without TIMESTAMP_QUERY.
     #[arg(long, help_heading = "Offline render")]
     gpu_timing: bool,
 
     /// CPU threads for encoding [one less than this machine has]
     ///
-    /// Describes the box, not the artwork: never scene or view data. The
-    /// default holds a core back so the desktop stays usable while a long
-    /// animation encodes.
+    /// A machine setting, never stored in a scene or view. The default leaves
+    /// a core free so the desktop stays usable during a long encode.
     #[arg(long, value_name = "N", help_heading = "Offline render")]
     threads: Option<usize>,
 
-    /// Use the splat renderer: additive log-density accumulation
+    /// Use the splat renderer instead of opaque points
     ///
-    /// Flame-style, instead of opaque points. R toggles it in-app, and a view
-    /// saved in splat mode selects it on load.
+    /// Points add up where they overlap and are tonemapped, flame-style. R
+    /// toggles it in the app, and a view saved in splat mode selects it.
     #[arg(long, help_heading = "Offline render")]
     splat: bool,
 
@@ -831,12 +797,11 @@ struct Args {
     /// Render with a transparent background, for compositing
     ///
     /// The PNG gets an alpha channel carrying the fractal's own coverage. Not
-    /// supported for animation output — neither AV1 nor H.264 carries an alpha
-    /// plane here.
+    /// supported for animation: neither video format here carries alpha.
     #[arg(long, help_heading = "Offline render")]
     transparent: bool,
 
-    /// Turn on atmospheric haze at the legacy default strength
+    /// Turn on haze at its old default strength (legacy)
     ///
     /// A scene's own `haze` value wins over this; see "Haze" in AGENTS.md.
     #[arg(long, help_heading = "Offline render")]
@@ -851,7 +816,7 @@ struct Args {
     #[arg(long, value_name = "SECONDS", help_heading = "Animation")]
     seconds: Option<f32>,
 
-    /// Higher is better quality and a bigger file
+    /// Encoding quality: higher looks better and makes a bigger file
     ///
     /// Maps to the AV1 quantizer for .avif and to H.264's QP for .mp4.
     #[arg(long, default_value = "60", value_name = "0-100", help_heading = "Animation")]
@@ -892,7 +857,7 @@ struct Args {
     #[arg(long, value_name = "1-24", help_heading = "Contact sheets")]
     mutations: Option<u32>,
 
-    /// Scale factor for --mutations perturbations
+    /// How much each --mutations variant changes, as a multiplier
     #[arg(long, default_value = "1.0", value_name = "SCALE", help_heading = "Contact sheets")]
     mutation_strength: f32,
 
@@ -927,41 +892,41 @@ struct Args {
     // -------------------------------------------------------- Infinite zoom
     /// Endless, scale-invariant zoom about a transform [the scene's]
     ///
-    /// Names the map to renormalize about, either by its name in the scene or
-    /// by its index (0-based, as --info lists them). The attractor then has no
-    /// biggest or smallest feature, and zoom that never runs out. The map must
-    /// be pure affine and contract on all three axes. Overrides the scene's
-    /// [zoom]. See "Infinite Zoom" in AGENTS.md.
+    /// The transform to zoom into, by name or 0-based index as --info lists
+    /// them. The picture then has no largest or smallest feature, so the zoom
+    /// never runs out. The transform must have no variations and must shrink
+    /// along all three axes. Overrides the scene's [zoom]. See "Infinite Zoom"
+    /// in AGENTS.md.
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Infinite zoom")]
     zoom: Option<String>,
 
     /// Octaves of scale rendered [the scene's, else 15]
     ///
-    /// More = deeper before the core empties out, at the cost of density in
-    /// each one.
+    /// More goes deeper before the middle empties out, with fewer points in
+    /// each octave.
     #[arg(long, requires = "zoom", value_name = "OCTAVES", help_heading = "Infinite zoom")]
     zoom_levels: Option<f32>,
 
     /// Outer radius of the band, in camera distances [scene's, else 4.8]
     ///
-    /// Below 2.42 the band's edge enters the frustum.
+    /// Below 2.42 the edge of the band comes into view.
     #[arg(long, requires = "zoom", value_name = "MULTIPLE", help_heading = "Infinite zoom")]
     zoom_radius: Option<f32>,
 
     /// Point-budget falloff toward the fixed point [scene's, else 0 = flat]
     ///
-    /// Given as a power of the contraction ratio. Non-zero makes a wrap step
-    /// the density; it is for stills.
+    /// A power of the map's scale factor. Anything but 0 makes the density jump
+    /// each time the zoom wraps, so use it only for stills.
     #[arg(long, requires = "zoom", value_name = "POWER", help_heading = "Infinite zoom")]
     zoom_falloff: Option<f32>,
 
     /// Octaves the picture's outer edge fades over [scene's, else 1]
     ///
-    /// The edge guard: material is taken to nothing over the outermost octave
-    /// of the field, measured against the camera, so a wrap costs nothing and
-    /// old structure leaves at a steady rate. 0 restores the hard edge, where
-    /// a wrap drops a whole octave between two frames — for measuring the
-    /// artifact, not for looking at. See "Infinite Zoom" in AGENTS.md.
+    /// The edge guard: the picture fades out toward its outer edge, measured
+    /// from the camera, so structure leaves smoothly as you zoom and the wrap
+    /// is invisible. 0 restores the hard edge, where a wrap drops a whole
+    /// octave between two frames; that's for measuring the artifact, not for
+    /// looking at. See "Infinite Zoom" in AGENTS.md.
     #[arg(
         long,
         alias = "zoom-fade",
@@ -1025,15 +990,12 @@ struct Args {
 
     /// Paint --info and --palettes with 24-bit ANSI colour
     ///
-    /// Off by default. Both commands are read far more often through a pipe,
-    /// by something that receives escape codes as literal bytes and cannot see
-    /// a gradient, than by a person at a terminal — and on a typical scene the
-    /// swatch alone was a third of the report's bytes.
+    /// Off by default, because these commands are mostly read through a pipe,
+    /// by something that gets the escape codes as literal bytes and can't see
+    /// colour anyway.
     ///
-    /// This adds to the output rather than replacing part of it: the hex stops
-    /// stay exactly where they are and wear their own colours, and --info
-    /// gains a continuous swatch. Everything you get without it, you also get
-    /// with it.
+    /// It only adds to the output: the hex stops stay where they are, now in
+    /// their own colours, and --info gains a continuous swatch.
     #[arg(long, help_heading = "Inspecting")]
     color: bool,
 
@@ -1511,9 +1473,9 @@ fn load_scene_reporting(args: &Args) -> (Scene, Vec<set::Applied>, Option<u64>) 
 fn warn_set_cannot_apply(args: &Args) -> Vec<set::Applied> {
     if !args.set.is_empty() {
         eprintln!(
-            "warning: --set had no effect. It rewrites a scene file's TOML before \n\
-             parsing, and --blank/--random/the built-in default have no file to \n\
-             rewrite. Save the scene first, or edit it after loading."
+            "warning: --set had no effect. It edits a scene file's TOML before \n\
+             loading it, and --blank, --random and the built-in default have no \n\
+             file to edit. Save the scene to a file first."
         );
     }
     Vec::new()
@@ -2770,8 +2732,8 @@ fn main() {
                 // are converted to YUV with r/g/b only, and neither codec here
                 // carries an alpha plane.
                 eprintln!(
-                    "--transparent is not supported for .{} output ({} has no alpha plane \
-                     here). Render a PNG sequence instead, or drop --transparent.",
+                    "--transparent doesn't work for .{} output ({} has no alpha channel \
+                     here). Render a .png still, or drop --transparent.",
                     format.extension(),
                     format.codec_label(),
                 );
