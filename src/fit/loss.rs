@@ -72,6 +72,12 @@ struct Grids {
     fine: usize,
     /// Per level, coarsest first: `√p` for every cell, row-major.
     levels: Vec<Vec<f32>>,
+    /// The same levels as plain density normalised to mean 1, which is what
+    /// SSIM's local moments are taken over. Held separately from `levels`
+    /// because Hellinger wants the square root and SSIM very much does not:
+    /// a square root is a contrast compressor, and compressing contrast is
+    /// exactly what makes fog and lace look alike.
+    raw: Vec<Vec<f32>>,
 }
 
 impl Grids {
@@ -106,7 +112,90 @@ impl Grids {
                 g
             })
             .collect();
-        Self { fine, levels }
+        let mut scratch = Vec::new();
+        let raw = PYRAMID
+            .iter()
+            .map(|div| {
+                let res = (fine / div).max(2);
+                density(pos, res, &mut scratch);
+                scratch.clone()
+            })
+            .collect();
+        Self { fine, levels, raw }
+    }
+
+    /// Structural dissimilarity to another cloud: `1 − SSIM`, over the pyramid.
+    ///
+    /// The reason this exists is that every *distributional* measure of two
+    /// clouds — transport, Hellinger, χ², all of them — is minimised by fog.
+    /// They ask "is the mass in the right places", and a smooth blur of the
+    /// subject answers yes. None of them asks "is it *lumpy* in the right
+    /// places", which is the only question that separates lace from haze, and
+    /// which is most of what human vision is actually measuring.
+    ///
+    /// SSIM asks it directly. Of its three factors the luminance term is the
+    /// one the old objective already had; the work here is done by the other
+    /// two. Contrast compares local standard deviations, and fog's is near
+    /// zero wherever the target's is high, so haze is penalised in proportion
+    /// to how much detail it smoothed away. Structure is the correlation
+    /// between the two local patches once mean and contrast are divided out,
+    /// which is what notices that filaments run the *wrong way*.
+    ///
+    /// Block-partitioned rather than sliding-window — the original 2004
+    /// formulation — because the grids are 8–64 cells wide, so blocks are
+    /// already fine relative to the picture and a sliding window would cost
+    /// five box filters per level per evaluation for no visible gain.
+    fn ssim_distance(&self, pos: &[Vec2], scratch: &mut Vec<f32>) -> f32 {
+        // Stabilisers, in units of the mean density (grids are normalised to
+        // mean 1). The standard C1 = (0.01 L)², C2 = (0.03 L)² with L = 2.
+        const C1: f32 = 0.0004;
+        const C2: f32 = 0.0036;
+
+        let mut total = 0.0f64;
+        let mut counted = 0usize;
+        for (div, mine) in PYRAMID.iter().zip(&self.raw) {
+            let res = (self.fine / div).max(2);
+            density(pos, res, scratch);
+
+            // Blocks of 4, but never so few that the whole level is one block
+            // and the statistic degenerates into a global mean.
+            let b = 4.min(res / 2).max(1);
+            let nb = res / b;
+            if nb == 0 {
+                continue;
+            }
+            let mut acc = 0.0f64;
+            for by in 0..nb {
+                for bx in 0..nb {
+                    let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                    for y in by * b..(by + 1) * b {
+                        for x in bx * b..(bx + 1) * b {
+                            let a = scratch[y * res + x];
+                            let t = mine[y * res + x];
+                            sa += a;
+                            sb += t;
+                            saa += a * a;
+                            sbb += t * t;
+                            sab += a * t;
+                        }
+                    }
+                    let n = (b * b) as f32;
+                    let (ma, mb) = (sa / n, sb / n);
+                    let va = (saa / n - ma * ma).max(0.0);
+                    let vb = (sbb / n - mb * mb).max(0.0);
+                    let cab = sab / n - ma * mb;
+                    let ssim = ((2.0 * ma * mb + C1) * (2.0 * cab + C2))
+                        / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+                    acc += ssim as f64;
+                }
+            }
+            total += acc / (nb * nb) as f64;
+            counted += 1;
+        }
+        if counted == 0 {
+            return 1.0;
+        }
+        (1.0 - total / counted as f64).max(0.0) as f32
     }
 
     /// Hellinger distance to another cloud, averaged over the pyramid.
@@ -130,6 +219,24 @@ impl Grids {
             total += acc;
         }
         (total / PYRAMID.len() as f64) as f32
+    }
+}
+
+/// Rasterise a cloud into a `res × res` grid normalised to mean 1.
+///
+/// Mean rather than sum, so the SSIM stabilisers can be constants: every grid
+/// arrives on the same scale whatever its resolution or point count.
+fn density(pos: &[Vec2], res: usize, out: &mut Vec<f32>) {
+    out.clear();
+    out.resize(res * res, 0.0);
+    for p in pos {
+        deposit(out, *p, res);
+    }
+    blur(out, res);
+    let sum: f32 = out.iter().sum();
+    let k = (res * res) as f32 / sum.max(1e-9);
+    for v in out.iter_mut() {
+        *v *= k;
     }
 }
 
@@ -223,6 +330,9 @@ pub struct Target {
     grids: Grids,
     /// Share of the reported loss that comes from the grid term.
     grid_share: f32,
+    /// Within the structure half, how much is SSIM rather than Hellinger.
+    /// At 0 this is exactly the old objective.
+    perceptual: f32,
     /// What each term scores against a cloud that knows nothing: uniform
     /// noise filling the box.
     ///
@@ -234,6 +344,7 @@ pub struct Target {
     /// the share is a share.
     sw_ref: f32,
     grid_ref: f32,
+    ssim_ref: f32,
 }
 
 fn feature(p: Vec2, c: Vec3, center: Vec3, scale: f32) -> [f32; 5] {
@@ -254,6 +365,7 @@ impl Target {
         n: usize,
         color_share: f32,
         grid_share: f32,
+        perceptual: f32,
         rng: &mut impl Rng,
     ) -> Self {
         let dirs: Vec<[f32; 5]> = (0..BANK).map(|_| random_direction(color_share, rng)).collect();
@@ -305,8 +417,10 @@ impl Target {
             col_scale,
             grids,
             grid_share: grid_share.clamp(0.0, 1.0),
+            perceptual: perceptual.clamp(0.0, 1.0),
             sw_ref: 1.0,
             grid_ref: 1.0,
+            ssim_ref: 1.0,
         };
 
         // Calibrate both terms against uniform noise in the box: the cloud
@@ -318,12 +432,18 @@ impl Target {
         let mut scratch = Vec::new();
         me.sw_ref = me.sliced(&noise, &grey, 128, 7, &mut scratch).max(1e-9);
         me.grid_ref = me.grids.distance(&noise, &mut scratch).max(1e-9);
+        me.ssim_ref = me.grids.ssim_distance(&noise, &mut scratch).max(1e-9);
         me
     }
 
     /// The grid term alone, normalised. Exposed for the diagnostic sheet.
     pub fn structure(&self, pos: &[Vec2], scratch: &mut Vec<f32>) -> f32 {
-        self.grids.distance(pos, scratch) / self.grid_ref
+        let hellinger = self.grids.distance(pos, scratch) / self.grid_ref;
+        if self.perceptual <= 0.0 {
+            return hellinger;
+        }
+        let ssim = self.grids.ssim_distance(pos, scratch) / self.ssim_ref;
+        hellinger * (1.0 - self.perceptual) + ssim * self.perceptual
     }
 
     /// The loss the fit actually minimises: transport and structure, blended.
@@ -349,7 +469,7 @@ impl Target {
             0.0
         };
         let structure = if w > 0.0 {
-            self.grids.distance(pos, scratch) / self.grid_ref
+            self.structure(pos, scratch)
         } else {
             0.0
         };
@@ -489,7 +609,7 @@ mod tests {
     fn identical_clouds_score_near_zero() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         let (pos, col) = cloud(4000, 0.0, &mut rng);
-        let target = Target::new(&pos, &col, 4000, 0.0, 0.0, &mut rng);
+        let target = Target::new(&pos, &col, 4000, 0.0, 0.0, 0.0, &mut rng);
         let mut scratch = Vec::new();
         let same = target.eval(&pos, &col, 64, 1, &mut scratch);
         assert!(same < 1e-4, "a cloud against itself should be ~0, got {same}");
@@ -499,7 +619,7 @@ mod tests {
     fn distance_grows_with_displacement() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(11);
         let (pos, col) = cloud(4000, 0.0, &mut rng);
-        let target = Target::new(&pos, &col, 4000, 0.0, 0.0, &mut rng);
+        let target = Target::new(&pos, &col, 4000, 0.0, 0.0, 0.0, &mut rng);
         let mut scratch = Vec::new();
 
         let (near, ncol) = cloud(4000, 0.1, &mut rng);
@@ -554,10 +674,10 @@ mod tests {
         let grey = vec![Vec3::splat(0.5); n];
 
         let mut scratch = Vec::new();
-        let transport = Target::new(target_pts, &grey, n, 0.0, 0.0, &mut rng);
+        let transport = Target::new(target_pts, &grey, n, 0.0, 0.0, 0.0, &mut rng);
         let sw = transport.eval(other_pts, &grey, 128, 5, &mut scratch);
 
-        let structural = Target::new(target_pts, &grey, n, 0.0, 1.0, &mut rng);
+        let structural = Target::new(target_pts, &grey, n, 0.0, 1.0, 0.0, &mut rng);
         let grid = structural.eval(other_pts, &grey, 128, 5, &mut scratch);
 
         // Both are normalised against uninformative noise, so they compare
@@ -578,11 +698,11 @@ mod tests {
         let blue = vec![Vec3::new(0.0, 0.0, 1.0); 3000];
 
         let mut scratch = Vec::new();
-        let geometric = Target::new(&pos, &red, 3000, 0.0, 0.0, &mut rng);
+        let geometric = Target::new(&pos, &red, 3000, 0.0, 0.0, 0.0, &mut rng);
         let shape_only = geometric.eval(&pos, &blue, 96, 3, &mut scratch);
         assert!(shape_only < 1e-4, "colour must be invisible at weight 0, got {shape_only}");
 
-        let coloured = Target::new(&pos, &red, 3000, 1.0, 0.0, &mut rng);
+        let coloured = Target::new(&pos, &red, 3000, 1.0, 0.0, 0.0, &mut rng);
         let wrong = coloured.eval(&pos, &blue, 96, 3, &mut scratch);
         assert!(wrong > 1e-2, "red vs blue must cost something, got {wrong}");
     }

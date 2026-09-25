@@ -1,0 +1,85 @@
+=== perceptual 0.0 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed  17: loss 0.0973 (from 0.4104, 4.2× better)  dimension 1.26  overlap 22%  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-017.toml
+cell   3  seed  15: loss 0.1065 (from 0.3882, 3.6× better)  dimension 1.19  overlap 23%  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-015.toml
+cell   4  seed   5: loss 0.1077 (from 0.4632, 4.3× better)  dimension 1.03  overlap 18%  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-005.toml
+cell   5  seed   1: loss 0.1085 (from 0.4832, 4.5× better)  dimension 0.73  overlap 15%  accept 51%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-001.toml
+cell   6  seed  16: loss 0.1142 (from 0.4834, 4.2× better)  dimension 0.93  overlap 18%  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-016.toml
+cell   7  seed  13: loss 0.1143 (from 0.5106, 4.5× better)  dimension 1.22  overlap 19%  accept 50%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-013.toml
+cell   8  seed   7: loss 0.1222 (from 0.4047, 3.3× better)  dimension 0.99  overlap 21%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-007.toml
+cell   9  seed   8: loss 0.1232 (from 0.5075, 4.1× better)  dimension 0.93  overlap 15%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-008.toml
+cell  10  seed   2: loss 0.1275 (from 0.4368, 3.4× better)  dimension 1.00  overlap 21%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-002.toml
+cell  11  seed  14: loss 0.1297 (from 0.5224, 4.0× better)  dimension 1.05  overlap 31%  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-014.toml
+cell  12  seed   9: loss 0.1312 (from 0.5568, 4.2× better)  dimension 0.90  overlap 23%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-009.toml
+cell  13  seed  19: loss 0.1363 (from 0.4023, 3.0× better)  dimension 1.03  overlap 28%  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-019.toml
+cell  14  seed  18: loss 0.1437 (from 0.5212, 3.6× better)  dimension 1.42  overlap 29%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-018.toml
+cell  15  seed  12: loss 0.1535 (from 0.4672, 3.0× better)  dimension 0.76  overlap 12%  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-012.toml
+cell  16  seed  11: loss 0.1614 (from 0.4279, 2.7× better)  dimension 0.72  overlap 12%  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-011.toml
+cell  17  seed   4: loss 0.1640 (from 0.5046, 3.1× better)  dimension 0.94  overlap 13%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-004.toml
+cell  18  seed   0: loss 0.1656 (from 0.4717, 2.8× better)  dimension 0.68  overlap 7%  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-000.toml
+cell  19  seed   3: loss 0.1772 (from 0.3978, 2.2× better)  dimension 0.86  overlap 10%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-003.toml
+cell  20  seed  10: loss 0.1904 (from 0.4784, 2.5× better)  dimension 0.78  overlap 5%  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-010.toml
+cell  21  seed   6: loss 0.2079 (from 0.4987, 2.4× better)  dimension 0.77  overlap 13%  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0-006.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.0.png  (target first, then one labelled cell per seed)
+20 fit(s) in 428.3s
+=== perceptual 0.4 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed   2: loss 0.1518 (from 0.4230, 2.8× better)  dimension 0.93  overlap 18%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-002.toml
+cell   3  seed   9: loss 0.1557 (from 0.5465, 3.5× better)  dimension 0.81  overlap 22%  accept 52%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-009.toml
+cell   4  seed   8: loss 0.1574 (from 0.5013, 3.2× better)  dimension 0.80  overlap 11%  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-008.toml
+cell   5  seed  17: loss 0.1619 (from 0.4506, 2.8× better)  dimension 1.21  overlap 28%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-017.toml
+cell   6  seed  16: loss 0.1665 (from 0.4844, 2.9× better)  dimension 1.20  overlap 10%  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-016.toml
+cell   7  seed  18: loss 0.1726 (from 0.5249, 3.0× better)  dimension 0.80  overlap 27%  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-018.toml
+cell   8  seed  19: loss 0.1731 (from 0.4249, 2.5× better)  dimension 0.68  overlap 10%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-019.toml
+cell   9  seed  11: loss 0.1832 (from 0.4368, 2.4× better)  dimension 1.20  overlap 16%  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-011.toml
+cell  10  seed   7: loss 0.1846 (from 0.4231, 2.3× better)  dimension 1.21  overlap 20%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-007.toml
+cell  11  seed  13: loss 0.1877 (from 0.4934, 2.6× better)  dimension 1.12  overlap 31%  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-013.toml
+cell  12  seed  12: loss 0.1939 (from 0.4814, 2.5× better)  dimension 0.87  overlap 17%  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-012.toml
+cell  13  seed   0: loss 0.1978 (from 0.4835, 2.4× better)  dimension 0.86  overlap 15%  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-000.toml
+cell  14  seed   3: loss 0.2060 (from 0.4374, 2.1× better)  dimension 1.12  overlap 15%  accept 68%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-003.toml
+cell  15  seed   4: loss 0.2086 (from 0.5619, 2.7× better)  dimension 0.76  overlap 9%  accept 67%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-004.toml
+cell  16  seed   1: loss 0.2103 (from 0.4876, 2.3× better)  dimension 1.14  overlap 22%  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-001.toml
+cell  17  seed  15: loss 0.2126 (from 0.4219, 2.0× better)  dimension 1.16  overlap 10%  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-015.toml
+cell  18  seed  14: loss 0.2191 (from 0.5385, 2.5× better)  dimension 1.22  overlap 12%  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-014.toml
+cell  19  seed   5: loss 0.2222 (from 0.4729, 2.1× better)  dimension 0.85  overlap 9%  accept 64%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-005.toml
+cell  20  seed   6: loss 0.2251 (from 0.5041, 2.2× better)  dimension 1.08  overlap 12%  accept 67%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-006.toml
+cell  21  seed  10: loss 0.2406 (from 0.4656, 1.9× better)  dimension 0.85  overlap 13%  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4-010.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o0.4.png  (target first, then one labelled cell per seed)
+20 fit(s) in 442.5s
+=== perceptual 1.0 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed  19: loss 0.2105 (from 0.4784, 2.3× better)  dimension 0.85  overlap 27%  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-019.toml
+cell   3  seed   8: loss 0.2111 (from 0.4785, 2.3× better)  dimension 0.93  overlap 17%  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-008.toml
+cell   4  seed  11: loss 0.2216 (from 0.4502, 2.0× better)  dimension 0.86  overlap 3%  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-011.toml
+cell   5  seed  12: loss 0.2222 (from 0.5027, 2.3× better)  dimension 1.03  overlap 21%  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-012.toml
+cell   6  seed   1: loss 0.2240 (from 0.4942, 2.2× better)  dimension 1.07  overlap 7%  accept 63%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-001.toml
+cell   7  seed  15: loss 0.2434 (from 0.4724, 1.9× better)  dimension 1.05  overlap 8%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-015.toml
+cell   8  seed  13: loss 0.2457 (from 0.4677, 1.9× better)  dimension 1.33  overlap 23%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-013.toml
+cell   9  seed   2: loss 0.2517 (from 0.4024, 1.6× better)  dimension 0.76  overlap 11%  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-002.toml
+cell  10  seed   6: loss 0.2546 (from 0.5124, 2.0× better)  dimension 1.17  overlap 12%  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-006.toml
+cell  11  seed  14: loss 0.2547 (from 0.5138, 2.0× better)  dimension 1.25  overlap 12%  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-014.toml
+cell  12  seed  16: loss 0.2620 (from 0.4859, 1.9× better)  dimension 1.52  overlap 22%  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-016.toml
+cell  13  seed  10: loss 0.2633 (from 0.4754, 1.8× better)  dimension 1.12  overlap 10%  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-010.toml
+cell  14  seed   9: loss 0.2707 (from 0.5310, 2.0× better)  dimension 0.91  overlap 8%  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-009.toml
+cell  15  seed  17: loss 0.2756 (from 0.5108, 1.9× better)  dimension 0.85  overlap 13%  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-017.toml
+cell  16  seed   7: loss 0.2801 (from 0.4404, 1.6× better)  dimension 1.20  overlap 11%  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-007.toml
+cell  17  seed   4: loss 0.2896 (from 0.4994, 1.7× better)  dimension 0.86  overlap 7%  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-004.toml
+cell  18  seed  18: loss 0.2948 (from 0.6012, 2.0× better)  dimension 0.88  overlap 13%  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-018.toml
+cell  19  seed   5: loss 0.3113 (from 0.4861, 1.6× better)  dimension 0.91  overlap 7%  accept 66%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-005.toml
+cell  20  seed   3: loss 0.3215 (from 0.4968, 1.5× better)  dimension 0.72  overlap 2%  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-003.toml
+cell  21  seed   0: loss 0.3300 (from 0.5311, 1.6× better)  dimension 1.12  overlap 7%  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0-000.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/osweep/o1.0.png  (target first, then one labelled cell per seed)
+20 fit(s) in 438.1s
+=== ALL DONE ===

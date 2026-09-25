@@ -380,8 +380,27 @@ struct Args {
     fit_target: Option<String>,
 
     /// Write a contact sheet of the target beside every seed's attractor
+    ///
+    /// Each cell is labelled with its seed and loss, so a cell you liked is a
+    /// file you can open. The terminal prints the same order.
     #[arg(long, value_name = "PNG", help_heading = "Likeness")]
     fit_preview: Option<String>,
+
+    /// Order of the contact sheet's cells: `loss` or `seed` [loss]
+    ///
+    /// Best-scoring first is a reading order, not a verdict — loss and quality
+    /// come apart, which is why the score is printed on every cell. `seed`
+    /// keeps the fitted order, for comparing against an older sheet.
+    #[arg(long, value_name = "ORDER", default_value = "loss", help_heading = "Likeness")]
+    fit_sort: fit::Order,
+
+    /// Side of one contact-sheet cell, in pixels [480]
+    ///
+    /// Raise it when a sweep is large enough that 480 px of attractor is not
+    /// enough to judge by. The sheet grows as the square of the seed count, so
+    /// this is the dial that decides whether it opens.
+    #[arg(long, value_name = "PX", default_value_t = 480, help_heading = "Likeness")]
+    fit_cell: u32,
 
     // --------------------------------------------------------------- Camera
     /// Load a saved view: framing, point size, haze [the scene's own]
@@ -2283,6 +2302,8 @@ fn main() {
             seeds: args.fit_seeds.max(1),
             target_sheet: args.fit_target.clone(),
             preview: args.fit_preview.clone(),
+            order: args.fit_sort,
+            cell: args.fit_cell.clamp(64, 2048),
         };
         if let Err(e) = fit::run(&opts) {
             eprintln!("{}", e);

@@ -181,7 +181,13 @@ fn reference_image(r: &target::Reference) -> RgbImage {
 /// Lay cells out on a black sheet, each fitted into its square without
 /// stretching — these get compared by eye, and a stretched aspect ratio is a
 /// difference you will read as a difference in the fit.
-fn sheet(cells: &[RgbImage], cols: usize, cell: u32) -> RgbImage {
+///
+/// `labels` runs parallel to `cells`; an empty string leaves that cell bare.
+/// A sweep's whole job is to be *picked from*, and an unlabelled sheet cannot
+/// be: twenty near-identical cells and twenty `out-0NN.toml` on disk, with the
+/// mapping living only in the terminal scrollback that the PNG outlives. The
+/// label is what lets a cell you liked become a file you can open.
+fn sheet(cells: &[RgbImage], labels: &[String], cols: usize, cell: u32) -> RgbImage {
     let rows = cells.len().div_ceil(cols.max(1));
     let mut out = RgbImage::new(cols as u32 * cell, rows as u32 * cell);
     for (i, im) in cells.iter().enumerate() {
@@ -195,7 +201,62 @@ fn sheet(cells: &[RgbImage], cols: usize, cell: u32) -> RgbImage {
         let oy = (i / cols) as u32 * cell + (cell - h) / 2;
         image::imageops::overlay(&mut out, &scaled, ox as i64, oy as i64);
     }
+    if labels.iter().any(|l| !l.is_empty()) {
+        label_sheet(&mut out, labels, cols, cell);
+    }
     out
+}
+
+/// Draw one label into the top-left of each cell.
+///
+/// [`crate::glyphs`] writes into the 16-bit RGBA buffer the offline contact
+/// sheets are composed in, and this sheet is an 8-bit RGB image, so it is
+/// widened and narrowed around the call. That is two passes over a few
+/// megapixels, once, on a file that is written and then looked at — cheaper
+/// than a second font renderer, and it keeps every label in this codebase
+/// coming out of one place.
+fn label_sheet(out: &mut RgbImage, labels: &[String], cols: usize, cell: u32) {
+    let (w, h) = (out.width(), out.height());
+    let mut buf = vec![0u16; (w * h * 4) as usize];
+    for (i, px) in out.pixels().enumerate() {
+        let o = i * 4;
+        for c in 0..3 {
+            buf[o + c] = px.0[c] as u16 * 257;
+        }
+        buf[o + 3] = u16::MAX;
+    }
+
+    let scale = crate::glyphs::scale_for_tile(cell);
+    let inset = 2 * scale;
+    if cell < crate::glyphs::text_height(scale) + 2 * inset {
+        return;
+    }
+    for (i, text) in labels.iter().enumerate() {
+        if text.is_empty() {
+            continue;
+        }
+        let ox = (i % cols) as u32 * cell + inset;
+        let oy = (i / cols) as u32 * cell + inset;
+        crate::glyphs::draw_label(
+            &mut buf,
+            w,
+            h,
+            ox,
+            oy,
+            text,
+            scale,
+            cell.saturating_sub(2 * inset),
+        );
+    }
+
+    for (i, px) in out.pixels_mut().enumerate() {
+        let o = i * 4;
+        px.0 = [
+            (buf[o] / 257) as u8,
+            (buf[o + 1] / 257) as u8,
+            (buf[o + 2] / 257) as u8,
+        ];
+    }
 }
 
 // ---------------------------------------------------------------- emit
@@ -287,6 +348,26 @@ pub struct Options {
     pub target_sheet: Option<String>,
     /// Contact sheet of the target beside every fit.
     pub preview: Option<String>,
+    /// Order the sheet's cells are laid out in.
+    pub order: Order,
+    /// Side of one contact-sheet cell, in pixels.
+    pub cell: u32,
+}
+
+/// How a sweep's cells are arranged on the contact sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Order {
+    /// Best-scoring first. What you want when there are twenty of them: the
+    /// eye starts where the solver thought it did well and disagrees from
+    /// there, which is faster than reading an arbitrary order.
+    ///
+    /// This is *not* an endorsement of the loss as a judge — the whole finding
+    /// in FIT-OPTIMIZER-PLAN.md §1 is that loss and quality come apart over
+    /// part of the range. It is a reading order, and the labels carry the
+    /// scores so the disagreement is visible rather than hidden.
+    Loss,
+    /// Seed order, as fitted. Reproducible against an older sheet.
+    Seed,
 }
 
 pub fn run(opts: &Options) -> Result<(), String> {
@@ -308,9 +389,19 @@ pub fn run(opts: &Options) -> Result<(), String> {
             reference_image(&target.reference),
             grid_image(&target.weight),
             grid_image(&target.density),
-            splat(&target.cloud.pos, &target.cloud.col, 480),
+            splat(&target.cloud.pos, &target.cloud.col, opts.cell),
         ];
-        sheet(&cells, 4, 480)
+        // Labelled because this strip is the first diagnostic in
+        // IFS-INVERSE-BACKGROUND.md §7 — "always dump the target point cloud
+        // and look at it first" — and four grey squares in a row do not say
+        // which one is the cloud.
+        let labels = [
+            "art".to_string(),
+            "subject weight".to_string(),
+            "target density".to_string(),
+            "sampled cloud".to_string(),
+        ];
+        sheet(&cells, &labels, 4, opts.cell)
             .save(path)
             .map_err(|e| format!("Failed to write {}: {}", path, e))?;
         println!("wrote {path}  (art, subject weight, target density, sampled cloud)");
@@ -349,22 +440,59 @@ pub fn run(opts: &Options) -> Result<(), String> {
     // Seeds are independent fits over a shared target, so they are the one
     // thing here worth threading. The target bank is the expensive shared
     // state and it is read-only once built.
-    let outcomes: Vec<solve::Outcome> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..opts.seeds.max(1))
-            .map(|i| {
+    //
+    // A bounded pool rather than a thread per seed, because a sweep is the
+    // point of this tool and a sweep is where one-thread-per-seed stops being
+    // free: twenty threads on four cores finish at the same wall-clock time
+    // they would have anyway, having spent the whole run fighting each other
+    // for cache and holding twenty walks resident instead of four.
+    let n_seeds = opts.seeds.max(1);
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, n_seeds);
+    let outcomes: Vec<solve::Outcome> = {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let next = AtomicUsize::new(0);
+        let finished = AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Option<solve::Outcome>>> =
+            (0..n_seeds).map(|_| std::sync::Mutex::new(None)).collect();
+
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                let (next, finished, slots) = (&next, &finished, &slots);
                 let objective = &objective[..];
-                let cfg = solve::Config {
-                    seed: opts.solve.seed.wrapping_add(i as u64),
-                    ..opts.solve
-                };
-                s.spawn(move || solve::fit(objective, &cfg))
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("fit thread panicked")).collect()
-    });
+                s.spawn(move || loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n_seeds {
+                        return;
+                    }
+                    let cfg = solve::Config {
+                        seed: opts.solve.seed.wrapping_add(i as u64),
+                        ..opts.solve
+                    };
+                    let outcome = solve::fit(objective, &cfg);
+                    // A sweep is minutes of silence otherwise, and silence is
+                    // indistinguishable from a hang. Arrival order, not seed
+                    // order — the ranked table comes after.
+                    let done = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                    println!(
+                        "  [{done:>3}/{n_seeds}] seed {:>3}  loss {:.4}",
+                        cfg.seed, outcome.loss,
+                    );
+                    *slots[i].lock().expect("fit slot poisoned") = Some(outcome);
+                });
+            }
+        });
+        slots
+            .into_iter()
+            .map(|m| m.into_inner().expect("fit slot poisoned").expect("seed never ran"))
+            .collect()
+    };
 
     let stem = std::path::Path::new(&opts.out);
-    let mut cells = vec![splat(&target.cloud.pos, &target.cloud.col, 480)];
+    // One cell per seed, in seed order for now; the sheet is re-ordered below.
+    let mut fits: Vec<(usize, String, RgbImage)> = Vec::with_capacity(n_seeds);
 
     for (i, outcome) in outcomes.iter().enumerate() {
         let mut walk_rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xf17);
@@ -384,8 +512,30 @@ pub fn run(opts: &Options) -> Result<(), String> {
         std::fs::write(&path, scene.to_toml_string()?)
             .map_err(|e| format!("Failed to write {}: {}", path, e))?;
 
+        let shown = normalize_walk(raw);
+        fits.push((i, path, splat(&shown.pos, &shown.col, opts.cell)));
+    }
+
+    // Reading order for both the sheet and the table, so a cell you picked out
+    // of the PNG is at the same rank in the terminal.
+    let mut order: Vec<usize> = (0..n_seeds).collect();
+    if opts.order == Order::Loss {
+        order.sort_by(|&a, &b| outcomes[a].loss.total_cmp(&outcomes[b].loss));
+    }
+
+    println!(
+        "\n{}:",
+        match opts.order {
+            Order::Loss => "by loss, best first",
+            Order::Seed => "by seed",
+        }
+    );
+    for (rank, &i) in order.iter().enumerate() {
+        let outcome = &outcomes[i];
         println!(
-            "seed {:>3}: loss {:.4} (from {:.4}, {:.1}× better)  dimension {}  accept {:.0}%  -> {}",
+            "cell {:>3}  seed {:>3}: loss {:.4} (from {:.4}, {:.1}× better)  \
+             dimension {}  overlap {:.0}%  accept {:.0}%  -> {}",
+            rank + 2, // cell 1 is the target
             opts.solve.seed.wrapping_add(i as u64),
             outcome.loss,
             outcome.initial_loss,
@@ -394,19 +544,28 @@ pub fn run(opts: &Options) -> Result<(), String> {
                 Some(d) => format!("{d:.2}"),
                 None => "--".to_string(),
             },
+            outcome.overlap * 100.0,
             outcome.accept_rate * 100.0,
-            path,
+            fits[i].1,
         );
-        let shown = normalize_walk(raw);
-        cells.push(splat(&shown.pos, &shown.col, 480));
     }
 
     if let Some(path) = &opts.preview {
+        let mut cells = vec![splat(&target.cloud.pos, &target.cloud.col, opts.cell)];
+        let mut labels = vec!["target".to_string()];
+        for &i in &order {
+            cells.push(fits[i].2.clone());
+            labels.push(format!(
+                "seed {} loss {:.4}",
+                opts.solve.seed.wrapping_add(fits[i].0 as u64),
+                outcomes[i].loss,
+            ));
+        }
         let cols = (cells.len() as f32).sqrt().ceil() as usize;
-        sheet(&cells, cols.max(2), 480)
+        sheet(&cells, &labels, cols.max(2), opts.cell)
             .save(path)
             .map_err(|e| format!("Failed to write {}: {}", path, e))?;
-        println!("wrote {path}  (target first, then one cell per seed)");
+        println!("\nwrote {path}  (target first, then one labelled cell per seed)");
     }
 
     println!("{} fit(s) in {:.1}s", outcomes.len(), t0.elapsed().as_secs_f32());
@@ -520,4 +679,44 @@ mod tests {
         }
     }
 
+    /// Every cell says which fit it is, and says it inside its own square.
+    ///
+    /// A sweep is only worth running if its sheet can be picked from, and the
+    /// way that breaks is silent: the PNG still looks like a contact sheet,
+    /// the cells are still right, and the mapping back to `out-0NN.toml` is
+    /// simply gone. So this checks the two things that make a label useful —
+    /// that it was drawn at all, and that it landed in the cell it names
+    /// rather than bleeding into the neighbour.
+    #[test]
+    fn every_sheet_cell_is_labelled_in_its_own_square() {
+        const CELL: u32 = 160;
+        let cells: Vec<RgbImage> = (0..4).map(|_| RgbImage::new(64, 64)).collect();
+        let labels: Vec<String> =
+            (0..4).map(|i| format!("seed {i} loss 0.1234")).collect();
+        let out = sheet(&cells, &labels, 2, CELL);
+
+        // Label pixels are the amber from `glyphs::LABEL_RGB`, which nothing
+        // in a black cell of an empty splat can produce by accident.
+        let amber = Rgb(crate::glyphs::LABEL_RGB);
+        let mut per_cell = [0usize; 4];
+        for (x, y, px) in out.enumerate_pixels() {
+            if *px != amber {
+                continue;
+            }
+            let (col, row) = (x / CELL, y / CELL);
+            per_cell[(row * 2 + col) as usize] += 1;
+        }
+        for (i, n) in per_cell.iter().enumerate() {
+            assert!(*n > 0, "cell {i} was not labelled: {per_cell:?}");
+        }
+
+        // And an empty label leaves its cell alone, so the target strip can
+        // opt individual cells out.
+        let bare: Vec<String> = vec![String::new(); 4];
+        let plain = sheet(&cells, &bare, 2, CELL);
+        assert!(
+            plain.pixels().all(|px| *px != amber),
+            "empty labels should draw nothing",
+        );
+    }
 }

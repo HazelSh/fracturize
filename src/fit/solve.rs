@@ -337,6 +337,13 @@ pub struct Walk {
     pub world: Vec<Vec3>,
     pub pos: Vec<Vec2>,
     pub col: Vec<Vec3>,
+    /// Which map produced each point — the index the chaos game last applied.
+    ///
+    /// This is the attractor's own partition, not bookkeeping: `A = ∪ fᵢ(A)`,
+    /// so a point that arrived through map `i` lies in the piece `fᵢ(A)`.
+    /// Tagging by it is what makes the open set condition measurable at all
+    /// (see [`piece_overlap`]).
+    pub piece: Vec<u16>,
 }
 
 /// Run the chaos game and project it.
@@ -355,6 +362,7 @@ pub fn walk(params: &Params, n: usize, rng: &mut impl Rng) -> Option<Walk> {
     let mut world = Vec::with_capacity(n);
     let mut pos = Vec::with_capacity(n);
     let mut col = Vec::with_capacity(n);
+    let mut piece = Vec::with_capacity(n);
 
     for _ in 0..TRAJECTORIES {
         let mut walker = Walker::new(&transforms, &enabled, rng)?;
@@ -376,9 +384,85 @@ pub fn walk(params: &Params, n: usize, rng: &mut impl Rng) -> Option<Walk> {
             world.push(p);
             pos.push(Vec2::new(p.x, p.y));
             col.push(rgb);
+            piece.push(idx as u16);
         }
     }
-    (world.len() == n).then_some(Walk { world, pos, col })
+    (world.len() == n).then_some(Walk { world, pos, col, piece })
+}
+
+/// How much of the attractor is built out of stacked pieces, in `[0, 1]`.
+///
+/// The missing constraint in this fitter. Hutchinson's theory, the Moran
+/// equation and every dimension statement downstream of them assume the **open
+/// set condition** — that the pieces `fᵢ(A)` meet only on a set of measure
+/// zero. Nothing here has ever enforced or even measured it, and
+/// IFS-INVERSE-BACKGROUND.md §3.5 names the consequence as the most common
+/// diagnosable pathology in the field: maps quietly stack, capacity vanishes,
+/// and `similarity_dimension` reports a number for a system whose premise it
+/// no longer satisfies. Measured over the 2026-08-19 sweep it read d = 0.68 to
+/// 1.26 — "lacy" — on twenty fits that render as solid fog.
+///
+/// The measure is *redundancy of mass*. Rasterise each piece separately,
+/// weighted by how often its map is chosen, so cell `c` holds `qᵢ(c)` from
+/// piece `i`. Everything in that cell beyond its single largest contributor is
+/// material that some other piece already covered:
+///
+/// ```text
+///     redundancy = Σ_c (Σᵢ qᵢ(c) − maxᵢ qᵢ(c)) / Σ_c Σᵢ qᵢ(c)
+/// ```
+///
+/// Zero when every cell belongs to one piece — the open set condition holding
+/// as far as the grid can see. Its maximum is `1 − 1/N` when all `N` pieces are
+/// identical, so the result is divided by that and lands in `[0, 1]`
+/// regardless of map count, which is what makes six maps comparable with
+/// twenty-four.
+///
+/// Chosen over pairwise piece-vs-piece intersection because it is `O(cells·N)`
+/// rather than `O(cells·N²)`, because it weights by the mass a piece actually
+/// contributes instead of counting a near-retired map's overlap as heavily as
+/// a load-bearing one, and because "what fraction of the picture is doubly
+/// covered" is a quantity you can argue about, which a mean of pairwise
+/// intersections is not.
+///
+/// Under a symmetry group the group elements are applied inside the step, so a
+/// piece here is the whole orbit of one map's image rather than a single copy.
+/// That is the right unit for this: the orbit is what the map contributes to
+/// the picture.
+pub fn piece_overlap(walk: &Walk, pieces: usize, res: usize) -> f32 {
+    if pieces < 2 || walk.pos.is_empty() {
+        return 0.0;
+    }
+    let cells = res * res;
+    let mut grids = vec![0.0f32; cells * pieces];
+    for (p, &k) in walk.pos.iter().zip(&walk.piece) {
+        let k = k as usize;
+        if k >= pieces {
+            continue;
+        }
+        // Nearest cell, not bilinear. The loss smears on purpose, to give a
+        // gradient; this is a measurement and smearing it would manufacture
+        // overlap between pieces that merely lie next to each other.
+        let map = |v: f32| (((v * 0.5 + 0.5) * res as f32) as isize).clamp(0, res as isize - 1) as usize;
+        grids[k * cells + map(p.y) * res + map(p.x)] += 1.0;
+    }
+
+    let (mut total, mut redundant) = (0.0f64, 0.0f64);
+    for c in 0..cells {
+        let (mut sum, mut top) = (0.0f32, 0.0f32);
+        for k in 0..pieces {
+            let q = grids[k * cells + c];
+            sum += q;
+            top = top.max(q);
+        }
+        total += sum as f64;
+        redundant += (sum - top) as f64;
+    }
+    if total <= 0.0 {
+        return 0.0;
+    }
+    // Rescale by the all-identical maximum so map count does not set the range.
+    let ceiling = 1.0 - 1.0 / pieces as f64;
+    ((redundant / total) / ceiling).clamp(0.0, 1.0) as f32
 }
 
 pub struct Config {
@@ -422,6 +506,16 @@ pub struct Config {
     pub dimension: Option<f32>,
 }
 
+/// Points and grid used for the reported [`piece_overlap`].
+///
+/// Generous on both, because this runs once per fit rather than once per
+/// evaluation. The grid has to be fine enough that two pieces merely adjacent
+/// are not read as one — at 16×16 nearly everything looks stacked — and the
+/// point count has to keep the smallest piece's cells populated, or a lightly
+/// weighted map reads as disjoint purely from being under-sampled.
+const OVERLAP_POINTS: usize = 200_000;
+const OVERLAP_RES: usize = 64;
+
 /// How hard [`Config::dimension`] pulls, per unit of excess, squared.
 ///
 /// Both loss terms are normalised to about 1 for an uninformative cloud, so
@@ -457,7 +551,30 @@ pub struct Outcome {
     /// Loss of the best random start, so the log can say what the annealing
     /// was worth on top of the dice.
     pub initial_loss: f32,
+    /// Mean pairwise-piece overlap of the winner — see [`piece_overlap`].
+    ///
+    /// Reported rather than penalised (yet): the open set condition is the
+    /// premise `dimension` above is computed under, so the two belong on the
+    /// same line, and a dimension quoted beside a high overlap should be read
+    /// as the nonsense it is.
+    pub overlap: f32,
+    /// Fraction of proposals accepted over the whole anneal.
+    ///
+    /// The one number that says whether the budget was spent or wasted: a
+    /// walk that accepts 2% of its moves did 4000 evaluations and took 80
+    /// steps. Reported so a bad schedule is visible rather than inferred.
+    pub accept_rate: f32,
 }
+
+/// Proposal acceptance the step size is steered towards.
+///
+/// The classic Metropolis figure. Too high and the walk is taking steps so
+/// small they measure noise; too low and it is proposing moves that are
+/// rejected out of hand. Either way the evaluations are bought and not used.
+const TARGET_ACCEPT: f32 = 0.3;
+
+/// Proposals between step-size adjustments.
+const ADAPT_WINDOW: usize = 100;
 
 /// Re-draw the chaos-game stream every this many steps.
 ///
@@ -469,61 +586,110 @@ pub struct Outcome {
 /// deliberately; we want it, just not inside a single comparison.)
 const BLOCK: usize = 20;
 
-pub fn fit(target: &loss::Target, cfg: &Config) -> Outcome {
+/// `targets` is a coarse-to-fine ladder over the same reference cloud: the
+/// same picture measured with more points and a finer density grid at each
+/// step. A single-element ladder is the old behaviour exactly.
+///
+/// Fitting through a ladder rather than at one resolution is the standard
+/// answer to a rugged objective, and it is worth two separate things here.
+/// The landscape is *fractal* (see IFS-INVERSE-BACKGROUND.md §3.2), so a
+/// coarse measurement is a low-passed one that a local walk can actually
+/// descend, and the fine levels then only have to polish a basin that was
+/// already chosen. And evaluation cost is linear in the point count, so the
+/// iterations spent exploring — the ones that get rejected — are bought at
+/// the cheap end and only the final refinement pays full price.
+pub fn fit(targets: &[loss::Target], cfg: &Config) -> Outcome {
     use rand::SeedableRng;
     let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(cfg.seed);
     let mut scratch = Vec::new();
+    assert!(!targets.is_empty(), "fit needs at least one target level");
+    let finest = targets.len() - 1;
 
     // One `stream` fixes both halves of the randomness an evaluation has: the
     // chaos-game trajectories and the slice directions. Two candidates scored
-    // under the same stream differ only by their parameters.
-    let mut measure = |p: &Params, stream: u64| {
+    // under the same stream differ only by their parameters — and, now, only
+    // if they were also scored at the same level, which is why every level
+    // change re-measures the incumbents below.
+    let measure = |p: &Params, stream: u64, level: usize, scratch: &mut Vec<f32>| {
+        let target = &targets[level];
         let mut walk_rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(stream);
         match walk(p, target.n, &mut walk_rng) {
             Some(w) => {
                 let w = super::normalize_walk(w);
-                target.eval(&w.pos, &w.col, cfg.slices, stream, &mut scratch)
+                target.eval(&w.pos, &w.col, cfg.slices, stream, scratch)
                     + dimension_penalty(p, cfg.dimension)
             }
             None => f32::INFINITY,
         }
     };
 
+    // Which level iteration `i` is measured at. Squaring the progress spends
+    // most of the walk at the cheap end, where the moves are exploratory and
+    // the measurement only has to be good enough to reject the hopeless.
+    let level_at = |i: usize| -> usize {
+        let t = i as f32 / cfg.iters.max(1) as f32;
+        ((t * t * targets.len() as f32) as usize).min(finest)
+    };
+
     // Random starts. A quarter of the whole budget goes here because the
     // annealer only rearranges what it was handed: at six maps most of the
     // basins are hopeless and the cheapest way past them is to roll again.
+    // Triage, so it runs at the coarsest level: the question here is only
+    // which starts are not hopeless, and that does not need a fine grid.
     let mut cur = Params::random(cfg.maps, cfg.depth, cfg.symmetry, cfg.axis_mode, cfg.nonlinear, &mut rng);
     let mut cur_loss = f32::INFINITY;
     for _ in 0..cfg.inits {
         let candidate = Params::random(cfg.maps, cfg.depth, cfg.symmetry, cfg.axis_mode, cfg.nonlinear, &mut rng);
-        let l = measure(&candidate, cfg.seed ^ 0x9e37);
+        let l = measure(&candidate, cfg.seed ^ 0x9e37, 0, &mut scratch);
         if l < cur_loss {
             cur_loss = l;
             cur = candidate;
         }
     }
-    let initial_loss = cur_loss;
+    // Scored again at the finest level purely so the log can compare it with
+    // the final number. The anneal itself keeps the coarse score it was
+    // chosen under; this is a report, not a decision.
+    let initial_loss = measure(&cur, cfg.seed ^ 0x9e37, finest, &mut scratch);
 
     let mut best = cur.clone();
     let mut best_loss = cur_loss;
 
+    // Steers the proposal size towards `TARGET_ACCEPT`. The fixed schedule
+    // underneath it is a guess about how far a useful move is; this is the
+    // correction from what the walk actually accepted, and it is what keeps a
+    // long budget from being spent on proposals that are all rejected.
+    let mut step_gain = 1.0f32;
+    let mut window_accepts = 0usize;
+    let mut window_n = 0usize;
+    let mut total_accepts = 0usize;
+
+    let mut level = 0usize;
     for i in 0..cfg.iters {
         let t = i as f32 / cfg.iters.max(1) as f32;
         // Both schedules are relative — the temperature to the current loss,
         // the step to the parameter's own natural range — so neither has to
         // know what scale the loss came out at for a given reference.
         let temp = cur_loss * lerp(0.12, 0.001, t);
-        let step = lerp(1.0, 0.06, t);
+        let step = lerp(1.0, 0.06, t) * step_gain;
 
         let stream = cfg.seed.wrapping_add((i / BLOCK) as u64).wrapping_mul(0x9e3779b9);
-        if i % BLOCK == 0 {
+        let next_level = level_at(i);
+        if next_level != level {
+            // The ladder changed the question. Both survivors carry a score
+            // from the old level, and neither is comparable to anything
+            // measured from here on, so both get re-asked. Skipping this is
+            // what would make a level change look like a sudden improvement.
+            level = next_level;
+            cur_loss = measure(&cur, stream, level, &mut scratch);
+            best_loss = measure(&best, stream, level, &mut scratch);
+        } else if i % BLOCK == 0 {
             // New stream: the incumbent has to be re-measured against it or
             // the next comparison is between two different questions.
-            cur_loss = measure(&cur, stream);
+            cur_loss = measure(&cur, stream, level, &mut scratch);
         }
 
         let candidate = propose(&cur, step, &mut rng);
-        let l = measure(&candidate, stream);
+        let l = measure(&candidate, stream, level, &mut scratch);
 
         let delta = l - cur_loss;
         let accept = delta <= 0.0
@@ -536,11 +702,31 @@ pub fn fit(target: &loss::Target, cfg: &Config) -> Outcome {
                 best = cur.clone();
             }
         }
+
+        window_n += 1;
+        window_accepts += accept as usize;
+        total_accepts += accept as usize;
+        if window_n >= ADAPT_WINDOW {
+            let rate = window_accepts as f32 / window_n as f32;
+            // Multiplicative, and deliberately gentle: the acceptance rate is
+            // itself a noisy estimate off a hundred samples, so this tracks
+            // the trend rather than chasing each window.
+            if rate > TARGET_ACCEPT * 1.2 {
+                step_gain *= 1.15;
+            } else if rate < TARGET_ACCEPT * 0.8 {
+                step_gain /= 1.15;
+            }
+            step_gain = step_gain.clamp(0.02, 50.0);
+            window_n = 0;
+            window_accepts = 0;
+        }
     }
+    let accept_rate = total_accepts as f32 / cfg.iters.max(1) as f32;
 
     // The running best was picked under a single noisy stream, so it is
     // optimistic by construction. Score both survivors properly and let the
     // honest number decide which one gets emitted.
+    let target = &targets[finest];
     let mut verify = |p: &Params| {
         let mut total = 0.0;
         for s in 0..4u64 {
@@ -562,7 +748,16 @@ pub fn fit(target: &loss::Target, cfg: &Config) -> Outcome {
         if cur_score < best_score { (cur, cur_score) } else { (best, best_score) };
 
     let dimension = crate::scene::similarity_dimension(&params.to_transforms());
-    Outcome { params, loss, initial_loss, dimension }
+    let overlap = {
+        let mut orng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xf17);
+        walk(&params, OVERLAP_POINTS, &mut orng)
+            .map(|w| {
+                let w = super::normalize_walk(w);
+                piece_overlap(&w, params.to_transforms().len(), OVERLAP_RES)
+            })
+            .unwrap_or(0.0)
+    };
+    Outcome { params, loss, initial_loss, dimension, overlap, accept_rate }
 }
 
 /// What this parameter vector's similarity dimension costs, if a budget was set.
@@ -656,6 +851,55 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
 
+    /// The overlap measure against two cases whose answer is known in advance.
+    ///
+    /// Sierpinski is the textbook open-set-condition example — three half-scale
+    /// maps that tile a triangle exactly, meeting only at corners — so its
+    /// pieces are disjoint up to a measure-zero set and it must read near 0.
+    /// Replacing a map with a duplicate of another stacks two pieces perfectly,
+    /// which is the collapse pathology of IFS-INVERSE-BACKGROUND.md §3.5, and
+    /// must read high.
+    ///
+    /// Pinning both ends matters more than it looks: a measure that is merely
+    /// monotone in the right direction would pass an eyeball check while
+    /// putting "fine" and "collapsed" at 0.4 and 0.5, and every threshold built
+    /// on it afterwards would be meaningless.
+    #[test]
+    fn overlap_separates_a_tiling_from_a_collapse() {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(5);
+
+        let tiling = sierpinski();
+        let n = tiling.to_transforms().len();
+        let w = super::super::normalize_walk(walk(&tiling, 200_000, &mut rng).unwrap());
+        let clean = piece_overlap(&w, n, OVERLAP_RES);
+
+        // Same system with map 2 replaced by a copy of map 0: two of the three
+        // pieces are now literally the same set.
+        let mut collapsed = sierpinski();
+        collapsed.maps[2] = collapsed.maps[0];
+        let n = collapsed.to_transforms().len();
+        let w = super::super::normalize_walk(walk(&collapsed, 200_000, &mut rng).unwrap());
+        let stacked = piece_overlap(&w, n, OVERLAP_RES);
+
+        // The collapsed case has an exact expected value, so it checks the
+        // normalisation and not merely the direction. Two of three equally
+        // weighted pieces coincide, so those cells hold `q + q` against a
+        // largest contributor of `q`: half of the two-thirds of the mass they
+        // carry is redundant, giving 1/3. The `1 − 1/N` ceiling is 2/3, so the
+        // reported figure must land on `(1/3)/(2/3) = 1/2` — "half way to total
+        // collapse", which is what two of three maps stacking is.
+        println!("  tiling {clean:.3}   collapsed {stacked:.3}");
+        assert!(clean < 0.15, "a tiling should read as disjoint, got {clean:.3}");
+        assert!(
+            (stacked - 0.5).abs() < 0.05,
+            "two of three pieces stacked should read 0.50, got {stacked:.3}",
+        );
+        assert!(
+            stacked > clean * 3.0,
+            "collapse ({stacked:.3}) must be far from a tiling ({clean:.3})",
+        );
+    }
+
     /// The Sierpinski gasket, exactly: three half-scale maps to the corners of
     /// a triangle, no rotation.
     ///
@@ -721,7 +965,7 @@ mod tests {
         // The blend the fitter actually runs, so the probe measures the
         // landscape that is really being searched.
         let target =
-            loss::Target::new(&cloud.pos, &cloud.col, n, 0.0, loss::DEFAULT_GRID_SHARE, &mut rng);
+            loss::Target::new(&cloud.pos, &cloud.col, n, 0.0, loss::DEFAULT_GRID_SHARE, 0.0, &mut rng);
 
         // The noise floor: the exact parameters against themselves, under a
         // stream the target did not come from. No fit can beat this, and a
@@ -755,7 +999,7 @@ mod tests {
 
         // What the shipped fitter actually reaches on this same target.
         let cfg = Config { maps: 3, depth: 0.0, ..Default::default() };
-        let fitted = fit(&target, &cfg);
+        let fitted = fit(std::slice::from_ref(&target), &cfg);
         let fitted_honest = score(&target, &fitted.params, 3001);
 
         println!("\n  loss landscape at a known-exact 3-map solution");

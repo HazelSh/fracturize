@@ -1,0 +1,169 @@
+=== perceptual 0.0 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed  17: loss 0.0973 (from 0.4104, 4.2× better)  dimension 1.26  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-017.toml
+cell   3  seed  15: loss 0.1065 (from 0.3882, 3.6× better)  dimension 1.19  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-015.toml
+cell   4  seed   5: loss 0.1077 (from 0.4632, 4.3× better)  dimension 1.03  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-005.toml
+cell   5  seed   1: loss 0.1085 (from 0.4832, 4.5× better)  dimension 0.73  accept 51%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-001.toml
+cell   6  seed  16: loss 0.1142 (from 0.4834, 4.2× better)  dimension 0.93  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-016.toml
+cell   7  seed  13: loss 0.1143 (from 0.5106, 4.5× better)  dimension 1.22  accept 50%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-013.toml
+cell   8  seed   7: loss 0.1222 (from 0.4047, 3.3× better)  dimension 0.99  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-007.toml
+cell   9  seed   8: loss 0.1232 (from 0.5075, 4.1× better)  dimension 0.93  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-008.toml
+cell  10  seed   2: loss 0.1275 (from 0.4368, 3.4× better)  dimension 1.00  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-002.toml
+cell  11  seed  14: loss 0.1297 (from 0.5224, 4.0× better)  dimension 1.05  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-014.toml
+cell  12  seed   9: loss 0.1312 (from 0.5568, 4.2× better)  dimension 0.90  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-009.toml
+cell  13  seed  19: loss 0.1363 (from 0.4023, 3.0× better)  dimension 1.03  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-019.toml
+cell  14  seed  18: loss 0.1437 (from 0.5212, 3.6× better)  dimension 1.42  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-018.toml
+cell  15  seed  12: loss 0.1535 (from 0.4672, 3.0× better)  dimension 0.76  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-012.toml
+cell  16  seed  11: loss 0.1614 (from 0.4279, 2.7× better)  dimension 0.72  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-011.toml
+cell  17  seed   4: loss 0.1640 (from 0.5046, 3.1× better)  dimension 0.94  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-004.toml
+cell  18  seed   0: loss 0.1656 (from 0.4717, 2.8× better)  dimension 0.68  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-000.toml
+cell  19  seed   3: loss 0.1772 (from 0.3978, 2.2× better)  dimension 0.86  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-003.toml
+cell  20  seed  10: loss 0.1904 (from 0.4784, 2.5× better)  dimension 0.78  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-010.toml
+cell  21  seed   6: loss 0.2079 (from 0.4987, 2.4× better)  dimension 0.77  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0-006.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.0.png  (target first, then one labelled cell per seed)
+20 fit(s) in 374.0s
+=== perceptual 0.2 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed   7: loss 0.1030 (from 0.4139, 4.0× better)  dimension 0.89  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-007.toml
+cell   3  seed   9: loss 0.1219 (from 0.5516, 4.5× better)  dimension 0.97  accept 50%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-009.toml
+cell   4  seed  12: loss 0.1301 (from 0.4743, 3.6× better)  dimension 0.86  accept 52%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-012.toml
+cell   5  seed  11: loss 0.1305 (from 0.4323, 3.3× better)  dimension 1.21  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-011.toml
+cell   6  seed  10: loss 0.1405 (from 0.4623, 3.3× better)  dimension 1.05  accept 51%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-010.toml
+cell   7  seed   4: loss 0.1489 (from 0.5188, 3.5× better)  dimension 1.09  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-004.toml
+cell   8  seed   6: loss 0.1499 (from 0.5014, 3.3× better)  dimension 1.35  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-006.toml
+cell   9  seed  15: loss 0.1517 (from 0.4050, 2.7× better)  dimension 1.18  accept 53%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-015.toml
+cell  10  seed   2: loss 0.1588 (from 0.4299, 2.7× better)  dimension 0.84  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-002.toml
+cell  11  seed   8: loss 0.1608 (from 0.5044, 3.1× better)  dimension 0.81  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-008.toml
+cell  12  seed  16: loss 0.1636 (from 0.4839, 3.0× better)  dimension 0.76  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-016.toml
+cell  13  seed   5: loss 0.1666 (from 0.4680, 2.8× better)  dimension 1.19  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-005.toml
+cell  14  seed   1: loss 0.1668 (from 0.4854, 2.9× better)  dimension 0.87  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-001.toml
+cell  15  seed   0: loss 0.1705 (from 0.4776, 2.8× better)  dimension 1.16  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-000.toml
+cell  16  seed   3: loss 0.1718 (from 0.4176, 2.4× better)  dimension 1.35  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-003.toml
+cell  17  seed  17: loss 0.1764 (from 0.4305, 2.4× better)  dimension 0.91  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-017.toml
+cell  18  seed  14: loss 0.1801 (from 0.5467, 3.0× better)  dimension 0.68  accept 63%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-014.toml
+cell  19  seed  13: loss 0.2139 (from 0.5020, 2.3× better)  dimension 1.18  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-013.toml
+cell  20  seed  18: loss 0.2175 (from 0.5230, 2.4× better)  dimension 0.99  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-018.toml
+cell  21  seed  19: loss 0.2420 (from 0.4136, 1.7× better)  dimension 1.09  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2-019.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.2.png  (target first, then one labelled cell per seed)
+20 fit(s) in 425.3s
+=== perceptual 0.4 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed   2: loss 0.1518 (from 0.4230, 2.8× better)  dimension 0.93  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-002.toml
+cell   3  seed   9: loss 0.1557 (from 0.5465, 3.5× better)  dimension 0.81  accept 52%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-009.toml
+cell   4  seed   8: loss 0.1574 (from 0.5013, 3.2× better)  dimension 0.80  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-008.toml
+cell   5  seed  17: loss 0.1619 (from 0.4506, 2.8× better)  dimension 1.21  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-017.toml
+cell   6  seed  16: loss 0.1665 (from 0.4844, 2.9× better)  dimension 1.20  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-016.toml
+cell   7  seed  18: loss 0.1726 (from 0.5249, 3.0× better)  dimension 0.80  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-018.toml
+cell   8  seed  19: loss 0.1731 (from 0.4249, 2.5× better)  dimension 0.68  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-019.toml
+cell   9  seed  11: loss 0.1832 (from 0.4368, 2.4× better)  dimension 1.20  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-011.toml
+cell  10  seed   7: loss 0.1846 (from 0.4231, 2.3× better)  dimension 1.21  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-007.toml
+cell  11  seed  13: loss 0.1877 (from 0.4934, 2.6× better)  dimension 1.12  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-013.toml
+cell  12  seed  12: loss 0.1939 (from 0.4814, 2.5× better)  dimension 0.87  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-012.toml
+cell  13  seed   0: loss 0.1978 (from 0.4835, 2.4× better)  dimension 0.86  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-000.toml
+cell  14  seed   3: loss 0.2060 (from 0.4374, 2.1× better)  dimension 1.12  accept 68%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-003.toml
+cell  15  seed   4: loss 0.2086 (from 0.5619, 2.7× better)  dimension 0.76  accept 67%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-004.toml
+cell  16  seed   1: loss 0.2103 (from 0.4876, 2.3× better)  dimension 1.14  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-001.toml
+cell  17  seed  15: loss 0.2126 (from 0.4219, 2.0× better)  dimension 1.16  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-015.toml
+cell  18  seed  14: loss 0.2191 (from 0.5385, 2.5× better)  dimension 1.22  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-014.toml
+cell  19  seed   5: loss 0.2222 (from 0.4729, 2.1× better)  dimension 0.85  accept 64%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-005.toml
+cell  20  seed   6: loss 0.2251 (from 0.5041, 2.2× better)  dimension 1.08  accept 67%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-006.toml
+cell  21  seed  10: loss 0.2406 (from 0.4656, 1.9× better)  dimension 0.85  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4-010.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.4.png  (target first, then one labelled cell per seed)
+20 fit(s) in 411.2s
+=== perceptual 0.6 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed  13: loss 0.1848 (from 0.4848, 2.6× better)  dimension 1.25  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-013.toml
+cell   3  seed  14: loss 0.1879 (from 0.5303, 2.8× better)  dimension 1.09  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-014.toml
+cell   4  seed   0: loss 0.1936 (from 0.4894, 2.5× better)  dimension 1.40  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-000.toml
+cell   5  seed   9: loss 0.1957 (from 0.5413, 2.8× better)  dimension 0.80  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-009.toml
+cell   6  seed  19: loss 0.2062 (from 0.4361, 2.1× better)  dimension 0.94  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-019.toml
+cell   7  seed   2: loss 0.2078 (from 0.4161, 2.0× better)  dimension 0.84  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-002.toml
+cell   8  seed  11: loss 0.2096 (from 0.4413, 2.1× better)  dimension 0.79  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-011.toml
+cell   9  seed  10: loss 0.2206 (from 0.4689, 2.1× better)  dimension 1.00  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-010.toml
+cell  10  seed   4: loss 0.2219 (from 0.5411, 2.4× better)  dimension 0.91  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-004.toml
+cell  11  seed   1: loss 0.2270 (from 0.4898, 2.2× better)  dimension 0.95  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-001.toml
+cell  12  seed  17: loss 0.2308 (from 0.4707, 2.0× better)  dimension 0.87  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-017.toml
+cell  13  seed   3: loss 0.2313 (from 0.4572, 2.0× better)  dimension 1.01  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-003.toml
+cell  14  seed   8: loss 0.2357 (from 0.5090, 2.2× better)  dimension 0.99  accept 66%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-008.toml
+cell  15  seed  18: loss 0.2413 (from 0.6054, 2.5× better)  dimension 1.42  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-018.toml
+cell  16  seed   7: loss 0.2440 (from 0.4323, 1.8× better)  dimension 0.98  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-007.toml
+cell  17  seed   5: loss 0.2492 (from 0.4777, 1.9× better)  dimension 0.84  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-005.toml
+cell  18  seed  12: loss 0.2497 (from 0.4885, 2.0× better)  dimension 0.69  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-012.toml
+cell  19  seed  16: loss 0.2730 (from 0.4849, 1.8× better)  dimension 1.22  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-016.toml
+cell  20  seed   6: loss 0.2732 (from 0.5069, 1.9× better)  dimension 1.07  accept 63%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-006.toml
+cell  21  seed  15: loss 0.2776 (from 0.4387, 1.6× better)  dimension 1.30  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6-015.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.6.png  (target first, then one labelled cell per seed)
+20 fit(s) in 408.9s
+=== perceptual 0.8 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed  13: loss 0.1565 (from 0.4763, 3.0× better)  dimension 1.59  accept 52%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-013.toml
+cell   3  seed   7: loss 0.1867 (from 0.4415, 2.4× better)  dimension 1.25  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-007.toml
+cell   4  seed  11: loss 0.1984 (from 0.4458, 2.2× better)  dimension 0.81  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-011.toml
+cell   5  seed   4: loss 0.2004 (from 0.5203, 2.6× better)  dimension 1.16  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-004.toml
+cell   6  seed  18: loss 0.2046 (from 0.6033, 2.9× better)  dimension 0.86  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-018.toml
+cell   7  seed  10: loss 0.2061 (from 0.4722, 2.3× better)  dimension 0.85  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-010.toml
+cell   8  seed  17: loss 0.2069 (from 0.4908, 2.4× better)  dimension 0.76  accept 63%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-017.toml
+cell   9  seed  19: loss 0.2133 (from 0.4768, 2.2× better)  dimension 0.93  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-019.toml
+cell  10  seed   0: loss 0.2152 (from 0.4953, 2.3× better)  dimension 1.00  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-000.toml
+cell  11  seed  15: loss 0.2197 (from 0.4555, 2.1× better)  dimension 0.82  accept 57%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-015.toml
+cell  12  seed   3: loss 0.2206 (from 0.4770, 2.2× better)  dimension 1.57  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-003.toml
+cell  13  seed   5: loss 0.2208 (from 0.4826, 2.2× better)  dimension 0.96  accept 65%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-005.toml
+cell  14  seed  12: loss 0.2218 (from 0.4956, 2.2× better)  dimension 1.30  accept 56%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-012.toml
+cell  15  seed   2: loss 0.2324 (from 0.4093, 1.8× better)  dimension 0.83  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-002.toml
+cell  16  seed   8: loss 0.2331 (from 0.4937, 2.1× better)  dimension 0.87  accept 67%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-008.toml
+cell  17  seed  16: loss 0.2405 (from 0.4854, 2.0× better)  dimension 0.96  accept 63%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-016.toml
+cell  18  seed   6: loss 0.2473 (from 0.5096, 2.1× better)  dimension 0.98  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-006.toml
+cell  19  seed   9: loss 0.2505 (from 0.5361, 2.1× better)  dimension 1.01  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-009.toml
+cell  20  seed  14: loss 0.2563 (from 0.5220, 2.0× better)  dimension 0.76  accept 64%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-014.toml
+cell  21  seed   1: loss 0.2670 (from 0.4920, 1.8× better)  dimension 0.87  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8-001.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p0.8.png  (target first, then one labelled cell per seed)
+20 fit(s) in 411.2s
+=== perceptual 1.0 ===
+target: 450 × 377, 60000 points, subject weight covers 14% of the frame
+ladder: 2048 -> 8192 points
+
+by loss, best first:
+cell   2  seed  19: loss 0.2105 (from 0.4784, 2.3× better)  dimension 0.85  accept 55%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-019.toml
+cell   3  seed   8: loss 0.2111 (from 0.4785, 2.3× better)  dimension 0.93  accept 54%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-008.toml
+cell   4  seed  11: loss 0.2216 (from 0.4502, 2.0× better)  dimension 0.86  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-011.toml
+cell   5  seed  12: loss 0.2222 (from 0.5027, 2.3× better)  dimension 1.03  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-012.toml
+cell   6  seed   1: loss 0.2240 (from 0.4942, 2.2× better)  dimension 1.07  accept 63%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-001.toml
+cell   7  seed  15: loss 0.2434 (from 0.4724, 1.9× better)  dimension 1.05  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-015.toml
+cell   8  seed  13: loss 0.2457 (from 0.4677, 1.9× better)  dimension 1.33  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-013.toml
+cell   9  seed   2: loss 0.2517 (from 0.4024, 1.6× better)  dimension 0.76  accept 58%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-002.toml
+cell  10  seed   6: loss 0.2546 (from 0.5124, 2.0× better)  dimension 1.17  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-006.toml
+cell  11  seed  14: loss 0.2547 (from 0.5138, 2.0× better)  dimension 1.25  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-014.toml
+cell  12  seed  16: loss 0.2620 (from 0.4859, 1.9× better)  dimension 1.52  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-016.toml
+cell  13  seed  10: loss 0.2633 (from 0.4754, 1.8× better)  dimension 1.12  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-010.toml
+cell  14  seed   9: loss 0.2707 (from 0.5310, 2.0× better)  dimension 0.91  accept 69%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-009.toml
+cell  15  seed  17: loss 0.2756 (from 0.5108, 1.9× better)  dimension 0.85  accept 59%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-017.toml
+cell  16  seed   7: loss 0.2801 (from 0.4404, 1.6× better)  dimension 1.20  accept 62%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-007.toml
+cell  17  seed   4: loss 0.2896 (from 0.4994, 1.7× better)  dimension 0.86  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-004.toml
+cell  18  seed  18: loss 0.2948 (from 0.6012, 2.0× better)  dimension 0.88  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-018.toml
+cell  19  seed   5: loss 0.3113 (from 0.4861, 1.6× better)  dimension 0.91  accept 66%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-005.toml
+cell  20  seed   3: loss 0.3215 (from 0.4968, 1.5× better)  dimension 0.72  accept 60%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-003.toml
+cell  21  seed   0: loss 0.3300 (from 0.5311, 1.6× better)  dimension 1.12  accept 61%  -> /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0-000.toml
+
+wrote /home/hazel/.claude/jobs/ec0a3849/tmp/psweep/p1.0.png  (target first, then one labelled cell per seed)
+20 fit(s) in 407.9s
+=== ALL DONE ===
