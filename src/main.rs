@@ -20,6 +20,7 @@ mod prefs;
 mod trace;
 mod pick;
 mod scene;
+mod scene_source;
 mod set;
 mod stats;
 mod subscene;
@@ -2022,12 +2023,21 @@ impl ApplicationHandler for AppWrapper {
                 }
             }
 
+            // Dropping a file opens it, the same as picking it in the Scenes
+            // browser. Each file of a multi-file drop is its own event, so
+            // they're collected here and opened (the first of them) at the
+            // top of the next frame.
+            WindowEvent::DroppedFile(path) => app.file_dropped(path),
+            WindowEvent::HoveredFile(path) => app.drop_hover = Some(path),
+            WindowEvent::HoveredFileCancelled => app.drop_hover = None,
+
             WindowEvent::Resized(new_size) => {
                 app.resize(new_size.width, new_size.height);
                 app.window.request_redraw();
             }
 
             WindowEvent::RedrawRequested => {
+                app.open_dropped();
                 app.update();
                 // Last frame's egui layout is what says whether the pointer is
                 // parked on a panel; a frame of lag is nothing against a

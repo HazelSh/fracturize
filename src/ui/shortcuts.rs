@@ -170,6 +170,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Files",
         &[
             ("Ctrl+O / B", "browse + load scenes", Some(HelpAction::Browse)),
+            ("drop a file", "open a .toml scene, or a .png render's scene", None),
             ("Ctrl+N", "start over on a blank canvas (undoable)", Some(HelpAction::NewScene)),
             ("Ctrl+S", "save scene TOML", Some(HelpAction::SaveScene)),
             ("Ctrl+Shift+S", "save scene as… (fork it under a new name)", None),

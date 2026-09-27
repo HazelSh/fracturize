@@ -138,7 +138,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
             app,
             &format!("{} Open…", icons::FOLDER_OPEN),
             "Ctrl+O",
-            "Browse scenes/ and load one. Asks first if this scene has unsaved edits.",
+            "Browse scenes/ and load one. Asks first if this scene has unsaved edits. You can also drop a .toml scene or a .png render on the window.",
         ) {
             app.toggle_browser();
         }
@@ -237,17 +237,26 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
     // there is work on screen that isn't on disk is worth being able to see
     // without opening anything.
     let dirty = if app.is_dirty() { "*" } else { "" };
+    // Opened from a render, it says so: there's no .toml behind it yet.
+    let from = if app.scene_png.is_some() { " (from PNG)" } else { "" };
     let label = if author.is_empty() {
-        format!("{}{}", dirty, app.scene.name)
+        format!("{}{}{}", dirty, app.scene.name, from)
     } else {
-        format!("{}{} — {}", dirty, app.scene.name, author)
+        format!("{}{} — {}{}", dirty, app.scene.name, author, from)
     };
     let resp = ui.add(
         egui::Button::new(egui::RichText::new(label).weak())
             .frame(false)
             .truncate(),
     );
-    let path = app.scene_path.clone().unwrap_or_else(|| "(unsaved scene)".to_string());
+    let path = match (&app.scene_path, &app.scene_png) {
+        (Some(p), _) => p.clone(),
+        (None, Some(png)) => format!(
+            "Opened from the render {}.\nCtrl+S saves it as a new scene; the PNG is never changed.",
+            png.display()
+        ),
+        (None, None) => "(unsaved scene)".to_string(),
+    };
     let resp = hinted(
         resp,
         &mut app.ui_state,

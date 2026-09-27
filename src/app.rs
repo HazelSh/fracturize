@@ -950,6 +950,20 @@ pub struct App {
     pub scene: Scene,
     /// Scene file path (save target; also recorded in saved view files)
     pub scene_path: Option<String>,
+    /// The render this scene was opened from, when it came out of a PNG's
+    /// embedded `fracturize:scene` chunk. `scene_path` is `None` then: there
+    /// is no `.toml` behind it, and Ctrl+S writes a new one rather than
+    /// touching the picture. Cleared by anything that gives the scene a file.
+    pub scene_png: Option<std::path::PathBuf>,
+    /// A message about the last attempt to open a scene — why it failed, or
+    /// what was ignored — shown in the status bar until dismissed or until the
+    /// next open. See `set_notice`.
+    notice: Option<Notice>,
+    /// A file being dragged over the window, for the status bar's hint.
+    pub drop_hover: Option<std::path::PathBuf>,
+    /// Files dropped since the last frame. winit delivers a multi-file drop as
+    /// one event per file, so they're gathered here and handled together.
+    dropped: Vec<std::path::PathBuf>,
     /// Point buffer capacity for HUD
     buffer_capacity: u32,
 
@@ -1026,6 +1040,26 @@ pub struct App {
     screenshot_depth: wgpu::Texture,
     screenshot_buffer: wgpu::Buffer,
     pub pending_screenshot: bool,
+}
+
+/// A status-bar message about opening a scene (see `App::set_notice`).
+pub struct Notice {
+    pub text: String,
+    /// A failure, drawn in the error colour, rather than a note.
+    pub error: bool,
+}
+
+/// Whether a dropped file is one the window can open, by its extension: a
+/// scene, or a render with a scene in it. Content is checked when it loads.
+pub fn droppable(path: &Path) -> Result<(), String> {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
+    match ext.as_deref() {
+        Some("toml") | Some("png") => Ok(()),
+        _ => Err(format!(
+            "Can't open {}: drop a .toml scene or a .png render",
+            path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        )),
+    }
 }
 
 impl App {
@@ -1274,7 +1308,15 @@ impl App {
             grade: grade.clamped(),
             show_traces: false,
             scene,
-            scene_path,
+            // A render passed as `-s` is opened, never saved back to.
+            scene_png: scene_path
+                .as_deref()
+                .filter(|p| crate::scene_source::is_png(p))
+                .map(std::path::PathBuf::from),
+            scene_path: scene_path.filter(|p| !crate::scene_source::is_png(p)),
+            notice: None,
+            drop_hover: None,
+            dropped: Vec::new(),
             buffer_capacity,
             // Nothing selected until you pick something. A scene arrives as a
             // picture, not as an open inspector: selecting transform 0 on load
@@ -2081,10 +2123,19 @@ impl App {
 
     pub fn save_scene(&mut self) {
         self.sync_scene_for_save();
-        let path = self
-            .scene_path
-            .clone()
-            .unwrap_or_else(|| format!("scenes/untitled-{}.toml", unix_timestamp()));
+        let path = self.scene_path.clone().unwrap_or_else(|| match self.png_stem() {
+            // Opened from a render: named after it, since that's the name the
+            // person knows it by — but never over a scene that already exists.
+            Some(stem) => {
+                let named = format!("scenes/{}.toml", stem);
+                if Path::new(&named).exists() {
+                    format!("scenes/{}-{}.toml", stem, unix_timestamp())
+                } else {
+                    named
+                }
+            }
+            None => format!("scenes/untitled-{}.toml", unix_timestamp()),
+        });
         self.write_scene_to(&path);
     }
 
@@ -2112,6 +2163,7 @@ impl App {
         self.scene.save(path).map_err(|e| e.to_string())?;
         log::info!("Scene saved as {} ({})", path, self.scene.name);
         self.scene_path = Some(path.to_string());
+        self.scene_png = None;
         self.mark_saved();
         // The slug feeds views/ lookups and render filenames, and it comes
         // from the scene name, not the path — but the *saved views* cache is
@@ -2134,8 +2186,16 @@ impl App {
                     None => name,
                 }
             }
-            None => format!("scenes/{}.toml", self.scene_slug()),
+            None => format!("scenes/{}.toml", self.png_stem().unwrap_or_else(|| self.scene_slug())),
         }
+    }
+
+    /// The file stem of the render this scene was opened from, if it was.
+    fn png_stem(&self) -> Option<String> {
+        self.scene_png
+            .as_deref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
     }
 
     /// Set the scene's display name — the toolbar's label, the `views/` and
@@ -2172,6 +2232,7 @@ impl App {
             Ok(()) => {
                 log::info!("Scene saved to {}", path);
                 self.scene_path = Some(path.to_string());
+                self.scene_png = None;
                 self.mark_saved();
                 self.last_save_error = None;
             }
@@ -2277,6 +2338,14 @@ impl App {
     /// Ask to open a scene. Same shape as `request_quit`: opening replaces the
     /// scene *and* clears the undo stack, so it is exactly as destructive.
     pub fn request_load_scene(&mut self, path: &Path) {
+        // Asking whether to keep your edits, and then failing to open the
+        // file anyway, is a question about nothing. Find out first.
+        if self.is_dirty() {
+            if let Err(e) = Scene::load(path) {
+                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), true);
+                return;
+            }
+        }
         if self.is_dirty() {
             self.pending_action = Some(crate::ui::confirm::Pending::Load(path.to_path_buf()));
         } else {
@@ -3893,10 +3962,13 @@ impl App {
             Ok(s) => s,
             Err(e) => {
                 log::error!("Failed to load {}: {}", path.display(), e);
+                // The scene on screen is untouched; say why nothing happened.
+                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), true);
                 return;
             }
         };
         log::info!("Loading scene: {} ({})", scene.name, path.display());
+        self.notice = None;
 
         self.camera = self.camera_for(&scene);
         self.invalidate_default_path();
@@ -3928,7 +4000,15 @@ impl App {
         self.drag = Drag::None;
         self.hovered = None;
         self.scene = scene;
-        self.scene_path = Some(path.to_string_lossy().into_owned());
+        // A render has no `.toml` behind it: the document is untitled, and
+        // remembers the picture only to name itself and its first save.
+        if crate::scene_source::is_png(path) {
+            self.scene_path = None;
+            self.scene_png = Some(path.to_path_buf());
+        } else {
+            self.scene_path = Some(path.to_string_lossy().into_owned());
+            self.scene_png = None;
+        }
         self.invalidate_saved_views();
         // Opening a document gives you a fresh undo stack, as it does in every
         // editor ever written. The surprise was never the clear — it was that
@@ -3936,6 +4016,64 @@ impl App {
         self.history.clear();
         self.mark_saved();
         self.rebuild_pipelines();
+    }
+
+    // === Opening by drag and drop ===
+
+    /// A file was dropped on the window. Gathered rather than opened at once,
+    /// because a multi-file drop arrives as one event per file.
+    pub fn file_dropped(&mut self, path: std::path::PathBuf) {
+        self.drop_hover = None;
+        self.dropped.push(path);
+    }
+
+    /// Open what was dropped since the last frame: the first file, through
+    /// the same door as the Scenes browser — unsaved-changes prompt and all.
+    pub fn open_dropped(&mut self) {
+        if self.dropped.is_empty() {
+            return;
+        }
+        let files = std::mem::take(&mut self.dropped);
+        let first = &files[0];
+        if let Err(e) = droppable(first) {
+            self.set_notice(e, true);
+            return;
+        }
+        self.request_load_scene(first);
+        let ignored = files.len() - 1;
+        let failed = self.notice.as_ref().is_some_and(|n| n.error);
+        if ignored > 0 && !failed {
+            let name = first.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // Still asking about unsaved edits, it hasn't opened yet.
+            let verb = if self.pending_action.is_some() { "Opening" } else { "Opened" };
+            self.set_notice(
+                format!(
+                    "{} {} and ignored the other {} — one scene at a time",
+                    verb,
+                    name,
+                    if ignored == 1 { "file".to_string() } else { format!("{} files", ignored) },
+                ),
+                false,
+            );
+        }
+    }
+
+    /// Show a message in the status bar until it's clicked away or the next
+    /// scene opens. Not on a timer: a message that leaves on its own can leave
+    /// before it's been read.
+    pub fn set_notice(&mut self, text: String, error: bool) {
+        if error {
+            log::error!("{}", text);
+        }
+        self.notice = Some(Notice { text, error });
+    }
+
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
+    }
+
+    pub fn dismiss_notice(&mut self) {
+        self.notice = None;
     }
 
     // === Render jobs ===
@@ -4477,6 +4615,7 @@ impl App {
         // A scene made in-app has no file behind it: Ctrl+S should write a new
         // scenes/untitled-*.toml rather than overwrite whatever was loaded.
         self.scene_path = None;
+        self.scene_png = None;
         self.invalidate_saved_views();
         self.bump_matrix_generation();
         self.after_scene_shape_change();
@@ -6239,6 +6378,10 @@ impl App {
             .and_then(|p| Path::new(p).file_name())
             .and_then(|n| n.to_str())
             .map(str::to_string)
+            .or_else(|| {
+                let png = self.scene_png.as_deref()?.file_name()?.to_string_lossy().into_owned();
+                Some(format!("{} (from {})", self.scene.name, png))
+            })
             .unwrap_or_else(|| format!("{} (unsaved)", self.scene.name));
         let title = format!(
             "{}{} — Fracturize",

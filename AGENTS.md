@@ -66,6 +66,7 @@ src/
   trace.rs       # CPU chaos walkers (variation port) for the trace overlay
   prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
   scene.rs       # TOML scene parsing AND saving, TransformSpec, variation names/slots
+  scene_source.rs# A path's scene TOML: the file, or a render PNG's embedded chunk
   symmetry.rs    # Finite subgroups of SO(3) (C/D/T/O/I) by closure, plus
                  # `repeat` progressions, which are not groups
   gpu/
@@ -415,6 +416,16 @@ and `--render` prints whichever form the framing it landed on needs.
 The Controls window (H or F1) is clickable: each row triggers its first-listed
 binding, shift+click the second. `I` persists to
 `~/.config/fracturize/prefs.toml` (user preferences, not scene data).
+
+**Dropping a file on the window opens it** — a `.toml` scene or a `.png`
+render (see "Scene Files") — through exactly the door the Scenes browser uses,
+`App::request_load_scene`, so unsaved edits get the same prompt. The file is
+parsed *before* that prompt, so a file that won't open never asks about your
+edits. A multi-file drop opens the first and says it ignored the rest; a
+failure leaves the scene alone and says why in the status bar (`App::notice`,
+which also catches browser load failures — those used to be log-only). It
+stays until clicked away or the next open, not on a timer. While a file is
+hovered over the window, the status bar says whether it will open.
 
 **Escape never quits.** In every desktop program written this century it means
 *cancel the thing in front of me*, so making it the quit key means the reflex
@@ -956,6 +967,19 @@ flames get a little haze by default; hand-authored scenes default to none.
 ## Scene Files (TOML)
 
 Use `--scene <path>` to load. See `scenes/` for examples.
+
+**A render is a scene file too.** Every still carries its scene in a
+`fracturize:scene` chunk (see "Render records"), so anything that takes a scene
+path takes a `.png`: `-s render.png --info`, `-s render.png -r again.png`, the
+in-app loader, a drop. `scene_source::read` is the one reader — it sniffs the
+content, returns the TOML text and whether it came from a `.toml` or a PNG, and
+reads a PNG only up to its pixels, so it is cheap enough to call on every file
+in a folder. `file =` references resolve beside the PNG, and a miss says the
+scene came from one. A scene opened from a PNG has no `.toml` behind it:
+`scene_path` is `None`, `App::scene_png` remembers the picture, the title and
+toolbar say "from" it, and Ctrl+S writes a new `scenes/<png-stem>.toml` (with a
+timestamp if that exists) — the untitled rule, better named. `Scene::save`
+refuses a PNG outright as a backstop.
 
 ```toml
 [meta]

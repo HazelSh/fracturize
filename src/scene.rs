@@ -1612,8 +1612,10 @@ impl Scene {
         path: P,
         overrides: &[String],
     ) -> Result<(Self, Vec<crate::set::Applied>), String> {
-        let content = fs::read_to_string(path.as_ref())
-            .map_err(|e| format!("Failed to read scene file: {}", e))?;
+        // A `.toml`, or a render's embedded scene: see `scene_source`.
+        let source = crate::scene_source::read(path.as_ref())?;
+        let from_png = source.kind == crate::scene_source::SourceKind::Png;
+        let content = source.text;
 
         let (content, applied) = crate::set::apply_recording(&content, overrides)?;
 
@@ -1877,8 +1879,20 @@ impl Scene {
         // Subscenes are appended after the scene's own maps, one layer each,
         // so the transform list stays grouped by layer.
         let base_dir = path.as_ref().parent().map(Path::to_path_buf).unwrap_or_default();
+        // For a render that is the PNG's directory, which is only right if
+        // the referenced scenes travelled with it — so say where it looked.
         let (subscenes, sub_maps, sub_names, sub_colors) =
-            load_subscenes(&scene_file.subscenes, &base_dir)?;
+            load_subscenes(&scene_file.subscenes, &base_dir).map_err(|e| {
+                if from_png {
+                    format!(
+                        "{} (this scene came from the PNG {}, so `file =` is looked up beside it)",
+                        e,
+                        path.as_ref().display()
+                    )
+                } else {
+                    e
+                }
+            })?;
         if transforms.is_empty() && subscenes.is_empty() {
             return Err("the scene has no [[transform]]s (and no [[subscene]]s)".to_string());
         }
@@ -2409,6 +2423,15 @@ impl Scene {
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        // A scene opened from a render has no `.toml` behind it, and the
+        // merge below would happily replace the picture with text. The app
+        // never passes a PNG here; this is the backstop.
+        if crate::scene_source::is_png(path.as_ref()) {
+            return Err(format!(
+                "Won't save over {}: it is a PNG render. Save the scene as a .toml instead",
+                path.as_ref().display()
+            ));
+        }
         // `file =` references are relative to the file they are written in,
         // so they are respelled for this one — a Save-As into another
         // directory must not leave them pointing at nothing.

@@ -6,11 +6,14 @@
 use crate::app::App;
 use crate::scene::similarity_dimension;
 
-use super::hints::HINT_VIEWPORT;
+use super::hints::{hinted, HINT_VIEWPORT};
 use super::icons;
 use super::num;
 
 const BAR_HEIGHT: f32 = 22.0;
+/// Widest the open-failure message gets before it truncates; the whole text
+/// is in its tooltip.
+const NOTICE_WIDTH: f32 = 420.0;
 const SPARKLINE_SIZE: egui::Vec2 = egui::vec2(100.0, 16.0);
 
 /// Character budget for the `FPS · ms · p99 · ui · wait` cluster: the fixed
@@ -43,6 +46,18 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     // (3) else the bare-viewport default.
     let pointer_over_egui = ui.ctx().is_pointer_over_egui();
     let hint = match app.ui_state.status_hint.take() {
+        // A file dragged over the window outranks everything: it's the one
+        // moment the question on the person's mind is "will this open?".
+        _ if app.drop_hover.is_some() => {
+            let path = app.drop_hover.as_deref().unwrap_or(std::path::Path::new(""));
+            match crate::app::droppable(path) {
+                Ok(()) => format!(
+                    "drop: open {}",
+                    path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                ),
+                Err(e) => e,
+            }
+        }
         Some(h) => h,
         None if !pointer_over_egui => app.hovered_hint().unwrap_or(HINT_VIEWPORT).to_string(),
         None => HINT_VIEWPORT.to_string(),
@@ -52,8 +67,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         .exact_size(BAR_HEIGHT)
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
-                ui.label(hint);
-
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (valid, capacity, warming) = app.point_stats();
                     let resp = num::text_cell(
@@ -304,6 +317,42 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         ui.label(egui::RichText::new("d n/a").weak())
                             .on_hover_text("No valid contracting transforms — dimension undefined.");
                     }
+
+                    // The left side goes last, into whatever the readouts
+                    // left over, so a long hint or message truncates instead
+                    // of running underneath them.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        // Why the last open failed, or what a drop ignored. Stays
+                        // until clicked away or the next scene opens.
+                        if let Some((text, error)) = app.notice().map(|n| (n.text.clone(), n.error)) {
+                            let color = if error {
+                                ui.visuals().error_fg_color
+                            } else {
+                                ui.visuals().warn_fg_color
+                            };
+                            let first = text.lines().next().unwrap_or_default().to_string();
+                            let resp = ui
+                                .allocate_ui(egui::vec2(NOTICE_WIDTH, BAR_HEIGHT), |ui| {
+                                    ui.add(
+                                        egui::Button::new(egui::RichText::new(first).color(color))
+                                            .frame(false)
+                                            .truncate(),
+                                    )
+                                })
+                                .inner;
+                            let resp = hinted(
+                                resp,
+                                &mut app.ui_state,
+                                format!("{}\n\nClick to dismiss.", text),
+                                "click: dismiss this message",
+                            );
+                            if resp.clicked() {
+                                app.dismiss_notice();
+                            }
+                            ui.separator();
+                        }
+                        ui.add(egui::Label::new(hint).truncate());
+                    });
                 });
             });
         });

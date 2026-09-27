@@ -76,15 +76,11 @@ const NARROW_BINS: usize = 3;
 /// `None` for anything the renderer didn't write, or whose record doesn't
 /// parse — the caller falls back to the border.
 pub fn recorded_background(path: &std::path::Path) -> Option<[u8; 3]> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().ok()?;
-    let chunk = reader
-        .info()
-        .utf8_text
-        .iter()
-        .find(|c| c.keyword == crate::record::KEY_SCENE)?;
-    let text = chunk.get_text().ok()?;
-    let scene: crate::scene::SceneFile = toml::from_str(&text).ok()?;
+    let source = crate::scene_source::read(path).ok()?;
+    if source.kind != crate::scene_source::SourceKind::Png {
+        return None;
+    }
+    let scene: crate::scene::SceneFile = toml::from_str(&source.text).ok()?;
     let b = scene.meta.background;
     Some([0, 1, 2].map(|i| crate::palette::linear_to_srgb8(b[i] as f32)))
 }
