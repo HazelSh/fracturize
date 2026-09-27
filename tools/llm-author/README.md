@@ -31,6 +31,10 @@ Each run writes `renders/llm/<time>-<task>-<model>/`, containing:
 - `round-N.toml` and `round-N.png` for each round, plus `final.*`;
 - `transcript.md` (reasoning included, folded) and `transcript.jsonl`;
 - `summary.md`, which collects anything the model wrote on a `NOTE:` line;
+- and, outside the run directory, `scenes/local-lll/<run-dir-name>.toml` with
+  `<run-dir-name>.png` beside it, so the scene browser can show the result.
+  New files only, never an overwrite (`-2`, `-3`… if taken); `--no-scenes`
+  skips it;
 
 To recount the primer after editing it (CPU only, vocab file only):
 

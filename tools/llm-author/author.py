@@ -11,8 +11,11 @@ revises or finishes, for at most --rounds rounds. The endpoint comes from
 OPENAI_BASE_URL, which with-llm sets; anything OpenAI-compatible works.
 
 Every run writes a directory under renders/llm/: each round's scene and render,
-the full transcript including the model's reasoning, and a summary. Nothing
-here edits scenes/.
+the full transcript including the model's reasoning, and a summary. The final
+scene is also copied to scenes/local-lll/<run-dir-name>.toml, with its render
+beside it as <run-dir-name>.png, so the in-app scene browser can show it. That
+only ever adds new files there (a -2, -3… suffix rather than overwriting); it
+never edits an existing scene. --no-scenes skips the copy.
 
 The model can end the session at any point: DONE (happy with it) or STOP (no
 reason needed), and both are honoured at once. Anything it writes on a NOTE:
@@ -246,6 +249,22 @@ def as_comment(model, answer):
     return "\n".join(lines) + "\n\n"
 
 
+def place_in_scenes(out):
+    """Copy final.toml (and final.png, as its thumbnail) into
+    scenes/local-lll/, named after the run directory so model, task and time
+    survive. Never overwrites: a name already taken gets a numeric suffix."""
+    dest = REPO / "scenes" / "local-lll"
+    dest.mkdir(parents=True, exist_ok=True)
+    stem, n = out.name, 1
+    while (dest / f"{stem}.toml").exists() or (dest / f"{stem}.png").exists():
+        n += 1
+        stem = f"{out.name}-{n}"
+    (dest / f"{stem}.toml").write_bytes((out / "final.toml").read_bytes())
+    if (out / "final.png").exists():
+        (dest / f"{stem}.png").write_bytes((out / "final.png").read_bytes())
+    return dest / f"{stem}.toml"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("task", choices=["new", "free", "tweak"])
@@ -260,6 +279,8 @@ def main():
                     help="constrain replies with scene.gbnf (see the README on thinking)")
     ap.add_argument("--no-think", action="store_true", help="ask the template to skip thinking [thinking on]")
     ap.add_argument("--no-image", action="store_true", help="don't send renders, even to a vision model")
+    ap.add_argument("--no-scenes", action="store_true",
+                    help="don't copy the final scene into scenes/local-lll/")
     ap.add_argument("--temperature", type=float, help="[the server's default]")
     ap.add_argument("--max-tokens", type=int, default=8192, help="per reply, thinking included [8192]")
     ap.add_argument("--fracturize", default=str(REPO / "target/release/fracturize"))
@@ -391,6 +412,9 @@ def main():
         (out / "final.toml").write_text(header + last_good.read_text())
         if (png := last_good.with_suffix(".png")).exists():
             (out / "final.png").write_bytes(png.read_bytes())
+        if not args.no_scenes:
+            placed = place_in_scenes(out)
+            print(f"added to the scene browser: {placed.relative_to(REPO)}")
     summary = [f"# {args.task} by {model}", "",
                f"- ended: {ending}",
                f"- rounds used: {min(rnd, args.rounds)} of {args.rounds}",
