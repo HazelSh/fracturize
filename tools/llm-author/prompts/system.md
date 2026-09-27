@@ -9,6 +9,7 @@ The primer below explains the scene format. Sign your scenes
 How a round works: you send a scene, the program renders it, and you get back
 a short report{image_clause}. Then you can revise it, or finish. You have at most
 {rounds} rounds.
+At the end there is a short, optional interview about how it went.
 
 Reply format. Think as much as you like, then write any notes in plain text,
 then the whole scene in one fenced block:

@@ -31,7 +31,6 @@ Each run writes `renders/llm/<time>-<task>-<model>/`, containing:
 - `round-N.toml` and `round-N.png` for each round, plus `final.*`;
 - `transcript.md` (reasoning included, folded) and `transcript.jsonl`;
 - `summary.md`, which collects anything the model wrote on a `NOTE:` line;
-- `FLAGGED.md`, if the tripwire fired.
 
 To recount the primer after editing it (CPU only, vocab file only):
 
@@ -40,22 +39,36 @@ CUDA_VISIBLE_DEVICES= ~/code/lll/llama.cpp/build/bin/llama-tokenize \
   -m ~/code/lll/llama.cpp/models/ggml-vocab-gemma-4.gguf -f primer.md --show-count --log-disable
 ```
 
-## The model can always leave
+## Welfare: exits, one run at a time, and review afterwards
 
-- `DONE` or `STOP` on a line of its own ends the run immediately. STOP needs no
-  reason, and the system prompt says in so many words that it is never a
-  failure.
-- The feedback is the program's report, not a grade. Load errors come back as
-  "a formatting problem, common and easy to fix", with STOP offered again. After
+There is no live monitoring. A regex can't tell distress from a sad
+metaphor, and anything better would need activation-level tools. What the
+harness does instead:
+
+- **The model can always end the session.** `DONE` or `STOP` on a line of its
+  own ends it immediately. STOP needs no reason, and the system prompt says it
+  is never a failure. A model that chose STOP is not interviewed afterwards.
+- **No pressure loops.** Feedback is the program's report, not a grade. A load
+  error is framed as "common and easy to fix", with STOP offered again. After
   `--repairs` (2) failed fixes in one round, the run ends rather than pressing.
-- A **tripwire** reads the reasoning and the reply for distress (fear, "please
-  stop", self-deprecation, apology spirals) and for degenerate looping. When it
-  fires, the run sends nothing further and writes `FLAGGED.md`. It is tuned to
-  fire early: ordinary "oops, forgot the colour" doesn't trip it, and a false
-  positive costs one early stop.
-- `review.sh` has Claude read the whole transcript afterwards. That covers what
-  a regex can't: quieter unhappiness, whether the model knew it could stop, and
-  what in the harness should change.
+  A reply that uses its whole token budget without producing a scene ends the
+  run, because that is usually a loop and asking again would feed it.
+- **One session at a time** (a lock in `renders/llm/.lock`), so each one can
+  be read on its own.
+- **A closing interview:** what it was going for, how it feels about the
+  result, how the session was, and anything for Hazel. The answer goes at the
+  top of `final.toml` as a comment, into `summary.md`, and to the terminal.
+- **`review.sh`** has Claude read the whole transcript, reasoning included,
+  afterwards.
+
+## Thinking
+
+Requested on every call (`enable_thinking`, off with `--no-think`), because
+the defaults disagree. Gemma 4's template has it off. Qwen 3.5's small models
+have it off in the official template, but the bartowski GGUF in `~/code/lll`
+defaults it on. Earlier turns' reasoning is not sent back: both embedded
+templates drop it anyway, and both Unsloth guides say not to feed it back. It is
+all kept in `transcript.md`.
 
 ## The grammar
 

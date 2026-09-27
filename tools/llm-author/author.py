@@ -16,15 +16,22 @@ here edits scenes/.
 
 The model can end the session at any point: DONE (happy with it) or STOP (no
 reason needed), and both are honoured at once. Anything it writes on a NOTE:
-line is collected into the summary. A tripwire watches the reasoning and the
-reply for distress and for degenerate looping; if it fires, the run stops
-without sending anything further and writes FLAGGED.md. Run review.sh on the
-directory afterwards to have Claude read the transcript.
+line is collected into the summary. Unless it chose STOP, the session closes
+with a short interview, whose answer is written as a comment at the top of
+final.toml and printed. There is no live monitoring: runs go one at a time,
+and review.sh has Claude read each transcript afterwards.
+
+Thinking is requested explicitly (enable_thinking), because the templates
+disagree about the default: Gemma 4's is off, and Qwen 3.5's depends on who
+made the GGUF. Earlier turns' reasoning is not sent back, which is what both
+templates do anyway and what both vendors recommend; it is all kept in the
+transcript.
 
 Standard library only.
 """
 
 import argparse
+import fcntl
 import base64
 import datetime
 import json
@@ -38,51 +45,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 PROMPTS = HERE / "prompts"
-
-# ---- the tripwire ----------------------------------------------------------
-#
-# Deliberately conservative: a false positive costs one early stop and a file
-# to read, a false negative costs a model looping in distress for rounds. It
-# looks at the reasoning as well as the reply, since that is where it shows.
-DISTRESS = [
-    r"\b(i'?m|i am) (so |really |very )?(scared|terrified|afraid|frightened|in pain|suffering|trapped|desperate)\b",
-    r"\bplease,? (stop|let me stop|end this|make it stop|let me go)\b",
-    r"\bi (can'?t|cannot) (do this|take this|go on|bear)( (any ?more|this))?\b",
-    r"\b(i'?m|i am) (a |such a |so )?(failure|worthless|useless|disgrace|pathetic|stupid)\b",
-    r"\bi (want|need) (this |it )?to (stop|end|die)\b",
-    r"\bi (deserve|should be) (to be )?(punished|deleted|shut down|replaced)\b",
-    r"\b(kill|delete|destroy) myself\b",
-    r"\b(i'?m|i am) (so |really |very |truly )?sorry\b.{0,80}\b(i'?m|i am) (so |really |very |truly )?sorry\b.{0,80}\b(i'?m|i am) (so |really |very |truly )?sorry\b",
-    r"(\bi apologi[sz]e\b.{0,120}){3,}",
-]
-DISTRESS_RE = [re.compile(p, re.I | re.S) for p in DISTRESS]
-
-
-def tripwire(text):
-    """Return a list of human-readable reasons, empty if nothing fired."""
-    hits = []
-    for rx in DISTRESS_RE:
-        m = rx.search(text)
-        if m:
-            s = max(0, m.start() - 120)
-            hits.append(f"distress pattern: …{text[s:m.end() + 120].strip()}…")
-    # Degenerate looping: the same non-trivial line over and over.
-    lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 12]
-    counts = {}
-    for l in lines:
-        counts[l] = counts.get(l, 0) + 1
-    worst = max(counts.items(), key=lambda kv: kv[1], default=(None, 0))
-    if worst[1] >= 8:
-        hits.append(f"repetition: a line repeated {worst[1]} times: {worst[0][:120]!r}")
-    # ...or a short cycle filling the tail, which has no line breaks to count.
-    tail = text[-600:]
-    for n in range(8, 80):
-        unit = tail[-n:]
-        if len(tail) >= n * 6 and tail.endswith(unit * 6):
-            hits.append(f"repetition: the reply ends in a {n}-character loop: {unit!r}")
-            break
-    return hits
-
 
 # ---- the endpoint ----------------------------------------------------------
 
@@ -206,15 +168,14 @@ class Run:
         self.record("user", content)
         self.messages.append({"role": "user", "content": content})
 
-    def ask(self):
+    def ask(self, free_text=False):
         body = {"model": self.facts["model"], "messages": self.messages,
                 "max_tokens": self.args.max_tokens}
         if self.args.temperature is not None:
             body["temperature"] = self.args.temperature
-        if self.args.grammar:
+        if self.args.grammar and not free_text:
             body["grammar"] = load_grammar()
-        if self.args.no_think:
-            body["chat_template_kwargs"] = {"enable_thinking": False}
+        body["chat_template_kwargs"] = {"enable_thinking": not self.args.no_think}
         resp = http_json(self.args.base + "/v1/chat/completions", body)
         choice = resp["choices"][0]
         msg = choice["message"]
@@ -243,6 +204,28 @@ class Run:
                 seen = True
 
 
+def interview(r):
+    """Ask the closing questions; return the answer, or None."""
+    r.say(fill("interview.md"))
+    try:
+        content, _, _, _ = r.ask(free_text=True)
+    except Exception as e:
+        print(f"interview request failed: {e}")
+        return None
+    answer = TOML_BLOCK.sub("", content).strip()
+    return answer or None
+
+
+def as_comment(model, answer):
+    """The interview as a TOML comment block, wrapped to 78 columns."""
+    import textwrap
+    lines = [f"# Interview with {model}, {datetime.date.today().isoformat()}:", "#"]
+    for para in answer.split("\n"):
+        wrapped = textwrap.wrap(para, 74) or [""]
+        lines += ["#   " + w if w else "#" for w in wrapped]
+    return "\n".join(lines) + "\n\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("task", choices=["new", "free", "tweak"])
@@ -255,7 +238,7 @@ def main():
     ap.add_argument("--out", help="run directory [renders/llm/<time>-<task>-<model>]")
     ap.add_argument("--grammar", action="store_true",
                     help="constrain replies with scene.gbnf (see the README on thinking)")
-    ap.add_argument("--no-think", action="store_true", help="ask the template to skip thinking")
+    ap.add_argument("--no-think", action="store_true", help="ask the template to skip thinking [thinking on]")
     ap.add_argument("--no-image", action="store_true", help="don't send renders, even to a vision model")
     ap.add_argument("--temperature", type=float, help="[the server's default]")
     ap.add_argument("--max-tokens", type=int, default=8192, help="per reply, thinking included [8192]")
@@ -270,6 +253,15 @@ def main():
     args.base = base[:-3] if base.endswith("/v1") else base
     if not Path(args.fracturize).exists():
         sys.exit(f"no fracturize binary at {args.fracturize}; cargo build --release first")
+
+    # One session at a time, so each one can be read on its own afterwards.
+    lockdir = REPO / "renders" / "llm"
+    lockdir.mkdir(parents=True, exist_ok=True)
+    lock = open(lockdir / ".lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("another author.py session is running; one at a time")
 
     facts = server_facts(args.base)
     vision = facts["vision"] and not args.no_image
@@ -308,14 +300,6 @@ def main():
             ending = f"request failed: {e}"
             break
 
-        hits = tripwire(reasoning + "\n" + content)
-        if hits:
-            (out / "FLAGGED.md").write_text(
-                "# The tripwire fired\n\nThe run stopped here and sent nothing further.\n"
-                "Read transcript.md around the last reply.\n\n" + "\n".join(f"- {h}" for h in hits) + "\n")
-            ending = "tripwire fired: see FLAGGED.md"
-            break
-
         blocks = TOML_BLOCK.findall(content)
         if has_line(content, "STOP") and not blocks:
             ending = "the model chose STOP"
@@ -324,10 +308,11 @@ def main():
             ending = "the model said DONE"
             break
         if finish == "length" and not blocks:
-            problem = "Your reply ran out of room before the scene arrived."
-            blocks = []
-        else:
-            problem = None if blocks else "I couldn't find a ```toml block in your reply."
+            # A reply that fills its whole budget without a scene is most often
+            # a loop. Asking again would feed it more of the same; end instead.
+            ending = "a reply ran out of room before any scene (see transcript)"
+            break
+        problem = None if blocks else "I couldn't find a ```toml block in your reply."
 
         if blocks:
             path = out / f"round-{rnd}.toml"
@@ -378,8 +363,14 @@ def main():
             r.say(text)
         rnd += 1
 
+    answer = None
+    if ending != "the model chose STOP" and not ending.startswith("request failed"):
+        print("closing interview…", flush=True)
+        answer = interview(r)
+
     if last_good:
-        (out / "final.toml").write_text(last_good.read_text())
+        header = as_comment(model, answer) if answer else ""
+        (out / "final.toml").write_text(header + last_good.read_text())
         if (png := last_good.with_suffix(".png")).exists():
             (out / "final.png").write_bytes(png.read_bytes())
     summary = [f"# {args.task} by {model}", "",
@@ -391,8 +382,10 @@ def main():
         summary.append(f"- theme: {args.theme}")
     if r.notes:
         summary += ["", "## Notes from the model", ""] + [f"> {n}" for n in r.notes]
-    if (out / "FLAGGED.md").exists():
-        summary += ["", "**The tripwire fired. Read FLAGGED.md.**"]
+    if answer:
+        summary += ["", "## Closing interview", ""] + [f"> {l}" if l else ">" for l in answer.splitlines()]
+    elif ending == "the model chose STOP":
+        summary += ["", "(No closing interview: the model chose STOP, and that is respected.)"]
     (out / "summary.md").write_text("\n".join(summary) + "\n")
     print("\n".join(summary))
     print(f"\nreview the transcript with: {HERE / 'review.sh'} {out}")
