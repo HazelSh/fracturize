@@ -52,7 +52,7 @@ src/
     camera_panel.rs# Framing, saved views, the camera path (incl. how it loops)
     axis_widget.rs # Corner orientation cross; click a ball to look down that axis
     radio.rs       # Segmented one-of-n radio, used by all three such settings
-    browser.rs     # Scene picker (Ctrl+O / B) — what File > Open… shows
+    browser.rs     # Scenes window (Ctrl+O / B): folder tree + places, thumbnail rows
     shortcuts.rs   # Controls window (H / F1): input prefs + the keybind table
     labels.rs      # World-anchored transform name labels
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
@@ -67,6 +67,7 @@ src/
   prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
   scene.rs       # TOML scene parsing AND saving, TransformSpec, variation names/slots
   scene_source.rs# A path's scene TOML: the file, or a render PNG's embedded chunk
+  scene_browser.rs# The Scenes window's model: places, a folder's scenes, parsed, sorted
   symmetry.rs    # Finite subgroups of SO(3) (C/D/T/O/I) by closure, plus
                  # `repeat` progressions, which are not groups
   gpu/
@@ -76,6 +77,7 @@ src/
       compute.rs   # Chaos game dispatch, circular buffer bookkeeping
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
       splat.rs     # Splat mode: additive log-density accumulation + tonemap
+    thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # In-world line renderer (traces, camera path, indicators)
     overlay.rs   # MSAA target for the in-world UI: depth blit, composite
@@ -526,7 +528,7 @@ right for. Undo and redo are the opposite trade, so they get visible buttons.
 | Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
-| Scenes (Ctrl+O, B) | Scene picker; the same selection the arrow keys walk. What File → Open… shows you |
+| Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
 | Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 
@@ -862,6 +864,55 @@ the point pass composites the flame over the background by coverage and a
 paper-white ground would swallow colours rolled at value 0.7–1.0. Override any
 of it with `--palette` / `--random-palette` / `--color-mode`, which apply after
 the roll.
+
+## The scene browser
+
+The Scenes window is our own file picker, on purpose: a system dialog can't
+show a fractal, and XFCE's default is GNOME's. Left: a folder tree rooted at
+the place you're in, then **places** — `scenes/`, `scenes/local-llm/` (where
+`tools/llm-author` puts each run's final scene), and any folder added with
+"Add this folder" (`prefs.browser_places`; right-click one to remove it).
+Right: the folder's scenes, three lines a row — name, author, file and age —
+beside a 16:9 thumbnail. Sort by name or newest. The folder you were in and
+the sort persist to prefs. A render with a scene in it is listed too, marked
+`PNG`; a `.render.toml` sidecar and an ordinary picture are not. A scene
+that fails to parse is listed with its error rather than left out.
+
+**Thumbnails are live renders, not cached PNGs** (`src/gpu/thumbs.rs`). Each
+is a `PointCompute` with 256 walkers and an 8k ring, drawn by an ordinary
+`SplatRenderer`, framed exactly as `--render` frames it (`offline::frame_setup`)
+— the scene's own camera, never reframed, because that is authorial intent
+and a scene with a poor opening shot should look like one. Measured on the
+GTX 1080 at 96px: ~0.7 ms to build, converge and draw one, 0.06 ms per
+re-draw, and parsing 0.1-1 ms a scene (9 ms for all of `scenes/`). 8k points
+is where nearly every scene reads at that size, and 2k only the compact ones;
+`cargo test --release thumbnail_study -- --ignored --nocapture` re-measures
+and writes the thumbnails out to look at.
+
+Three things make it cheap, and each is easy to undo by accident:
+
+- **One compile.** `ChaosPipelines` and `SplatPipelines` hold the compiled
+  shaders; `with_pipelines` shares them. Compiling `chaos.wgsl` is ~6 ms (230
+  cold, first run in a process with the splat set), and every instance used to
+  pay it — including the main view on every transform add, which now doesn't.
+- **Converge once, then it's a still.** A burn-in submit and then exactly one
+  lap. Two submits, not one dispatch: the ring is walker-major, so a dispatch
+  writing more than a lap lets one walker's burn-in land on another's finished
+  points. The chaos game has no fuse otherwise; the interactive ring hides the
+  dust by turning over for thirteen seconds.
+- **Only the row under the pointer moves**, flying its camera path (the
+  default orbit if it authors none). Everything else stays still, which is a
+  design rule rather than a budget: a list where everything moves is one
+  nobody can look at.
+
+Rows ask `ThumbCache::get` while egui lays them out; `App::render` builds
+what was asked (4 ms budget a frame, always at least one) and registers the
+textures before egui paints, so a thumbnail lands the frame after its row. The
+scene's background colour stands in until then. A file's thumbnail rebuilds
+when its modified time changes. Deferred: an author-set thumbnail view for
+scenes whose opening shot is mid-flight; per-scene renderer choice (waits on
+the renderer rework); reading folders off the UI thread, which 9 ms doesn't
+yet need.
 
 ## Starting From Nothing
 

@@ -47,12 +47,26 @@ pub fn is_png(path: impl AsRef<Path>) -> bool {
 /// anything still opens. Doesn't parse the TOML — that's `Scene::load`'s job.
 pub fn read(path: impl AsRef<Path>) -> Result<SceneSource, String> {
     let path = path.as_ref();
+    read_if_scene(path)?.ok_or_else(|| {
+        format!(
+            "{} has no scene in it. Only Fracturize renders carry one \
+             (not mutation or sweep sheets, and not images from elsewhere)",
+            path.display()
+        )
+    })
+}
+
+/// [`read`], except that a PNG with no scene in it is `Ok(None)` rather than
+/// an error — for the scene browser, which lists a folder and should pass over
+/// an ordinary picture rather than report it as a broken scene.
+pub fn read_if_scene(path: impl AsRef<Path>) -> Result<Option<SceneSource>, String> {
+    let path = path.as_ref();
     let open = || std::fs::File::open(path).map_err(|e| format!("Failed to read scene file: {}", e));
     if is_png(path) {
         // Streamed, not slurped: a poster-sized render is hundreds of
         // megabytes of pixels behind a few kilobytes of text.
         return read_png(path, std::io::BufReader::new(open()?))
-            .map(|text| SceneSource { text, kind: SourceKind::Png });
+            .map(|text| text.map(|text| SceneSource { text, kind: SourceKind::Png }));
     }
     let mut bytes = Vec::new();
     open()?
@@ -61,29 +75,26 @@ pub fn read(path: impl AsRef<Path>) -> Result<SceneSource, String> {
     let text = String::from_utf8(bytes).map_err(|_| {
         format!("{} isn't a scene: it is neither a TOML file nor a PNG render", path.display())
     })?;
-    Ok(SceneSource { text, kind: SourceKind::Toml })
+    Ok(Some(SceneSource { text, kind: SourceKind::Toml }))
 }
 
-fn read_png(path: &Path, file: impl std::io::BufRead + std::io::Seek) -> Result<String, String> {
+fn read_png(
+    path: &Path,
+    file: impl std::io::BufRead + std::io::Seek,
+) -> Result<Option<String>, String> {
     // `read_info` stops at the first IDAT, which is past every chunk the
     // renderer writes, so this reads the header and the text and nothing else.
     let reader = png::Decoder::new(file)
         .read_info()
         .map_err(|e| format!("{}: not a readable PNG: {}", path.display(), e))?;
-    let chunk = reader
-        .info()
-        .utf8_text
-        .iter()
-        .find(|c| c.keyword == crate::record::KEY_SCENE)
-        .ok_or_else(|| {
-            format!(
-                "{} has no scene in it. Only Fracturize renders carry one \
-                 (not mutation or sweep sheets, and not images from elsewhere)",
-                path.display()
-            )
-        })?;
+    let Some(chunk) =
+        reader.info().utf8_text.iter().find(|c| c.keyword == crate::record::KEY_SCENE)
+    else {
+        return Ok(None);
+    };
     chunk
         .get_text()
+        .map(Some)
         .map_err(|e| format!("{}: the embedded scene is unreadable: {}", path.display(), e))
 }
 

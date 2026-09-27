@@ -20,6 +20,7 @@ mod prefs;
 mod trace;
 mod pick;
 mod scene;
+mod scene_browser;
 mod scene_source;
 mod set;
 mod stats;

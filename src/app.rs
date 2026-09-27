@@ -987,10 +987,18 @@ pub struct App {
     /// an inspector field isn't clobbered by a same-frame re-decompose.
     matrix_generation: u64,
 
-    // Scene browser overlay (B)
+    // Scene browser (B, Ctrl+O)
     pub show_browser: bool,
-    browser_files: Vec<std::path::PathBuf>,
+    /// The folder the browser is showing, read when it opens or navigates;
+    /// `Err` when that folder couldn't be read.
+    browser: Option<Result<crate::scene_browser::Folder, String>>,
     browser_selected: usize,
+    /// Scene thumbnails for the browser's rows. See `gpu::thumbs`.
+    pub thumbs: crate::gpu::thumbs::ThumbCache,
+    /// The chaos game's and the window's splat pipelines, compiled once. See
+    /// `ChaosPipelines`.
+    chaos_pipelines: crate::gpu::points::compute::ChaosPipelines,
+    splat_pipelines: crate::gpu::points::splat::SplatPipelines,
 
     /// Unified undo/redo history (see src/history.rs): every scene-mutating
     /// edit path commits through `commit_edit`. Cleared on scene load.
@@ -1091,12 +1099,20 @@ impl App {
         let buffer_capacity = scene.point_count as u32;
         log::info!("Point buffer capacity: {}", buffer_capacity);
 
+        // Compiled once for the life of the app: rebuilding the chaos game on
+        // a transform add, and every thumbnail in the scene browser, share them.
+        let chaos_pipelines = crate::gpu::points::compute::ChaosPipelines::new(&gpu.device);
+        let splat_pipelines = crate::gpu::points::splat::SplatPipelines::new(&gpu.device, gpu.format);
+        let thumbs = crate::gpu::thumbs::ThumbCache::new(&gpu.device, &chaos_pipelines);
+
         // Create point compute pipeline
-        let point_compute = PointCompute::new(
+        let point_compute = PointCompute::with_pipelines(
             &gpu.device,
+            &chaos_pipelines,
             &crate::gpu::points::compute::LayerTable::build(&scene, &[], scene.color_contrast),
             buffer_capacity,
             crate::gpu::points::compute::DEFAULT_SEED,
+            crate::gpu::points::compute::DEFAULT_WORKGROUPS,
         );
 
         // Create point renderer
@@ -1108,9 +1124,9 @@ impl App {
         );
 
         // Splat renderer shares the same point + colormap buffers
-        let splat_renderer = SplatRenderer::new(
+        let splat_renderer = SplatRenderer::with_pipelines(
             &gpu.device,
-            gpu.format,
+            &splat_pipelines,
             &point_compute.point_buffer,
             &point_compute.colormap_buffer,
         );
@@ -1332,8 +1348,11 @@ impl App {
             // Reopened below once the app exists — the browser has a directory
             // scan behind it, so it can't just be a bool set here.
             show_browser: false,
-            browser_files: Vec::new(),
+            browser: None,
             browser_selected: 0,
+            thumbs,
+            chaos_pipelines,
+            splat_pipelines,
             history: History::new(),
             gizmo_drag_before: None,
             cursor_last_moved: Instant::now(),
@@ -3875,53 +3894,118 @@ impl App {
 
     // === Scene browser (B) ===
 
-    /// Open/close the scene browser overlay. Opening rescans scenes/ (plus
-    /// the current scene's directory, if different).
+    /// Open/close the scene browser. Opening reads the folder it was last
+    /// showing (else the current scene's, else `scenes/`), fresh, so a scene
+    /// that landed while it was closed is there.
     pub fn toggle_browser(&mut self) {
         if self.show_browser {
             self.show_browser = false;
             return;
         }
-
-        let mut dirs = vec![std::path::PathBuf::from("scenes")];
-        if let Some(dir) = self
+        let current_dir = self
             .scene_path
             .as_ref()
             .and_then(|p| Path::new(p).parent())
-            .filter(|d| !d.as_os_str().is_empty() && *d != Path::new("scenes"))
-        {
-            dirs.push(dir.to_path_buf());
-        }
-
-        let mut files: Vec<std::path::PathBuf> = dirs
-            .iter()
-            .filter_map(|d| fs::read_dir(d).ok())
-            .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .collect();
-        files.sort();
-        files.dedup();
-
-        if files.is_empty() {
-            log::warn!("No scene files found in scenes/");
-            return;
-        }
-        // Start on the current scene when it's in the list
-        self.browser_selected = self
-            .scene_path
-            .as_ref()
-            .and_then(|p| files.iter().position(|f| f == Path::new(p)))
-            .unwrap_or(0);
-        self.browser_files = files;
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        let folder = self
+            .prefs
+            .browser_folder
+            .clone()
+            .filter(|d| d.is_dir())
+            .or(current_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("scenes"));
+        self.browser_open_folder(&folder);
         self.show_browser = true;
     }
 
-    /// Scenes found by the last `toggle_browser` scan, for the browser
-    /// window's list.
-    pub fn browser_files(&self) -> &[std::path::PathBuf] {
-        &self.browser_files
+    /// Show `path` in the browser, and remember it for next time.
+    pub fn browser_open_folder(&mut self, path: &Path) {
+        let folder = crate::scene_browser::Folder::read(path, self.prefs.browser_sort);
+        // Start on the current scene when it's in this folder.
+        self.browser_selected = folder
+            .as_ref()
+            .ok()
+            .and_then(|f| {
+                let current = self.scene_path.as_deref().map(Path::new).or(self.scene_png.as_deref())?;
+                f.entries.iter().position(|e| crate::scene_browser::same_path(&e.path, current))
+            })
+            .unwrap_or(0);
+        self.browser = Some(folder);
+        if self.prefs.browser_folder.as_deref() != Some(path) {
+            self.prefs.browser_folder = Some(path.to_path_buf());
+            self.prefs_dirty_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Read the shown folder again.
+    pub fn browser_refresh(&mut self) {
+        self.ui_state.browser_tree.clear();
+        if let Some(path) = self.browser_folder_path().map(Path::to_path_buf) {
+            self.browser_open_folder(&path);
+        }
+    }
+
+    /// The folder the browser is showing, whether or not it could be read.
+    pub fn browser_folder_path(&self) -> Option<&Path> {
+        self.prefs.browser_folder.as_deref().filter(|_| self.browser.is_some())
+    }
+
+    /// The browser's folder, the thumbnail cache and the UI state, borrowed
+    /// together so a row can ask for its thumbnail while it draws.
+    pub fn browser_parts(
+        &mut self,
+    ) -> (
+        Option<&Result<crate::scene_browser::Folder, String>>,
+        &mut crate::gpu::thumbs::ThumbCache,
+        &mut crate::ui::UiState,
+    ) {
+        (self.browser.as_ref(), &mut self.thumbs, &mut self.ui_state)
+    }
+
+    pub fn browser_sort(&self) -> crate::scene_browser::Sort {
+        self.prefs.browser_sort
+    }
+
+    pub fn set_browser_sort(&mut self, sort: crate::scene_browser::Sort) {
+        if self.prefs.browser_sort == sort {
+            return;
+        }
+        self.prefs.browser_sort = sort;
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+        // Keep the keyboard selection on the same scene through the re-sort.
+        if let Some(Ok(folder)) = self.browser.as_mut() {
+            let selected = folder.entries.get(self.browser_selected).map(|e| e.path.clone());
+            folder.sort(sort);
+            self.browser_selected = selected
+                .and_then(|p| folder.entries.iter().position(|e| e.path == p))
+                .unwrap_or(0);
+        }
+    }
+
+    /// Built-in places, then the ones added by hand.
+    pub fn browser_places(&self) -> Vec<crate::scene_browser::Place> {
+        crate::scene_browser::places(&self.prefs.browser_places)
+    }
+
+    pub fn add_browser_place(&mut self, path: &Path) {
+        if self.browser_places().iter().any(|p| crate::scene_browser::same_path(&p.path, path)) {
+            return;
+        }
+        self.prefs.browser_places.push(path.to_path_buf());
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    pub fn remove_browser_place(&mut self, path: &Path) {
+        self.prefs.browser_places.retain(|p| p != path);
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    fn browser_len(&self) -> usize {
+        match &self.browser {
+            Some(Ok(f)) => f.entries.len(),
+            _ => 0,
+        }
     }
 
     /// Index the Up/Down keys are currently on.
@@ -3931,13 +4015,13 @@ impl App {
 
     /// Move the keyboard selection to a clicked row, so the two stay in sync.
     pub fn set_browser_selected(&mut self, idx: usize) {
-        if idx < self.browser_files.len() {
+        if idx < self.browser_len() {
             self.browser_selected = idx;
         }
     }
 
     pub fn browser_move(&mut self, down: bool) {
-        let n = self.browser_files.len();
+        let n = self.browser_len();
         if n == 0 {
             return;
         }
@@ -3949,7 +4033,11 @@ impl App {
     }
 
     pub fn browser_load_selected(&mut self) {
-        if let Some(path) = self.browser_files.get(self.browser_selected).cloned() {
+        let path = match &self.browser {
+            Some(Ok(f)) => f.entries.get(self.browser_selected).map(|e| e.path.clone()),
+            _ => None,
+        };
+        if let Some(path) = path {
             self.request_load_scene(&path);
         }
         self.show_browser = false;
@@ -5257,11 +5345,13 @@ impl App {
     /// The chaos game restarts from warmup.
     fn rebuild_pipelines(&mut self) {
         self.scene.resolve_all_color_speeds(self.color_falloff);
-        self.point_compute = PointCompute::new(
+        self.point_compute = PointCompute::with_pipelines(
             &self.gpu.device,
+            &self.chaos_pipelines,
             &self.layer_table(),
             self.buffer_capacity,
             crate::gpu::points::compute::DEFAULT_SEED,
+            crate::gpu::points::compute::DEFAULT_WORKGROUPS,
         );
         self.point_renderer = PointRenderer::new(
             &self.gpu.device,
@@ -5269,9 +5359,9 @@ impl App {
             &self.point_compute.point_buffer,
             &self.point_compute.colormap_buffer,
         );
-        self.splat_renderer = SplatRenderer::new(
+        self.splat_renderer = SplatRenderer::with_pipelines(
             &self.gpu.device,
-            self.gpu.format,
+            &self.splat_pipelines,
             &self.point_compute.point_buffer,
             &self.point_compute.colormap_buffer,
         );
@@ -6640,6 +6730,9 @@ impl App {
         if self.pending_screenshot {
             self.take_screenshot();
         }
+        // Before egui paints, so a thumbnail built or flown this frame is the
+        // one it draws.
+        self.thumbs.service(&self.gpu.device, &self.gpu.queue, egui_renderer);
 
         let (width, height) = self.gpu.size();
         let aspect = width as f32 / height as f32;

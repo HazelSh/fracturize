@@ -54,8 +54,11 @@ pub struct ThumbPipelines {
 }
 
 impl ThumbPipelines {
-    pub fn new(device: &wgpu::Device) -> Self {
-        Self { chaos: ChaosPipelines::new(device), splat: SplatPipelines::new(device, FORMAT) }
+    /// `chaos` is shared with whatever else runs the chaos game on this
+    /// device; the splat pipelines are the thumbnails' own, being for their
+    /// texture format rather than the window's.
+    pub fn new(device: &wgpu::Device, chaos: &ChaosPipelines) -> Self {
+        Self { chaos: chaos.clone(), splat: SplatPipelines::new(device, FORMAT) }
     }
 }
 
@@ -63,11 +66,16 @@ pub struct Thumbnail {
     scene: Scene,
     compute: PointCompute,
     splat: SplatRenderer,
+    /// Only read back by the tests; the view is what egui draws.
+    #[cfg_attr(not(test), allow(dead_code))]
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// How long one flight of the camera path takes, in seconds: the authored
+    /// path's, else the default orbit's. The hovered entry plays at this rate.
+    seconds: f32,
     /// Zoom periods the ring has been carried by, so a flight that crosses a
     /// wrap carries the points with the camera — by the change in fold depth,
     /// never by the depth itself (see "Infinite Zoom" in AGENTS.md).
@@ -142,8 +150,11 @@ impl Thumbnail {
             Grade::default(),
         );
 
+        let default = crate::path::CameraPath::full_orbit(&scene.camera());
+        let seconds = crate::path::resolve(scene.camera_path.as_ref(), &default).duration();
+
         let mut thumb = Self {
-            scene, compute, splat, texture, view, depth_view, width, height, folded: 0,
+            scene, compute, splat, texture, view, depth_view, width, height, seconds, folded: 0,
         };
         thumb.render(device, queue, None);
         Ok(thumb)
@@ -189,9 +200,160 @@ impl Thumbnail {
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
     }
+}
 
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.texture
+/// What a row gets back when it asks for its thumbnail.
+pub enum ThumbState<'a> {
+    Ready(egui::TextureId),
+    /// Asked for; drawn by the next frame.
+    Pending,
+    Failed(&'a str),
+}
+
+struct Slot {
+    modified: Option<std::time::SystemTime>,
+    /// `(width, height)` it was drawn at; a different size is a rebuild.
+    size: (u32, u32),
+    built: Result<(Thumbnail, egui::TextureId), String>,
+    /// `ThumbCache::frame` when a row last asked for it, for eviction.
+    used: u64,
+}
+
+/// Thumbnails by file: asked for by the browser's rows while it draws, built
+/// by [`ThumbCache::service`] at the top of the next render, and kept.
+///
+/// Split that way because the rows are drawn inside egui's UI pass, which has
+/// neither the device nor egui's renderer to register a texture with; the
+/// render has both. A new thumbnail therefore appears one frame after its row
+/// does, which nobody can see.
+///
+/// A file's thumbnail is rebuilt when its modified time changes, so a scene
+/// saved in another window, or a run landing in `scenes/local-llm/`, is
+/// current the next time its row is drawn.
+pub struct ThumbCache {
+    pipes: ThumbPipelines,
+    slots: std::collections::HashMap<std::path::PathBuf, Slot>,
+    wanted: Vec<(std::path::PathBuf, Option<std::time::SystemTime>, (u32, u32), Scene)>,
+    /// The entry under the pointer, flying its path, and since when.
+    hovered: Option<(std::path::PathBuf, std::time::Instant)>,
+    /// One that stopped being hovered and needs putting back on its still.
+    settle: Option<std::path::PathBuf>,
+    frame: u64,
+}
+
+/// Thumbnails kept at most. About 0.4 MB of VRAM each at 128x72, so this is
+/// ~40 MB — and a folder bigger than this re-renders rows as they scroll back
+/// into view, at under a millisecond each.
+const MAX_SLOTS: usize = 96;
+
+/// Build time spent per frame, past the first thumbnail. At ~0.7 ms apiece
+/// this is a screenful per frame without costing the live view a frame.
+const BUILD_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+
+impl ThumbCache {
+    pub fn new(device: &wgpu::Device, chaos: &ChaosPipelines) -> Self {
+        Self {
+            pipes: ThumbPipelines::new(device, chaos),
+            slots: Default::default(),
+            wanted: Vec::new(),
+            hovered: None,
+            settle: None,
+            frame: 0,
+        }
+    }
+
+    /// The thumbnail for `path` at `size` pixels, asking for it if it isn't
+    /// built (or is stale). `scene` is only cloned when it is.
+    pub fn get(
+        &mut self,
+        path: &std::path::Path,
+        modified: Option<std::time::SystemTime>,
+        size: (u32, u32),
+        scene: &Scene,
+    ) -> ThumbState<'_> {
+        let fresh = self
+            .slots
+            .get(path)
+            .is_some_and(|s| s.modified == modified && s.size == size);
+        if !fresh {
+            if !self.wanted.iter().any(|(p, ..)| p == path) {
+                self.wanted.push((path.to_path_buf(), modified, size, scene.clone()));
+            }
+            return ThumbState::Pending;
+        }
+        let slot = self.slots.get_mut(path).expect("checked above");
+        slot.used = self.frame;
+        match &slot.built {
+            Ok((_, id)) => ThumbState::Ready(*id),
+            Err(e) => ThumbState::Failed(e),
+        }
+    }
+
+    /// Which entry the pointer is over, if any. It flies its camera path; the
+    /// rest stay still.
+    pub fn set_hovered(&mut self, path: Option<&std::path::Path>) {
+        if self.hovered.as_ref().map(|(p, _)| p.as_path()) == path {
+            return;
+        }
+        if let Some((old, _)) = self.hovered.take() {
+            self.settle = Some(old);
+        }
+        self.hovered = path.map(|p| (p.to_path_buf(), std::time::Instant::now()));
+    }
+
+    /// Build what was asked for, fly the hovered entry, settle the one that
+    /// was. Called once a frame, before egui paints.
+    pub fn service(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        egui: &mut egui_wgpu::Renderer,
+    ) {
+        self.frame += 1;
+        let start = std::time::Instant::now();
+        let mut built = 0;
+        while !self.wanted.is_empty() && (built == 0 || start.elapsed() < BUILD_BUDGET) {
+            let (path, modified, size, scene) = self.wanted.remove(0);
+            let built_thumb = Thumbnail::new(device, queue, &self.pipes, scene, size.0, size.1)
+                .map(|t| {
+                    let id = egui.register_native_texture(device, t.view(), wgpu::FilterMode::Linear);
+                    (t, id)
+                });
+            if let Some(Slot { built: Ok((_, id)), .. }) = self.slots.insert(
+                path,
+                Slot { modified, size, built: built_thumb, used: self.frame },
+            ) {
+                egui.free_texture(&id);
+            }
+            built += 1;
+        }
+        // Anything asked for and not reached is asked for again next frame by
+        // its row, if it is still on screen; a row scrolled away shouldn't
+        // keep its place in the queue.
+        self.wanted.clear();
+
+        if let Some(path) = self.settle.take()
+            && let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(&path)
+        {
+            t.render(device, queue, None);
+        }
+        if let Some((path, since)) = &self.hovered
+            && let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(path)
+        {
+            let t_path = (since.elapsed().as_secs_f32() / t.seconds.max(0.1)).fract();
+            t.render(device, queue, Some(t_path));
+        }
+
+        if self.slots.len() > MAX_SLOTS {
+            let mut by_age: Vec<(u64, std::path::PathBuf)> =
+                self.slots.iter().map(|(p, s)| (s.used, p.clone())).collect();
+            by_age.sort();
+            for (_, path) in by_age.into_iter().take(self.slots.len() - MAX_SLOTS) {
+                if let Some(Slot { built: Ok((_, id)), .. }) = self.slots.remove(&path) {
+                    egui.free_texture(&id);
+                }
+            }
+        }
     }
 }
 
@@ -245,7 +407,7 @@ mod tests {
         let (device, queue, adapter) = crate::offline::create_device().unwrap();
         println!("adapter: {adapter}");
         let t = Instant::now();
-        let pipes = ThumbPipelines::new(&device);
+        let pipes = ThumbPipelines::new(&device, &ChaosPipelines::new(&device));
         wait(&device);
         println!("pipelines: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
 

@@ -104,6 +104,9 @@ pub struct UiState {
     /// by hand — it snaps back the instant the selection leaves the viewport
     /// — so it only happens on the frame the selection actually moves.
     pub browser_scrolled_to: Option<usize>,
+    /// The browser's folder tree: each opened node's subfolders, read when it
+    /// first opens rather than every frame. Cleared by a refresh.
+    pub browser_tree: std::collections::HashMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
     /// "Save scene as…" dialog: open state and in-progress filename.
     pub save_as: save_as::SaveAsState,
     /// Render-job dialog: the in-progress form. Kept whole (rather than
@@ -161,6 +164,7 @@ impl UiState {
             transform_menu: None,
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,
+            browser_tree: Default::default(),
             save_as: save_as::SaveAsState::default(),
             render_job: render_job::RenderJobForm::default(),
             palette_stop: None,
@@ -247,6 +251,10 @@ impl WindowKey {
     fn min_size(self) -> egui::Vec2 {
         match self {
             Self::Camera => egui::vec2(360.0, 240.0),
+            // Two panes: a folder tree beside rows that each carry a 128px
+            // thumbnail. The old one-column list was 280 wide, and saved
+            // geometry wins over the default, so this is what widens it.
+            Self::Scenes => egui::vec2(560.0, 300.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -270,7 +278,7 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
     match key {
         WindowKey::Render => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
         WindowKey::Explore => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 220.0)),
-        WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(280.0, 420.0)),
+        WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(720.0, 520.0)),
         WindowKey::Keybinds => (egui::pos2(620.0, top), egui::vec2(360.0, 420.0)),
         WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),
         WindowKey::Camera => (

@@ -129,3 +129,9 @@ pub const ZOOM_IN: &str = "\u{E310}";
 /// at button size is hard to tell from `file`. `cube` (E1DA) anchors this
 /// stretch of the sheet.
 pub const COPY: &str = "\u{E1CA}";
+/// Scene browser: go to the parent folder — Phosphor `arrow-up`. Located by
+/// rendering the candidates with Pillow, as above.
+pub const UP: &str = "\u{E08E}";
+/// Scene browser: read the folder again — Phosphor `arrow-clockwise`, the
+/// mirror of [`RESET`] beside it.
+pub const REFRESH: &str = "\u{E036}";

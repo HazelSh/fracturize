@@ -122,6 +122,17 @@ pub struct Prefs {
     /// — it silently resets every preference the person has.
     #[serde(default)]
     pub gpu_share: Option<f32>,
+    /// Folders added to the scene browser's places, after the built-in ones
+    /// (`scene_browser::builtin_places`).
+    #[serde(default)]
+    pub browser_places: Vec<PathBuf>,
+    /// The folder the scene browser was last showing; it reopens there.
+    /// `None` = never opened, start in `scenes/`.
+    #[serde(default)]
+    pub browser_folder: Option<PathBuf>,
+    /// How the scene browser orders its list.
+    #[serde(default)]
+    pub browser_sort: crate::scene_browser::Sort,
     /// Where each panel window was left, keyed by its `ui::WindowKey` name:
     /// `[x, y, width, height]` in egui points. Panels you've arranged stay
     /// arranged across launches; anything absent falls back to the
@@ -143,6 +154,9 @@ impl Default for Prefs {
             point_count: None,
             threads: None,
             gpu_share: None,
+            browser_places: Vec::new(),
+            browser_folder: None,
+            browser_sort: Default::default(),
             window_geometry: BTreeMap::new(),
         }
     }
