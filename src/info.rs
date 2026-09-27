@@ -805,10 +805,38 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         Cell::new("lacunarity", lacunarity_str),
     ]);
 
+    // A walk that never leaves one spot is a scene whose maps all fix the same
+    // point, and it is the easiest mistake there is: put every translation at
+    // the origin and nothing else can happen. The framing advice below is
+    // computed from the radius, so for a point it would be confidently wrong
+    // — it once told an author to fly the camera in, three rounds running, to
+    // a picture that did not exist. Say what it is instead.
+    let collapsed = m.radius < 1e-4;
     let framed = (m.radius * 2.4).clamp(0.8, 12.0);
     let crisp = 1.5 * framed / 1080.0;
-    s.text(format!("{:<19} -S camera.distance={:.2}", "to fill the frame", framed));
-    s.text(format!("{:<19} -S meta.point_size={:.4}", "for crisp points", crisp));
+    if collapsed {
+        notes.add(
+            "shape",
+            "the attractor is a single point: every map fixes the same point, \
+             so the walk never leaves it — give the maps different translations",
+        );
+        s.text(format!("{:<19} n/a: a single point", "to fill the frame"));
+        s.text(format!("{:<19} n/a: a single point", "for crisp points"));
+    } else {
+        // The next thing down: maps that don't all fix one point, but whose
+        // copies all fall along one direction. Two unrotated maps do exactly
+        // this, in any number of dimensions. Measured along the attractor's
+        // own axes, so a diagonal line counts.
+        if m.principal.y < 0.03 * m.principal.x {
+            notes.add(
+                "shape",
+                "the attractor is nearly a line: every copy falls along one \
+                 direction — turn a map a few degrees, or add one off that line",
+            );
+        }
+        s.text(format!("{:<19} -S camera.distance={:.2}", "to fill the frame", framed));
+        s.text(format!("{:<19} -S meta.point_size={:.4}", "for crisp points", crisp));
+    }
     s.text(format!(
         "{:<19} distance {:.3}, point_size {:.4}",
         "the scene sets", scene.camera_distance, scene.point_size
@@ -823,7 +851,7 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     // with a --view loaded those are different numbers, and the useful one is
     // what you would get.
     let d = effective.distance;
-    if (d / framed).max(framed / d) > 2.0 {
+    if !collapsed && (d / framed).max(framed / d) > 2.0 {
         notes.add(
             "shape",
             format!(
@@ -836,7 +864,7 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     }
     // The bound was already being computed and compared against nothing. Fat
     // points are the most common hand-authoring mistake there is.
-    if scene.point_size > crisp * 1.5 {
+    if !collapsed && scene.point_size > crisp * 1.5 {
         notes.add(
             "render",
             format!(
@@ -2090,6 +2118,36 @@ levels = 14
         broken.transforms[1].weight = 0.0;
         let text = report(&Subject::new(&broken, "blank"));
         assert!(text.contains("maps    [1] #1 has weight 0 and never fires"), "{}", text);
+    }
+
+    /// Maps that all fix one point make a one-point attractor. The report has
+    /// to say so, and must not hand out a camera distance for it.
+    #[test]
+    fn a_collapsed_attractor_is_named_not_framed() {
+        let mut scene = Scene::blank();
+        for t in scene.transforms.iter_mut() {
+            t.matrix = glam::Mat4::from_scale(Vec3::splat(0.5));
+        }
+        let text = report(&Subject::new(&scene, "blank"));
+        assert!(text.contains("the attractor is a single point"), "{}", text);
+        assert!(text.contains("n/a: a single point"), "{}", text);
+        assert!(!text.contains("-S camera.distance"), "{}", text);
+        assert!(!text.contains("that fills the frame"), "{}", text);
+    }
+
+    /// Two unrotated maps make a line, and the report says so; turning one of
+    /// them is enough to lift it off.
+    #[test]
+    fn a_line_is_named() {
+        let scene = Scene::blank();
+        let text = report(&Subject::new(&scene, "blank"));
+        assert!(text.contains("the attractor is nearly a line"), "{}", text);
+
+        let mut turned = Scene::blank();
+        turned.transforms[0].matrix *= glam::Mat4::from_rotation_z(0.3);
+        turned.transforms[1].matrix *= glam::Mat4::from_rotation_x(0.3);
+        let text = report(&Subject::new(&turned, "blank"));
+        assert!(!text.contains("nearly a line"), "{}", text);
     }
 
     /// A map that reflects and a map that expands used to print exactly like a

@@ -204,9 +204,29 @@ class Run:
                 seen = True
 
 
-def interview(r):
-    """Ask the closing questions; return the answer, or None."""
-    r.say(fill("interview.md"))
+def with_image(text, png, vision):
+    """A user message: text, plus the render if the model can see."""
+    if vision and png is not None and png.exists():
+        b64 = base64.b64encode(png.read_bytes()).decode()
+        return [{"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}]
+    return text
+
+
+def interview(r, unseen, vision):
+    """Ask the closing questions; return the answer, or None.
+
+    `unseen` is the last round's (report, png) when the loop ended before the
+    model was shown it. It goes first, so the model isn't asked how it feels
+    about a picture it never saw."""
+    text = fill("interview.md")
+    png = None
+    if unseen:
+        report, png = unseen
+        seen = "\nThe picture shows four views from around it.\n" if vision and png.exists() else ""
+        text = f"Here is how your final version came out:\n\n```\n{report}\n```\n{seen}\n" + text
+    r.say(with_image(text, png, vision))
+    r.forget_old_images()
     try:
         content, _, _, _ = r.ask(free_text=True)
     except Exception as e:
@@ -231,7 +251,7 @@ def main():
     ap.add_argument("task", choices=["new", "free", "tweak"])
     ap.add_argument("--theme", help="the theme, for `new`")
     ap.add_argument("--scene", help="the scene to vary, for `tweak`")
-    ap.add_argument("--rounds", type=int, default=4, help="most rounds the model gets [4]")
+    ap.add_argument("--rounds", type=int, default=6, help="most rounds the model gets [6]")
     ap.add_argument("--repairs", type=int, default=2,
                     help="format fixes allowed per round before the run ends [2]")
     ap.add_argument("--author", help="what the model signs as [the server's model id]")
@@ -292,6 +312,7 @@ def main():
                    scene_name=name.group(1) if name else src.stem))
 
     ending, last_good, rnd, repairs = "ran out of rounds", None, 1, 0
+    unseen = None  # the last render, if the loop ends before it is shown
     while rnd <= args.rounds:
         print(f"round {rnd}: asking…", flush=True)
         try:
@@ -338,6 +359,7 @@ def main():
         else:
             report += "\n\n" + stats
         print(f"round {rnd}: {path.name} rendered", flush=True)
+        unseen = (report, png)
 
         if has_line(content, "DONE"):
             ending = "the model said DONE with this version"
@@ -354,19 +376,15 @@ def main():
         text = fill("round.md", round=rnd, report=report, left=args.rounds - rnd,
                     image_note="\nThe picture shows four views from around the scene.\n"
                     if vision and png.exists() else "")
-        if vision and png.exists():
-            b64 = base64.b64encode(png.read_bytes()).decode()
-            r.say([{"type": "text", "text": text},
-                   {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}])
-            r.forget_old_images()
-        else:
-            r.say(text)
+        r.say(with_image(text, png, vision))
+        r.forget_old_images()
+        unseen = None
         rnd += 1
 
     answer = None
     if ending != "the model chose STOP" and not ending.startswith("request failed"):
         print("closing interview…", flush=True)
-        answer = interview(r)
+        answer = interview(r, unseen, vision)
 
     if last_good:
         header = as_comment(model, answer) if answer else ""

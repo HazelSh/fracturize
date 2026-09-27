@@ -86,13 +86,17 @@ out for a plain map (`linear = 1.0`). Weights around 1 in total are safest.
   `swirl`, `julia`, `disc`, `polar`, `spiral`, `hyperbolic`, `diamond`,
   `horseshoe`, `bent`, `cylinder`, `tangent`. A few degrees of tilt in
   `rotation` gives the layers relief.
-- **Well-behaved:** `bubble`, `fisheye`, `sinusoidal`, `swirl`, `julia`.
 - **Sprays fuzz everywhere:** `spherical`. Keep it under 0.2.
 - `bulb`: pearly nested shells. `absfold`: crystal facets (0.1-0.2 is plenty).
   `boxfold` / `spherefold` only act beyond distance 1 from the centre, so use
   them on maps with scale above 1 and a separate small map to hold things in.
-- `sinusoidal` with scale above 1.4 flattens onto walls, which can look like
-  glass panes.
+
+## First, give it room to exist
+
+Use at least two maps, and give them **different translations**. If every map
+leaves the same point where it is, the whole picture collapses onto that one
+point. Add **a few degrees of rotation** somewhere, too: two unrotated maps make
+only a straight line. The report says if either has happened.
 
 ## Numbers that predict the look
 
@@ -113,7 +117,7 @@ as 60, so those maps want small scales (around 0.45 for Cyc5, 0.16 for Icosa)
 or thin per-axis scales like `[0.1, 0.4, 0.1]`. If the picture is a blob, shrink
 the scales. You do not need a new idea.
 
-Every scale must stay below 1 unless a variation brings the point back.
+Keep every scale below 1 unless a variation brings points back.
 
 **Weight is share, and share is colour.** A map with weight 0.1 among maps of
 weight 1 gets a small share of the points, so its colour barely shows. To see a
@@ -142,5 +146,4 @@ After each scene you get a short report:
 - **dimension**: under 2.1 is lace, 2.1-2.6 a surface, over 2.7 a solid.
 - **an image**, if you can see: four views of your scene from around it.
 
-A broken file comes back with the loader's error message instead. Fix that line
-and send the whole scene again.
+A broken file gets the loader's error instead; fix it and resend the scene.

@@ -359,6 +359,10 @@ pub struct AttractorStats {
     pub radius: f32,
     /// Per-axis standard deviation of the visited points
     pub spread: Vec3,
+    /// Standard deviation along the attractor's own principal axes, largest
+    /// first. Unlike `spread` it doesn't care how the shape is turned, so a
+    /// diagonal line reads as a line: one large value and two near zero.
+    pub principal: Vec3,
     /// Fraction of the bounding box's cells that contain any point
     pub occupancy: f32,
 }
@@ -394,20 +398,7 @@ pub fn measure(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Attract
         points.push(p);
     }
 
-    let n = MEASURE_STEPS as f32;
-    let mean = sum / n;
-    let var = (sum_sq / n - mean * mean).max(Vec3::ZERO);
-
-    let mut radii: Vec<f32> = points.iter().map(|p| (*p - mean).length()).collect();
-    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let radius = radii[(radii.len() as f32 * 0.95) as usize % radii.len()];
-
-    Some(AttractorStats {
-        center: mean,
-        radius,
-        spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
-        occupancy: occupancy(&points, mean, radius),
-    })
+    Some(stats_of(&points))
 }
 
 /// What `measure` finds for each layer of a scene, in scene space, and for the
@@ -478,6 +469,35 @@ fn walk_points(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Vec<Vec
 
 /// Centre, 95th-percentile radius, spread and occupancy of a point set —
 /// `measure`'s arithmetic, for points from anywhere.
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+
+    /// A diagonal line is a line, whichever way it points; axis-aligned
+    /// spread would call it a 3D blob.
+    #[test]
+    fn a_diagonal_line_has_one_principal_spread() {
+        let pts: Vec<Vec3> = (0..1000).map(|i| Vec3::splat(i as f32 / 1000.0)).collect();
+        let s = stats_of(&pts);
+        assert!(s.spread.min_element() > 0.1, "axis spread sees 3D: {:?}", s.spread);
+        assert!(s.principal.x > 0.4 && s.principal.y < 1e-3 && s.principal.z < 1e-3, "{:?}", s.principal);
+    }
+
+    #[test]
+    fn a_cube_has_three_equal_principal_spreads() {
+        let mut pts = Vec::new();
+        for x in 0..10 {
+            for y in 0..10 {
+                for z in 0..10 {
+                    pts.push(Vec3::new(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let p = stats_of(&pts).principal;
+        assert!((p.x - p.z).abs() < 1e-3 * p.x, "{:?}", p);
+    }
+}
+
 fn stats_of(points: &[Vec3]) -> AttractorStats {
     let n = points.len() as f32;
     let (sum, sum_sq) = points.iter().fold((Vec3::ZERO, Vec3::ZERO), |(s, q), p| (s + *p, q + *p * *p));
@@ -490,8 +510,62 @@ fn stats_of(points: &[Vec3]) -> AttractorStats {
         center: mean,
         radius,
         spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
+        principal: principal_spreads(points, mean),
         occupancy: occupancy(points, mean, radius),
     }
+}
+
+/// Standard deviations along the principal axes of a point cloud, largest
+/// first: the square roots of its covariance matrix's eigenvalues, found by
+/// Jacobi rotation (a symmetric 3x3 converges in a handful of sweeps).
+fn principal_spreads(points: &[Vec3], mean: Vec3) -> Vec3 {
+    let n = points.len().max(1) as f32;
+    let mut c = [[0.0f32; 3]; 3];
+    for p in points {
+        let d = *p - mean;
+        let d = [d.x, d.y, d.z];
+        for i in 0..3 {
+            for j in 0..3 {
+                c[i][j] += d[i] * d[j] / n;
+            }
+        }
+    }
+    for _ in 0..16 {
+        let (mut p, mut q, mut big) = (0, 1, 0.0f32);
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            if c[i][j].abs() > big {
+                (p, q, big) = (i, j, c[i][j].abs());
+            }
+        }
+        if big < 1e-12 {
+            break;
+        }
+        let theta = 0.5 * (2.0 * c[p][q]).atan2(c[q][q] - c[p][p]);
+        let (sn, cs) = theta.sin_cos();
+        let mut r = [[0.0f32; 3]; 3];
+        for (i, row) in r.iter_mut().enumerate() {
+            row[i] = 1.0;
+        }
+        r[p][p] = cs;
+        r[q][q] = cs;
+        r[p][q] = sn;
+        r[q][p] = -sn;
+        // c <- r^T c r
+        let mut t = [[0.0f32; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                t[i][j] = (0..3).map(|k| c[i][k] * r[k][j]).sum();
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                c[i][j] = (0..3).map(|k| r[k][i] * t[k][j]).sum();
+            }
+        }
+    }
+    let mut e = [c[0][0].max(0.0).sqrt(), c[1][1].max(0.0).sqrt(), c[2][2].max(0.0).sqrt()];
+    e.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    Vec3::from(e)
 }
 
 /// Fraction of a coarse grid over the attractor's core that holds any point.

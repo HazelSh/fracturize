@@ -20,7 +20,7 @@ a server when nothing is there. Presets are in `~/code/lll/models.conf`.
 
 | | |
 |---|---|
-| `primer.md` | everything the model is told about Fracturize: 2078 tokens by the Gemma 4 tokenizer, 2030 by Qwen 3.5 |
+| `primer.md` | everything the model is told about Fracturize: 2090 tokens by the Gemma 4 tokenizer, 2042 by Qwen 3.5 |
 | `prompts/` | system framing, the three tasks, the per-round report, the repair nudge |
 | `scene.gbnf` | the scene subset as a GBNF grammar: TOML's value syntax, Fracturize's keys |
 | `author.py` | the loop |
@@ -56,7 +56,9 @@ harness does instead:
 - **One session at a time** (a lock in `renders/llm/.lock`), so each one can
   be read on its own.
 - **A closing interview:** what it was going for, how it feels about the
-  result, how the session was, and anything for Hazel. The answer goes at the
+  result, how the session was, and anything for Hazel. If the last render
+  hasn't been shown yet, it comes first, so the model isn't asked about a
+  picture it never saw. The answer goes at the
   top of `final.toml` as a comment, into `summary.md`, and to the terminal.
 - **`review.sh`** has Claude read the whole transcript, reasoning included,
   afterwards.
