@@ -2256,7 +2256,7 @@ Every still and every animation now writes a **record** (`src/record.rs`) —
 twice, to two audiences:
 
 - **into the PNG**, as `iTXt` chunks, so the picture carries its own recipe
-  wherever it goes. `Software` (= `fracturize <version.txt>`), `Creation Time`,
+  wherever it goes. `Software` (= `fracturize α-0.5 (15698f9, 2026-09-27)`: the release from `version.txt`, then the git commit — `-dirty` if the compiled-in source had uncommitted changes — and that commit's date, all stamped by `build.rs`; `--version` prints the same), `Creation Time`,
   `fracturize:scene` (the full scene TOML, verbatim), `fracturize:render` (the
   same block as the sidecar) and `fracturize:scene_sha256`;
 - **beside it**, as `renders/<name>.render.toml`, following the pattern
@@ -2275,7 +2275,7 @@ Five things about it are load-bearing:
   sessions. `renders/` is gitignored. A useful consequence is that
   `Scene::save`'s comment-preserving `toml_edit` merge never has to learn about
   render data, so there is no new way for scene round-tripping to drift.
-- **`iTXt`, not `tEXt`.** tEXt is Latin-1; the version string alone is `α-0.4`,
+- **`iTXt`, not `tEXt`.** tEXt is Latin-1; the version string alone is `α-0.5`,
   and scene and author names are UTF-8 in general. iTXt is the chunk PNG
   defines for UTF-8.
 - **The scene is embedded as rendered, not as the file on disk.** By the time a

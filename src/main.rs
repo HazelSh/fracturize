@@ -106,7 +106,7 @@ scene format and the maths behind --zoom.";
 
 /// 3D IFS Fractal Renderer inspired by Apophysis
 #[derive(Parser, Debug)]
-#[command(name = "fracturize")]
+#[command(name = "fracturize", version = crate::version::BUILD)]
 #[command(
     about = "3D IFS fractal renderer: an interactive window by default, stills and \
              animation with --render",

@@ -46,7 +46,7 @@ use crate::camera::{CameraOverride, OrbitCamera};
 use crate::gpu::points::splat::Grade;
 use crate::gpu::Filter;
 use crate::offline::BitDepth;
-use crate::version::VERSION;
+use crate::version::{BUILD, COMMIT, COMMIT_DATE, VERSION};
 
 /// Hex SHA-256, the one spelling.
 ///
@@ -146,7 +146,7 @@ impl RenderRecord {
         let q = &self.quality;
         let mut s = String::new();
         let _ = writeln!(s, "# fracturize render record — informational, not a scene file.");
-        let _ = writeln!(s, "# Written by fracturize {} at {}", VERSION, self.created);
+        let _ = writeln!(s, "# Written by fracturize {} at {}", BUILD, self.created);
         let _ = writeln!(s);
 
         let _ = writeln!(s, "[source]");
@@ -199,6 +199,10 @@ impl RenderRecord {
         let _ = writeln!(s, "# Informational. Do not replay any of this: a thread count that");
         let _ = writeln!(s, "# is right on one box is wrong advice on another.");
         let _ = writeln!(s, "version = {}", toml_str(VERSION));
+        let _ = writeln!(s, "commit = {}", toml_str(COMMIT));
+        if !COMMIT_DATE.is_empty() {
+            let _ = writeln!(s, "commit_date = {}", toml_str(COMMIT_DATE));
+        }
         let _ = writeln!(s, "threads = {}", self.machine.threads);
         let _ = writeln!(s, "elapsed_seconds = {}", num(self.machine.elapsed_seconds));
         if !self.machine.adapter.is_empty() {
@@ -215,7 +219,7 @@ impl RenderRecord {
     /// format to keep in sync for no reader's benefit.
     pub fn png_chunks(&self) -> Vec<(String, String)> {
         vec![
-            ("Software".to_string(), format!("fracturize {}", VERSION)),
+            ("Software".to_string(), format!("fracturize {}", BUILD)),
             ("Creation Time".to_string(), self.created.clone()),
             (KEY_SCENE_SHA.to_string(), self.scene_sha256()),
             (KEY_RENDER.to_string(), self.to_toml()),
