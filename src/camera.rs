@@ -132,7 +132,12 @@ pub const Z_NEAR: f32 = 0.1;
 /// clips is deep sub-pixel at any resolution, while `Z_NEAR / (0.005 · d)`
 /// keeps the depth range inside what Depth32Float carries comfortably.
 const NEAR_FRAC: f32 = 0.005;
+/// The far plane for a scene framed near enough that a constant works.
+/// [`OrbitCamera::far_plane`] is the value used and is never nearer than this.
 pub const Z_FAR: f32 = 100.0;
+/// The far plane as a multiple of the orbit radius: what the constant gave a
+/// scene framed at 12.5, so every scene framed nearer than that is unchanged.
+const FAR_FRAC: f32 = 8.0;
 
 /// Radians of orbit or roll per pixel of drag
 const DRAG_RATE: f32 = 0.006;
@@ -316,8 +321,19 @@ impl OrbitCamera {
         (self.distance * NEAR_FRAC).min(Z_NEAR).max(1e-7)
     }
 
+    /// The far plane: [`Z_FAR`], or further for a scene framed far out.
+    ///
+    /// A constant here said "no scene is bigger than 100 units", and the fit
+    /// tool writes scenes framed at 1300: under the points renderer the whole
+    /// attractor sat behind the plane and the window drew nothing, while splat
+    /// — which doesn't clip on depth — and the browser's thumbnail showed it
+    /// fine. Scaling with the distance can only move the plane outward.
+    pub fn far_plane(&self) -> f32 {
+        (self.distance * FAR_FRAC).max(Z_FAR)
+    }
+
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov.radians(), aspect, self.near_plane(), Z_FAR)
+        Mat4::perspective_rh(self.fov.radians(), aspect, self.near_plane(), self.far_plane())
             * self.view_matrix()
     }
 
@@ -415,9 +431,13 @@ impl OrbitCamera {
     /// by 15% of a period, once per period, forever — and because the clamp
     /// makes the sequence idempotent, the camera settled into a cycle of four
     /// distances that no amount of further scrolling could leave.
+    ///
+    /// The ceiling never pulls the camera *in*: a scene framed beyond
+    /// [`MAX_ORBIT_DISTANCE`] (the fit tool's are, at ~1300) used to jump to 80
+    /// on the first notch of the wheel in either direction.
     pub fn zoom(&mut self, steps: f32, floor: f32) {
-        self.distance =
-            (self.distance * 0.9f32.powf(steps)).clamp(floor.max(1e-6), MAX_ORBIT_DISTANCE);
+        let ceiling = MAX_ORBIT_DISTANCE.max(self.distance);
+        self.distance = (self.distance * 0.9f32.powf(steps)).clamp(floor.max(1e-6), ceiling);
     }
 
     /// Right-drag roll: horizontal drag spins the horizon.
@@ -890,6 +910,27 @@ mod tests {
     /// The near plane has to be a fixed fraction of the framing, or a zoom
     /// wrap moves it through the object. Two framings one period apart must
     /// put it at the same place *relative to the picture*.
+    #[test]
+    fn a_scene_framed_far_out_is_inside_the_far_plane() {
+        // The fit tool's out-000: framed at 1319 with a 446 radius.
+        let cam = OrbitCamera::from_chart(0.0, 0.0, 0.0, 1319.0, Vec3::ZERO);
+        assert!(cam.far_plane() > 1319.0 + 446.0);
+        // ...and nothing framed nearer than 12.5 moves.
+        for d in [0.1, 1.0, 12.0, 12.5] {
+            let cam = OrbitCamera::from_chart(0.0, 0.0, 0.0, d, Vec3::ZERO);
+            assert_eq!(cam.far_plane(), Z_FAR, "d={d}");
+        }
+    }
+
+    #[test]
+    fn the_wheel_never_pulls_a_far_scene_in() {
+        let mut cam = OrbitCamera::from_chart(0.0, 0.0, 0.0, 1319.0, Vec3::ZERO);
+        cam.zoom(-1.0, MIN_ORBIT_DISTANCE);
+        assert!((cam.distance - 1319.0).abs() < 1e-3, "zooming out held at {}", cam.distance);
+        cam.zoom(1.0, MIN_ORBIT_DISTANCE);
+        assert!((cam.distance - 1319.0 * 0.9).abs() < 1e-2, "zooming in went to {}", cam.distance);
+    }
+
     #[test]
     fn the_near_plane_scales_with_the_framing() {
         let s = 0.325_f32;

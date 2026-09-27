@@ -380,7 +380,7 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
                 base.fov.radians(),
                 aspect,
                 base.near_plane(),
-                crate::camera::Z_FAR,
+                base.far_plane(),
             );
             let right = base.right();
             let up = base.up();
