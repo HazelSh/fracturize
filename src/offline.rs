@@ -423,7 +423,7 @@ fn build_tiles(base: &OrbitCamera, grid: GridMode, aspect: f32) -> Vec<TileView>
 }
 
 /// Create a headless wgpu device with storage limits raised to adapter max
-fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
+pub(crate) fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -675,7 +675,7 @@ const GPU_TIMING_SAMPLES: u32 = 256;
 /// Offline, an unusable zoom map is fatal rather than a status-bar note: a
 /// render is a thing you come back to later, and silently getting the ordinary
 /// bounded attractor back is the kind of surprise that costs an hour.
-fn scene_zoom(scene: &Scene) -> Result<Option<crate::renorm::Renorm>, String> {
+pub(crate) fn scene_zoom(scene: &Scene) -> Result<Option<crate::renorm::Renorm>, String> {
     scene
         .zoom
         .as_ref()
@@ -698,16 +698,16 @@ fn scene_zoom(scene: &Scene) -> Result<Option<crate::renorm::Renorm>, String> {
 /// an 11% drop in one frame. Offline was the only renderer with the bug,
 /// which is why it showed up in a render and never in the window.
 #[derive(Clone, Copy)]
-struct Haze {
+pub(crate) struct Haze {
     /// `Some` only when a view pinned the band; otherwise auto-ranged
     pinned: Option<(f32, f32)>,
-    transmittance: f32,
-    saturation: f32,
+    pub(crate) transmittance: f32,
+    pub(crate) saturation: f32,
 }
 
 impl Haze {
     /// `(near, far)` for a camera at `distance`
-    fn band(&self, distance: f32) -> (f32, f32) {
+    pub(crate) fn band(&self, distance: f32) -> (f32, f32) {
         self.pinned.unwrap_or_else(|| crate::haze::auto_band(distance))
     }
 }
@@ -784,15 +784,35 @@ fn base_setup(
     haze_enabled: bool,
     over: CameraOverride,
 ) -> (OrbitCamera, f32, Haze, i32) {
+    let (camera, point_size, haze, folded, unpinned) = frame_setup(view, scene, haze_enabled, over);
+    if unpinned {
+        println!("haze band auto-ranged (a pinned band is not wrap-invariant under infinite zoom)");
+    }
+    if !over.is_empty() {
+        // So a framing found by flags can be kept without transcription
+        println!("{}", CameraOverride::describe(&camera));
+    }
+    (camera, point_size, haze, folded)
+}
+
+/// `base_setup` without the printing, for callers that frame a scene every
+/// frame — the scene browser's thumbnails. The last value says whether a
+/// pinned haze band was dropped for infinite zoom, which `base_setup` reports.
+pub(crate) fn frame_setup(
+    view: &Option<View>,
+    scene: &Scene,
+    haze_enabled: bool,
+    over: CameraOverride,
+) -> (OrbitCamera, f32, Haze, i32, bool) {
     let (point_size, mut haze) = base_render_params(view, scene, haze_enabled);
     // A band pinned in world units cannot survive a zoom wrap: the wrap
     // rescales the camera and the picture together and leaves the band where
     // it was, so the image drifts out of the haze across a period and snaps
     // back at the seam. Under infinite zoom the pin is a bug by construction,
     // and every legacy view carries one — say so and auto-range instead.
-    if haze.pinned.is_some() && scene.zoom.is_some() {
+    let unpinned = haze.pinned.is_some() && scene.zoom.is_some();
+    if unpinned {
         haze.pinned = None;
-        println!("haze band auto-ranged (a pinned band is not wrap-invariant under infinite zoom)");
     }
     let (camera, folded) = effective_camera_folded(view.as_ref(), scene, over);
     // And the same for the ink; see `Renorm::point_scale`.
@@ -814,11 +834,7 @@ fn base_setup(
         }
         None => point_size,
     };
-    if !over.is_empty() {
-        // So a framing found by flags can be kept without transcription
-        println!("{}", CameraOverride::describe(&camera));
-    }
-    (camera, point_size, haze, folded)
+    (camera, point_size, haze, folded, unpinned)
 }
 
 /// Point size and haze from a view file, or the scene's own. The framing that

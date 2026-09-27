@@ -390,121 +390,27 @@ impl GroupTable {
     }
 }
 
-impl PointCompute {
-    pub fn new(
-        device: &wgpu::Device,
-        // The scene's maps, grouped by layer, with their colours and
-        // colormaps. Per-transform RGB is uploaded whatever the mode: the
-        // mode is a uniform flip at draw time, so the buffer has to be ready
-        // for either.
-        table: &LayerTable,
-        buffer_capacity: u32,
-        // Seeds the walkers. `DEFAULT_SEED` reproduces every render made before
-        // this parameter existed.
-        seed: u64,
-    ) -> Self {
-        // Calculate parallelism - aim for ~0.125% of buffer per frame (full cycle every 800 frames)
-        let points_per_frame = (buffer_capacity / 800).max(1000);
-        let num_workgroups = 64u32;
-        let num_walkers = num_workgroups * WORKGROUP_SIZE;
-        let iterations_per_walker = ((points_per_frame + num_walkers - 1) / num_walkers).max(1);
-        let actual_points_per_frame = num_walkers * iterations_per_walker;
-        
-        // Warmup uses 10x more iterations to fill buffer in ~80 frames instead of 800
-        let warmup_iterations_per_walker = iterations_per_walker * 10;
-        let warmup_points_per_frame = num_walkers * warmup_iterations_per_walker;
-        let warmup_frames = (buffer_capacity + warmup_points_per_frame - 1) / warmup_points_per_frame;
+/// The interactive walker count, in workgroups: 16,384 walkers.
+pub const DEFAULT_WORKGROUPS: u32 = 64;
 
-        log::info!(
-            "Point compute: {} walkers × {} iters = {} points/frame (warmup: {} iters, {} frames to fill)",
-            num_walkers, iterations_per_walker, actual_points_per_frame, warmup_iterations_per_walker, warmup_frames
-        );
+/// The chaos game's compiled pipelines, which depend on nothing but the device.
+/// Build once per device and hand to [`PointCompute::with_pipelines`]; wgpu
+/// handles are reference counted, so every instance shares one compile.
+#[derive(Clone)]
+pub struct ChaosPipelines {
+    pipeline: wgpu::ComputePipeline,
+    rewrap_pipeline: wgpu::ComputePipeline,
+    stats_pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
 
+impl ChaosPipelines {
+    pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("point_chaos_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/points/chaos.wgsl").into()),
         });
 
-        // Transform data, layer by layer, with per-layer cumulative weights
-        let groups = &table.groups;
-        let colormap: &[[f32; 4]; 256] =
-            table.colormaps[..256].try_into().expect("layer 0's colormap");
-
-        let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("transform_buffer"),
-            contents: bytemuck::cast_slice(&table.gpu_transforms),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // The symmetry groups. Fixed capacity so that changing a group is a
-        // buffer write rather than a pipeline rebuild — see MAX_GROUP_ELEMENTS.
-        let group_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("symmetry_group_buffer"),
-            contents: bytemuck::cast_slice(&groups.padded()),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Initialize walker states with different seeds
-        let walker_states: Vec<WalkerState> =
-            (0..num_walkers).map(|i| WalkerState::new(walker_seed(seed, i))).collect();
-
-        let walker_states_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("walker_states_buffer"),
-            contents: bytemuck::cast_slice(&walker_states),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Parameters uniform
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point_compute_params"),
-            size: std::mem::size_of::<PointComputeParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Point buffer - the main output
-        let point_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point_buffer"),
-            size: (buffer_capacity as usize * std::mem::size_of::<Point>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        // The emphasis buffers. The big one is not allocated until something
-        // asks for it (see `set_emphasis`); until then this stand-in keeps the
-        // binding legal, and the shader never writes through it.
-        let sensitivity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("point_sensitivity_placeholder"),
-            size: 16,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("emphasis_stats_buffer"),
-            size: 16,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Colormap buffer
-        let colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("colormap_buffer"),
-            contents: bytemuck::cast_slice(colormap),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let layer_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("layer_table"),
-            contents: bytemuck::cast_slice(&table.gpu_layers(num_walkers)),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let layer_colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("layer_colormaps"),
-            contents: bytemuck::cast_slice(&table.colormaps),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("point_compute_bind_group_layout"),
             entries: &[
@@ -643,6 +549,150 @@ impl PointCompute {
             cache: None,
         });
 
+        Self { pipeline, rewrap_pipeline, stats_pipeline, bind_group_layout }
+    }
+}
+
+impl PointCompute {
+    pub fn new(
+        device: &wgpu::Device,
+        table: &LayerTable,
+        buffer_capacity: u32,
+        seed: u64,
+    ) -> Self {
+        Self::with_pipelines(
+            device,
+            &ChaosPipelines::new(device),
+            table,
+            buffer_capacity,
+            seed,
+            DEFAULT_WORKGROUPS,
+        )
+    }
+
+    /// [`PointCompute::new`], on pipelines compiled once and shared, and with
+    /// `workgroups` × 256 walkers rather than the interactive 16,384.
+    ///
+    /// Compiling `chaos.wgsl` costs ~6 ms on the GTX 1080 (11 ms cold), and
+    /// every instance used to pay it. That is a stall on every transform add,
+    /// and it would be one per scene in a folder of thumbnails.
+    pub fn with_pipelines(
+        device: &wgpu::Device,
+        pipelines: &ChaosPipelines,
+        // The scene's maps, grouped by layer, with their colours and
+        // colormaps. Per-transform RGB is uploaded whatever the mode: the
+        // mode is a uniform flip at draw time, so the buffer has to be ready
+        // for either.
+        table: &LayerTable,
+        buffer_capacity: u32,
+        // Seeds the walkers. `DEFAULT_SEED` reproduces every render made before
+        // this parameter existed.
+        seed: u64,
+        // Walkers, in workgroups of 256. Changing it changes walker seeding
+        // and therefore the image, so everything that must match a render
+        // uses `DEFAULT_WORKGROUPS`.
+        num_workgroups: u32,
+    ) -> Self {
+        // Calculate parallelism - aim for ~0.125% of buffer per frame (full cycle every 800 frames)
+        let points_per_frame = (buffer_capacity / 800).max(1000);
+        let num_walkers = num_workgroups * WORKGROUP_SIZE;
+        let iterations_per_walker = ((points_per_frame + num_walkers - 1) / num_walkers).max(1);
+        let actual_points_per_frame = num_walkers * iterations_per_walker;
+        
+        // Warmup uses 10x more iterations to fill buffer in ~80 frames instead of 800
+        let warmup_iterations_per_walker = iterations_per_walker * 10;
+        let warmup_points_per_frame = num_walkers * warmup_iterations_per_walker;
+        let warmup_frames = (buffer_capacity + warmup_points_per_frame - 1) / warmup_points_per_frame;
+
+        log::info!(
+            "Point compute: {} walkers × {} iters = {} points/frame (warmup: {} iters, {} frames to fill)",
+            num_walkers, iterations_per_walker, actual_points_per_frame, warmup_iterations_per_walker, warmup_frames
+        );
+
+
+        // Transform data, layer by layer, with per-layer cumulative weights
+        let groups = &table.groups;
+        let colormap: &[[f32; 4]; 256] =
+            table.colormaps[..256].try_into().expect("layer 0's colormap");
+
+        let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("transform_buffer"),
+            contents: bytemuck::cast_slice(&table.gpu_transforms),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // The symmetry groups. Fixed capacity so that changing a group is a
+        // buffer write rather than a pipeline rebuild — see MAX_GROUP_ELEMENTS.
+        let group_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("symmetry_group_buffer"),
+            contents: bytemuck::cast_slice(&groups.padded()),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Initialize walker states with different seeds
+        let walker_states: Vec<WalkerState> =
+            (0..num_walkers).map(|i| WalkerState::new(walker_seed(seed, i))).collect();
+
+        let walker_states_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("walker_states_buffer"),
+            contents: bytemuck::cast_slice(&walker_states),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Parameters uniform
+        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point_compute_params"),
+            size: std::mem::size_of::<PointComputeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Point buffer - the main output
+        let point_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point_buffer"),
+            size: (buffer_capacity as usize * std::mem::size_of::<Point>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        // The emphasis buffers. The big one is not allocated until something
+        // asks for it (see `set_emphasis`); until then this stand-in keeps the
+        // binding legal, and the shader never writes through it.
+        let sensitivity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point_sensitivity_placeholder"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("emphasis_stats_buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Colormap buffer
+        let colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("colormap_buffer"),
+            contents: bytemuck::cast_slice(colormap),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let layer_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("layer_table"),
+            contents: bytemuck::cast_slice(&table.gpu_layers(num_walkers)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let layer_colormap_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("layer_colormaps"),
+            contents: bytemuck::cast_slice(&table.colormaps),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Bind group layout
+        let ChaosPipelines { pipeline, rewrap_pipeline, stats_pipeline, bind_group_layout } =
+            pipelines.clone();
+
         // Every buffer but the sensitivity one is fixed for the lifetime of the
         // pipeline, so the bind group is built once here and only rebuilt when
         // the emphasis swaps the stand-in for the real thing.
@@ -769,7 +819,7 @@ impl PointCompute {
         self.advance_with_iters(queue, self.warmup_iterations_per_walker)
     }
 
-    fn advance_with_iters(&mut self, queue: &wgpu::Queue, current_iters: u32) -> u32 {
+    pub fn advance_with_iters(&mut self, queue: &wgpu::Queue, current_iters: u32) -> u32 {
         let pending = self.num_walkers * current_iters;
         // Counting this dispatch, because the chaos pass is encoded before
         // anything reads a sensitivity and the points it is about to write are

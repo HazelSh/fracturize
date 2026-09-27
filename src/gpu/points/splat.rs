@@ -173,13 +173,21 @@ struct AccumTarget {
     height: u32,
 }
 
-impl SplatRenderer {
-    pub fn new(
-        device: &Device,
-        format: TextureFormat,
-        point_buffer: &Buffer,
-        colormap_buffer: &Buffer,
-    ) -> Self {
+/// The splat renderer's compiled pipelines, for one device and one output
+/// format. Build once and hand to [`SplatRenderer::with_pipelines`]; the
+/// handles are reference counted, so every renderer shares one compile.
+#[derive(Clone)]
+pub struct SplatPipelines {
+    accum_format: TextureFormat,
+    quad_pipeline: RenderPipeline,
+    point_pipeline: RenderPipeline,
+    tonemap_pipeline: RenderPipeline,
+    accum_layout: BindGroupLayout,
+    tonemap_layout: BindGroupLayout,
+}
+
+impl SplatPipelines {
+    pub fn new(device: &Device, format: TextureFormat) -> Self {
         let accum_format = accum_format(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("splat_shader"),
@@ -365,6 +373,37 @@ impl SplatRenderer {
             multiview_mask: None,
             cache: None,
         });
+
+        Self { accum_format, quad_pipeline, point_pipeline, tonemap_pipeline, accum_layout, tonemap_layout }
+    }
+}
+
+impl SplatRenderer {
+    pub fn new(
+        device: &Device,
+        format: TextureFormat,
+        point_buffer: &Buffer,
+        colormap_buffer: &Buffer,
+    ) -> Self {
+        Self::with_pipelines(device, &SplatPipelines::new(device, format), point_buffer, colormap_buffer)
+    }
+
+    /// [`SplatRenderer::new`] on pipelines compiled once and shared; see
+    /// [`SplatPipelines`].
+    pub fn with_pipelines(
+        device: &Device,
+        pipelines: &SplatPipelines,
+        point_buffer: &Buffer,
+        colormap_buffer: &Buffer,
+    ) -> Self {
+        let SplatPipelines {
+            accum_format,
+            quad_pipeline,
+            point_pipeline,
+            tonemap_pipeline,
+            accum_layout,
+            tonemap_layout,
+        } = pipelines.clone();
 
         let camera_buffer = create_camera_buffer(device);
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {

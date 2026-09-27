@@ -12,6 +12,7 @@ pub mod gizmo;
 pub mod lines;
 pub mod overlay;
 pub mod points;
+pub mod thumbs;
 pub mod timing;
 
 // Re-export shared types
