@@ -107,6 +107,9 @@ pub struct UiState {
     /// The browser's folder tree: each opened node's subfolders, read when it
     /// first opens rather than every frame. Cleared by a refresh.
     pub browser_tree: std::collections::HashMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+    /// A folder the browser has just moved to, canonical. The tree opens it
+    /// and scrolls it into view once, then clears this.
+    pub browser_arrived: Option<std::path::PathBuf>,
     /// "Save scene as…" dialog: open state and in-progress filename.
     pub save_as: save_as::SaveAsState,
     /// Render-job dialog: the in-progress form. Kept whole (rather than
@@ -165,6 +168,7 @@ impl UiState {
             variation_rows: (usize::MAX, Vec::new()),
             browser_scrolled_to: None,
             browser_tree: Default::default(),
+            browser_arrived: None,
             save_as: save_as::SaveAsState::default(),
             render_job: render_job::RenderJobForm::default(),
             palette_stop: None,

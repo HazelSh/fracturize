@@ -60,14 +60,19 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             });
             egui::Panel::left("fracturize_scenes_nav")
                 .resizable(true)
-                .default_size(180.0)
+                .default_size(200.0)
                 .min_size(120.0)
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        tree(ui, app, &mut actions);
-                        ui.add_space(10.0);
+                    // Places pinned under the tree, so a long tree can't
+                    // scroll them out of reach.
+                    egui::Panel::bottom("fracturize_scenes_places").show(ui, |ui| {
+                        ui.add_space(4.0);
                         places(ui, app, &mut actions);
                     });
+                    egui::ScrollArea::vertical()
+                        .id_salt("fracturize_scenes_tree_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| tree(ui, app, &mut actions));
                 });
             hovered = list(ui, app, &mut actions);
         });
@@ -134,7 +139,7 @@ fn top_bar(ui: &mut egui::Ui, app: &mut App, actions: &mut Vec<Action>) {
             }
             if let Some(path) = &current {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(path.display().to_string()).monospace().weak())
+                    egui::Label::new(egui::RichText::new(display_path(path)).monospace().weak())
                         .truncate(),
                 );
             }
@@ -153,22 +158,49 @@ fn parent_of(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// The folder tree, rooted at the place the shown folder is in (else at the
-/// folder itself). Each node's subfolders are read when it is first drawn.
+/// The folder tree. Rooted at home (or `/` for a folder outside it) and
+/// always the same tree, so where you are is a highlighted row in a fixed
+/// map rather than a new root every click. The branch down to the shown
+/// folder is held open, a folder opens when it is shown, and the tree scrolls
+/// it into view. Each node's subfolders are read the first time it is drawn.
 fn tree(ui: &mut egui::Ui, app: &mut App, actions: &mut Vec<Action>) {
     ui.label(egui::RichText::new("Folders").small().weak());
-    let Some(current) = app.browser_folder_path().map(Path::to_path_buf) else { return };
-    let root = app
-        .browser_places()
-        .into_iter()
-        .filter(|p| current.starts_with(&p.path))
-        .max_by_key(|p| p.path.components().count())
-        .map(|p| p.path)
-        .unwrap_or_else(|| current.clone());
-    node(ui, app, &root, &current, actions);
+    let Some(current) = app.browser_folder_path() else { return };
+    let current = current.canonicalize().unwrap_or_else(|_| current.to_path_buf());
+    let root = match home() {
+        Some(home) if current.starts_with(&home) => home,
+        _ => PathBuf::from("/"),
+    };
+    // A folder that has just become the shown one opens and scrolls into
+    // view once, and is then the person's to close.
+    let arrived = app.ui_state.browser_arrived.take_if(|p| *p == current);
+    node(ui, app, &root, &current, arrived.is_some(), actions);
 }
 
-fn node(ui: &mut egui::Ui, app: &mut App, dir: &Path, current: &Path, actions: &mut Vec<Action>) {
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).and_then(|h| h.canonicalize().ok())
+}
+
+/// A path as the top bar shows it: absolute, with home as `~`.
+fn display_path(path: &Path) -> String {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    match home() {
+        Some(home) if abs.starts_with(&home) => {
+            let rest = abs.strip_prefix(&home).unwrap_or(&abs);
+            if rest.as_os_str().is_empty() { "~".into() } else { format!("~/{}", rest.display()) }
+        }
+        _ => abs.display().to_string(),
+    }
+}
+
+fn node(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    dir: &Path,
+    current: &Path,
+    arrived: bool,
+    actions: &mut Vec<Action>,
+) {
     let children = app
         .ui_state
         .browser_tree
@@ -176,39 +208,41 @@ fn node(ui: &mut egui::Ui, app: &mut App, dir: &Path, current: &Path, actions: &
         .or_insert_with(|| Folder::subdirs_of(dir))
         .clone();
     let is_current = dir == current;
+    let name = if Some(dir) == home().as_deref() { "~".to_string() } else { folder_label(dir) };
     let mut label = |ui: &mut egui::Ui, app: &mut App| {
-        let resp = ui.selectable_label(is_current, folder_label(dir));
-        if hinted(resp, &mut app.ui_state, dir.display().to_string(), "click: show this folder")
-            .clicked()
+        let resp = ui.selectable_label(is_current, &name);
+        if is_current && arrived {
+            resp.scroll_to_me(Some(egui::Align::Center));
+        }
+        if hinted(resp, &mut app.ui_state, display_path(dir), "click: show this folder").clicked()
+            && !is_current
         {
             actions.push(Action::Open(dir.to_path_buf()));
         }
     };
     if children.is_empty() {
         ui.horizontal(|ui| {
-            ui.add_space(ui.spacing().icon_width + ui.spacing().item_spacing.x);
+            // Laid out as `CollapsingState::show_header` lays out a header —
+            // the arrow takes the full indent width, with no item spacing —
+            // so a leaf's name lines up with its siblings'.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(ui.spacing().indent);
             label(ui, app);
         });
         return;
     }
     let id = ui.make_persistent_id(("fracturize_scenes_tree", dir));
-    // The branch holding the shown folder stays open, so navigating anywhere
-    // — by a place, by Up — always shows where you are. The shown folder
-    // itself starts open, to show what is under it, and can be closed.
     let on_path = current.starts_with(dir) && !is_current;
-    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-        ui.ctx(),
-        id,
-        on_path || is_current,
-    );
-    if on_path {
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, on_path);
+    if on_path || (is_current && arrived) {
         state.set_open(true);
     }
     state
         .show_header(ui, |ui| label(ui, app))
         .body(|ui| {
             for child in &children {
-                node(ui, app, child, current, actions);
+                node(ui, app, child, current, arrived, actions);
             }
         });
 }

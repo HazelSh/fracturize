@@ -3932,6 +3932,7 @@ impl App {
             })
             .unwrap_or(0);
         self.browser = Some(folder);
+        self.ui_state.browser_arrived = path.canonicalize().ok();
         if self.prefs.browser_folder.as_deref() != Some(path) {
             self.prefs.browser_folder = Some(path.to_path_buf());
             self.prefs_dirty_since = Some(std::time::Instant::now());

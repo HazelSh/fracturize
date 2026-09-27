@@ -868,8 +868,12 @@ the roll.
 ## The scene browser
 
 The Scenes window is our own file picker, on purpose: a system dialog can't
-show a fractal, and XFCE's default is GNOME's. Left: a folder tree rooted at
-the place you're in, then **places** — `scenes/`, `scenes/local-llm/` (where
+show a fractal, and XFCE's default is GNOME's. Left: a folder tree, always
+rooted at `~` (or `/` outside it) so it is one fixed map with where you are
+highlighted in it — the branch to the shown folder held open, a folder opening
+when you arrive in it. Rooting it at the folder you'd clicked was tried first
+and read as Finder without Finder's sense of motion: every click a new root,
+and no way back inside the tree. Under the tree, pinned, **places** — `scenes/`, `scenes/local-llm/` (where
 `tools/llm-author` puts each run's final scene), and any folder added with
 "Add this folder" (`prefs.browser_places`; right-click one to remove it).
 Right: the folder's scenes, three lines a row — name, author, file and age —
