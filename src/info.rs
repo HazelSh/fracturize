@@ -760,9 +760,24 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     // Similarity dimension: the single best predictor of dust/shell/mush.
     // Per subscene in a composite — the maps of two attractors have no joint
     // dimension — so it is reported in `subscenes` instead.
-    let dim = if composite { None } else { crate::scene::similarity_dimension(&scene.transforms) };
+    //
+    // A map that expands has no place in `Σsᵢᵈ = 1`, and the sum quietly
+    // leaves it out — so one expanding map beside one contracting one used to
+    // print as "0.00 (dust)", a number the notes line above contradicted.
+    // Whatever brings such a walk back (a fold, sinusoidal's walls) is not
+    // something a similarity dimension can describe, so it says so.
+    let expands = scene
+        .transforms
+        .iter()
+        .any(|t| t.weight > 0.0 && contraction_of(t).abs() >= 1.0);
+    let dim = if composite || expands {
+        None
+    } else {
+        crate::scene::similarity_dimension(&scene.transforms)
+    };
     let dim_str = dim.map_or("n/a".to_string(), |d| format!("{:>8.2}", d));
     let dim_class = match dim {
+        None if expands && !composite => "a map expands",
         Some(d) if d < 1.7 => "dust",
         Some(d) if d < 2.1 => "lace",
         Some(d) if d < 2.6 => "shell",
@@ -2133,6 +2148,17 @@ levels = 14
         assert!(text.contains("n/a: a single point"), "{}", text);
         assert!(!text.contains("-S camera.distance"), "{}", text);
         assert!(!text.contains("that fills the frame"), "{}", text);
+    }
+
+    /// An expanding map makes the similarity dimension undefined; it must not
+    /// be reported as whatever the remaining maps happen to solve to.
+    #[test]
+    fn an_expanding_map_has_no_dimension() {
+        let mut scene = Scene::blank();
+        scene.transforms[0].matrix *= glam::Mat4::from_scale(Vec3::splat(2.2));
+        let text = report(&Subject::new(&scene, "blank"));
+        assert!(text.contains("(a map expands)"), "{}", text);
+        assert!(!text.contains("(dust)"), "{}", text);
     }
 
     /// Two unrotated maps make a line, and the report says so; turning one of
