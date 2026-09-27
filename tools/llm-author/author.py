@@ -12,7 +12,7 @@ OPENAI_BASE_URL, which with-llm sets; anything OpenAI-compatible works.
 
 Every run writes a directory under renders/llm/: each round's scene and render,
 the full transcript including the model's reasoning, and a summary. The final
-scene is also copied to scenes/local-lll/<run-dir-name>.toml, with its render
+scene is also copied to scenes/local-llm/<run-dir-name>.toml, with its render
 beside it as <run-dir-name>.png, so the in-app scene browser can show it. That
 only ever adds new files there (a -2, -3… suffix rather than overwriting); it
 never edits an existing scene. --no-scenes skips the copy.
@@ -249,11 +249,50 @@ def as_comment(model, answer):
     return "\n".join(lines) + "\n\n"
 
 
+def spark_pool(path):
+    """Base-form words from a spelling dictionary, minus spark-exclude.txt.
+
+    A spelling list carries every inflection, so about half of it is forms
+    like "frittering" and "bookmobiles". Dropping plurals, -ed, -ing and -ly
+    words whose root is also listed halves /usr/share/dict/words to ~30k
+    roots, which read as concepts rather than as grammar."""
+    words = sorted({w.strip() for w in open(path, encoding="utf-8", errors="ignore")
+                    if re.fullmatch(r"[a-z]{4,12}", w.strip())})
+    have = set(words)
+
+    def inflected(w):
+        dbl = lambda b: b[:-1] if len(b) > 2 and b[-1] == b[-2] else None
+        rules = (("ies", lambda b: [b + "y"]), ("es", lambda b: [b]), ("s", lambda b: [b]),
+                 ("ied", lambda b: [b + "y"]), ("ed", lambda b: [b, b + "e", dbl(b)]),
+                 ("ing", lambda b: [b, b + "e", dbl(b)]), ("ily", lambda b: [b + "y"]),
+                 ("ly", lambda b: [b, b + "le"]))
+        for suffix, roots in rules:
+            if w.endswith(suffix) and any(r in have for r in roots(w[:-len(suffix)]) if r):
+                return True
+        # Comparatives and superlatives, but only as a pair: "braver" goes
+        # because "bravest" exists too, while "gatecrasher" and "interest",
+        # which have no such sibling, stay.
+        for suffix, sibling in (("ier", "iest"), ("iest", "ier"), ("er", "est"), ("est", "er")):
+            if w.endswith(suffix) and w[:-len(suffix)] + sibling in have:
+                return True
+        return False
+
+    exclude = {l.split("#")[0].strip() for l in open(HERE / "spark-exclude.txt")}
+    return [w for w in words if not inflected(w) and w not in exclude]
+
+
+def draw_sparks(n, seed, path):
+    """n distinct words, reproducible from (seed, word list)."""
+    import random
+    pool = spark_pool(path)
+    return random.Random(seed).sample(pool, min(n, len(pool))), len(pool)
+
+
 def place_in_scenes(out):
     """Copy final.toml (and final.png, as its thumbnail) into
-    scenes/local-lll/, named after the run directory so model, task and time
+    scenes/local-llm/, named after the run directory so model, task and time
     survive. Never overwrites: a name already taken gets a numeric suffix."""
-    dest = REPO / "scenes" / "local-lll"
+    dest = REPO / "scenes" / "local-llm"
     dest.mkdir(parents=True, exist_ok=True)
     stem, n = out.name, 1
     while (dest / f"{stem}.toml").exists() or (dest / f"{stem}.png").exists():
@@ -279,8 +318,14 @@ def main():
                     help="constrain replies with scene.gbnf (see the README on thinking)")
     ap.add_argument("--no-think", action="store_true", help="ask the template to skip thinking [thinking on]")
     ap.add_argument("--no-image", action="store_true", help="don't send renders, even to a vision model")
+    ap.add_argument("--spark", type=int, default=0, metavar="N",
+                    help="offer N random words as optional inspiration [off]")
+    ap.add_argument("--spark-seed", type=int,
+                    help="seed for the words, to reproduce a run's prompt [random, recorded]")
+    ap.add_argument("--spark-words", default="/usr/share/dict/words",
+                    help="word list to draw from [/usr/share/dict/words]")
     ap.add_argument("--no-scenes", action="store_true",
-                    help="don't copy the final scene into scenes/local-lll/")
+                    help="don't copy the final scene into scenes/local-llm/")
     ap.add_argument("--temperature", type=float, help="[the server's default]")
     ap.add_argument("--max-tokens", type=int, default=8192, help="per reply, thinking included [8192]")
     ap.add_argument("--fracturize", default=str(REPO / "target/release/fracturize"))
@@ -292,6 +337,8 @@ def main():
         ap.error("`tweak` needs --scene")
     base = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1").rstrip("/")
     args.base = base[:-3] if base.endswith("/v1") else base
+    if args.spark_seed is None:
+        args.spark_seed = int.from_bytes(os.urandom(4), "big")
     if not Path(args.fracturize).exists():
         sys.exit(f"no fracturize binary at {args.fracturize}; cargo build --release first")
 
@@ -322,15 +369,21 @@ def main():
     r.record("system", system)
 
     if args.task == "new":
-        r.say(fill("new.md", theme=args.theme))
+        task = fill("new.md", theme=args.theme)
     elif args.task == "free":
-        r.say(fill("free.md"))
+        task = fill("free.md")
     else:
         src = Path(args.scene)
         info, err = info_report(args.fracturize, src)
         name = re.search(r'^name\s*=\s*"([^"]*)"', src.read_text(), re.M)
-        r.say(fill("tweak.md", scene=src.read_text().strip(), info=info or err,
-                   scene_name=name.group(1) if name else src.stem))
+        task = fill("tweak.md", scene=src.read_text().strip(), info=info or err,
+                    scene_name=name.group(1) if name else src.stem)
+    sparks = None
+    if args.spark > 0:
+        sparks, pool = draw_sparks(args.spark, args.spark_seed, args.spark_words)
+        task += fill("spark.md", words=", ".join(sparks))
+        print(f"sparks: {', '.join(sparks)} (seed {args.spark_seed}, from {pool} words)")
+    r.say(task)
 
     ending, last_good, rnd, repairs = "ran out of rounds", None, 1, 0
     unseen = None  # the last render, if the loop ends before it is shown
@@ -422,6 +475,9 @@ def main():
                f"- vision: {'on' if vision else 'off'}"]
     if args.theme:
         summary.append(f"- theme: {args.theme}")
+    if sparks:
+        summary.append(f"- sparks: {', '.join(sparks)} (--spark {args.spark} "
+                       f"--spark-seed {args.spark_seed}, {args.spark_words})")
     if r.notes:
         summary += ["", "## Notes from the model", ""] + [f"> {n}" for n in r.notes]
     if answer:

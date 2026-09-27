@@ -1,0 +1,73 @@
+# Words never drawn as sparks. One per line, lowercase; # starts a comment.
+#
+# /usr/share/dict/words is a spelling dictionary, not a curated vocabulary,
+# so it carries slurs, sexual terms and some grim ones. A spark is a random
+# gift in an otherwise gentle creative invitation, and it shouldn't hand a
+# model any of these unasked. Matching is exact, against base forms (the
+# draw already drops plurals, -ed, -ing and -ly forms), so list the root.
+#
+# Extend freely. It doesn't need to be complete to be useful; the goal is
+# that the common cases can't come up.
+
+# slurs and epithets
+chink
+coon
+dago
+dyke
+fag
+faggot
+gook
+honky
+kike
+nigga
+nigger
+paki
+raghead
+retard
+spic
+tranny
+wetback
+wop
+
+# sexual and explicit
+anal
+blowjob
+boner
+clit
+cock
+cum
+cunt
+dildo
+ejaculate
+erection
+fuck
+horny
+masturbate
+orgasm
+orgy
+penis
+porn
+porno
+pussy
+rape
+rapist
+semen
+sodomy
+slut
+testicle
+vagina
+whore
+
+# self-harm, abuse and atrocity
+abuse
+bestiality
+genocide
+holocaust
+incest
+lynch
+massacre
+molest
+paedophile
+pedophile
+suicide
+torture

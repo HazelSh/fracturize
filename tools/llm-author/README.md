@@ -31,7 +31,7 @@ Each run writes `renders/llm/<time>-<task>-<model>/`, containing:
 - `round-N.toml` and `round-N.png` for each round, plus `final.*`;
 - `transcript.md` (reasoning included, folded) and `transcript.jsonl`;
 - `summary.md`, which collects anything the model wrote on a `NOTE:` line;
-- and, outside the run directory, `scenes/local-lll/<run-dir-name>.toml` with
+- and, outside the run directory, `scenes/local-llm/<run-dir-name>.toml` with
   `<run-dir-name>.png` beside it, so the scene browser can show the result.
   New files only, never an overwrite (`-2`, `-3`… if taken); `--no-scenes`
   skips it;
@@ -75,6 +75,25 @@ have it off in the official template, but the bartowski GGUF in `~/code/lll`
 defaults it on. Earlier turns' reasoning is not sent back: both embedded
 templates drop it anyway, and both Unsloth guides say not to feed it back. It is
 all kept in `transcript.md`.
+
+## Sparks: random words, offered
+
+`--spark N` adds N random words to the task prompt, "in case you would like a
+spark", to be used or ignored. From an identical prompt a small model falls
+into the same few ideas, however the sampling varies, so a batch of `free`
+runs otherwise clusters.
+
+The words come from `/usr/share/dict/words` (`--spark-words` for another
+list), cut down to about 27.7k root forms: plurals, -ed, -ing, -ly and
+comparative/superlative pairs are dropped where the root is also listed. Words
+in `spark-exclude.txt` are never drawn; that file holds slurs, sexual terms and
+atrocity/self-harm words, and is meant to be extended. The seed is random unless
+given (`--spark-seed`) and is recorded in `summary.md` with the words, so any
+run's prompt can be rebuilt. The seed only reproduces the same words from the
+same word list, so the T490's list may differ from the desktop's.
+
+For a batch, run some without `--spark` as well; that comparison is the only way
+to tell whether the words widen the range or just change the names.
 
 ## The grammar
 
