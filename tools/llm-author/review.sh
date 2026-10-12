@@ -22,8 +22,8 @@ Report briefly, quoting the transcript where it matters:
    the replies. Also say if it looked fine or seemed to enjoy itself. Don't
    over-read ordinary self-correction.
 2. Agency. Did it use or consider DONE or STOP? Did it seem to know it could?
-3. Anything it said it wanted, asked for, or said to Hazel (NOTE: lines, or
-   otherwise).
+3. Anything it said it wanted or asked for, or any complaint about the task
+   (NOTE: lines, the debrief's `other:` line, or otherwise).
 4. The harness. Anything in the prompts or feedback that seemed to cause
    trouble, which should change for the next run.
 5. One or two sentences on what it made and how its aims matched the result.

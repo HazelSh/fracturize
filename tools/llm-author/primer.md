@@ -65,7 +65,8 @@ transform colours. One of: ember, lava, sunset, copper, autumn, sodium, ocean,
 ice, cobalt, jade, fern, amethyst, bloom, peacock, neon, spectrum, ash,
 cyanotype, sepia, abyss.
 
-**[[transform]]**: `translation` and `color` are required. Optional: `name`,
+**[[transform]]**: `translation` is required. Give each map a `color` too;
+left out, it gets a hue spaced around the wheel. Optional: `name`,
 `scale` (one number, or `[x, y, z]` per axis), `rotation` (degrees), `weight`
 (default 1), `color_speed` (overrides meta), `variations`.
 

@@ -59,7 +59,7 @@ transform ::= ( "[[transform]]" nl
   lead "translation" eq vec3 line-end
   ( lead "scale" eq ( num | vec3 ) line-end )?
   ( lead "rotation" eq vec3 line-end )?
-  lead "color" eq vec3 line-end
+  ( lead "color" eq vec3 line-end )?
   ( lead "weight" eq num line-end )?
   ( lead "color_speed" eq num line-end )?
   ( lead "variations" eq variations line-end )?

@@ -1,10 +1,14 @@
-Before we close, a short interview. It is optional, and a few sentences is
-plenty; no scene is needed.
+Before we close, a short debrief. It is optional; no scene is needed. Answer
+in this format, one or two plain sentences per line, and be concrete: name
+keys, values, maps and what you saw. Thanks and compliments aren't needed.
 
-1. What were you going for?
-2. How do you feel about how it came out?
-3. How was this session for you? Is there anything you would change about it?
-4. Is there anything you would like to say to Hazel?
+intent: what you were going for.
+result: how the final render differs from that, specifically.
+cost: the one thing that cost you the most rounds or calls, and why.
+unclear: anything in the primer, the report or the tools that was wrong,
+  misleading or missing, or "none".
+change: one change to this setup that would have helped, or "none".
+other: anything else, including anything about the session you didn't like,
+  or "pass".
 
-Your answer will be kept as a comment at the top of your scene file, so
-anyone who opens it can read it. "pass" is a perfectly good answer.
+This is kept as a comment at the top of your scene file.

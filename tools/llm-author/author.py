@@ -242,7 +242,7 @@ def interview(r, unseen, vision):
 def as_comment(model, answer):
     """The interview as a TOML comment block, wrapped to 78 columns."""
     import textwrap
-    lines = [f"# Interview with {model}, {datetime.date.today().isoformat()}:", "#"]
+    lines = [f"# Debrief from {model}, {datetime.date.today().isoformat()}:", "#"]
     for para in answer.split("\n"):
         wrapped = textwrap.wrap(para, 74) or [""]
         lines += ["#   " + w if w else "#" for w in wrapped]
