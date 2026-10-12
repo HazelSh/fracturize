@@ -10,11 +10,16 @@ notes    3
 shape    centre     ( 0.021,  0.023,  0.021)
          spread     ( 0.016,  0.048,  0.033)
          radius        0.061   occupancy      1.8%
+         box        (-0.002,  0.000, -0.010) to ( 0.042,  0.187,  0.078)
          dimension      1.20   (dust)   compactness   0.54   lacunarity   92.2
          to fill the frame   -S camera.distance=0.80
          for crisp points    -S meta.point_size=0.0011
          the scene sets      distance 3.400, point_size 0.0018
-         radius is the 95th percentile of the walk's distance from the centre
+         on screen           x    50% to    51%    y    47% to    52%
+         in frame            100.0% of the walk
+         radius is the 95th percentile of the walk's distance from the centre;
+         box and on screen hold the middle 95% of it. On screen, 0% to 100%
+         is the 16:9 frame, left to right and top to bottom
 
 maps     3   share of the walk, contraction, colour as rendered
          [0] bough         74.3%   contraction  0.600   #38242e @0.12
@@ -49,6 +54,10 @@ camera   yaw         0.0000 rad (   0.0°)
          roll        0.0000 rad (   0.0°)
          distance     3.400
          focus     ( 0.000,  0.000,  0.000)
+         forward   ( 0.000, -0.900, -0.436)
+         right     ( 1.000,  0.000,  0.000)
+         up        ( 0.000,  0.436, -0.900)
+         axes      +x right       +y toward you  +z down
          fov       45° vertical   73° horizontal at 16:9; the default
          from the scene
          under infinite zoom, reported in the canonical period as it renders

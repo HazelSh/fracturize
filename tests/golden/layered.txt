@@ -34,11 +34,16 @@ view     views/v.toml
 shape    centre     ( 0.018,  0.070,  0.021)
          spread     ( 0.017,  0.111,  0.033)
          radius        0.244   occupancy      1.1%
+         box        (-0.002,  0.000, -0.010) to ( 0.042,  0.349,  0.084)
          dimension      1.20   (dust)   compactness   0.47   lacunarity   73.6
          to fill the frame   -S camera.distance=0.80
          for crisp points    -S meta.point_size=0.0011
          the scene sets      distance 3.400, point_size 0.0018
-         radius is the 95th percentile of the walk's distance from the centre
+         on screen           x    55% to    57%    y    41% to    56%
+         in frame            100.0% of the walk
+         radius is the 95th percentile of the walk's distance from the centre;
+         box and on screen hold the middle 95% of it. On screen, 0% to 100%
+         is the 16:9 frame, left to right and top to bottom
 
 maps     3   share of the walk, contraction, colour as rendered
          [0] bough         67.4%   contraction  0.600   #6f95d4 @0.12
@@ -74,6 +79,10 @@ camera   yaw         1.2500 rad (  71.6°)
          roll        0.0000 rad (   0.0°)
          distance     2.500
          focus     ( 0.100,  0.200,  0.300)
+         forward   (-0.891, -0.343, -0.296)
+         right     ( 0.315,  0.000, -0.949)
+         up        (-0.325,  0.939, -0.108)
+         axes      +x toward you  +y up          +z left
          fov       45° vertical   73° horizontal at 16:9; the default
          from --view, then the camera flags
          the scene's own: yaw 0.0000 pitch 1.1200 distance 3.400

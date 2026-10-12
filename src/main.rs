@@ -146,6 +146,17 @@ struct Args {
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
     solo: Option<String>,
 
+    /// Light up what one map moves, as selecting it in the app does [off]
+    ///
+    /// A map by name or index. The material that moves when this map moves
+    /// brightens and the rest recedes toward the background, so it shows what
+    /// the map is responsible for, at every scale. Works on a still and on
+    /// orbit, move and sweep sheets. The glow reads the point buffer, so the
+    /// render does not accumulate: an --effort tier becomes a buffer size, as
+    /// it does on a sheet. Not with --spp, --transparent or an animation.
+    #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
+    emphasis: Option<String>,
+
     /// Start from a randomly generated flame instead of a scene file
     ///
     /// Quality-checked on the CPU before it's handed back, so it always
@@ -853,6 +864,16 @@ struct Args {
     #[arg(long, value_name = "COLSxROWS", help_heading = "Contact sheets")]
     orbit_grid: Option<String>,
 
+    /// One tile per map, each lit as --emphasis lights it [no sheet]
+    ///
+    /// The quickest answer to "which map made that part?". Tiles follow the
+    /// scene's map order and are labelled with each map's name, or its index
+    /// when it has none; stdout prints the --emphasis flag for each. Every
+    /// tile refills the point buffer, so prefer --effort tiny/small. Up to 36
+    /// maps; for more, light the ones you want with --emphasis.
+    #[arg(long, help_heading = "Contact sheets")]
+    map_grid: bool,
+
     /// Sheet of views nudged across the view plane, e.g. 3x3 [one view]
     ///
     /// Left/right (columns) and up/down (rows), all still looking at the
@@ -875,7 +896,7 @@ struct Args {
     #[arg(long, default_value = "1.0", value_name = "SCALE", help_heading = "Contact sheets")]
     mutation_strength: f32,
 
-    /// Sheet varying one scene value, repeatable up to twice [no sheet]
+    /// Sheet varying a scene value; twice makes a 2D grid [no sheet]
     ///
     /// Takes a --set path and either a range or a list. Join paths with `+`
     /// to move them in lockstep (`transform.a.weight+transform.b.weight=0.5:2`),
@@ -883,14 +904,16 @@ struct Args {
     /// `transform.facet-1.variations.absfold=0.05:0.55` walks --sweep-steps
     /// values between the ends; `palette.name=ember,abyss,peacock` uses the
     /// list verbatim (checked for first, so a value containing a comma is
-    /// never read as a range). Give it twice and the first varies across
-    /// columns, the second down rows. Composes with --set, which sets the
+    /// never read as a range). Give it twice and you get a grid, not a strip:
+    /// the first varies across columns, the second down rows, so two sweeps
+    /// of --sweep-steps 4 make a 4x4 sheet of 16 tiles, every combination of
+    /// the two. A third --sweep is refused. Composes with --set, which sets the
     /// base every tile starts from. Needs --scene, and each tile refills the
     /// point buffer, so prefer --effort tiny/small.
     #[arg(long, value_name = "PATH=A:B|A,B,C", help_heading = "Contact sheets")]
     sweep: Vec<String>,
 
-    /// Values per --sweep range; ignored by the list form
+    /// Values per --sweep range, per axis: two sweeps of 4 make 16 tiles
     #[arg(long, default_value = "5", value_name = "2-12", help_heading = "Contact sheets")]
     sweep_steps: usize,
 
@@ -1327,9 +1350,73 @@ fn run_sweep(
         eprintln!("{}", e);
         std::process::exit(1);
     });
+    let build = sheet_scene_builder(args, scene_path, effort_points);
+    offline::render_sweep(params, &tiles, cols, rows, &build, &[])
+}
 
+/// `--map-grid`: a sweep sheet whose tiles differ only in which map they
+/// light. The scene is the same in every tile; the fill is not, because the
+/// chaos pass measures one map at a time.
+fn run_map_grid(
+    params: offline::OfflineParams,
+    args: &Args,
+    grid: offline::GridMode,
+    effort_points: Option<usize>,
+) -> Result<render_job::Outcome, String> {
+    if !matches!(grid, offline::GridMode::Single) || args.mutations.is_some() || !args.sweep.is_empty() {
+        eprintln!("--map-grid is a sheet of its own: it cannot be combined with --orbit-grid, \
+                   --move-grid, --mutations or --sweep");
+        std::process::exit(1);
+    }
+    if args.emphasis.is_some() {
+        eprintln!("--map-grid lights every map in turn, so --emphasis has nothing to add. Drop one.");
+        std::process::exit(1);
+    }
+    let Some(scene_path) = args.scene.clone() else {
+        eprintln!("--map-grid needs --scene");
+        std::process::exit(1);
+    };
+    let names = &params.scene.transform_names;
+    let n = names.len();
+    if n == 0 || n > 36 {
+        eprintln!(
+            "--map-grid draws one tile per map, up to 36, and this scene has {}. \
+             Light the ones you want with --emphasis <NAME|INDEX>.",
+            n
+        );
+        std::process::exit(1);
+    }
+    let tiles: Vec<sweep::Tile> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let reference = name.clone().unwrap_or_else(|| i.to_string());
+            sweep::Tile {
+                sets: Vec::new(),
+                label: match name {
+                    Some(name) => format!("{}: {}", i, name),
+                    None => format!("map {}", i),
+                },
+                description: format!("--emphasis {}", reference),
+            }
+        })
+        .collect();
+    let lit: Vec<Option<usize>> = (0..n).map(Some).collect();
+    let (cols, rows) = offline::grid_shape(n);
+    let build = sheet_scene_builder(args, scene_path, effort_points);
+    offline::render_sweep(params, &tiles, cols, rows, &build, &lit)
+}
+
+/// How a sweep or map sheet builds each tile's scene: the file, under `--set`
+/// and the tile's own sets, with the same zoom, palette and point count the
+/// base scene got.
+fn sheet_scene_builder<'a>(
+    args: &'a Args,
+    scene_path: String,
+    effort_points: Option<usize>,
+) -> impl Fn(&[String]) -> Result<Scene, String> + 'a {
     let points = args.points.or(effort_points);
-    let build = |extra: &[String]| -> Result<Scene, String> {
+    move |extra: &[String]| -> Result<Scene, String> {
         let mut sets = args.set.clone();
         sets.extend_from_slice(extra);
         let mut scene = Scene::load_with(&scene_path, &sets)?;
@@ -1340,9 +1427,7 @@ fn run_sweep(
             scene.point_count = n;
         }
         Ok(scene)
-    };
-
-    offline::render_sweep(params, &tiles, cols, rows, &build)
+    }
 }
 
 fn load_scene(args: &Args) -> Scene {
@@ -2404,7 +2489,8 @@ fn main() {
             .with_camera(args.camera_override())
             .with_set(&applied)
             .with_seed(seed)
-            .with_color(args.color);
+            .with_color(args.color)
+            .with_aspect(args.width, args.height);
         if let (Some(path), Some(v)) = (args.view.as_deref(), view.as_ref()) {
             subject = subject.with_view(path, v);
         }
@@ -2479,20 +2565,28 @@ fn main() {
             || args.move_grid.is_some()
             || args.mutations.is_some()
             || !args.sweep.is_empty()
+            || args.map_grid
             || crate::video::Format::from_path(std::path::Path::new(out)).is_some();
-        let tier_accumulates = splat_render && !many_images;
+        // The glow reads the ring the chaos game writes, so a lit still takes
+        // a tier as a ring size too.
+        let lit = args.emphasis.is_some() || args.map_grid;
+        let tier_accumulates = splat_render && !many_images && !lit;
         let accumulating = args.spp.is_some() || (args.effort.is_some() && tier_accumulates);
         let effort_points = args.effort.map(|e| e.points(pixels, accumulating));
         let effort_spp = args.effort.and_then(|e| tier_accumulates.then(|| e.spp()));
         if let Some(e) = args.effort {
-            if splat_render && many_images && args.spp.is_none() && args.points.is_none() {
+            if splat_render && (many_images || lit) && args.spp.is_none() && args.points.is_none() {
                 eprintln!(
                     "note: --effort {} renders this as a {:.1}M point buffer per image \
-                     (~{} samples/px) rather than accumulating: accumulation makes one still, \
-                     and this output is several images.",
+                     (~{} samples/px) rather than accumulating: {}",
                     e.name(),
                     e.points(pixels, false) as f64 / 1e6,
                     (e.points(pixels, false) as u64 / pixels.max(1)).max(1),
+                    if many_images {
+                        "accumulation makes one still, and this output is several images."
+                    } else {
+                        "--emphasis lights the point buffer, which accumulation does not keep."
+                    },
                 );
             }
             if !tier_accumulates && !e.reachable_without_accumulating(pixels) {
@@ -2555,6 +2649,12 @@ fn main() {
             .or(view.as_ref().and_then(|v| v.exposure))
             .unwrap_or(1.0);
 
+        let emphasis = args.emphasis.as_ref().map(|reference| {
+            scene::resolve_transform_ref(reference, &scene.transform_names).unwrap_or_else(|e| {
+                eprintln!("--emphasis: {}", e);
+                std::process::exit(1);
+            })
+        });
         let params = offline::OfflineParams {
             // A terminal render owns the GPU; nothing else is on it.
             gpu_reserve: 0,
@@ -2593,6 +2693,7 @@ fn main() {
                 .unwrap_or_else(render_job::default_threads),
             gpu_timing: args.gpu_timing,
             chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
+            emphasis,
             spp,
             grade,
             checkpoint_out: args.checkpoint.as_ref().map(|p| {
@@ -2622,6 +2723,7 @@ fn main() {
             if !matches!(grid, offline::GridMode::Single)
                 || args.mutations.is_some()
                 || !args.sweep.is_empty()
+                || args.map_grid
             {
                 eprintln!(
                     "animation (.{}) cannot be combined with grid, mutation or sweep sheets",
@@ -2652,6 +2754,7 @@ fn main() {
             )
         } else {
             match (args.sweep.is_empty(), args.mutations) {
+                _ if args.map_grid => run_map_grid(params, &args, grid, effort_points),
                 (false, _) => run_sweep(params, &args, grid, effort_points),
                 (true, Some(n)) => {
                     if !matches!(grid, offline::GridMode::Single) {

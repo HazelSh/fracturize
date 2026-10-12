@@ -365,6 +365,10 @@ pub struct AttractorStats {
     pub principal: Vec3,
     /// Fraction of the bounding box's cells that contain any point
     pub occupancy: f32,
+    /// The box that holds the walk, as the 2.5th and 97.5th percentile on each
+    /// world axis — min corner, then max. Percentiles for the same reason the
+    /// radius is one: a box drawn round the outliers is mostly empty.
+    pub bounds: [Vec3; 2],
 }
 
 /// Run the CPU chaos game over the enabled transforms and measure where it
@@ -410,6 +414,8 @@ pub struct LayerMeasure {
     /// The visible layers together, pooled in proportion to their shares — the
     /// shape the picture actually has.
     pub union: Option<AttractorStats>,
+    /// The pooled points the union was measured from.
+    pub union_points: Vec<Vec3>,
 }
 
 /// [`measure`] for a composite: each layer walked on its own maps (a walk over
@@ -436,7 +442,7 @@ pub fn measure_layers(scene: &crate::scene::Scene) -> LayerMeasure {
         layers.push(stats);
     }
     let union = (!pooled.is_empty()).then(|| stats_of(&pooled));
-    LayerMeasure { layers, union }
+    LayerMeasure { layers, union, union_points: pooled }
 }
 
 /// Samples each layer contributes to the pooled union: in proportion to its
@@ -449,7 +455,9 @@ fn allocate_samples(shares: &[f32]) -> Vec<usize> {
 }
 
 /// The walk `measure` takes, as points.
-fn walk_points(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Vec<Vec3>> {
+/// The points `measure` walks, for a caller that wants them rather than
+/// their summary — `--info` projects them through the camera.
+pub(crate) fn walk_points(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Vec<Vec3>> {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
     let mut walker = Walker::new(transforms, enabled, &mut rng)?;
@@ -498,7 +506,7 @@ mod principal_tests {
     }
 }
 
-fn stats_of(points: &[Vec3]) -> AttractorStats {
+pub(crate) fn stats_of(points: &[Vec3]) -> AttractorStats {
     let n = points.len() as f32;
     let (sum, sum_sq) = points.iter().fold((Vec3::ZERO, Vec3::ZERO), |(s, q), p| (s + *p, q + *p * *p));
     let mean = sum / n;
@@ -512,7 +520,23 @@ fn stats_of(points: &[Vec3]) -> AttractorStats {
         spread: Vec3::new(var.x.sqrt(), var.y.sqrt(), var.z.sqrt()),
         principal: principal_spreads(points, mean),
         occupancy: occupancy(points, mean, radius),
+        bounds: percentile_box(points, 0.025),
     }
+}
+
+/// Per-axis `q` and `1 - q` percentiles of a point set: a box with the
+/// outliers trimmed off each face.
+fn percentile_box(points: &[Vec3], q: f32) -> [Vec3; 2] {
+    let mut lo = Vec3::ZERO;
+    let mut hi = Vec3::ZERO;
+    for axis in 0..3 {
+        let mut v: Vec<f32> = points.iter().map(|p| p[axis]).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let at = |f: f32| v[((v.len() - 1) as f32 * f).round() as usize];
+        lo[axis] = at(q);
+        hi[axis] = at(1.0 - q);
+    }
+    [lo, hi]
 }
 
 /// Standard deviations along the principal axes of a point cloud, largest

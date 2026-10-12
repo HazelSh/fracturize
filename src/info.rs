@@ -87,6 +87,9 @@ pub struct Subject<'a> {
     /// `--color`: the one switch that decides whether any escape code is
     /// emitted anywhere in this report
     pub color: bool,
+    /// Width over height of the frame `on screen` measures against: the
+    /// render's `--width`/`--height`, 16:9 unless they say otherwise.
+    pub aspect: f32,
 }
 
 impl<'a> Subject<'a> {
@@ -99,7 +102,13 @@ impl<'a> Subject<'a> {
             set: &[],
             seed: None,
             color: false,
+            aspect: 16.0 / 9.0,
         }
+    }
+
+    pub fn with_aspect(mut self, width: u32, height: u32) -> Self {
+        self.aspect = width.max(1) as f32 / height.max(1) as f32;
+        self
     }
 
     pub fn with_view(mut self, path: &'a str, view: &'a View) -> Self {
@@ -725,6 +734,52 @@ fn view_section(path: &str, v: &View, scene: &Scene, notes: &mut Notes) -> Secti
     s
 }
 
+/// Where a walk lands in the frame from `camera`: the 2.5th and 97.5th
+/// percentile across and down, as fractions of the frame (0 is the left or top
+/// edge, 1 the right or bottom), then the share of points inside it and the
+/// share behind the camera. Points behind it have no place on screen and are
+/// left out of the percentiles.
+fn screen_extent(
+    points: &[Vec3],
+    camera: &crate::camera::OrbitCamera,
+    aspect: f32,
+) -> ([f32; 2], [f32; 2], f32, f32) {
+    let view_proj = camera.view_proj(aspect);
+    let mut xs = Vec::with_capacity(points.len());
+    let mut ys = Vec::with_capacity(points.len());
+    let mut inside = 0usize;
+    for &p in points {
+        if let Some((x, y)) = crate::camera::world_to_screen(p, view_proj, 1.0, 1.0) {
+            if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
+                inside += 1;
+            }
+            xs.push(x);
+            ys.push(y);
+        }
+    }
+    let n = points.len().max(1) as f32;
+    let behind = (points.len() - xs.len()) as f32 / n;
+    let range = |v: &mut Vec<f32>| {
+        if v.is_empty() {
+            return [0.0, 0.0];
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let at = |f: f32| v[((v.len() - 1) as f32 * f).round() as usize];
+        [at(0.025), at(0.975)]
+    };
+    (range(&mut xs), range(&mut ys), inside as f32 / n, behind)
+}
+
+/// An aspect ratio as people say it: `16:9` for the ones with names, else
+/// `1.33:1`.
+fn aspect_name(aspect: f32) -> String {
+    const NAMED: [(u32, u32); 6] = [(16, 9), (4, 3), (1, 1), (3, 2), (21, 9), (9, 16)];
+    NAMED
+        .iter()
+        .find(|(w, h)| (aspect - *w as f32 / *h as f32).abs() < 0.01)
+        .map_or(format!("{:.2}:1", aspect), |(w, h)| format!("{}:{}", w, h))
+}
+
 /// Where the attractor actually lands, and the two numbers most often wrong in
 /// a hand-authored scene — as commands rather than as facts, because a
 /// suggestion you have to reassemble into a flag is a suggestion half-given.
@@ -737,10 +792,15 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     // A composite's shape is the union of its visible subscenes, each walked
     // on its own maps and placed. Walking every map as one IFS would measure
     // a picture nothing draws.
-    let measured = if composite {
-        crate::trace::measure_layers(scene).union
+    //
+    // The points are kept as well as their summary, because where they land
+    // on screen is a question only the points can answer.
+    let (measured, points) = if composite {
+        let layers = crate::trace::measure_layers(scene);
+        (layers.union, layers.union_points)
     } else {
-        crate::trace::measure(&scene.transforms, &enabled)
+        let points = crate::trace::walk_points(&scene.transforms, &enabled);
+        (points.as_deref().map(crate::trace::stats_of), points.unwrap_or_default())
     };
     let Some(m) = measured else {
         s.text("the chaos game does not converge");
@@ -769,6 +829,7 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         Cell::new("radius", length(m.radius)),
         Cell::new("occupancy", format!("{:>7.1}%", m.occupancy * 100.0)),
     ]);
+    s.pair("box", format!("{} to {}", point(m.bounds[0]), point(m.bounds[1])));
 
     // Similarity dimension: the single best predictor of dust/shell/mush.
     // Per subscene in a composite — the maps of two attractors have no joint
@@ -869,7 +930,27 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         "{:<19} distance {:.3}, point_size {:.4}",
         "the scene sets", scene.camera_distance, scene.point_size
     ));
-    s.text("radius is the 95th percentile of the walk's distance from the centre");
+    // Where the walk lands in the frame that would render. Facts only, and
+    // deliberately no verdict: a compact attractor centred with a margin is
+    // the common framing, not the only good one — a close-up, or a form that
+    // bursts past every edge, is a choice this cannot tell from a mistake.
+    let (x, y, inside, behind) = screen_extent(&points, effective, subject.aspect);
+    s.text(format!(
+        "{:<19} x {:>5.0}% to {:>5.0}%    y {:>5.0}% to {:>5.0}%",
+        "on screen", x[0] * 100.0, x[1] * 100.0, y[0] * 100.0, y[1] * 100.0
+    ));
+    s.text(format!(
+        "{:<19} {:>5.1}% of the walk{}",
+        "in frame",
+        inside * 100.0,
+        if behind > 0.0 { format!(", {:.1}% behind the camera", behind * 100.0) } else { String::new() }
+    ));
+    s.text("radius is the 95th percentile of the walk's distance from the centre;");
+    s.text("box and on screen hold the middle 95% of it. On screen, 0% to 100%");
+    s.text(format!(
+        "is the {} frame, left to right and top to bottom",
+        aspect_name(subject.aspect)
+    ));
     if composite {
         s.text("a composite: this is every visible subscene together; dimension");
         s.text("and lacunarity are per subscene, in `layers` below");
@@ -1539,6 +1620,31 @@ fn camera_section(
     s.pair("roll", angle(chart.roll.radians()));
     s.pair("distance", length(effective.distance));
     s.pair("focus", point(effective.focus));
+    // The framing as directions in world space, which is what you need to move
+    // anything by hand: the chart's angles don't say which way +x runs on
+    // screen. `right` and `up` are the screen's axes, so moving the focus
+    // along `right` slides the picture left.
+    s.pair("forward", point(effective.forward()));
+    s.pair("right", point(effective.right()));
+    s.pair("up", point(effective.up()));
+    // The corner axis cross from the app, in words.
+    let on_screen = |axis: Vec3| {
+        let (r, u, f) = (axis.dot(effective.right()), axis.dot(effective.up()), axis.dot(effective.forward()));
+        if f.abs() > 0.85 {
+            return if f > 0.0 { "away" } else { "toward you" }.to_string();
+        }
+        const WORDS: [&str; 8] =
+            ["right", "up-right", "up", "up-left", "left", "down-left", "down", "down-right"];
+        let octant = (u.atan2(r) / std::f32::consts::FRAC_PI_4).round().rem_euclid(8.0) as usize;
+        WORDS[octant].to_string()
+    };
+    s.text(format!(
+        "{:<10}+x {:<11} +y {:<11} +z {}",
+        "axes",
+        on_screen(Vec3::X),
+        on_screen(Vec3::Y),
+        on_screen(Vec3::Z)
+    ));
     // The lens, and where it came from — which is the part worth printing.
     // A headless render never reads prefs, so a scene that states no `fov`
     // renders at the default here however the GUI is set up, and the only way

@@ -4336,6 +4336,7 @@ impl App {
                 // there is nothing here that would use one until accumulation
                 // lands, and a knob with no effect is worse than none.
                 chaos_seed: crate::gpu::points::compute::DEFAULT_SEED,
+                emphasis: None,
                 spp,
                 // Inherited from the Render window, like `exposure` above,
                 // rather than duplicated as three more sliders in the dialog:

@@ -17,6 +17,13 @@ second** on the reference desktop, so the loop is look-change-look, not plan-com
 The loop, concretely: `--sweep <path>=<a:b>` varies one scene value across a
 labelled sheet, `--set <path>=<value>` pins the rest, and `--mutations N` throws
 dice when you don't yet know what to vary. None of the three edits the file.
+Give `--sweep` twice and the sheet is a **grid**, not a strip: the first value
+runs across columns, the second down rows, so two sweeps at `--sweep-steps 4`
+are sixteen tiles, every pairing of the two. That is the cheap way to find out
+whether two values interact.
+When you can't tell which map made which part of the picture, `--map-grid`
+renders one tile per map with that map's material lit, and `--emphasis <map>`
+lights one in an ordinary still.
 
 ---
 

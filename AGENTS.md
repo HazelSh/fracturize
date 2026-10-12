@@ -2993,11 +2993,11 @@ The sections, in the order they print:
 | `notes` | **every diagnostic, or `none`** |
 | `set` | what each `-S` displaced (only when one was given) |
 | `view` | what a `--view` sets and what each value replaced |
-| `shape` | where the attractor lands, and the two flags that would frame it |
+| `shape` | where the attractor lands, its box, where it falls in the frame, and the two flags that would fill it |
 | `maps` | four fixed lines per transform |
 | `render` | point size, count, haze, decay, exposure, background |
 | `colour` | mode, the three dials, luminance, the ramp |
-| `camera` | the framing that would render, and the scene's own under it |
+| `camera` | the framing that would render, its screen axes in world space, and the scene's own under it |
 | `path` | every keypoint, not just the count |
 | `zoom` | the band as rows, or every eligible map as a `--zoom` command |
 
@@ -3023,6 +3023,21 @@ root of the determinant — negative means the map reflects, at or past 1.0 mean
 it expands — and rotations are re-derived from the matrix, so an authored
 `(-26, 138, 0)` can print as `(154, 42, -180)`: same rotation, other euler
 branch.
+
+`shape` also says **where the walk falls in the frame** that would render —
+`on screen x 30% to 74%, y 10% to 83%`, 0% to 100% being the frame left to
+right and top to bottom at `--width`/`--height`'s aspect, and `in frame` as the
+share of the walk inside it — beside a world-space `box`. Both hold the middle
+95% of the walk, like the radius. They are facts with no verdict attached, on
+purpose: a compact attractor centred with a margin is the common framing, not
+the only good one, and a close-up or a form that bursts past every edge is a
+choice the report cannot tell from a mistake.
+
+`camera` gives the framing as directions too: `forward`, `right` and `up` in
+world space, then `axes`, which says where each world axis points on screen —
+the app's corner axis cross in words (`+x right +y up +z toward you`). Moving
+the focus along `right` slides the picture left; which way `+x` does that
+depends entirely on where the camera is, and this is where it says.
 
 `--info` reports on a `--view` too, and on the camera flags: the `view` block
 says what the file sets, what each value replaced, and — in its closing lines —
@@ -3163,6 +3178,18 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   tile prints its equivalent `yaw`/`pitch`/`distance`, so a good framing can
   be adopted directly into a `[camera]` block or view file.
 
+**Which map made that?** `--emphasis <map>` draws the app's selected-transform
+glow over a render: the material that moves when that map moves brightens, and
+the rest recedes toward the background. It is the same `EmphasisRenderer` the
+window uses (`offline::Glow`), drawn on the output after the reconstruction
+filter, so a still at 1x lights exactly what the window would. It works on a
+still and on orbit, move and sweep sheets. `--map-grid` is the sheet form: one
+tile per map (up to 36), each lit in turn and labelled with the map's name,
+with each tile's `--emphasis` flag on stdout. The glow reads the point ring the
+chaos game writes, so neither accumulates — an `--effort` tier becomes a buffer
+size, as on any sheet — and both refuse `--spp`, `--transparent` (the unlit
+material recedes toward a background that isn't there) and animation.
+
 **Parameter sweeps** (`--sweep`, exploring the *scene* rather than the framing):
 
 - `--set <path>=<value>` (repeatable, `-S`) overrides any scene value without
@@ -3179,7 +3206,9 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   containing a comma is never read as a range). Join paths with `+` to move
   them in lockstep — `t.a.variations.absfold+t.b.variations.absfold=0.05:0.55`
   — which is what you want when several maps must stay equal. Give `--sweep`
-  twice for a 2D grid: the first varies across columns, the second down rows.
+  twice for a 2D grid: the first varies across columns, the second down rows,
+  and `--sweep-steps` applies to each, so two sweeps of 4 make a 4x4 sheet of
+  sixteen tiles. A third is refused.
   Composes with `--set`, which sets the base every tile starts from.
 - Sweeps need `--scene`, and **each tile refills the point buffer** (the swept
   parameter changes the IFS), so prefer `--effort tiny|small`. Unlike mutation
