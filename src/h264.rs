@@ -302,9 +302,14 @@ mod tests {
             }
             enc.samples.iter().map(|s| s.data.len()).sum::<usize>()
         };
-        let (low, mid, high) = (encoded(20), encoded(50), encoded(80));
-        assert!(low < mid, "q20 ({low}) should be smaller than q50 ({mid})");
-        assert!(mid < high, "q50 ({mid}) should be smaller than q80 ({high})");
+        // 60 at the top, not 80. Independent random RGB per pixel at quality
+        // 70 or more (QP 16 and below) overflows openh264's own output buffer
+        // on the first frame, and it reports that as Native:3, out of memory.
+        // No render is per-pixel noise: grainy full-frame menger encodes fine
+        // at --quality 100. Measured 2026-10-12 on openh264 0.9.8.
+        let (low, mid, high) = (encoded(20), encoded(40), encoded(60));
+        assert!(low < mid, "q20 ({low}) should be smaller than q40 ({mid})");
+        assert!(mid < high, "q40 ({mid}) should be smaller than q60 ({high})");
     }
 
     /// Encode a real gradient animation and validate the container; if ffprobe
