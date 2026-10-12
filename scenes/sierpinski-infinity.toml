@@ -1,30 +1,30 @@
 [meta]
 name = "Sierpinski Infinity"
 author = "Claude Opus 4.5 (Claude Code 2.0.76)"
-point_size = 0.0003
+point_size = 0.0000165117
 points_per_frame = 100000
 decay = 0.8
 color_speed = 0.5
 color_falloff = 0.0
 color_contrast = 1.0
 color_mode = "mix"
-background = [0.0121, 0.0121, 0.03]
+background = [0.0078, 0.0078, 0.0178]
 haze = 0.0
 exposure = 7.0
 
 [camera]
 focus = [0.0, 0.0, 0.0]
-distance = 0.1594
-yaw = 1.6156
-pitch = 0.0984
-roll = 0.0433
+distance = 0.0102
+yaw = 0.1852
+pitch = -1.0775
+roll = -0.2963
 
 [zoom]
 map = "4"
-radius = 4.8
-levels = 15.0
-octave_falloff = 0.9
-edge_guard = 2.2
+radius = 12.0
+levels = 18.0
+octave_falloff = 0.7
+edge_guard = 4.0
 
 [[transform]]
 translation = [0.0, 0.0, 0.5]
@@ -33,6 +33,7 @@ rotation = [0.0, 0.0, 0.0]
 color = [1.0, 0.2, 0.2]
 weight = 1.0
 color_value = 0.0
+color_speed = 0.42
 
 [[transform]]
 translation = [0.0, 0.47, -0.17]
@@ -40,7 +41,8 @@ scale = 0.5
 rotation = [0.0, 0.0, 0.0]
 color = [0.2, 1.0, 0.2]
 weight = 1.0
-color_value = 0.333
+color_value = 1.0
+color_speed = 0.38
 
 [[transform]]
 translation = [-0.41, -0.24, -0.17]
@@ -49,6 +51,7 @@ rotation = [0.0, 0.0, 0.0]
 color = [0.2, 0.2, 1.0]
 weight = 1.0
 color_value = 0.667
+color_speed = 0.37
 
 [[transform]]
 translation = [0.41, -0.24, -0.17]
@@ -57,12 +60,13 @@ rotation = [0.0, 0.0, 0.0]
 color = [1.0, 1.0, 0.2]
 weight = 1.0
 color_value = 1.0
+color_speed = 0.25
 
 [[transform]]
 translation = [0.0, 0.0, 0.0]
 scale = 0.325
 rotation = [0.0, 0.0, 0.0]
 color = [0.0, 0.0, 0.0]
-weight = 4.4869
+weight = 2.3757
 color_value = 1.0
-color_speed = 0.5
+color_speed = 0.05

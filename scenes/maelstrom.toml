@@ -1,0 +1,98 @@
+# Maelstrom — a spiral whose arms are spirals, scrolled into forever
+#
+# Built to show off helical scroll (2026-09-11 notes in NOTES-infinite-zoom.md):
+# the wheel now steps the camera along the zoom's own similarity, so scrolling
+# in on a spiral *turns* with it instead of sliding down a straight line and
+# stalling. Look at it from above and a logarithmic spiral magnified is the
+# same spiral rotated, so the whole picture wheels round as you descend.
+#
+# "turn" is the symmetry: 0.845 and 22° about the vertical, which winds at
+# 142° per e-fold of scale — tight enough that the arms curl, loose enough that
+# they read as arms. The three fronds are small (0.2) and climb as they go
+# round; every frond carries a whole copy of the maelstrom, which is why the
+# arms are strings of little whorls.
+#
+# The period is chosen against the wheel, and that is the one thing here that
+# is not taste. A scroll is instant, not a glide, so what you see per click is
+# the *fractional* part of a period. A wheel click is two steps of 0.9; this
+# period is 1.6 steps, so a click is 1.25 periods and looks like a steady
+# quarter-period in. A scale that is a whole power of 0.9 (0.81, 0.9) is
+# prettier on paper and looks frozen under the wheel: every click lands on the
+# identical frame. An arrow key is one step, 0.6 of a period, and looks like a
+# small step back — the aliasing has to land somewhere. Press O for the
+# continuous version.
+#
+# The framing is aimed beside the fixed point, not at it, on purpose. That is
+# the case the old radial scroll could not do: it converged on the focus, and
+# stopped.
+#
+# Fly it:
+#   fracturize --scene scenes/maelstrom.toml        # scroll in, and keep going
+#
+# Claude Opus 5, 2026-09-17.
+
+[meta]
+name = "Maelstrom"
+author = "Claude Opus 5"
+point_size = 0.0022
+point_count = 8_000_000
+color_speed = 0.5
+color_falloff = 0.5
+color_contrast = 1.8
+haze = 0.45
+background = [0.012, 0.010, 0.022]
+
+[camera]
+distance = 3.2
+yaw = 0.0
+pitch = 1.35
+focus = [0.15, 0.0, 0.1]
+
+# One period of descent, closing on itself under the symmetry (see
+# wellspiral.toml for why a single key is exactly a constant-rate helix).
+path_zoom_loop = 1
+path_seconds = 3.0
+
+[[camera.path]]
+yaw = 0.0
+pitch = 1.35
+distance = 3.2
+focus = [0.15, 0.0, 0.1]
+
+# The symmetry: zero translation so the fixed point is the origin.
+[[transform]]
+name = "turn"
+translation = [0.0, 0.0, 0.0]
+scale = 0.845
+rotation = [0.0, 22.0, 0.0]
+color = [0.22, 0.30, 0.70]
+weight = 2.5
+
+[[transform]]
+name = "frond-1"
+translation = [1.0, 0.1, 0.0]
+scale = 0.2
+rotation = [-24.0, 20.0, 0.0]
+color = [0.95, 0.66, 0.30]
+weight = 0.3
+
+[[transform]]
+name = "frond-2"
+translation = [-0.5, 0.3, -0.866]
+scale = 0.2
+rotation = [-24.0, 140.0, 0.0]
+color = [0.90, 0.34, 0.46]
+weight = 0.3
+
+[[transform]]
+name = "frond-3"
+translation = [-0.5, 0.5, 0.866]
+scale = 0.2
+rotation = [-24.0, 260.0, 0.0]
+color = [0.40, 0.74, 0.90]
+weight = 0.3
+
+[zoom]
+map = "turn"
+radius = 6.0
+levels = 14

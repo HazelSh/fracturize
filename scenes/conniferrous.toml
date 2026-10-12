@@ -1,0 +1,47 @@
+[meta]
+name = "Conniferrous"
+author = "Claude Opus 5.5 & Hazel"
+point_size = 0.000025
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.5
+color_falloff = 0.0
+color_contrast = 1.0
+background = [0.0097, 0.0097, 0.0176]
+haze = 0.0
+exposure = 1.2
+
+[camera]
+focus = [-0.0711, 0.3688, -0.344]
+distance = 1.9975
+yaw = -2.1827
+pitch = -1.0931
+roll = -1.9728
+
+[palette]
+name = "random harmony"
+stops = [
+    { at = 0.0, color = "#121303" },
+    { at = 0.1429, color = "#528424" },
+    { at = 0.2857, color = "#91d77c" },
+    { at = 0.4286, color = "#b9f6bd" },
+    { at = 0.5714, color = "#dce595" },
+    { at = 0.7143, color = "#91b34b" },
+    { at = 0.8571, color = "#2d6a18" }
+]
+
+[[transform]]
+translation = [0.2214, 0.2252, -0.5224]
+scale = 1.0099
+rotation = [11.0504, -35.5744, 4.0833]
+color = [0.9, 0.5, 0.25]
+weight = 1.0
+color_value = 0.0
+
+[[transform]]
+translation = [-0.9294, -0.6614, -0.1104]
+scale = [0.5, 0.6, 0.5]
+rotation = [0.0, 0.0, 0.0]
+color = [0.25, 0.6, 0.9]
+weight = 1.0
+color_value = 0.5
