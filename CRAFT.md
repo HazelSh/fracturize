@@ -838,3 +838,15 @@ recorded dead end is worth as much as a recipe.
   splayed ears), and the defect's weight 0.04 -> 0.3, where it stops being a
   ghost and becomes the knot. d = 2.08 with notes `none`, and it looked right
   first time, which is §2.1 earning its keep again.
+
+- **2026-10-12, Opus 5.5. Two lessons from `scenes/sodium_sheaf.toml`.**
+  **A post is a copy long enough to overlap its neighbours.** A degenerate
+  strut map draws the whole attractor squashed into a column, gaps included,
+  so the column is only solid where the copies overlap. At y-scale 0.55 to 0.7
+  the posts broke into fragments with the lamp heads floating off them; at 0.9
+  they ran solid. `--info` saw it first: d = 1.50 (dust) before, 1.86 after.
+  **A part that must stay its own colour needs its own speed.** In mix mode
+  the tyre's slabs are copies of the whole piece, gold heads included, and at
+  the scene's 0.6 they rendered as gold triangles. A per-map
+  `color_speed = 0.95` makes the colour land on arrival, and the band went
+  tyre-black. This is kintsugi's gold, run the other way.

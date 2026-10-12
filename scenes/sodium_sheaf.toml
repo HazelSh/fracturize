@@ -1,0 +1,73 @@
+# Sodium Sheaf -- lamp posts bound at the waist with a tyre.
+#
+# After Flour Power in central Christchurch, as Hazel remembers it: sodium
+# lamps on octagonal galvanized posts, gathered like a sheaf and tied with a
+# tyre. Cousin of scenes/sheaf.toml.
+#
+# Cyc8 about Y (one group, three motifs), so it stands up rather than
+# mirroring into an hourglass the way sheaf's Dih5 does:
+#   post  -- a long thin copy of the whole piece, anchored near the axis and
+#            tilted 12 degrees, so the eight cross at the tie and flare above
+#            and below. Its y-scale of 0.9 is what makes it a post; at 0.6
+#            the copies don't overlap and each post breaks into fragments.
+#   lamp  -- a small whole copy at each post's head, gold.
+#   tyre  -- eight squashed tangential slabs ringing the crossing. Pinned to
+#            color_speed 0.95 so its points come out tyre-black; without that
+#            the slabs carry the gold of the copies inside them.
+# spare is the map outside the group (CRAFT 3.6): one more lamp, turned half a
+# group step, burning white. 0.08 of the walk; at 0.03 it is already there, as
+# a ghost.
+#
+# Mix colour, so silver, gold and black stay three colours. Render with splat.
+
+[meta]
+name = "Sodium Sheaf"
+author = "Claude Opus 5.5"
+point_size = 0.0012
+color_mode = "mix"
+color_speed = 0.6
+haze = 0.2
+background = [0.006, 0.008, 0.018]
+
+[camera]
+focus = [0.0, -0.3, 0.0]
+distance = 4.0
+yaw = 0.3
+pitch = 0.12
+
+[[symmetry]]
+group = "Cyc8"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["post", "lamp", "tyre"]
+
+[[transform]]
+name = "post"
+translation = [0.08, -0.2, 0.0]
+scale = [0.1, 0.9, 0.1]
+rotation = [0.0, 0.0, -12.0]
+color = [0.62, 0.66, 0.70]
+weight = 1.0
+
+[[transform]]
+name = "lamp"
+translation = [0.3, 0.72, 0.0]
+scale = 0.2
+color = [1.0, 0.62, 0.12]
+weight = 0.5
+
+[[transform]]
+name = "tyre"
+translation = [0.12, -0.55, 0.0]
+scale = [0.08, 0.1, 0.13]
+color = [0.03, 0.03, 0.035]
+color_speed = 0.95
+weight = 0.3
+
+[[transform]]
+name = "spare"
+translation = [0.28, 0.78, 0.11]
+scale = 0.22
+rotation = [0.0, 22.5, 0.0]
+color = [1.0, 0.92, 0.7]
+color_speed = 0.9
+weight = 0.08
