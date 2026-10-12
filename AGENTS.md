@@ -931,7 +931,8 @@ gradient from `palette::random`. The **background** is rolled from a colour
 the flame actually renders in (one of the transform colours, or a sample of
 the gradient), hue-rotated in Oklab — usually within the flame's own family,
 sometimes to its complement. Two thirds of rolls are dark and saturated; the
-rest are mid and near-neutral, and deliberately stop short of white, because
+rest are mid and near-neutral — linear 0.06–0.2, which displays as 27–49%
+grey — and deliberately stop short of white, because
 the point pass composites the flame over the background by coverage and a
 paper-white ground would swallow colours rolled at value 0.7–1.0. Override any
 of it with `--palette` / `--random-palette` / `--color-mode`, which apply after

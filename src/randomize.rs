@@ -933,7 +933,12 @@ const DARK_BACKGROUND_LEVEL: f32 = 0.06;
 /// the render composites the flame *over* the background by coverage, so
 /// contrast is the gap between the two, and rolled flame colours are bright
 /// (value 0.7–1.0). A paper-white ground would swallow them.
-const LIGHT_BACKGROUND_LEVEL: std::ops::Range<f32> = 0.06..0.35;
+///
+/// Linear, so read it through the sRGB curve: 0.06 shows as 69/255 and 0.2 as
+/// 124/255. It used to reach 0.35 (160/255, a 63% grey), which was judged too
+/// bright at the top — a judgement that could only be made once thumbnails
+/// stopped drawing every background darker than it opens (2a75672).
+const LIGHT_BACKGROUND_LEVEL: std::ops::Range<f32> = 0.06..0.2;
 
 /// Roll a background that belongs behind `tint`.
 ///
