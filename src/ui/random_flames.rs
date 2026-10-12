@@ -271,8 +271,9 @@ fn row(
     let n = entry.scene.transforms.len();
     let kinds = if entry.kinds.is_empty() { "affine".to_string() } else { entry.kinds.join(" + ") };
     let title = format!(
-        "{}{n} maps · {kinds}",
+        "{}{n} maps · {}{kinds}",
         if is_open { "(open) " } else { "" },
+        entry.symmetry.as_ref().map_or(String::new(), |g| format!("{g} · ")),
     );
     let body = egui::TextStyle::Body.resolve(ui.style());
     line(&painter, egui::pos2(x, top), title, body, visuals.strong_text_color(), width);

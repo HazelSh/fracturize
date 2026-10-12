@@ -96,6 +96,67 @@ impl Default for VariationRange {
     }
 }
 
+/// Whether, and how, a rolled flame is symmetric (`crate::symmetry`).
+///
+/// Off unless `chance` says otherwise, so the default dice are unchanged. When
+/// a roll takes a group, it picks one of the enabled kinds, makes some of the
+/// flame's maps its motifs and leaves `free` of them outside — CRAFT §3.6:
+/// *symmetry gets you a form, one map outside the group gets you a picture*,
+/// because an orbit spreads measure evenly by construction and a wholly
+/// symmetric flame reads as wallpaper.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct SymmetrySettings {
+    /// Chance a flame is symmetric at all.
+    pub chance: f32,
+    /// `Cyc<n>`: n-fold about an axis.
+    pub cyclic: bool,
+    /// `Dih<n>`: n-fold plus the half-turn flip.
+    pub dihedral: bool,
+    /// The fold `n` for cyclic and dihedral.
+    pub fold: [u32; 2],
+    pub tetra: bool,
+    pub octa: bool,
+    pub icosa: bool,
+    /// A repeat: copies stepped along a helix, which is not a group (see
+    /// `symmetry::OrbitKind`) but is the same machinery.
+    pub repeat: bool,
+    /// Copies in a repeat.
+    pub repeat_count: [u32; 2],
+    /// Maps kept outside the group. At least one motif is always left.
+    pub free: [u32; 2],
+    /// Chance the group is extended by the central inversion, doubling it.
+    pub mirror: f32,
+    /// Chance the orbit is coloured by group element rather than shared.
+    pub orbit_color: f32,
+}
+
+impl Default for SymmetrySettings {
+    fn default() -> Self {
+        Self {
+            chance: 0.0,
+            cyclic: true,
+            dihedral: true,
+            fold: [3, 8],
+            tetra: true,
+            octa: true,
+            icosa: true,
+            repeat: false,
+            repeat_count: [5, 16],
+            free: [1, 1],
+            mirror: 0.15,
+            orbit_color: 0.25,
+        }
+    }
+}
+
+impl SymmetrySettings {
+    /// Whether any kind is switched on — with none, `chance` means nothing.
+    pub fn any_kind(&self) -> bool {
+        self.cyclic || self.dihedral || self.tetra || self.octa || self.icosa || self.repeat
+    }
+}
+
 /// A bound that can be switched off without forgetting its range.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
@@ -154,6 +215,8 @@ pub struct RandomSettings {
     /// if it is one of the bounded variations, at `[0.12, 0.75]`. `linear` is
     /// never listed — it is what's left: `1 − Σ|w|`, floored at 0.
     pub variations: BTreeMap<String, VariationRange>,
+    /// Symmetry groups, and how often.
+    pub symmetry: SymmetrySettings,
     /// Bound on the similarity dimension of the maps' affine parts. Steered:
     /// see the module docs.
     pub dimension: Bound,
@@ -183,6 +246,7 @@ impl Default for RandomSettings {
             per_map: [0, 1],
             negative: 0.15,
             variations,
+            symmetry: SymmetrySettings::default(),
             dimension: Bound::off([1.5, 2.5]),
             // p10-p75 of default rolls (`random_flame_study`): on, it keeps
             // most of what the dice make and trims the smooth and the sparse.
@@ -223,6 +287,13 @@ impl RandomSettings {
             let v = self.variations.entry(name).or_insert(d);
             v.weight = ordered(v.weight, 0.0, WEIGHT_LIMIT);
         }
+        let sym = &mut self.symmetry;
+        sym.chance = sym.chance.clamp(0.0, 1.0);
+        sym.fold = ordered(sym.fold, 2, crate::symmetry::MAX_FOLD);
+        sym.repeat_count = ordered(sym.repeat_count, 2, crate::symmetry::MAX_REPEAT);
+        sym.free = ordered(sym.free, 0, MAX_TRANSFORMS);
+        sym.mirror = sym.mirror.clamp(0.0, 1.0);
+        sym.orbit_color = sym.orbit_color.clamp(0.0, 1.0);
         self.dimension.range = ordered(self.dimension.range, DIMENSION_LIMITS[0], DIMENSION_LIMITS[1]);
         self.lacunarity.range =
             ordered(self.lacunarity.range, LACUNARITY_LIMITS[0], LACUNARITY_LIMITS[1]);
@@ -435,6 +506,8 @@ fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
         rescale(&mut transforms, 0.75 / mean);
     }
 
+    apply_symmetry(&mut transforms, &settings.symmetry, rng);
+
     // Variations. Purely affine IFS are a real and worthwhile family, but a
     // *random* one is almost always a dull Sierpinski variant — the good ones
     // come from deliberate symmetry, not dice. So by default every roll
@@ -503,6 +576,76 @@ fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
     }
 }
 
+/// Roll a symmetry onto some of the maps, if the settings ask for one.
+///
+/// The motifs shrink as they join, by `(Σ eᵢ^D)^(-1/D)` over the elements'
+/// sizes `eᵢ` (all 1 for a group, a taper for a repeat) with `D = 2.2`: what
+/// keeps the effective map set's dimension near where the maps alone had it,
+/// instead of sixty full-size copies filling space into a lump the shape gate
+/// throws away. Reliquary's hand-sized icosahedral facet is about this size.
+/// A dimension bound, if on, then steers from there as usual.
+fn apply_symmetry(transforms: &mut [TransformSpec], s: &SymmetrySettings, rng: &mut impl Rng) {
+    use crate::symmetry::{OrbitColor, OrbitKind, Repeat, Symmetry};
+    if !s.any_kind() || rng.r#gen::<f32>() >= s.chance {
+        return;
+    }
+    let mut kinds = Vec::new();
+    let fold = |rng: &mut _| rng_range_u32(rng, s.fold);
+    if s.cyclic {
+        kinds.push(OrbitKind::Cyclic(fold(rng)));
+    }
+    if s.dihedral {
+        kinds.push(OrbitKind::Dihedral(fold(rng)));
+    }
+    if s.tetra {
+        kinds.push(OrbitKind::Tetrahedral);
+    }
+    if s.octa {
+        kinds.push(OrbitKind::Octahedral);
+    }
+    if s.icosa {
+        kinds.push(OrbitKind::Icosahedral);
+    }
+    let axis = random_quat(rng) * Vec3::Y;
+    if s.repeat {
+        // A helix up the axis that tapers: the turn anywhere, the climb a
+        // fraction of a unit per copy, so the whole run stays near a frame.
+        let count = rng_range_u32(rng, s.repeat_count);
+        let climb = rng.gen_range(0.6f32..1.6) / count as f32;
+        kinds.push(OrbitKind::Repeat(Repeat {
+            count,
+            translate: axis * climb,
+            turn: rng.gen_range(20.0..160.0),
+            scale: rng.gen_range(0.85..0.98),
+        }));
+    }
+    let kind = kinds[rng.gen_range(0..kinds.len())];
+    let mirror = kind.is_group() && rng.r#gen::<f32>() < s.mirror;
+    let color = if rng.r#gen::<f32>() < s.orbit_color { OrbitColor::Orbit } else { OrbitColor::Shared };
+    let Ok(sym) = Symmetry::new(kind, axis, mirror, color) else { return };
+
+    let n = transforms.len();
+    let free = (rng_range_u32(rng, s.free) as usize).min(n - 1);
+    let order = choose(rng, &(0..n).collect::<Vec<_>>(), n - free);
+    const D: f32 = 2.2;
+    let k = sym.element_scales().iter().map(|e| e.powf(D)).sum::<f32>().powf(-1.0 / D);
+    for i in order {
+        let t = &mut transforms[i];
+        let (scale, rot, mut p) = t.matrix.to_scale_rotation_translation();
+        // A motif on the centre is copied onto itself; push it out to where
+        // its copies land apart.
+        if p.length() < 0.4 {
+            p = if p.length() > 1e-3 { p.normalize() } else { random_quat(rng) * Vec3::X } * 0.4;
+        }
+        t.matrix = Mat4::from_scale_rotation_translation(scale * k, rot, p);
+        t.symmetry = Some(sym.clone());
+    }
+}
+
+fn rng_range_u32(rng: &mut impl Rng, r: [u32; 2]) -> u32 {
+    rng.gen_range(r[0]..=r[1].max(r[0]))
+}
+
 /// `k` distinct items of `from`, in random order.
 fn choose(rng: &mut impl Rng, from: &[usize], k: usize) -> Vec<usize> {
     let mut v = from.to_vec();
@@ -542,10 +685,20 @@ fn steer_dimension(
     }
     let [lo, hi] = settings.dimension.range;
     let target = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
-    let contractions: Vec<f32> =
-        transforms.iter().map(|t| t.linear_determinant().abs().cbrt()).collect();
-    if contractions.iter().any(|&s| !(s > 0.0 && s.is_finite())) {
-        return Err(());
+    // The effective map set, as `similarity_dimension` counts it: a motif
+    // contributes one contraction per element of its group (all the motif's
+    // size for a group, tapering for a repeat). Scaling every map by `k`
+    // scales every one of these by `k`, so the same closed form holds.
+    let mut contractions = Vec::new();
+    for t in transforms.iter() {
+        let s = t.linear_determinant().abs().cbrt();
+        if !(s > 0.0 && s.is_finite()) {
+            return Err(());
+        }
+        match &t.symmetry {
+            Some(g) => contractions.extend(g.element_scales().into_iter().map(|e| s * e)),
+            None => contractions.push(s),
+        }
     }
     // Σ (k·sᵢ)ᵗ = 1  ⇒  k = (Σ sᵢᵗ)^(−1/t)
     let sum: f32 = contractions.iter().map(|s| s.powf(target)).sum();
@@ -1113,6 +1266,93 @@ mod tests {
         for p in [0.05, 0.25, 0.5, 0.75, 0.95] {
             println!("p{:02}: d {:.2}  lacunarity {:.2}", (p * 100.0) as u32, pct(&mut ds, p), pct(&mut ls, p));
         }
+    }
+
+
+    fn symmetric() -> RandomSettings {
+        RandomSettings {
+            symmetry: SymmetrySettings { chance: 1.0, repeat: true, ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    /// At chance 1 every roll that passes is symmetric, keeps a map outside
+    /// the group, and every motif shares one group.
+    #[test]
+    fn symmetric_rolls_have_a_group_and_a_defect() {
+        let settings = symmetric();
+        let mut rolled = 0;
+        for seed in 0..24u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let Ok(r) = roll(&settings, &mut rng) else { continue };
+            rolled += 1;
+            let ts = &r.scene.transforms;
+            let motifs: Vec<_> = ts.iter().filter_map(|t| t.symmetry.as_ref()).collect();
+            assert!(!motifs.is_empty(), "seed {seed}: no group");
+            assert_eq!(ts.len() - motifs.len(), 1, "seed {seed}: one map stays outside");
+            assert!(motifs.iter().all(|g| *g == motifs[0]), "seed {seed}: two groups");
+            // And it survives a save: the group is regrouped into a block and
+            // read back onto the same motifs.
+            let text = r.scene.to_toml_string().unwrap();
+            let path = std::env::temp_dir().join(format!("fracturize-symroll-{}-{seed}.toml", std::process::id()));
+            std::fs::write(&path, &text).unwrap();
+            let back = Scene::load(&path).unwrap_or_else(|e| panic!("seed {seed}: {e}\n{text}"));
+            std::fs::remove_file(&path).ok();
+            assert_eq!(
+                back.transforms.iter().filter(|t| t.symmetry.is_some()).count(),
+                motifs.len(),
+                "seed {seed}: symmetry lost in a save"
+            );
+        }
+        assert!(rolled >= 16, "only {rolled} of 24 symmetric rolls passed");
+    }
+
+    /// Steering has to count the group's copies, or it lands somewhere else.
+    #[test]
+    fn dimension_steering_counts_the_group() {
+        let mut settings = symmetric();
+        settings.dimension = Bound { on: true, range: [2.0, 2.1] };
+        let mut met = 0;
+        for seed in 0..12u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            if let Ok(r) = roll(&settings, &mut rng) {
+                let d = similarity_dimension(&r.scene.transforms).unwrap();
+                assert!((1.998..=2.102).contains(&d), "seed {seed}: d {d}");
+                met += 1;
+            }
+        }
+        assert!(met >= 8, "only {met} of 12");
+    }
+
+    /// How often symmetric rolls pass, and what they cost.
+    /// `cargo test --release symmetry_study -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement; prints a distribution"]
+    fn symmetry_study() {
+        let settings = symmetric();
+        let (mut ok, mut tries, mut ds, mut ls) = (0, 0, Vec::new(), Vec::new());
+        let t = std::time::Instant::now();
+        for seed in 0..200u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            match roll(&settings, &mut rng) {
+                Ok(r) => {
+                    ok += 1;
+                    tries += r.attempts;
+                    ds.extend(r.dimension);
+                    ls.extend(r.lacunarity);
+                }
+                Err(f) => println!("seed {seed}: {}", f.message()),
+            }
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ls.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "{ok}/200 rolled, {:.2} tries each, {:.1} ms/roll; d median {:.2}, lacunarity median {:.1}",
+            tries as f32 / ok as f32,
+            t.elapsed().as_secs_f64() * 1e3 / 200.0,
+            ds[ds.len() / 2],
+            ls[ls.len() / 2],
+        );
     }
 
 }

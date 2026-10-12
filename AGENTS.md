@@ -873,8 +873,17 @@ prefs.toml, edited in the Random settings window), never scene data:
 - how many *kinds* a flame draws from, and how many each map carries. Kinds are
   picked per flame and shared across its maps, because one kind across several
   maps reads as a coherent form and freely mixed ones read as a pile;
+- **symmetry** (`SymmetrySettings`, off at chance 0 by default): which kinds
+  may be rolled — Cyc/Dih with a fold range, Tetra, Octa, Icosa, and a
+  tapering-helix `repeat` — and how many maps stay *outside* the group (default
+  one, per CRAFT §3.6: a wholly symmetric flame is wallpaper), plus mirror and
+  orbit-colour chances. Motifs shrink as they join, by `(Σ eᵢ^2.2)^(-1/2.2)`
+  over the elements' sizes, so sixty copies under Icosa don't fill space into a
+  lump — about Reliquary's hand-sized facet. Measured at chance 1 with every
+  kind on: 200/200 rolled, ~2 tries and ~2 ms each;
 - bounds on the **similarity dimension** and the **lacunarity summary** — the
-  status bar's `d` and `Λ`, the same functions;
+  status bar's `d` and `Λ`, the same functions. Dimension steering counts a
+  motif once per group element, as `similarity_dimension` does;
 - the try budget.
 
 **The two bounds are met in different ways, because they cost different

@@ -68,6 +68,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 ui.add_space(6.0);
                 variations(ui, &mut app.ui_state, &mut s);
                 ui.add_space(6.0);
+                symmetry(ui, &mut app.ui_state, &mut s);
+                ui.add_space(6.0);
                 bounds(ui, &mut app.ui_state, &mut s, &app.random_list);
             });
         });
@@ -238,6 +240,109 @@ fn variations(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings
                 ui.end_row();
             }
         });
+}
+
+fn symmetry(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
+    heading(ui, "Symmetry");
+    let sym = &mut s.symmetry;
+    egui::Grid::new("fracturize_random_symmetry").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+        ui.label("chance");
+        chance(
+            ui,
+            st,
+            &mut sym.chance,
+            "Chance a flame takes a symmetry group. At 0 none do. Its motifs shrink as they \
+             join, so sixty copies under Icosa don't fill space into a lump.",
+            "drag: chance of a symmetric flame",
+        );
+        ui.end_row();
+
+        let kind = |ui: &mut egui::Ui, st: &mut super::UiState, on: &mut bool, name: &str, tip: &str| {
+            let resp = ui.checkbox(on, name);
+            hinted(resp, st, tip, "click: roll this kind of symmetry");
+        };
+
+        ui.label("rotations");
+        ui.horizontal(|ui| {
+            kind(ui, st, &mut sym.cyclic, "Cyc", "n-fold about a random axis — the mandala");
+            kind(ui, st, &mut sym.dihedral, "Dih", "n-fold plus the half-turn flip, so it has a front and a back");
+        });
+        ui.end_row();
+
+        ui.label("fold");
+        ui.add_enabled_ui(sym.cyclic || sym.dihedral, |ui| {
+            count_range(ui, st, &mut sym.fold, 2, crate::symmetry::MAX_FOLD, "The n of Cyc and Dih", "drag: fold range");
+        });
+        ui.end_row();
+
+        ui.label("polyhedra");
+        ui.horizontal(|ui| {
+            kind(ui, st, &mut sym.tetra, "Tetra", "The tetrahedron's 12 rotations");
+            kind(ui, st, &mut sym.octa, "Octa", "The cube's 24 rotations");
+            kind(ui, st, &mut sym.icosa, "Icosa", "The icosahedron's 60 rotations");
+        });
+        ui.end_row();
+
+        ui.label("repeat");
+        ui.horizontal(|ui| {
+            kind(
+                ui,
+                st,
+                &mut sym.repeat,
+                "",
+                "Copies stepped up a tapering helix. Not a group — it repeats without being \
+                 symmetric — but the same machinery",
+            );
+            ui.add_enabled_ui(sym.repeat, |ui| {
+                count_range(
+                    ui,
+                    st,
+                    &mut sym.repeat_count,
+                    2,
+                    crate::symmetry::MAX_REPEAT,
+                    "Copies in a repeat, counting the motif itself",
+                    "drag: repeat copies",
+                );
+            });
+        });
+        ui.end_row();
+
+        ui.label("outside");
+        count_range(
+            ui,
+            st,
+            &mut sym.free,
+            0,
+            MAX_TRANSFORMS,
+            "Maps kept out of the group. One is the useful default: an orbit spreads \
+             measure evenly by construction, so a wholly symmetric flame reads as \
+             wallpaper, and one map outside the group gives it somewhere to look. At \
+             least one map always joins.",
+            "drag: maps outside the group",
+        );
+        ui.end_row();
+
+        ui.label("mirror");
+        chance(
+            ui,
+            st,
+            &mut sym.mirror,
+            "Chance a group is extended by the central inversion, doubling its copies",
+            "drag: chance of a mirrored group",
+        );
+        ui.end_row();
+
+        ui.label("orbit colour");
+        chance(
+            ui,
+            st,
+            &mut sym.orbit_color,
+            "Chance the colour is offset by which group element was drawn — an \
+             interference pattern through the form, rather than every copy alike",
+            "drag: chance of orbit colouring",
+        );
+        ui.end_row();
+    });
 }
 
 fn variation_tip(name: &str) -> String {

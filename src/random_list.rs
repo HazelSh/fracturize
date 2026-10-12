@@ -37,6 +37,8 @@ pub struct RandomEntry {
     pub attempts: u32,
     /// The variations it carries, by name, in slot order.
     pub kinds: Vec<&'static str>,
+    /// Its symmetry's label (`Icosa`, `Cyc5`, `Repeat…`), if it has one.
+    pub symmetry: Option<String>,
 }
 
 struct Job {
@@ -202,8 +204,10 @@ impl RandomList {
                     .filter(|&s| roll.scene.transforms.iter().any(|t| t.variations[s] != 0.0))
                     .map(|s| VARIATION_NAMES[s])
                     .collect();
+                let symmetry = roll.scene.transforms.iter().find_map(|t| t.symmetry.as_ref()).map(|g| g.label());
                 self.next_id += 1;
                 self.entries.push(RandomEntry {
+                    symmetry,
                     id: self.next_id,
                     seed: d.seed,
                     scene: roll.scene,
