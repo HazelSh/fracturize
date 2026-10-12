@@ -59,7 +59,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 
                     let resp = ui.toggle_value(
                         &mut app.ui_state.panels.random_settings_open,
-                        (icons::SLIDERS, "Settings"),
+                        (icons::SLIDERS, "Settings…"),
                     );
                     hinted(
                         resp,

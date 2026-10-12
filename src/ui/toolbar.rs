@@ -189,7 +189,7 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
             ui,
             app,
             |p| &mut p.random_open,
-            &format!("{} Random flames list", icons::DICE),
+            &format!("{} Random flames list…", icons::DICE),
             "A scrolling list of rolls down the left of the screen, each a live thumbnail. Click one to open it.",
         );
         menu_toggle(
