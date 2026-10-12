@@ -1,5 +1,5 @@
-//! Top toolbar: a thin strip of icon toggle buttons for the six panel
-//! windows, then the quick controls — the handful of settings you reach for
+//! Top toolbar: the File and Explore menus, a thin strip of icon toggle
+//! buttons for the panel windows, then the quick controls — the handful of settings you reach for
 //! often enough that opening a panel to get at them is friction.
 //!
 //! Quick controls delegate to the panels' own widgets (`render_panel::
@@ -21,6 +21,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             ui.add_space(4.0);
 
             draw_file_menu(ui, app);
+            draw_explore_menu(ui, app);
             ui.separator();
 
             // Then the windows, ordered by task rather than by module: what am
@@ -40,14 +41,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 &mut app.ui_state,
                 "Subscenes — compose other scenes into this one: import, show/hide, share of the points, placement",
                 "toggle the Subscenes window",
-            );
-
-            let resp = ui.toggle_value(&mut app.ui_state.panels.explore_open, (icons::FLASK, "Explore"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Explore — mutate, undo, strength",
-                "toggle the Explore window",
             );
 
             ui.separator();
@@ -98,7 +91,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
 /// The File menu.
 ///
-/// A menu, and the only one — not the first entry of a File/Edit/View/Help bar.
+/// Not the first entry of a File/Edit/View/Help bar.
 /// The scene is a **document**, and the whole value of that abstraction is that
 /// people can port intuition from every file-editing program they have used;
 /// but intuition needs furniture to attach to, and this is the furniture that
@@ -130,7 +123,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
         // a slab of empty space.
         ui.set_min_width(168.0);
 
-        if menu_item(ui, app, &format!("{} New", icons::FILE), "Ctrl+N", "Start over on an empty canvas. An edit like any other — one Ctrl+Z brings back what was on screen.") {
+        if menu_item(ui, app, &format!("{} New blank scene", icons::FILE), "Ctrl+N", "Start over on an empty canvas: two plain half-scale transforms to build on. An edit like any other — one Ctrl+Z brings back what was on screen.") {
             app.new_blank_scene();
         }
         if menu_item(
@@ -164,6 +157,122 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
             app.request_quit();
         }
     });
+}
+
+/// The Explore menu: the ways of finding a scene by chance — roll one, browse
+/// a list of rolls, mutate what's there — and the undo that makes all of them
+/// safe to try.
+///
+/// It used to be a window, holding a random-flame button, a blank-scene
+/// button, the mutation slider and button, undo and redo, and the history
+/// list — five unrelated jobs in a column. Each is its own thing now: the
+/// commands are rows here, and the three that need room (History, Mutate,
+/// the Random flames list and its settings) are windows this menu opens. The
+/// blank scene went to File, where "start a new document" lives in every
+/// program.
+fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
+    let resp = ui.button((icons::FLASK, "Explore"));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Random flames, mutation, undo and history",
+        "click: the Explore menu",
+    );
+
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(200.0);
+
+        if menu_item(ui, app, &format!("{} Random flame", icons::DICE), "", "Roll a new flame with the random settings and open it. Quality-checked first, so it renders — and it's one Ctrl+Z away from what you have now.") {
+            app.random_flame();
+        }
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.random_open,
+            &format!("{} Random flames list", icons::DICE),
+            "A scrolling list of rolls down the left of the screen, each a live thumbnail. Click one to open it.",
+        );
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.random_settings_open,
+            &format!("{} Random settings…", icons::SLIDERS),
+            "What the dice may roll: variations and their weights, how many maps, and bounds on dimension and lacunarity.",
+        );
+
+        ui.separator();
+
+        if menu_item(ui, app, &format!("{} Mutate", icons::SHUFFLE), "U", "Perturb the scene at random. One Ctrl+Z takes it back.") {
+            app.mutate_scene();
+        }
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.mutate_open,
+            &format!("{} Mutate…", icons::SHUFFLE),
+            "The mutation strength, and a button to mutate with it.",
+        );
+
+        ui.separator();
+
+        let next_undo = app.history.undo_display().next().map(str::to_string);
+        let next_redo = app.history.redo_display().last().map(str::to_string);
+        let undo_tip = match &next_undo {
+            Some(l) => format!("Undo “{}”", l),
+            None => "Nothing to undo yet".to_string(),
+        };
+        let redo_tip = match &next_redo {
+            Some(l) => format!("Redo “{}”", l),
+            None => "Nothing to redo — undo something first".to_string(),
+        };
+        if menu_item_enabled(ui, app, next_undo.is_some(), &format!("{} Undo", icons::UNDO), "Ctrl+Z", &undo_tip) {
+            app.undo();
+        }
+        if menu_item_enabled(ui, app, next_redo.is_some(), &format!("{} Redo", icons::REDO), "Ctrl+Shift+Z", &redo_tip) {
+            app.redo();
+        }
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.history_open,
+            &format!("{} History…", icons::RESET),
+            "Every edit, newest first. Click one to go back — or forward — to it.",
+        );
+    });
+}
+
+/// A menu row that opens or closes a window, lit while it's open.
+fn menu_toggle(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    flag: impl Fn(&mut crate::prefs::PanelPrefs) -> &mut bool,
+    label: &str,
+    tip: &str,
+) {
+    let open = *flag(&mut app.ui_state.panels);
+    let resp = ui.add(egui::Button::selectable(open, label));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        tip,
+        if open { "click: close this window" } else { "click: open this window" },
+    );
+    if resp.clicked() {
+        *flag(&mut app.ui_state.panels) = !open;
+        ui.close();
+    }
+}
+
+/// [`menu_item`], greyed when there's nothing for it to do.
+fn menu_item_enabled(ui: &mut egui::Ui, app: &mut App, enabled: bool, label: &str, key: &str, tip: &str) -> bool {
+    let resp = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(key));
+    let resp = hinted(resp, &mut app.ui_state, tip, "click: run this command");
+    if resp.clicked() {
+        ui.close();
+        true
+    } else {
+        false
+    }
 }
 
 /// One File-menu row: label on the left, its accelerator greyed on the right,

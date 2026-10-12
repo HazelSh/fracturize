@@ -30,7 +30,9 @@ src/
   history.rs     # Unified snapshot undo/redo behind App::commit_edit (all edits)
   haze.rs        # Aerial perspective: one amount, band and falloffs derived
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
-  randomize.rs   # Random flame generator with a CPU chaos-game quality gate
+  randomize.rs   # Random flame generator: RandomSettings, a CPU chaos-game
+                 # quality gate, dimension steering, lacunarity rejection
+  random_list.rs # The Random flames list's model: rolls on worker threads
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
   derive.rs      # --derive: print a map turned about a world axis / spun about its own
@@ -45,7 +47,10 @@ src/
     confirm.rs     # Click-wait-click Arm, and the unsaved-changes modal
     transforms.rs  # Transform tab rail + selected-transform detail pane
     subscenes.rs   # Subscenes window: layers, eye, share, import, placement
-    explore.rs     # Random flame, mutate + strength, undo/redo, history list
+    history.rs     # History window: every edit, click a row to jump to it
+    mutate.rs      # Mutate window: strength + the button
+    random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
+    random_settings.rs # What the dice may roll: variations, maps, bounds
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
   render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
@@ -504,35 +509,46 @@ the drawable area, so aspect and picking math are unaffected by which panels
 are open. The toolbar runs
 
 ```
-File | Transforms  Subscenes  Gizmos | Explore | Camera  Render | Undo Redo | quick controls … scene name | Help
+File  Explore | Transforms  Subscenes | Camera  Render | Undo Redo | quick controls … scene name | Help
 ```
 
-ordered by task rather than by module: what am I working on, then how am I
-looking at it, then help. Gizmos sits with Transforms because it is a *view of
-the same object*, not a peer of the panel toggles.
+ordered by task rather than by module: where does a scene come from, what am I
+working on, then how am I looking at it, then help.
 
-**File is a menu, and the only one** — not the first entry of a
+**File and Explore are menus, and the only two** — not the first entries of a
 File/Edit/View/Help bar. The scene is a document, and the value of that
 abstraction is that people can port intuition from every file-editing program
 they have used; but intuition needs furniture to attach to, and a File menu
 with the conventional contents in the conventional order is that furniture.
 What it deliberately is *not* is a menu bar: Edit and View would be near-empty
-duplicates of the toolbar toggles and the Explore window, and a menu bar that
-is mostly empty teaches people that menus here aren't worth opening. File
-operations are numerous, conventional and infrequent — the trade a menu is
-right for. Undo and redo are the opposite trade, so they get visible buttons.
+duplicates of the toolbar toggles, and a menu bar that is mostly empty teaches
+people that menus here aren't worth opening. File operations are numerous,
+conventional and infrequent — the trade a menu is right for. Undo and redo are
+the opposite trade, so they get visible buttons as well as menu rows.
+
+**Explore is the other menu**: the ways of finding a scene by chance, and the
+undo that makes them safe to try. Random flame, the Random flames list, Random
+settings…; Mutate (U), Mutate…; Undo, Redo, History…. It used to be a window
+holding five unrelated jobs in a column (two "new scene" buttons, the mutation
+slider, undo/redo, the history list). Each is its own thing now — commands are
+menu rows, and what needs room is a window the menu opens, lit in the menu
+while it's open. The blank scene went to File (`New blank scene`, Ctrl+N),
+where "start a new document" lives in every program.
 
 | Window | What lives there |
 |--------|------------------|
 | Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
-| Explore | New random flame, new blank scene, mutate + strength, undo/redo, and the history list (click a row to jump N steps in one rebuild) |
+| History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
+| Mutate | Mutation strength (a preference), the Mutate button, Undo |
+| Random flames | A scrolling list of rolls under the random settings, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
+| Random settings | What the dice may roll: maps, variations and their weight ranges, dimension and lacunarity bounds, the try budget |
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
 | Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 
-All seven persist their open state to prefs, and all seven behave alike.
+All of them persist their open state to prefs, and all behave alike.
 
 **Panels group by persistence class, with headings that say so.** Three kinds
 of value used to stack with nothing admitting it: session state that evaporates
@@ -725,7 +741,7 @@ Conventions worth keeping:
   authoring act that changes what Ctrl+S writes. History is capped by entry
   count and by bytes, but the byte cap stops at ten entries (`MIN_ENTRIES`)
   rather than grinding down to one on a 40k-transform scene, and it counts what
-  it dropped so the Explore list can say so instead of quietly ceasing to be
+  it dropped so the History window can say so instead of quietly ceasing to be
   the beginning.
 - **A disclosure hides elaboration, never the headline.** Haze gets this right:
   the amount is always visible and only the band's pin/near/far fold away. If a
@@ -839,18 +855,65 @@ done/total), the pulse should go with it and this exception disappears.
 
 ## Random Flames
 
-`--random` (windowed or with `--render`) and the Explore window's dice button
-both call `randomize::random_flame`. Randomising an IFS is easy; randomising
-one that renders is not, so every candidate runs a short CPU chaos game
-(`trace.rs` walkers, the same variation port the shader uses) and is rejected
-unless it lands in a bounded attractor with real extent on two axes and
-*fractal* rather than solid occupancy. Up to 20 tries, then the last roll is
-kept so the button always returns something.
+`--random` (windowed or with `--render`), Explore → Random flame, and every row
+of the Random flames list all call `randomize::roll_seeded(settings, seed)`.
+Randomising an IFS is easy; randomising one that renders is not, so every
+candidate runs a short CPU chaos game (`trace.rs` walkers, the same variation
+port the shader uses) and is rejected unless it lands in a bounded attractor
+with real extent on two axes and *fractal* rather than solid occupancy.
 
-`--random --seed N` is reproducible byte-for-byte; the seed is printed either
-way, so an interesting roll can always be recovered. `spherical` is never
-rolled (its 1/r^2 inversion blows scenes out — fine by hand, bad by dice).
-A rolled flame is a normal history entry: one Ctrl+Z restores what was there.
+**What gets rolled is `RandomSettings`** — a preference (`[random]` in
+prefs.toml, edited in the Random settings window), never scene data:
+
+- maps per flame, and the range each map's scale is drawn from (log-uniform),
+  plus the chance of a squashed axis;
+- which variations may be rolled, each with its own weight range (a magnitude;
+  a separate chance makes it negative). `linear` is never listed — it is the
+  remainder, `1 − Σ|w|`, floored at 0;
+- how many *kinds* a flame draws from, and how many each map carries. Kinds are
+  picked per flame and shared across its maps, because one kind across several
+  maps reads as a coherent form and freely mixed ones read as a pile;
+- bounds on the **similarity dimension** and the **lacunarity summary** — the
+  status bar's `d` and `Λ`, the same functions;
+- the try budget.
+
+**The two bounds are met in different ways, because they cost different
+amounts.** Dimension is analytic and moves predictably with scale: one factor
+`k = (Σ sᵢᵗ)^(−1/t)` on every map lands it exactly on a target `t`. So a roll
+outside the bound is *steered* onto a target drawn inside it — the maps keep
+their ratios, the scale range stops applying, and it costs nothing; only a
+rescale that would leave a map barely contracting is a rejection. Lacunarity
+has no such lever, so it is rejection-sampled. Measured on 200 default rolls
+(`cargo test --release random_flame_study -- --ignored --nocapture`): ~0.9 ms
+and ~1.15 candidates per roll, `d` p5–p95 0.75–2.58, `Λ` p5 7.5 / median 16 /
+p95 80 — so a lacunarity bound of [5, 15] still accepts about 45%. Rejections
+are counted by reason (`Rejections`) and every failure says which bound did it.
+
+**A roll that finds nothing says so.** With the defaults that almost never
+happens, and `--random` without a config still falls back to the last
+candidate as it always has. With settings, the dice leave your scene alone and
+put the reason in the status bar, `--random --random-config` exits 1, and the
+list stops rolling after eight empty rolls in a row and offers "Keep trying" —
+a list that silently stops growing would read as a bug.
+
+**Every roll is reproducible from its seed**, and is named after it
+(`random-<seed>`). `--random --seed N` reproduces a roll made with the
+defaults; `--random-config FILE` supplies the settings, and takes either a bare
+settings table or any file with a `[random]` table — prefs.toml itself — so
+`--random --seed N --random-config ~/.config/fracturize/prefs.toml` rolls
+exactly what the app did. A row's tooltip prints that command. A rolled flame
+is a normal history entry: one Ctrl+Z restores what was there.
+
+**The Random flames list** (`src/ui/random_flames.rs`, model
+`src/random_list.rs`) rolls on two or three worker threads, so a tight
+lacunarity bound never costs a frame, and keeps eight rows ahead of the last
+one on screen — scroll and it grows, without end. Changing a setting restarts
+it once the settings have been still for 400 ms, and drops any roll still in
+flight under the old ones. Thumbnails share `gpu::thumbs::ThumbCache` with the
+scene browser (keyed by `ThumbKey::Random(id)`), so the same rules hold: only
+the hovered row flies its camera, and thumbnails are never reframed. Hover is
+reported per frame (`ThumbCache::hover`) rather than set, so two lists open at
+once can't clear each other's.
 
 Colour is rolled too, not just form. The colour *source* is one of all three
 modes — `transforms` half the time (the per-transform RGBs are generated for
@@ -920,7 +983,7 @@ yet need.
 
 ## Starting From Nothing
 
-`--blank`, and the Explore window's "Blank scene", give you `Scene::blank()`:
+`--blank`, and File → New blank scene (Ctrl+N), give you `Scene::blank()`:
 two plain half-scale transforms at ±(0.5, 0.5, 0), no rotation, no variations,
 default everything else. Two rather than one because a single contracting map
 converges to a point — two give a visible line of dust with each transform's
@@ -3210,6 +3273,8 @@ fracturize --scene scenes/koru.toml --render /tmp/koru_evo.png \
 # seed used is always printed so a good one can be recovered
 fracturize --random --render /tmp/roll.png --effort small --width 480 --height 270
 fracturize --random --seed 7 --render /tmp/roll7.png --effort large
+# ...under the app's Random settings (variations, bounds), exactly as it rolls
+fracturize --random --seed 7 --random-config ~/.config/fracturize/prefs.toml --info
 
 # animated loop of a camera path (scenes/winze.toml authors one; see its
 # header comments) — preview small/cheap, then commit to the real encode

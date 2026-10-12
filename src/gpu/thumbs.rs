@@ -210,6 +210,14 @@ pub enum ThumbState<'a> {
     Failed(&'a str),
 }
 
+/// What a thumbnail is of: a scene file, or a roll in the Random flames list
+/// (by its id there, which is never reused).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ThumbKey {
+    File(std::path::PathBuf),
+    Random(u64),
+}
+
 struct Slot {
     modified: Option<std::time::SystemTime>,
     /// `(width, height)` it was drawn at; a different size is a rebuild.
@@ -219,7 +227,8 @@ struct Slot {
     used: u64,
 }
 
-/// Thumbnails by file: asked for by the browser's rows while it draws, built
+/// Thumbnails by file or roll: asked for by the rows of the scene browser and
+/// the Random flames list while they draw, built
 /// by [`ThumbCache::service`] at the top of the next render, and kept.
 ///
 /// Split that way because the rows are drawn inside egui's UI pass, which has
@@ -232,12 +241,14 @@ struct Slot {
 /// current the next time its row is drawn.
 pub struct ThumbCache {
     pipes: ThumbPipelines,
-    slots: std::collections::HashMap<std::path::PathBuf, Slot>,
-    wanted: Vec<(std::path::PathBuf, Option<std::time::SystemTime>, (u32, u32), Scene)>,
+    slots: std::collections::HashMap<ThumbKey, Slot>,
+    wanted: Vec<(ThumbKey, Option<std::time::SystemTime>, (u32, u32), Scene)>,
     /// The entry under the pointer, flying its path, and since when.
-    hovered: Option<(std::path::PathBuf, std::time::Instant)>,
+    hovered: Option<(ThumbKey, std::time::Instant)>,
+    /// What this frame's lists reported under the pointer (see [`Self::hover`]).
+    hover_now: Option<ThumbKey>,
     /// One that stopped being hovered and needs putting back on its still.
-    settle: Option<std::path::PathBuf>,
+    settle: Option<ThumbKey>,
     frame: u64,
 }
 
@@ -257,31 +268,32 @@ impl ThumbCache {
             slots: Default::default(),
             wanted: Vec::new(),
             hovered: None,
+            hover_now: None,
             settle: None,
             frame: 0,
         }
     }
 
-    /// The thumbnail for `path` at `size` pixels, asking for it if it isn't
+    /// The thumbnail for `key` at `size` pixels, asking for it if it isn't
     /// built (or is stale). `scene` is only cloned when it is.
     pub fn get(
         &mut self,
-        path: &std::path::Path,
+        key: &ThumbKey,
         modified: Option<std::time::SystemTime>,
         size: (u32, u32),
         scene: &Scene,
     ) -> ThumbState<'_> {
         let fresh = self
             .slots
-            .get(path)
+            .get(key)
             .is_some_and(|s| s.modified == modified && s.size == size);
         if !fresh {
-            if !self.wanted.iter().any(|(p, ..)| p == path) {
-                self.wanted.push((path.to_path_buf(), modified, size, scene.clone()));
+            if !self.wanted.iter().any(|(k, ..)| k == key) {
+                self.wanted.push((key.clone(), modified, size, scene.clone()));
             }
             return ThumbState::Pending;
         }
-        let slot = self.slots.get_mut(path).expect("checked above");
+        let slot = self.slots.get_mut(key).expect("checked above");
         slot.used = self.frame;
         match &slot.built {
             Ok((_, id)) => ThumbState::Ready(*id),
@@ -289,16 +301,23 @@ impl ThumbCache {
         }
     }
 
-    /// Which entry the pointer is over, if any. It flies its camera path; the
-    /// rest stay still.
-    pub fn set_hovered(&mut self, path: Option<&std::path::Path>) {
-        if self.hovered.as_ref().map(|(p, _)| p.as_path()) == path {
+    /// Report the entry under the pointer, this frame. It flies its camera
+    /// path; the rest stay still. A list with nothing hovered says nothing,
+    /// so two lists drawing in one frame can't clear each other's hover —
+    /// [`Self::service`] takes what was reported and treats silence as none.
+    pub fn hover(&mut self, key: ThumbKey) {
+        self.hover_now = Some(key);
+    }
+
+    fn update_hovered(&mut self) {
+        let now = self.hover_now.take();
+        if self.hovered.as_ref().map(|(k, _)| k) == now.as_ref() {
             return;
         }
         if let Some((old, _)) = self.hovered.take() {
             self.settle = Some(old);
         }
-        self.hovered = path.map(|p| (p.to_path_buf(), std::time::Instant::now()));
+        self.hovered = now.map(|k| (k, std::time::Instant::now()));
     }
 
     /// Build what was asked for, fly the hovered entry, settle the one that
@@ -310,17 +329,18 @@ impl ThumbCache {
         egui: &mut egui_wgpu::Renderer,
     ) {
         self.frame += 1;
+        self.update_hovered();
         let start = std::time::Instant::now();
         let mut built = 0;
         while !self.wanted.is_empty() && (built == 0 || start.elapsed() < BUILD_BUDGET) {
-            let (path, modified, size, scene) = self.wanted.remove(0);
+            let (key, modified, size, scene) = self.wanted.remove(0);
             let built_thumb = Thumbnail::new(device, queue, &self.pipes, scene, size.0, size.1)
                 .map(|t| {
                     let id = egui.register_native_texture(device, t.view(), wgpu::FilterMode::Linear);
                     (t, id)
                 });
             if let Some(Slot { built: Ok((_, id)), .. }) = self.slots.insert(
-                path,
+                key,
                 Slot { modified, size, built: built_thumb, used: self.frame },
             ) {
                 egui.free_texture(&id);
@@ -332,24 +352,24 @@ impl ThumbCache {
         // keep its place in the queue.
         self.wanted.clear();
 
-        if let Some(path) = self.settle.take()
-            && let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(&path)
+        if let Some(key) = self.settle.take()
+            && let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(&key)
         {
             t.render(device, queue, None);
         }
-        if let Some((path, since)) = &self.hovered
-            && let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(path)
+        if let Some((key, since)) = &self.hovered
+            && let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(key)
         {
             let t_path = (since.elapsed().as_secs_f32() / t.seconds.max(0.1)).fract();
             t.render(device, queue, Some(t_path));
         }
 
         if self.slots.len() > MAX_SLOTS {
-            let mut by_age: Vec<(u64, std::path::PathBuf)> =
-                self.slots.iter().map(|(p, s)| (s.used, p.clone())).collect();
-            by_age.sort();
-            for (_, path) in by_age.into_iter().take(self.slots.len() - MAX_SLOTS) {
-                if let Some(Slot { built: Ok((_, id)), .. }) = self.slots.remove(&path) {
+            let mut by_age: Vec<(u64, ThumbKey)> =
+                self.slots.iter().map(|(k, s)| (s.used, k.clone())).collect();
+            by_age.sort_by_key(|(used, _)| *used);
+            for (_, key) in by_age.into_iter().take(self.slots.len() - MAX_SLOTS) {
+                if let Some(Slot { built: Ok((_, id)), .. }) = self.slots.remove(&key) {
                     egui.free_texture(&id);
                 }
             }

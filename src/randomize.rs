@@ -1,32 +1,52 @@
 //! Random flame generator: a whole new `Scene` from nothing, for the Explore
-//! window's dice button.
+//! menu's dice, the Random flames list, and `--random`.
 //!
 //! Randomising an IFS is easy; randomising one that *renders* is not. Most
 //! random parameter sets either collapse to a point or diverge to a haze, so
 //! every candidate is run through a short CPU chaos game (the same `trace.rs`
 //! walkers the GPU shader mirrors) and rejected unless it settles into a
-//! bounded attractor with real extent on more than one axis. Up to
-//! `MAX_ATTEMPTS` tries; the last candidate is kept if none pass, so the
-//! button always produces something rather than hanging.
+//! bounded attractor with real extent on more than one axis.
+//!
+//! **What gets rolled is configurable** ([`RandomSettings`]): which variations
+//! may appear and at what weights, how many maps a flame has and how big they
+//! are, and bounds on the similarity dimension and the lacunarity. The two
+//! bounds are met in different ways, because they cost different amounts:
+//!
+//! - **Dimension is steered, not rejected.** It is analytic (`Σ sᵢᵈ = 1` over
+//!   the maps' contractions), and scaling every map by one factor `k` moves it
+//!   predictably: `k = (Σ sᵢᵗ)^(-1/t)` puts it exactly on a target `t`. So a
+//!   flame outside the bound is rescaled onto a target drawn inside it, which
+//!   keeps the maps' relative sizes and costs nothing. Only a rescale that
+//!   would stop a map contracting is a rejection.
+//! - **Lacunarity is rejected.** It is measured by a chaos walk, and nothing
+//!   predicts it from the parameters, so a candidate outside the bound is
+//!   thrown away and another rolled — up to [`RandomSettings::attempts`]
+//!   tries, with the reasons counted ([`Rejections`]) so a bound that is too
+//!   tight can say so instead of silently returning nothing.
 //!
 //! Colour is rolled as well as form — the colour source (all three modes),
 //! the gradient a palette-mode roll needs, and the background it all sits on.
 //! Every draw comes off the caller's rng, so `--random --seed N` reproduces a
-//! roll exactly, colours included.
+//! roll exactly, colours included, given the same settings.
+
+use std::collections::BTreeMap;
 
 use glam::{Mat4, Quat, Vec3};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::path::CameraPath;
 use crate::scene::{
-    generate_colormap, resolve_color_speeds, Scene, TransformSpec, NUM_VARIATIONS,
-    VARIATION_NAMES,
+    generate_colormap, resolve_color_speeds, similarity_dimension, Scene, TransformSpec,
+    NUM_VARIATIONS, VARIATION_NAMES,
 };
 use crate::trace::{self, AttractorStats};
 
-/// Variations that stay bounded under repeated application in 3D. Notably
-/// absent: `spherical`, whose 1/r² inversion reliably blows scenes out (see
-/// AGENTS.md) — it's a fine thing to reach for by hand, a bad thing to roll.
+/// Variations rolled unless the settings say otherwise: the ones that stay
+/// bounded under repeated application in 3D. Notably absent: `spherical`,
+/// whose 1/r² inversion reliably blows scenes out (see AGENTS.md) — a fine
+/// thing to reach for by hand, and something the settings can switch on, but
+/// a bad default for dice.
 const FRIENDLY: &[&str] = &[
     "sinusoidal",
     "swirl",
@@ -39,7 +59,6 @@ const FRIENDLY: &[&str] = &[
     "bulb",
 ];
 
-const MAX_ATTEMPTS: usize = 20;
 /// Attractor radius bounds. Below the floor it's collapsed to a speck, above
 /// the ceiling it's a diverging haze that no camera framing will save.
 const MIN_RADIUS: f32 = 0.15;
@@ -57,30 +76,337 @@ const MAX_OCCUPANCY: f32 = 0.22;
 /// the far more common near-miss — a thin ribbon or filament that technically
 /// has extent on two axes but reads as a line on screen.
 const MIN_AXIS_RATIO: f32 = 0.25;
+/// Largest axis scale a map may have after the dimension rescale. Past this
+/// it barely contracts, and the walk takes forever to settle, if it does.
+const MAX_AXIS_SCALE: f32 = 0.95;
 
-/// Build a random flame that passes the quality gate.
-pub fn random_flame(rng: &mut impl Rng) -> Scene {
-    let mut last = build_candidate(rng);
-    for attempt in 0..MAX_ATTEMPTS {
-        if let Some(stats) = measure_candidate(&last.transforms) {
-            log::debug!(
-                "Random flame attempt {}: r95 {:.3}, spread {:?}, occupancy {:.3} -> {}",
-                attempt,
-                stats.radius,
-                stats.spread,
-                stats.occupancy,
-                if stats.acceptable() { "accept" } else { "reject" },
-            );
-            if stats.acceptable() {
-                return finish(last, stats.center, stats.radius, rng);
-            }
-        }
-        last = build_candidate(rng);
+/// One variation's place in the dice: whether it can be rolled, and the
+/// range its weight is drawn from (a magnitude; the sign is
+/// [`RandomSettings::negative`]'s job).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct VariationRange {
+    pub enabled: bool,
+    pub weight: [f32; 2],
+}
+
+impl Default for VariationRange {
+    fn default() -> Self {
+        Self { enabled: false, weight: [0.12, 0.75] }
     }
-    // Nothing passed — hand back the last roll anyway with a neutral framing
-    // rather than looping forever or returning an error the UI can't act on.
-    log::warn!("Random flame: no candidate passed the quality gate in {} tries", MAX_ATTEMPTS);
-    finish(last, Vec3::ZERO, 1.0, rng)
+}
+
+/// A bound that can be switched off without forgetting its range.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct Bound {
+    pub on: bool,
+    pub range: [f32; 2],
+}
+
+impl Bound {
+    fn off(range: [f32; 2]) -> Self {
+        Self { on: false, range }
+    }
+
+    /// Whether `v` satisfies the bound. Off passes everything; on, a value
+    /// that couldn't be measured fails.
+    pub fn admits(&self, v: Option<f32>) -> bool {
+        !self.on || v.is_some_and(|v| v >= self.range[0] && v <= self.range[1])
+    }
+}
+
+impl Default for Bound {
+    fn default() -> Self {
+        Self::off([0.0, 1.0])
+    }
+}
+
+/// What the dice may roll. Persisted to prefs as `[random]`, edited in the
+/// Random settings window, and readable by `--random-config`.
+///
+/// Every range is `[min, max]`, inclusive; [`Self::normalized`] puts them in
+/// order and inside what the generator can use, so a hand-edited file can't
+/// hand it an inverted or impossible range.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct RandomSettings {
+    /// Maps per flame.
+    pub transforms: [u32; 2],
+    /// Each map's base scale, drawn log-uniformly — before any dimension
+    /// rescale, which keeps the maps' ratios but not this range.
+    pub scale: [f32; 2],
+    /// Chance a map has one axis squashed, which is what turns blobs into
+    /// sheets and ribbons.
+    pub squash: f32,
+    /// Chance a flame carries no variations at all — pure affine.
+    pub affine: f32,
+    /// How many different variations a flame draws its maps' variations
+    /// from. One kind across several maps reads as a coherent form; many
+    /// kinds read as a pile of unrelated distortions.
+    pub kinds: [u32; 2],
+    /// Variations on each map, chosen from the flame's kinds. At least one
+    /// map always gets one (unless the flame rolled affine).
+    pub per_map: [u32; 2],
+    /// Chance a rolled variation weight is negative (Apophysis-style).
+    pub negative: f32,
+    /// Per variation, by name. A name not listed takes the default: enabled
+    /// if it is one of the bounded variations, at `[0.12, 0.75]`. `linear` is
+    /// never listed — it is what's left: `1 − Σ|w|`, floored at 0.
+    pub variations: BTreeMap<String, VariationRange>,
+    /// Bound on the similarity dimension of the maps' affine parts. Steered:
+    /// see the module docs.
+    pub dimension: Bound,
+    /// Bound on the lacunarity summary (1 = a random scatter, higher =
+    /// clumpier). Rejection-sampled.
+    pub lacunarity: Bound,
+    /// Candidates tried per flame before giving up.
+    pub attempts: u32,
+}
+
+impl Default for RandomSettings {
+    fn default() -> Self {
+        let variations = VARIATION_NAMES
+            .iter()
+            .skip(1)
+            .map(|&name| {
+                let range = VariationRange { enabled: FRIENDLY.contains(&name), ..Default::default() };
+                (name.to_string(), range)
+            })
+            .collect();
+        Self {
+            transforms: [2, 5],
+            scale: [0.35, 0.75],
+            squash: 0.3,
+            affine: 0.08,
+            kinds: [1, 2],
+            per_map: [0, 1],
+            negative: 0.15,
+            variations,
+            dimension: Bound::off([1.5, 2.5]),
+            // p10-p75 of default rolls (`random_flame_study`): on, it keeps
+            // most of what the dice make and trims the smooth and the sparse.
+            lacunarity: Bound::off([8.0, 30.0]),
+            attempts: 60,
+        }
+    }
+}
+
+/// Ranges' outer limits, shared by `normalized` and the settings window.
+pub const MAX_TRANSFORMS: u32 = 12;
+pub const SCALE_LIMITS: [f32; 2] = [0.05, 0.95];
+pub const WEIGHT_LIMIT: f32 = 2.0;
+pub const DIMENSION_LIMITS: [f32; 2] = [0.1, 6.0];
+pub const LACUNARITY_LIMITS: [f32; 2] = [0.1, 1000.0];
+pub const MAX_ATTEMPTS: u32 = 1000;
+
+fn ordered<T: PartialOrd + Copy>(r: [T; 2], lo: T, hi: T) -> [T; 2] {
+    let clamp = |v: T| if v < lo { lo } else if v > hi { hi } else { v };
+    let (a, b) = (clamp(r[0]), clamp(r[1]));
+    if a <= b { [a, b] } else { [b, a] }
+}
+
+impl RandomSettings {
+    /// Ranges in order and in bounds, and every variation listed.
+    pub fn normalized(mut self) -> Self {
+        self.transforms = ordered(self.transforms, 1, MAX_TRANSFORMS);
+        self.scale = ordered(self.scale, SCALE_LIMITS[0], SCALE_LIMITS[1]);
+        self.squash = self.squash.clamp(0.0, 1.0);
+        self.affine = self.affine.clamp(0.0, 1.0);
+        self.kinds = ordered(self.kinds, 1, NUM_VARIATIONS as u32 - 1);
+        self.per_map = ordered(self.per_map, 0, NUM_VARIATIONS as u32 - 1);
+        self.negative = self.negative.clamp(0.0, 1.0);
+        let defaults = Self::default().variations;
+        // Unknown names dropped, missing ones filled in.
+        self.variations.retain(|k, _| defaults.contains_key(k));
+        for (name, d) in defaults {
+            let v = self.variations.entry(name).or_insert(d);
+            v.weight = ordered(v.weight, 0.0, WEIGHT_LIMIT);
+        }
+        self.dimension.range = ordered(self.dimension.range, DIMENSION_LIMITS[0], DIMENSION_LIMITS[1]);
+        self.lacunarity.range =
+            ordered(self.lacunarity.range, LACUNARITY_LIMITS[0], LACUNARITY_LIMITS[1]);
+        self.attempts = self.attempts.clamp(1, MAX_ATTEMPTS);
+        self
+    }
+
+    /// The variation in GPU slot `slot` (1.., never linear), defaulted if
+    /// the settings don't list it.
+    pub fn variation(&self, slot: usize) -> VariationRange {
+        let name = VARIATION_NAMES[slot];
+        self.variations.get(name).copied().unwrap_or(VariationRange {
+            enabled: FRIENDLY.contains(&name),
+            ..Default::default()
+        })
+    }
+
+    /// Slots that may be rolled.
+    pub fn enabled_slots(&self) -> Vec<usize> {
+        (1..NUM_VARIATIONS).filter(|&s| self.variation(s).enabled).collect()
+    }
+
+    /// Read settings from a TOML file: either the table itself, or a file
+    /// with a `[random]` table in it — which is what prefs.toml is, so the
+    /// GUI's settings can be handed straight to `--random-config`.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let value: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+        let table = match value.get("random") {
+            Some(toml::Value::Table(t)) => t.clone(),
+            _ => value,
+        };
+        let settings: Self = toml::Value::Table(table).try_into().map_err(|e: toml::de::Error| e.to_string())?;
+        Ok(settings.normalized())
+    }
+}
+
+/// Why candidates were thrown away, counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rejections {
+    /// Collapsed, diverged, a line, or a lump: the quality gate.
+    pub shape: u32,
+    /// No rescale could put the dimension in bounds without a map ceasing to
+    /// contract.
+    pub dimension: u32,
+    /// Lacunarity outside its bound.
+    pub lacunarity: u32,
+}
+
+impl Rejections {
+    pub fn total(&self) -> u32 {
+        self.shape + self.dimension + self.lacunarity
+    }
+
+    /// "52 lacunarity, 7 shape", biggest first, for messages.
+    pub fn describe(&self) -> String {
+        let mut parts = [
+            (self.lacunarity, "lacunarity"),
+            (self.dimension, "dimension"),
+            (self.shape, "shape"),
+        ];
+        parts.sort_by(|a, b| b.0.cmp(&a.0));
+        parts
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{n} {what}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// A flame that met the settings, and what it measured.
+pub struct Roll {
+    pub scene: Scene,
+    /// Similarity dimension of the maps' affine parts.
+    pub dimension: Option<f32>,
+    /// Lacunarity summary (`trace::lacunarity_summary`).
+    pub lacunarity: Option<f32>,
+    /// Candidates it took, this one included.
+    pub attempts: u32,
+    pub rejected: Rejections,
+}
+
+/// Nothing met the settings in the budget.
+pub struct RollFailure {
+    pub attempts: u32,
+    pub rejected: Rejections,
+    /// The last candidate, framed neutrally, for a caller that must return
+    /// *something*.
+    pub last: Scene,
+}
+
+impl RollFailure {
+    pub fn message(&self) -> String {
+        format!(
+            "no flame met the random settings in {} tries (rejected for {}) — loosen a bound or allow more tries",
+            self.attempts,
+            self.rejected.describe(),
+        )
+    }
+}
+
+/// Only the tests call this now: the app and `--random` go through
+/// [`roll_seeded`], so every roll has a seed it can be had again from.
+#[cfg_attr(not(test), allow(dead_code))]
+/// Build a random flame with the default settings. Always returns one: if
+/// nothing passes the gate in the budget, the last roll comes back with a
+/// neutral framing rather than an error the dice can't act on.
+pub fn random_flame(rng: &mut impl Rng) -> Scene {
+    match roll(&RandomSettings::default(), rng) {
+        Ok(r) => r.scene,
+        Err(f) => {
+            log::warn!("Random flame: {}", f.message());
+            f.last
+        }
+    }
+}
+
+/// One roll from a seed: what `--random --seed N` does, and what the dice
+/// and the Random flames list do with a seed of their own, so any of them can
+/// be had again from the command line. The scene is named after its seed.
+pub fn roll_seeded(settings: &RandomSettings, seed: u64) -> Result<Roll, RollFailure> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut rolled = roll(settings, &mut rng);
+    let name = format!("random-{seed}");
+    match &mut rolled {
+        Ok(r) => r.scene.name = name,
+        Err(f) => f.last.name = name,
+    }
+    rolled
+}
+
+/// Build a random flame that meets `settings`.
+pub fn roll(settings: &RandomSettings, rng: &mut impl Rng) -> Result<Roll, RollFailure> {
+    let mut rejected = Rejections::default();
+    let mut last = None;
+    for attempt in 1..=settings.attempts.max(1) {
+        let mut c = build_candidate(settings, rng);
+        let dimension = match steer_dimension(&mut c.transforms, settings, rng) {
+            Ok(d) => d,
+            Err(()) => {
+                rejected.dimension += 1;
+                last = Some(c);
+                continue;
+            }
+        };
+        let Some(stats) = measure_candidate(&c.transforms) else {
+            rejected.shape += 1;
+            last = Some(c);
+            continue;
+        };
+        log::debug!(
+            "Random flame attempt {}: r95 {:.3}, spread {:?}, occupancy {:.3} -> {}",
+            attempt,
+            stats.radius,
+            stats.spread,
+            stats.occupancy,
+            if stats.acceptable() { "accept" } else { "reject" },
+        );
+        if !stats.acceptable() {
+            rejected.shape += 1;
+            last = Some(c);
+            continue;
+        }
+        let lacunarity = trace::lacunarity_summary(&c.transforms, &vec![true; c.transforms.len()]);
+        if !settings.lacunarity.admits(lacunarity) {
+            rejected.lacunarity += 1;
+            last = Some(c);
+            continue;
+        }
+        return Ok(Roll {
+            scene: finish(c, stats.center, stats.radius, rng),
+            dimension,
+            lacunarity,
+            attempts: attempt,
+            rejected,
+        });
+    }
+    let last = last.unwrap_or_else(|| build_candidate(settings, rng));
+    Err(RollFailure {
+        attempts: settings.attempts.max(1),
+        rejected,
+        last: finish(last, Vec3::ZERO, 1.0, rng),
+    })
 }
 
 /// A candidate before quality checking: just the parts the chaos game needs.
@@ -90,19 +416,12 @@ struct Candidate {
     colors: Vec<Vec3>,
 }
 
-fn build_candidate(rng: &mut impl Rng) -> Candidate {
-    // Transform count: 3 and 4 are the sweet spot for legible structure.
-    let roll: f32 = rng.r#gen();
-    let n = match roll {
-        r if r < 0.15 => 2,
-        r if r < 0.55 => 3,
-        r if r < 0.85 => 4,
-        _ => 5,
-    };
+fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
+    let n = rng.gen_range(settings.transforms[0]..=settings.transforms[1]).max(1) as usize;
 
     let mut transforms = Vec::with_capacity(n);
     for _ in 0..n {
-        transforms.push(random_transform(rng));
+        transforms.push(random_transform(settings, rng));
     }
 
     // An IFS only converges if it contracts on average. Rescale everything if
@@ -113,62 +432,44 @@ fn build_candidate(rng: &mut impl Rng) -> Candidate {
         .sum::<f32>()
         / n as f32;
     if mean > 0.85 {
-        let fix = 0.75 / mean;
-        for t in &mut transforms {
-            let (s, r, p) = t.matrix.to_scale_rotation_translation();
-            t.matrix = Mat4::from_scale_rotation_translation(s * fix, r, p);
-        }
+        rescale(&mut transforms, 0.75 / mean);
     }
 
     // Variations. Purely affine IFS are a real and worthwhile family, but a
     // *random* one is almost always a dull Sierpinski variant — the good ones
-    // come from deliberate symmetry, not dice. So every roll carries some
-    // nonlinearity, and only rarely stays affine.
+    // come from deliberate symmetry, not dice. So by default every roll
+    // carries some nonlinearity, and only rarely stays affine.
     //
-    // The flame gets one characteristic variation, applied to a subset of its
-    // transforms at independently-rolled strengths. Picking a single kind per
-    // flame (rather than one per transform) is what makes the result read as
-    // a coherent form instead of a pile of unrelated distortions; varying the
-    // strength per transform is what keeps it from looking uniform.
-    if rng.r#gen::<f32>() >= 0.08 {
-        let name = FRIENDLY[rng.gen_range(0..FRIENDLY.len())];
-        let slot = VARIATION_NAMES.iter().position(|&v| v == name).unwrap();
+    // The flame draws a few characteristic kinds, and each map takes its
+    // variations from those. Picking kinds per flame (rather than freely per
+    // map) is what makes the result read as a coherent form instead of a pile
+    // of unrelated distortions; varying which maps carry them, and at what
+    // strength, is what keeps it from looking uniform.
+    let pool = settings.enabled_slots();
+    if !pool.is_empty() && rng.r#gen::<f32>() >= settings.affine {
+        let k = (rng.gen_range(settings.kinds[0]..=settings.kinds[1]) as usize).clamp(1, pool.len());
+        let kinds = choose(rng, &pool, k);
 
-        // How many transforms carry it. All of them reads as a global warp;
-        // one reads as an accent. Both are good, so roll it.
-        let touched = rng.gen_range(1..=n);
-        let mut order: Vec<usize> = (0..n).collect();
-        for i in (1..n).rev() {
-            order.swap(i, rng.gen_range(0..=i));
-        }
-
-        // Mostly-low strengths with an occasional strong one: at high blend a
-        // nonlinear variation tends to swamp the affine structure, and the
-        // interesting flames usually live where the two are still arguing.
-        for &idx in order.iter().take(touched) {
-            let w = if rng.r#gen::<f32>() < 0.25 {
-                rng.gen_range(0.55..1.0)
-            } else {
-                rng.gen_range(0.12..0.55)
-            };
-            let w = if rng.r#gen::<f32>() < 0.15 { -w } else { w };
-            transforms[idx].variations[slot] = w;
-            // Keep the total blend near 1 so the transform's overall scale
-            // stays in the range the contraction check just established.
-            transforms[idx].variations[0] = 1.0 - w.abs();
-        }
-
-        // Occasionally a second kind on one transform, for flames that need
-        // somewhere for the eye to catch.
-        if n >= 3 && rng.r#gen::<f32>() < 0.3 {
-            let other = FRIENDLY[rng.gen_range(0..FRIENDLY.len())];
-            let other_slot = VARIATION_NAMES.iter().position(|&v| v == other).unwrap();
-            if other_slot != slot {
-                let idx = rng.gen_range(0..n);
-                let w = rng.gen_range(0.15..0.5);
-                transforms[idx].variations[other_slot] = w;
-                transforms[idx].variations[0] = (transforms[idx].variations[0] - w).max(0.0);
+        let mut any = false;
+        for t in transforms.iter_mut() {
+            let m = (rng.gen_range(settings.per_map[0]..=settings.per_map[1]) as usize).min(kinds.len());
+            for slot in choose(rng, &kinds, m) {
+                t.variations[slot] = roll_weight(settings, slot, rng);
+                any = true;
             }
+        }
+        // A flame that rolled kinds but put none of them anywhere is just
+        // affine by accident; one map always carries one.
+        if !any {
+            let idx = rng.gen_range(0..n);
+            let slot = kinds[rng.gen_range(0..kinds.len())];
+            transforms[idx].variations[slot] = roll_weight(settings, slot, rng);
+        }
+        // Keep the total blend near 1 so each map's overall scale stays in
+        // the range the contraction check just established.
+        for t in transforms.iter_mut() {
+            let nonlinear: f32 = t.variations[1..].iter().map(|w| w.abs()).sum();
+            t.variations[0] = (1.0 - nonlinear).max(0.0);
         }
     }
 
@@ -202,7 +503,72 @@ fn build_candidate(rng: &mut impl Rng) -> Candidate {
     }
 }
 
-fn random_transform(rng: &mut impl Rng) -> TransformSpec {
+/// `k` distinct items of `from`, in random order.
+fn choose(rng: &mut impl Rng, from: &[usize], k: usize) -> Vec<usize> {
+    let mut v = from.to_vec();
+    for i in (1..v.len()).rev() {
+        v.swap(i, rng.gen_range(0..=i));
+    }
+    v.truncate(k);
+    v
+}
+
+/// A weight for `slot`, from its range, negative at the settings' odds.
+fn roll_weight(settings: &RandomSettings, slot: usize, rng: &mut impl Rng) -> f32 {
+    let [lo, hi] = settings.variation(slot).weight;
+    let w = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
+    if rng.r#gen::<f32>() < settings.negative { -w } else { w }
+}
+
+/// Scale every map's linear part by `k`, about its own translation.
+fn rescale(transforms: &mut [TransformSpec], k: f32) {
+    for t in transforms {
+        let (s, r, p) = t.matrix.to_scale_rotation_translation();
+        t.matrix = Mat4::from_scale_rotation_translation(s * k, r, p);
+    }
+}
+
+/// Put the similarity dimension inside the settings' bound, if it has one,
+/// by rescaling every map together. Returns the dimension it ends on; `Err`
+/// when the rescale that would do it leaves a map that barely contracts.
+fn steer_dimension(
+    transforms: &mut [TransformSpec],
+    settings: &RandomSettings,
+    rng: &mut impl Rng,
+) -> Result<Option<f32>, ()> {
+    let d = similarity_dimension(transforms);
+    if settings.dimension.admits(d) {
+        return Ok(d);
+    }
+    let [lo, hi] = settings.dimension.range;
+    let target = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
+    let contractions: Vec<f32> =
+        transforms.iter().map(|t| t.linear_determinant().abs().cbrt()).collect();
+    if contractions.iter().any(|&s| !(s > 0.0 && s.is_finite())) {
+        return Err(());
+    }
+    // Σ (k·sᵢ)ᵗ = 1  ⇒  k = (Σ sᵢᵗ)^(−1/t)
+    let sum: f32 = contractions.iter().map(|s| s.powf(target)).sum();
+    let k = sum.powf(-1.0 / target);
+    let widest = transforms
+        .iter()
+        .map(|t| t.matrix.to_scale_rotation_translation().0.abs().max_element())
+        .fold(0.0f32, f32::max);
+    if !k.is_finite() || widest * k > MAX_AXIS_SCALE {
+        return Err(());
+    }
+    rescale(transforms, k);
+    let d = similarity_dimension(transforms);
+    // Bisection inside `similarity_dimension` lands within its tolerance of
+    // the target, which can sit a hair outside a bound placed at the target.
+    let slack = 1e-3;
+    match d {
+        Some(v) if v >= lo - slack && v <= hi + slack => Ok(Some(v.clamp(lo, hi))),
+        _ => Err(()),
+    }
+}
+
+fn random_transform(settings: &RandomSettings, rng: &mut impl Rng) -> TransformSpec {
     // Translation: uniform-ish inside a ball, so transforms don't all pile up
     // near the origin the way independent per-axis ranges would.
     let dir = Vec3::new(
@@ -217,8 +583,9 @@ fn random_transform(rng: &mut impl Rng) -> TransformSpec {
 
     // Log-uniform so 0.35 and 0.75 are equally likely to be *interesting*,
     // rather than the top of the range dominating.
-    let base = (rng.gen_range(0.35f32.ln()..0.75f32.ln())).exp();
-    let scale = if rng.r#gen::<f32>() < 0.3 {
+    let [lo, hi] = settings.scale;
+    let base = if hi > lo { rng.gen_range(lo.ln()..=hi.ln()).exp() } else { lo };
+    let scale = if rng.r#gen::<f32>() < settings.squash {
         // Squash one axis: this is what turns blobs into sheets and ribbons.
         let mut s = Vec3::splat(base);
         s[rng.gen_range(0..3)] = base * rng.gen_range(0.15..0.6);
@@ -612,4 +979,140 @@ mod tests {
             }
         }
     }
+
+    /// Only enabled variations are rolled, and only at their weights.
+    #[test]
+    fn rolls_keep_to_the_variation_pool_and_ranges() {
+        let mut settings = RandomSettings::default();
+        for v in settings.variations.values_mut() {
+            v.enabled = false;
+        }
+        settings.variations.insert("julia".into(), VariationRange { enabled: true, weight: [0.3, 0.4] });
+        settings.variations.insert("absfold".into(), VariationRange { enabled: true, weight: [0.2, 0.25] });
+        settings.affine = 0.0;
+        settings.negative = 0.0;
+        settings.transforms = [3, 4];
+        settings.per_map = [1, 2];
+        let settings = settings.normalized();
+        let julia = VARIATION_NAMES.iter().position(|&v| v == "julia").unwrap();
+        let absfold = VARIATION_NAMES.iter().position(|&v| v == "absfold").unwrap();
+        let mut rolled = 0;
+        for seed in 0..10u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let Ok(r) = roll(&settings, &mut rng) else { continue };
+            rolled += 1;
+            assert!((3..=4).contains(&r.scene.transforms.len()), "seed {seed}: count");
+            for t in &r.scene.transforms {
+                for (slot, &w) in t.variations.iter().enumerate().skip(1) {
+                    match slot {
+                        s if s == julia => assert!(w == 0.0 || (0.3..=0.4).contains(&w)),
+                        s if s == absfold => assert!(w == 0.0 || (0.2..=0.25).contains(&w)),
+                        _ => assert_eq!(w, 0.0, "seed {seed}: rolled {}", VARIATION_NAMES[slot]),
+                    }
+                }
+                // Each map takes at least one variation.
+                assert!(t.variations[1..].iter().any(|&w| w != 0.0), "seed {seed}: bare map");
+            }
+        }
+        assert!(rolled >= 5, "only {rolled} of 10 rolls passed");
+    }
+
+    /// Dimension is steered rather than rejected, so even a narrow bound is
+    /// met nearly every time.
+    #[test]
+    fn dimension_bounds_are_met() {
+        for range in [[1.2, 1.4], [2.2, 2.4], [2.8, 3.0]] {
+            let settings = RandomSettings {
+                dimension: Bound { on: true, range },
+                ..Default::default()
+            };
+            let mut met = 0;
+            for seed in 0..12u64 {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                if let Ok(r) = roll(&settings, &mut rng) {
+                    let d = similarity_dimension(&r.scene.transforms).unwrap();
+                    assert!(
+                        d >= range[0] - 2e-3 && d <= range[1] + 2e-3,
+                        "seed {seed}: d {d} outside {range:?}"
+                    );
+                    met += 1;
+                }
+            }
+            assert!(met >= 10, "{range:?}: only {met} of 12 met the bound");
+        }
+    }
+
+    /// Lacunarity is rejection-sampled: whatever comes back is inside, and a
+    /// bound nothing can meet fails with the reason counted.
+    #[test]
+    fn lacunarity_bounds_are_met_or_reported() {
+        let settings = RandomSettings {
+            lacunarity: Bound { on: true, range: [3.0, 30.0] },
+            ..Default::default()
+        };
+        for seed in 0..6u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            if let Ok(r) = roll(&settings, &mut rng) {
+                let l = r.lacunarity.unwrap();
+                assert!((3.0..=30.0).contains(&l), "seed {seed}: lacunarity {l}");
+            }
+        }
+        let impossible = RandomSettings {
+            lacunarity: Bound { on: true, range: [900.0, 1000.0] },
+            attempts: 8,
+            ..Default::default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let Err(f) = roll(&impossible, &mut rng) else { panic!("met an impossible bound") };
+        assert_eq!(f.attempts, 8);
+        assert_eq!(f.rejected.total(), 8);
+        assert!(f.rejected.lacunarity > 0, "{:?}", f.rejected);
+    }
+
+    #[test]
+    fn settings_read_bare_or_from_prefs() {
+        let bare = "transforms = [6, 3]\n[variations.spherical]\nenabled = true\n";
+        let s = RandomSettings::from_toml(bare).unwrap();
+        assert_eq!(s.transforms, [3, 6], "range put in order");
+        assert!(s.variation(2).enabled, "spherical switched on");
+        assert!(s.variation(3).enabled, "swirl kept its default");
+        assert_eq!(s.variations.len(), NUM_VARIATIONS - 1);
+
+        let prefs = "invert_pitch = true\n[random]\nattempts = 5\n[random.lacunarity]\non = true\nrange = [4.0, 2.0]\n";
+        let s = RandomSettings::from_toml(prefs).unwrap();
+        assert_eq!(s.attempts, 5);
+        assert!(s.lacunarity.on);
+        assert_eq!(s.lacunarity.range, [2.0, 4.0]);
+        assert!(RandomSettings::from_toml("transforms = \"many\"").is_err());
+    }
+
+    /// Not a correctness test: how dimension and lacunarity fall across
+    /// default rolls, which is what says whether a bound is improbable.
+    /// `cargo test --release random_flame_study -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement; prints a distribution"]
+    fn random_flame_study() {
+        let settings = RandomSettings::default();
+        let mut ds = Vec::new();
+        let mut ls = Vec::new();
+        let mut tries = 0;
+        let t = std::time::Instant::now();
+        for seed in 0..200u64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            if let Ok(r) = roll(&settings, &mut rng) {
+                tries += r.attempts;
+                ds.extend(r.dimension);
+                ls.extend(r.lacunarity);
+            }
+        }
+        let pct = |v: &mut Vec<f32>, p: f32| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[((v.len() - 1) as f32 * p) as usize]
+        };
+        println!("{} rolls, {} candidates, {:.1} ms/roll", ls.len(), tries, t.elapsed().as_secs_f64() * 1e3 / 200.0);
+        for p in [0.05, 0.25, 0.5, 0.75, 0.95] {
+            println!("p{:02}: d {:.2}  lacunarity {:.2}", (p * 100.0) as u32, pct(&mut ds, p), pct(&mut ls, p));
+        }
+    }
+
 }

@@ -30,6 +30,7 @@ mod symmetry;
 mod tile;
 mod glyphs;
 mod randomize;
+mod random_list;
 mod record;
 mod renorm;
 mod render_job;
@@ -152,6 +153,16 @@ struct Args {
     /// always logged); combine with --render to explore offline.
     #[arg(long, conflicts_with = "scene", help_heading = "Scene")]
     random: bool,
+
+    /// What --random may roll, from a TOML file [the defaults]
+    ///
+    /// Variations and their weight ranges, maps per flame, bounds on dimension
+    /// and lacunarity — the app's Random settings window. Takes the settings
+    /// table on its own, or any file with a [random] table in it, which is
+    /// what the app's prefs.toml is: pass ~/.config/fracturize/prefs.toml to
+    /// roll exactly what the window would.
+    #[arg(long, value_name = "FILE", requires = "random", help_heading = "Scene")]
+    random_config: Option<String>,
 
     /// Start from a blank scene: two plain half-scale transforms
     ///
@@ -1365,7 +1376,7 @@ fn load_scene_reporting(args: &Args) -> (Scene, Vec<set::Applied>, Option<u64>) 
         }
         None if args.blank => (Scene::blank(), warn_set_cannot_apply(args), None),
         None if args.random => {
-            let (scene, seed) = random_scene(args.seed);
+            let (scene, seed) = random_scene(args.seed, args.random_config.as_deref());
             (scene, warn_set_cannot_apply(args), Some(seed))
         }
         None => (default_scene(), warn_set_cannot_apply(args), None),
@@ -1394,16 +1405,39 @@ fn warn_set_cannot_apply(args: &Args) -> Vec<set::Applied> {
 ///
 /// The seed comes back rather than only going to stdout: `--info` carries it
 /// inside the report, where a capture to a file keeps it.
-fn random_scene(seed: Option<u64>) -> (Scene, u64) {
-    use rand::SeedableRng;
+///
+/// With `--random-config`, rolls under those settings and fails outright if
+/// nothing meets them — the bounds were asked for. Without it, the defaults
+/// nearly always pass, and the rare roll that doesn't comes back anyway, as
+/// it always has.
+fn random_scene(seed: Option<u64>, config: Option<&str>) -> (Scene, u64) {
     let seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
     });
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let scene = randomize::random_flame(&mut rng);
+    let settings = match config {
+        None => randomize::RandomSettings::default(),
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| randomize::RandomSettings::from_toml(&t))
+            .unwrap_or_else(|e| {
+                eprintln!("--random-config {}: {}", path, e);
+                std::process::exit(1);
+            }),
+    };
+    let scene = match randomize::roll_seeded(&settings, seed) {
+        Ok(r) => r.scene,
+        Err(f) if config.is_none() => {
+            log::warn!("Random flame: {}", f.message());
+            f.last
+        }
+        Err(f) => {
+            eprintln!("--random --seed {}: {}", seed, f.message());
+            std::process::exit(1);
+        }
+    };
     log::info!("Random flame seed: {} (reproduce with --random --seed {})", seed, seed);
     (scene, seed)
 }
@@ -1621,7 +1655,7 @@ impl ApplicationHandler for AppWrapper {
             }),
             None if self.args.blank => Scene::blank(),
             None if self.args.random => {
-                let (scene, seed) = random_scene(self.args.seed);
+                let (scene, seed) = random_scene(self.args.seed, self.args.random_config.as_deref());
                 println!("Random flame seed: {}", seed);
                 scene
             }

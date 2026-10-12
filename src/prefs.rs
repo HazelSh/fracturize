@@ -16,8 +16,18 @@ use crate::camera::OrbitStyle;
 pub struct PanelPrefs {
     #[serde(default)]
     pub transforms_open: bool,
+    /// History: every edit, clickable to jump to.
     #[serde(default)]
-    pub explore_open: bool,
+    pub history_open: bool,
+    /// Mutate: strength and the button.
+    #[serde(default)]
+    pub mutate_open: bool,
+    /// The Random flames list down the left of the screen.
+    #[serde(default)]
+    pub random_open: bool,
+    /// What the dice may roll (`randomize::RandomSettings`).
+    #[serde(default)]
+    pub random_settings_open: bool,
     #[serde(default)]
     pub camera_open: bool,
     #[serde(default)]
@@ -81,7 +91,7 @@ pub struct Prefs {
     /// Open/closed state of the Phase 2 panel windows
     #[serde(default)]
     pub panels: PanelPrefs,
-    /// Strength multiplier for U's random mutation (Explore window slider)
+    /// Strength multiplier for U's random mutation (Mutate window slider)
     #[serde(default = "default_mutate_strength")]
     pub mutate_strength: f32,
     /// Multiplier on every panel's size, over and above the window's own scale
@@ -90,6 +100,12 @@ pub struct Prefs {
     /// monitor" — which on a 4K display is a real complaint and had no answer.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// What the dice may roll — the Random settings window. Follows the
+    /// person rather than any scene. `--random` never reads it (a render must
+    /// be reproducible from flags plus scene); `--random-config` can point at
+    /// this file to borrow it deliberately.
+    #[serde(default)]
+    pub random: crate::randomize::RandomSettings,
     /// Who to credit on scenes made in-app. Scene files carry their own
     /// author; this is only the default for one that doesn't have one yet (a
     /// blank canvas, a random flame), so a person doesn't have to type their
@@ -150,6 +166,7 @@ impl Default for Prefs {
             panels: PanelPrefs::default(),
             mutate_strength: default_mutate_strength(),
             ui_scale: default_ui_scale(),
+            random: Default::default(),
             author: None,
             point_count: None,
             threads: None,
@@ -173,7 +190,12 @@ impl Prefs {
     pub fn load() -> Self {
         prefs_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| toml::from_str(&s).ok())
+            .and_then(|s| toml::from_str::<Self>(&s).ok())
+            .map(|mut p| {
+                // A hand-edited range comes back in order and in bounds.
+                p.random = p.random.normalized();
+                p
+            })
             .unwrap_or_default()
     }
 
@@ -233,4 +255,19 @@ mod tests {
         assert!(s.contains(r#"orbit_style = "turntable""#), "{}", s);
         assert_eq!(toml::from_str::<Prefs>(&s).unwrap().orbit_style, OrbitStyle::Turntable);
     }
+
+    #[test]
+    fn random_settings_round_trip_and_feed_random_config() {
+        let mut p = Prefs::default();
+        p.random.transforms = [3, 7];
+        p.random.lacunarity.on = true;
+        p.random.variations.get_mut("spherical").unwrap().enabled = true;
+        let s = toml::to_string(&p).expect("prefs must serialize");
+        let back: Prefs = toml::from_str(&s).unwrap();
+        assert_eq!(back.random, p.random);
+        // The prefs file is a valid --random-config.
+        let from_file = crate::randomize::RandomSettings::from_toml(&s).unwrap();
+        assert_eq!(from_file, p.random);
+    }
+
 }

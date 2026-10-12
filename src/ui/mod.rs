@@ -1,5 +1,7 @@
-//! egui UI layer: a top icon toolbar, floating panel windows (Transforms,
-//! Explore, Render, Camera, Scenes, Keybinds), a bottom status bar with
+//! egui UI layer: a top icon toolbar with the File and Explore menus,
+//! floating panel windows (Transforms, Subscenes, Render, Camera, Scenes,
+//! Controls, History, Mutate, Random flames, Random settings), a bottom
+//! status bar with
 //! hover hints and an FPS/p99 tracker, and world-anchored gizmo labels —
 //! over vendored Phosphor icons and a best-effort Envy Code R.
 //!
@@ -22,14 +24,17 @@ pub mod axis_widget;
 pub mod browser;
 pub mod camera_panel;
 pub mod confirm;
-pub mod explore;
+pub mod history;
 pub mod gradient;
 pub mod hints;
 pub mod icons;
 pub mod gizmo_ring;
 pub mod labels;
+pub mod mutate;
 pub mod num;
 pub mod radio;
+pub mod random_flames;
+pub mod random_settings;
 pub mod render_job;
 pub mod render_panel;
 pub mod save_as;
@@ -149,6 +154,8 @@ pub struct UiState {
     pub renaming_subscene: Option<(usize, String)>,
     /// Why the last import failed, shown in the window until the next attempt.
     pub import_error: Option<String>,
+    /// The Random settings window's "Defaults" button (see `confirm::Arm`).
+    pub random_reset_arm: confirm::Arm,
 }
 
 impl UiState {
@@ -178,6 +185,7 @@ impl UiState {
             subscene_euler: None,
             renaming_subscene: None,
             import_error: None,
+            random_reset_arm: confirm::Arm::default(),
         }
     }
 }
@@ -202,7 +210,10 @@ impl UiState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WindowKey {
     Render,
-    Explore,
+    History,
+    Mutate,
+    Random,
+    RandomSettings,
     Scenes,
     Keybinds,
     Transforms,
@@ -214,7 +225,10 @@ impl WindowKey {
     pub fn name(self) -> &'static str {
         match self {
             Self::Render => "render",
-            Self::Explore => "explore",
+            Self::History => "history",
+            Self::Mutate => "mutate",
+            Self::Random => "random",
+            Self::RandomSettings => "random_settings",
             Self::Scenes => "scenes",
             Self::Keybinds => "keybinds",
             Self::Transforms => "transforms",
@@ -259,6 +273,10 @@ impl WindowKey {
             // thumbnail. The old one-column list was 280 wide, and saved
             // geometry wins over the default, so this is what widens it.
             Self::Scenes => egui::vec2(560.0, 300.0),
+            // One thumbnail across, and a couple of rows of it.
+            Self::Random => egui::vec2(200.0, 260.0),
+            // The variation rows are a name and a min-max pair.
+            Self::RandomSettings => egui::vec2(300.0, 260.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -268,7 +286,8 @@ impl WindowKey {
 /// the right-hand column tracks the window edge instead of sitting at a fixed
 /// x that only works at one size.
 ///
-/// The layout is Hazel's: Render top-left with Explore beneath it, then Scenes
+/// The layout is Hazel's: Render top-left with History and Mutate beneath
+/// it (where the Explore window was before it became a menu), then Scenes
 /// and Keybinds filling the middle, and Transforms top-right with Camera
 /// beneath it against the right edge. Persisted geometry always wins over
 /// this — it's only what you get before you've moved anything.
@@ -281,7 +300,16 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
     let right_x = (screen.right() - right_col_w - 20.0).max(20.0);
     match key {
         WindowKey::Render => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
-        WindowKey::Explore => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 220.0)),
+        WindowKey::History => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 260.0)),
+        WindowKey::Mutate => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 90.0)),
+        // Asked for down the left side of the screen: the full height, one
+        // thumbnail wide. Over Render's default spot, which is fine — this is
+        // only where windows land before anyone has moved them.
+        WindowKey::Random => (
+            egui::pos2(8.0, top),
+            egui::vec2(284.0, (screen.height() - top - 40.0).max(300.0)),
+        ),
+        WindowKey::RandomSettings => (egui::pos2(300.0, top), egui::vec2(360.0, 560.0)),
         WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(720.0, 520.0)),
         WindowKey::Keybinds => (egui::pos2(620.0, top), egui::vec2(360.0, 420.0)),
         WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),
@@ -363,7 +391,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     toolbar::draw(ui, app);
     step("toolbar", t, &mut timings);
     let t = std::time::Instant::now();
-    explore::draw(&ctx, app);
+    history::draw(&ctx, app);
+    mutate::draw(&ctx, app);
+    random_flames::draw(&ctx, app);
+    random_settings::draw(&ctx, app);
     step("explore", t, &mut timings);
     let t = std::time::Instant::now();
     render_panel::draw(&ctx, app);

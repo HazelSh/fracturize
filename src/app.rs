@@ -995,6 +995,9 @@ pub struct App {
     browser_selected: usize,
     /// Scene thumbnails for the browser's rows. See `gpu::thumbs`.
     pub thumbs: crate::gpu::thumbs::ThumbCache,
+    /// The Random flames list: rolls under the person's random settings,
+    /// made on background threads. See `random_list`.
+    pub random_list: crate::random_list::RandomList,
     /// The chaos game's and the window's splat pipelines, compiled once. See
     /// `ChaosPipelines`.
     chaos_pipelines: crate::gpu::points::compute::ChaosPipelines,
@@ -1224,6 +1227,7 @@ impl App {
         };
 
         let prefs = crate::prefs::Prefs::load();
+        let random_list = crate::random_list::RandomList::new(prefs.random.clone());
         let ui_state = UiState::from_prefs(&prefs);
         // Read before `prefs` is moved into the struct below.
         let (help_open, browser_open) = (prefs.panels.help_open, prefs.panels.browser_open);
@@ -1351,6 +1355,7 @@ impl App {
             browser: None,
             browser_selected: 0,
             thumbs,
+            random_list,
             chaos_pipelines,
             splat_pipelines,
             history: History::new(),
@@ -2838,7 +2843,7 @@ impl App {
     }
 
     /// Undo the most recent history entry (Ctrl+Z, Shift+U, the Explore
-    /// window's Undo button).
+    /// menu, the toolbar's Undo button).
     pub fn undo(&mut self) {
         let current = self.edit_snapshot();
         match self.history.undo(current) {
@@ -2851,7 +2856,7 @@ impl App {
     }
 
     /// Redo the most recently undone entry (Ctrl+Shift+Z, the Explore
-    /// window's Redo button).
+    /// menu, the toolbar's Redo button).
     pub fn redo(&mut self) {
         let current = self.edit_snapshot();
         match self.history.redo(current) {
@@ -2863,8 +2868,8 @@ impl App {
         }
     }
 
-    /// Undo `steps` entries in one go (clicking N deep into the Explore
-    /// window's history list) as a single pipeline rebuild.
+    /// Undo `steps` entries in one go (clicking N deep into the History
+    /// window's list) as a single pipeline rebuild.
     pub fn jump_undo(&mut self, steps: usize) {
         if steps == 0 {
             return;
@@ -3018,7 +3023,7 @@ impl App {
         })
     }
 
-    /// Strength multiplier for U's random mutation (Explore window slider;
+    /// Strength multiplier for U's random mutation (Mutate window slider;
     /// persisted in prefs).
     pub fn mutate_strength(&self) -> f32 {
         self.prefs.mutate_strength
@@ -4652,16 +4657,72 @@ impl App {
     // === Evolutionary exploration (U / Shift+U) ===
 
     /// Replace the whole scene with a freshly generated random flame
-    /// (`src/randomize.rs`) — see `adopt_scene` for why that's an edit rather
-    /// than a load.
+    /// (`src/randomize.rs`), rolled under the random settings — see
+    /// `adopt_scene` for why that's an edit rather than a load.
+    ///
+    /// When nothing meets the settings the scene stays as it was and the
+    /// status bar says why. The generator's old habit of handing back its last
+    /// candidate anyway was right for the defaults, which nearly always pass;
+    /// with bounds set, a flame outside them is a flame the person asked not
+    /// to see.
     pub fn random_flame(&mut self) {
-        let scene = crate::randomize::random_flame(&mut rand::thread_rng());
-        log::info!(
-            "Random flame: {} transforms, camera distance {:.2}",
-            scene.transforms.len(),
-            scene.camera_distance
-        );
-        self.adopt_scene(scene, "Random flame");
+        let seed = crate::random_list::fresh_seed();
+        match crate::randomize::roll_seeded(&self.prefs.random, seed) {
+            Ok(r) => {
+                log::info!(
+                    "Random flame seed {seed}: {} transforms, {} tries (reproduce with --random --seed {seed}{})",
+                    r.scene.transforms.len(),
+                    r.attempts,
+                    if self.prefs.random == Default::default() { "" } else { " --random-config <prefs.toml>" },
+                );
+                self.adopt_scene(r.scene, &format!("Random flame (seed {seed})"));
+            }
+            Err(f) => self.set_notice(format!("Random flame: {}. Kept the scene you had.", f.message()), true),
+        }
+    }
+
+    // === Random flames list and settings ===
+
+    pub fn random_settings(&self) -> &crate::randomize::RandomSettings {
+        &self.prefs.random
+    }
+
+    /// Change what the dice roll. Persisted; the Random flames list starts
+    /// over once the settings stop moving.
+    pub fn set_random_settings(&mut self, settings: crate::randomize::RandomSettings) {
+        let settings = settings.normalized();
+        if settings == self.prefs.random {
+            return;
+        }
+        self.prefs.random = settings;
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+        self.random_list.settings_changed(&self.prefs.random);
+    }
+
+    /// Throw the list away and roll a fresh one.
+    pub fn reroll_random_list(&mut self) {
+        self.random_list.reroll(&self.prefs.random);
+    }
+
+    /// Collect finished rolls and keep `want` rows rolled or on their way.
+    pub fn poll_random_list(&mut self, want: usize) {
+        self.random_list.poll(&self.prefs.random, want);
+    }
+
+    /// Open row `index` of the Random flames list: an edit, like the dice.
+    pub fn adopt_random(&mut self, index: usize) {
+        let Some(e) = self.random_list.entries.get(index) else { return };
+        let (scene, seed) = (e.scene.clone(), e.seed);
+        log::info!("Random flame seed {seed}, from the list");
+        self.adopt_scene(scene, &format!("Random flame (seed {seed})"));
+    }
+
+    /// The list, the thumbnail cache and the UI state, borrowed together so a
+    /// row can ask for its thumbnail while it draws.
+    pub fn random_list_parts(
+        &mut self,
+    ) -> (&crate::random_list::RandomList, &mut crate::gpu::thumbs::ThumbCache, &mut crate::ui::UiState) {
+        (&self.random_list, &mut self.thumbs, &mut self.ui_state)
     }
 
     /// Start over on an empty canvas (`Scene::blank`) — the build-from-nothing

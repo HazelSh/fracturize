@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use egui::text::{LayoutJob, TextWrapping};
 
 use crate::app::App;
-use crate::gpu::thumbs::ThumbState;
+use crate::gpu::thumbs::{ThumbKey, ThumbState};
 use crate::scene_browser::{folder_label, same_path, Entry, Folder, Sort};
 use crate::scene_source::SourceKind;
 
@@ -44,7 +44,6 @@ enum Action {
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     if !app.show_browser {
-        app.thumbs.set_hovered(None);
         return;
     }
     let mut open = true;
@@ -76,7 +75,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 });
             hovered = list(ui, app, &mut actions);
         });
-    app.thumbs.set_hovered(hovered.as_deref());
+    if let Some(path) = hovered {
+        app.thumbs.hover(ThumbKey::File(path));
+    }
 
     super::remember(ctx, app, super::WindowKey::Scenes);
 
@@ -387,7 +388,7 @@ fn row(
 
     let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(ROW_PAD, ROW_PAD), THUMB);
     match &entry.scene {
-        Ok(scene) => match thumbs.get(&entry.path, entry.modified, px, scene) {
+        Ok(scene) => match thumbs.get(&ThumbKey::File(entry.path.clone()), entry.modified, px, scene) {
             ThumbState::Ready(id) => {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(id, thumb, uv, egui::Color32::WHITE);
