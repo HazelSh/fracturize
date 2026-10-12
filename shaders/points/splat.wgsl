@@ -178,6 +178,14 @@ const KERNEL_SHARPNESS: f32 = 4.0;
 // kernel sums to 1 over a splat of radius 1 px
 const KERNEL_NORM: f32 = 1.29;
 
+// A point `--isolate` dropped (see ISOLATE_DROPPED in chaos.wgsl, which this
+// must agree with). Reported as behind the camera, which every vertex shader
+// here already clips. Greater-than rather than equal, so a rewrap that scales
+// the sentinel still counts.
+fn isolate_dropped(pos: vec3<f32>) -> bool {
+    return abs(pos.x) > 1.0e36;
+}
+
 @vertex
 fn vs_splat(
     @builtin(vertex_index) corner_index: u32,
@@ -185,7 +193,7 @@ fn vs_splat(
 ) -> SplatOutput {
     let point = points[point_index];
     let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
-    let depth = clip.w;
+    let depth = select(clip.w, -1.0, isolate_dropped(point.position));
 
     var out: SplatOutput;
     if depth <= 0.0 {
@@ -260,7 +268,7 @@ fn vs_splat(
 fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     let point = points[point_index];
     let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
-    let depth = clip.w;
+    let depth = select(clip.w, -1.0, isolate_dropped(point.position));
 
     var out: SplatOutput;
     if depth <= 0.0 {

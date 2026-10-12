@@ -105,12 +105,19 @@ struct ComputeParams {
     // src/subscene.rs): how many layers, and whether the scene composes them.
     num_layers: u32,
     composite: u32,
-    _pad3: u32,
+    // `--isolate`: 0 is off; k + 1 keeps only points whose last map was slot k.
+    // The rest go to ISOLATE_DROPPED, which every point shader clips.
+    isolate: u32,
     zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
     zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
     zoom_a: mat3x3<f32>,
     zoom_a_inv: mat3x3<f32>,
 }
+
+// Where `--isolate` sends a point it drops. Far past anything real — a walker
+// past 1e6 is re-seeded — and tested for by `isolate_dropped` in render.wgsl
+// and splat.wgsl, which must agree with this.
+const ISOLATE_DROPPED: f32 = 1.0e37;
 
 @group(0) @binding(0) var<storage, read_write> points: array<Point>;
 @group(0) @binding(1) var<storage, read> transforms: array<Transform>;
@@ -804,6 +811,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let c = layer_colormaps[li * 256u + (u32(stretched * 256.0) & 0xFFu)].rgb;
                 word = color_idx | (pack_rgb(c) << 8u);
             }
+        }
+        // Isolation drops a point at the write and nowhere else, so the walk —
+        // and therefore every point that is kept — is exactly the full
+        // picture's. Under symmetry `transform_idx` is the motif, so a motif's
+        // tile holds its whole orbit.
+        if params.isolate != 0u && transform_idx + 1u != params.isolate {
+            out_pos = vec3<f32>(ISOLATE_DROPPED, 0.0, 0.0);
         }
         points[output_idx] = Point(out_pos, word);
         // Behind the flag because the buffer bound here is a sixteen-byte

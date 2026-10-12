@@ -146,16 +146,16 @@ struct Args {
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
     solo: Option<String>,
 
-    /// Light up what one map moves, as selecting it in the app does [off]
+    /// Draw only the points one map placed, and nothing else [every map]
     ///
-    /// A map by name or index. The material that moves when this map moves
-    /// brightens and the rest recedes toward the background, so it shows what
-    /// the map is responsible for, at every scale. Works on a still and on
-    /// orbit, move and sweep sheets. The glow reads the point buffer, so the
-    /// render does not accumulate: an --effort tier becomes a buffer size, as
-    /// it does on a sheet. Not with --spp, --transparent or an animation.
+    /// A map by name or index. A point belongs to the map that moved it last,
+    /// so this is that map's part of the picture, exactly: the same pixels the
+    /// full render has there, with every other map's removed and the
+    /// background left bare. The maps' parts add up to the whole picture.
+    /// Under symmetry a motif's part includes its whole orbit. Works on any
+    /// render: stills, sheets, animations.
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
-    emphasis: Option<String>,
+    isolate: Option<String>,
 
     /// Start from a randomly generated flame instead of a scene file
     ///
@@ -864,13 +864,13 @@ struct Args {
     #[arg(long, value_name = "COLSxROWS", help_heading = "Contact sheets")]
     orbit_grid: Option<String>,
 
-    /// One tile per map, each lit as --emphasis lights it [no sheet]
+    /// One tile per map, each showing only that map's points [no sheet]
     ///
     /// The quickest answer to "which map made that part?". Tiles follow the
-    /// scene's map order and are labelled with each map's name, or its index
-    /// when it has none; stdout prints the --emphasis flag for each. Every
-    /// tile refills the point buffer, so prefer --effort tiny/small. Up to 36
-    /// maps; for more, light the ones you want with --emphasis.
+    /// scene's map order and are labelled with each map's name (or index) and
+    /// its share of the points; stdout prints the --isolate flag for each.
+    /// Every tile refills the point buffer, so prefer --effort tiny/small. Up
+    /// to 36 maps; for more, pick the ones you want with --isolate.
     #[arg(long, help_heading = "Contact sheets")]
     map_grid: bool,
 
@@ -1368,8 +1368,8 @@ fn run_map_grid(
                    --move-grid, --mutations or --sweep");
         std::process::exit(1);
     }
-    if args.emphasis.is_some() {
-        eprintln!("--map-grid lights every map in turn, so --emphasis has nothing to add. Drop one.");
+    if args.isolate.is_some() {
+        eprintln!("--map-grid isolates every map in turn, so --isolate has nothing to add. Drop one.");
         std::process::exit(1);
     }
     let Some(scene_path) = args.scene.clone() else {
@@ -1381,23 +1381,25 @@ fn run_map_grid(
     if n == 0 || n > 36 {
         eprintln!(
             "--map-grid draws one tile per map, up to 36, and this scene has {}. \
-             Light the ones you want with --emphasis <NAME|INDEX>.",
+             Pick the ones you want with --isolate <NAME|INDEX>.",
             n
         );
         std::process::exit(1);
     }
+    let shares = map_shares(&params.scene);
     let tiles: Vec<sweep::Tile> = names
         .iter()
         .enumerate()
         .map(|(i, name)| {
             let reference = name.clone().unwrap_or_else(|| i.to_string());
+            let share = format!("{:.0}%", shares[i] * 100.0);
             sweep::Tile {
                 sets: Vec::new(),
                 label: match name {
-                    Some(name) => format!("{}: {}", i, name),
-                    None => format!("map {}", i),
+                    Some(name) => format!("{}: {} {}", i, name, share),
+                    None => format!("map {} {}", i, share),
                 },
-                description: format!("--emphasis {}", reference),
+                description: format!("--isolate {}  ({} of the points)", reference, share),
             }
         })
         .collect();
@@ -1405,6 +1407,38 @@ fn run_map_grid(
     let (cols, rows) = offline::grid_shape(n);
     let build = sheet_scene_builder(args, scene_path, effort_points);
     offline::render_sweep(params, &tiles, cols, rows, &build, &lit)
+}
+
+/// Each map's share of the points: the chance it is the one drawn, which is
+/// its weight over its layer's, times the layer's share of the walkers in a
+/// composite. Exactly the fraction of the ring `--isolate` keeps.
+fn map_shares(scene: &Scene) -> Vec<f32> {
+    let layers = scene.layer_count();
+    let visible: f32 = (0..layers)
+        .filter(|&k| scene.layer_visible(k))
+        .map(|k| scene.layer_share(k))
+        .sum();
+    scene
+        .transforms
+        .iter()
+        .map(|t| {
+            let k = t.layer as usize;
+            let total: f32 = scene
+                .transforms
+                .iter()
+                .filter(|u| u.layer == t.layer)
+                .map(|u| u.weight.max(0.0))
+                .sum();
+            let layer = if layers > 1 && visible > 0.0 && scene.layer_visible(k) {
+                scene.layer_share(k) / visible
+            } else if layers > 1 {
+                0.0
+            } else {
+                1.0
+            };
+            if total > 0.0 { t.weight.max(0.0) / total * layer } else { 0.0 }
+        })
+        .collect()
 }
 
 /// How a sweep or map sheet builds each tile's scene: the file, under `--set`
@@ -2567,26 +2601,19 @@ fn main() {
             || !args.sweep.is_empty()
             || args.map_grid
             || crate::video::Format::from_path(std::path::Path::new(out)).is_some();
-        // The glow reads the ring the chaos game writes, so a lit still takes
-        // a tier as a ring size too.
-        let lit = args.emphasis.is_some() || args.map_grid;
-        let tier_accumulates = splat_render && !many_images && !lit;
+        let tier_accumulates = splat_render && !many_images;
         let accumulating = args.spp.is_some() || (args.effort.is_some() && tier_accumulates);
         let effort_points = args.effort.map(|e| e.points(pixels, accumulating));
         let effort_spp = args.effort.and_then(|e| tier_accumulates.then(|| e.spp()));
         if let Some(e) = args.effort {
-            if splat_render && (many_images || lit) && args.spp.is_none() && args.points.is_none() {
+            if splat_render && many_images && args.spp.is_none() && args.points.is_none() {
                 eprintln!(
                     "note: --effort {} renders this as a {:.1}M point buffer per image \
-                     (~{} samples/px) rather than accumulating: {}",
+                     (~{} samples/px) rather than accumulating: accumulation makes one still, \
+                     and this output is several images.",
                     e.name(),
                     e.points(pixels, false) as f64 / 1e6,
                     (e.points(pixels, false) as u64 / pixels.max(1)).max(1),
-                    if many_images {
-                        "accumulation makes one still, and this output is several images."
-                    } else {
-                        "--emphasis lights the point buffer, which accumulation does not keep."
-                    },
                 );
             }
             if !tier_accumulates && !e.reachable_without_accumulating(pixels) {
@@ -2649,11 +2676,18 @@ fn main() {
             .or(view.as_ref().and_then(|v| v.exposure))
             .unwrap_or(1.0);
 
-        let emphasis = args.emphasis.as_ref().map(|reference| {
-            scene::resolve_transform_ref(reference, &scene.transform_names).unwrap_or_else(|e| {
-                eprintln!("--emphasis: {}", e);
+        let isolate = args.isolate.as_ref().map(|reference| {
+            let i = scene::resolve_transform_ref(reference, &scene.transform_names).unwrap_or_else(|e| {
+                eprintln!("--isolate: {}", e);
                 std::process::exit(1);
-            })
+            });
+            println!(
+                "isolating map {} ({}): {:.1}% of the points",
+                i,
+                scene.transform_names[i].as_deref().unwrap_or("unnamed"),
+                map_shares(&scene)[i] * 100.0
+            );
+            i
         });
         let params = offline::OfflineParams {
             // A terminal render owns the GPU; nothing else is on it.
@@ -2693,7 +2727,7 @@ fn main() {
                 .unwrap_or_else(render_job::default_threads),
             gpu_timing: args.gpu_timing,
             chaos_seed: args.chaos_seed.unwrap_or(gpu::points::compute::DEFAULT_SEED),
-            emphasis,
+            isolate,
             spp,
             grade,
             checkpoint_out: args.checkpoint.as_ref().map(|p| {
@@ -2810,6 +2844,35 @@ fn main() {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// `--isolate`'s drop is one fact in three shaders: chaos.wgsl writes the
+    /// sentinel, and both point shaders must clip it in both their entry
+    /// points, or an isolated render quietly draws a smear at one position.
+    #[test]
+    fn every_point_shader_clips_what_isolate_drops() {
+        let chaos = include_str!("../shaders/points/chaos.wgsl");
+        assert!(chaos.contains("const ISOLATE_DROPPED: f32 = 1.0e37;"));
+        for (name, src) in [
+            ("render.wgsl", include_str!("../shaders/points/render.wgsl")),
+            ("splat.wgsl", include_str!("../shaders/points/splat.wgsl")),
+        ] {
+            assert!(src.contains("return abs(pos.x) > 1.0e36;"), "{name}: threshold moved");
+            assert_eq!(
+                src.matches("select(clip.w, -1.0, isolate_dropped(point.position))").count(),
+                2,
+                "{name}: every vertex entry point must clip dropped points"
+            );
+        }
+    }
+
+    #[test]
+    fn map_shares_are_weights_over_their_layer() {
+        let mut scene = Scene::blank();
+        scene.transforms[0].weight = 3.0;
+        scene.transforms[1].weight = 1.0;
+        let shares = map_shares(&scene);
+        assert!((shares[0] - 0.75).abs() < 1e-6 && (shares[1] - 0.25).abs() < 1e-6, "{shares:?}");
+    }
 
     #[test]
     fn cli_is_well_formed() {

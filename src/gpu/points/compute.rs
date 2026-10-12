@@ -290,6 +290,8 @@ pub struct PointCompute {
     /// Which transform the emphasis is measuring, and `written_total` when it
     /// was chosen.
     emphasis: Option<(u32, u64)>,
+    /// `--isolate`: the scene transform whose points alone are drawn.
+    isolate: Option<u32>,
     /// Infinite-zoom renormalization applied to every emitted point, if the
     /// scene asked for one (see `renorm.rs`). Rebuilt on transform edits.
     pub zoom: Option<crate::renorm::Renorm>,
@@ -764,6 +766,7 @@ impl PointCompute {
             stats_pipeline,
             bind_group_layout,
             emphasis: None,
+            isolate: None,
             zoom: None,
             seed,
             layer_buffer,
@@ -840,6 +843,11 @@ impl PointCompute {
             }),
             num_layers: self.num_layers,
             composite: u32::from(self.composite),
+            // Chosen by scene index, like the emphasis; stored one up so that
+            // zero can mean "off".
+            isolate: self.isolate.map_or(0, |t| {
+                self.gpu_order.iter().position(|&j| j == t as usize).map_or(u32::MAX, |k| k as u32 + 1)
+            }),
             emphasis_run_start: run_start,
             emphasis_run_len: run_len,
             ..PointComputeParams::zeroed()
@@ -874,6 +882,16 @@ impl PointCompute {
         let written = (self.written_total + pending as u64).saturating_sub(mark);
         let len = written.min(self.buffer_capacity as u64) as u32;
         ((mark % self.buffer_capacity as u64) as u32, len)
+    }
+
+    /// Keep only the points one transform placed last, or every point again.
+    ///
+    /// The rest are still computed and still written — the walk is unchanged,
+    /// so the kept points are exactly the ones the full picture has — but at a
+    /// position every point shader clips. Points already in the ring are not
+    /// touched, so set this before filling it.
+    pub fn set_isolate(&mut self, target: Option<u32>) {
+        self.isolate = target;
     }
 
     /// Point the emphasis at a transform, or turn it off.

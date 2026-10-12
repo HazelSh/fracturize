@@ -478,13 +478,17 @@ pub struct PointComputeParams {
     /// frames and would mix that many camera positions into one image.
     ///
     /// Two of those three words now carry the layer table's size and whether
-    /// the scene is a composite (see `crate::subscene`); one is still padding.
+    /// the scene is a composite (see `crate::subscene`), and the third says
+    /// which map `--isolate` keeps.
     pub num_layers: u32,
     /// 1 when the scene composes subscenes: the chaos pass then places each
     /// point by its layer and resolves its colour to packed RGB. 0 is the chaos
     /// pass exactly as it was before subscenes.
     pub composite: u32,
-    pub _pad: u32,
+    /// `--isolate`: 0 draws every point; `k + 1` keeps only the points whose
+    /// last map was GPU slot `k` and writes the rest at `ISOLATE_DROPPED`,
+    /// which every point vertex shader clips. Took the last padding word.
+    pub isolate: u32,
     /// xyz = the map's fixed point, w = target radius
     pub zoom_fixed: [f32; 4],
     /// xyz = the rotation axis of `A`, w = its angle

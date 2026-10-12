@@ -23,7 +23,7 @@ use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::points::accumulate::Accumulator;
 use crate::gpu::points::splat::Grade;
 use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
-use crate::gpu::{EmphasisParams, EmphasisRenderer, PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
+use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
 use crate::record::RenderRecord;
 use crate::scene::Scene;
@@ -220,11 +220,11 @@ pub struct OfflineParams<'a> {
     /// made before this existed; any other value is an independent deal of the
     /// same attractor.
     pub chaos_seed: u64,
-    /// Light up the material this map moves: the glow the app draws over a
-    /// selected transform, drawn over the render. A scene transform index.
-    /// Ring-buffer renders only, because the glow reads the ring the chaos
-    /// game is writing; an accumulating render keeps a histogram instead.
-    pub emphasis: Option<usize>,
+    /// Draw only the points this map placed last, and nothing else: its
+    /// share of the picture, exactly. A scene transform index. The walk is
+    /// unchanged, so what is kept is pixel for pixel what the full render has
+    /// there. See `PointCompute::set_isolate`.
+    pub isolate: Option<usize>,
     /// Target samples per **output** pixel, accumulated into a persistent
     /// histogram. `None` is the ring-buffer render this program has always
     /// done, where the sample count is the buffer's capacity and nothing more.
@@ -537,7 +537,7 @@ fn fill_points(
     control: Option<&JobControl>,
     gpu_timing: bool,
     chaos_seed: u64,
-    emphasis: Option<usize>,
+    isolate: Option<usize>,
 ) -> Result<(PointCompute, u32, Outcome), String> {
     let mut compute = PointCompute::new(
         device,
@@ -546,9 +546,8 @@ fn fill_points(
         chaos_seed,
     );
     compute.zoom = scene_zoom(scene)?;
-    // Before the first dispatch, so every point in the ring is measured
-    // against this map and the glow may read all of them.
-    compute.set_emphasis(device, queue, emphasis.map(|i| i as u32));
+    // Before the first dispatch, so no point in the ring predates it.
+    compute.set_isolate(isolate.map(|i| i as u32));
     let total_frames = compute.warmup_frames + accumulate.max(1);
     log::info!(
         "Filling {} point buffer: {} warmup + {} accumulation frames",
@@ -598,16 +597,6 @@ fn fill_points(
                 }
             }
         }
-    }
-    if compute.emphasis_target().is_some() {
-        // The reference the glow normalizes against. The app re-measures it
-        // every frame; a still is one frame, and the first measurement seeds
-        // it outright rather than easing toward it.
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("offline_emphasis_stats_encoder"),
-        });
-        compute.dispatch_emphasis_stats(&mut encoder);
-        queue.submit(std::iter::once(encoder.finish()));
     }
     // Unconditional, and it has to be: on the cancel path there is submitted
     // work in flight that the readback would otherwise race.
@@ -962,75 +951,11 @@ impl TileRenderer {
     }
 }
 
-/// The app's selected-transform glow, drawn over an offline render
-/// (`--emphasis`, `--map-grid`).
-///
-/// Nothing new: the same `EmphasisRenderer` the window uses, over a ring the
-/// fill measured against one map. It draws on the *output*-sized target, after
-/// the reconstruction filter, so its camera is the output's — no supersample
-/// factor — and a still at 1x lights exactly what the window would.
-struct Glow {
-    renderer: EmphasisRenderer,
-    params: EmphasisParams,
-}
-
-impl Glow {
-    /// `None` unless the fill was measuring a map.
-    fn new(
-        device: &wgpu::Device,
-        depth: BitDepth,
-        compute: &PointCompute,
-        splat: bool,
-        background: Vec3,
-    ) -> Option<Self> {
-        compute.emphasis_target()?;
-        let (run_start, run_len) = compute.emphasis_window();
-        let renderer = EmphasisRenderer::new(
-            device,
-            depth.format(),
-            &compute.point_buffer,
-            &compute.sensitivity_buffer,
-            &compute.stats_buffer,
-        );
-        let params = EmphasisParams {
-            run_start,
-            run_len,
-            capacity: compute.buffer_capacity,
-            // Gather the glow the way the picture under it was drawn.
-            splat_mode: u32::from(splat),
-            background: background.to_array(),
-            ..EmphasisParams::default()
-        };
-        Some(Self { renderer, params })
-    }
-
-    fn upload(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
-        self.renderer.upload_camera(queue, camera);
-        self.renderer.upload_params(queue, &self.params);
-    }
-}
-
-/// A transparent render has no background for the glow's unlit material to
-/// recede toward, so the two are refused together rather than baking a colour
-/// into an alpha channel that exists to leave it out.
-fn reject_emphasis_transparent(emphasis: Option<usize>, transparent: bool) -> Result<(), String> {
-    if emphasis.is_some() && transparent {
-        return Err("--emphasis and --map-grid dim everything a map does not move toward the \
-                    background colour, and a --transparent render has none. Drop one of them."
-            .into());
-    }
-    Ok(())
-}
-
-/// The glow reads the ring the chaos game is writing, and only the ordinary
-/// still path and the sheets keep one.
-fn reject_emphasis(emphasis: Option<usize>, what: &str, fix: &str) -> Result<(), String> {
-    if emphasis.is_some() {
-        return Err(format!(
-            "--emphasis lights the point buffer a ring-buffer render draws from, and {} does \
-             not render that way. {}",
-            what, fix
-        ));
+/// `--isolate` keeps the maps a scene has, and a mutation sheet's variants may
+/// not have the same ones.
+fn reject_isolate(isolate: Option<usize>, what: &str, fix: &str) -> Result<(), String> {
+    if isolate.is_some() {
+        return Err(format!("--isolate names a map of the scene, and {} changes its maps. {}", what, fix));
     }
     Ok(())
 }
@@ -1187,7 +1112,6 @@ impl TileTarget {
         sheet_w: u32,
         col: u32,
         row: u32,
-        glow: Option<&mut Glow>,
     ) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("offline_render_encoder"),
@@ -1246,11 +1170,6 @@ impl TileTarget {
                     use_point_primitives,
                 );
             }
-        }
-        if let Some(g) = glow {
-            g.renderer.render(
-                device, &mut encoder, &self.color_view, self.width, self.height, g.params.run_len,
-            );
         }
         self.copy_out(&mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
@@ -2010,7 +1929,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         threads,
         gpu_timing,
         chaos_seed,
-        emphasis,
+        isolate,
         // `Some` took the accumulating path at the top of this function.
         spp: _,
         grade,
@@ -2026,7 +1945,6 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         gpu_reserve: _,
         gpu_share: _,
     } = params;
-    reject_emphasis_transparent(emphasis, transparent)?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -2048,8 +1966,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     let t_setup = Instant::now();
 
     let (compute, point_count, mut outcome) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed, emphasis)?;
-    let mut glow = Glow::new(&device, bit_depth, &compute, splat, scene.background);
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed, isolate)?;
     let mut renderer =
         TileRenderer::new(
         &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
@@ -2111,22 +2028,11 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // pixels, so it scales with N alongside `target_height` above.
         .with_supersample(sampling.n);
         renderer.upload_camera(&queue, &camera);
-        if let Some(g) = &glow {
-            // The glow draws on the output, after the filter: same framing,
-            // output height, no supersample factor.
-            g.upload(&queue, &CameraUniforms::new(
-                tile.view_proj, base_camera.fov, height as f32, point_size, aspect, 1.0,
-                haze_near, haze_far, haze.transmittance, haze.saturation,
-                color_contrast, scene.background.to_array(),
-                transparent, scene.packs_rgb(),
-            )
-            .with_zoom_guard(zoom.as_ref(), base_camera.eye()));
-        }
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
-            &mut sheet, sheet_w, col, row, glow.as_mut(),
+            &mut sheet, sheet_w, col, row,
         );
         if tiles.len() > 1 {
             println!("tile [row {}, col {}]: {}", row, col, tile.label);
@@ -2326,13 +2232,6 @@ fn reject_spp(spp: Option<u32>, what: &str, fix: &str) -> Result<(), String> {
 /// actually completed so the brightness is right either way. This is the
 /// strongest form of the anytime property this renderer has.
 fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
-    // Only an explicit --spp gets here: with --emphasis, main.rs takes an
-    // --effort tier as a ring size, the way a sheet does.
-    reject_emphasis(
-        params.emphasis,
-        "an --spp render, which accumulates into a histogram instead,",
-        "Drop --spp; an --effort tier still sets the density.",
-    )?;
     let OfflineParams {
         mut scene,
         view,
@@ -2358,8 +2257,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         threads,
         gpu_timing,
         chaos_seed,
-        // Refused at the top of this function.
-        emphasis: _,
+        isolate,
         spp,
         grade,
         grade_out,
@@ -2436,6 +2334,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         crate::gpu::points::compute::resume_seed(chaos_seed, prior_laps),
     );
     compute.zoom = scene_zoom(&scene)?;
+    compute.set_isolate(isolate.map(|i| i as u32));
     let capacity = compute.buffer_capacity;
 
     // Laps to reach the target. `--spp` counts against *output* pixels, so
@@ -3152,7 +3051,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         threads,
         gpu_timing,
         chaos_seed,
-        emphasis,
+        isolate,
         spp,
         grade,
         grade_out,
@@ -3164,7 +3063,6 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         gpu_share: _,
     } = params;
     reject_spp(spp, "an animation", "Render the frame you want as a single still.")?;
-    reject_emphasis(emphasis, "an animation", "Render a frame of it as a still with --path-t.")?;
     reject_grade_out(grade_out, "an animation", "Render the frame you want as a single still.")?;
     reject_checkpoint(checkpoint_out, resume_from, "an animation", "Render the frame you want as a single still.")?;
     reject_density_estimation(density_estimation, "an animation", "Render the frame you want as a single still.")?;
@@ -3194,7 +3092,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     let t_setup = Instant::now();
 
     let (compute, point_count, fill) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed, None)?;
+        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed, isolate)?;
     // See this function's doc comment: an animation has nothing to keep from a
     // half-filled cloud, so a cancel here is a cancel.
     if fill.is_partial() {
@@ -3320,7 +3218,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         let use_point_primitives = sampling.use_point_primitives(point_size, cam.distance, cam.fov);
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
-            &mut frame_buf, width, 0, 0, None,
+            &mut frame_buf, width, 0, 0,
         );
         for (o, &v) in frame_rgba8.iter_mut().zip(&frame_buf) {
             *o = (v / 257) as u8;
@@ -3432,7 +3330,7 @@ pub fn render_mutations(
         threads: _,
         gpu_timing,
         chaos_seed,
-        emphasis,
+        isolate,
         spp,
         grade,
         grade_out,
@@ -3444,7 +3342,7 @@ pub fn render_mutations(
         gpu_share: _,
     } = params;
     reject_spp(spp, "a variant sheet", "Set the sheet's density with --points instead.")?;
-    reject_emphasis(emphasis, "a mutation sheet", "Light a map in one variant's .mutN.toml instead.")?;
+    reject_isolate(isolate, "a mutation sheet", "Isolate a map in one variant's .mutN.toml instead.")?;
     reject_grade_out(grade_out, "a variant sheet", "Render the tile you want on its own.")?;
     reject_checkpoint(checkpoint_out, resume_from, "a variant sheet", "Render the tile you want on its own.")?;
     reject_density_estimation(density_estimation, "a variant sheet", "Render the tile you want on its own.")?;
@@ -3542,7 +3440,7 @@ pub fn render_mutations(
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
-            &mut sheet, sheet_w, col, row, None,
+            &mut sheet, sheet_w, col, row,
         );
 
         if idx == 0 {
@@ -3614,9 +3512,9 @@ pub fn render_sweep(
     cols: u32,
     rows: u32,
     build: &dyn Fn(&[String]) -> Result<Scene, String>,
-    // The map each tile lights, by tile; a tile without one lights whatever
-    // `--emphasis` asked for, if anything. This is what `--map-grid` is.
-    tile_emphasis: &[Option<usize>],
+    // The map each tile isolates, by tile; a tile without one isolates
+    // whatever `--isolate` asked for, if anything. This is what `--map-grid` is.
+    tile_isolate: &[Option<usize>],
 ) -> Result<Outcome, String> {
     print_start("sweep sheet", params.width, params.height, params.out_path);
     let OfflineParams {
@@ -3645,7 +3543,7 @@ pub fn render_sweep(
         threads: _,
         gpu_timing,
         chaos_seed,
-        emphasis,
+        isolate,
         spp,
         grade,
         grade_out,
@@ -3657,9 +3555,8 @@ pub fn render_sweep(
         gpu_share: _,
     } = params;
     reject_spp(spp, "a sweep sheet", "Set the sheet's density with --points instead.")?;
-    let lit: Vec<Option<usize>> =
-        (0..tiles.len()).map(|i| tile_emphasis.get(i).copied().flatten().or(emphasis)).collect();
-    reject_emphasis_transparent(lit.iter().flatten().next().copied(), transparent)?;
+    let kept: Vec<Option<usize>> =
+        (0..tiles.len()).map(|i| tile_isolate.get(i).copied().flatten().or(isolate)).collect();
     reject_grade_out(grade_out, "a sweep sheet", "Render the tile you want on its own.")?;
     reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet", "Render the tile you want on its own.")?;
     reject_density_estimation(density_estimation, "a sweep sheet", "Render the tile you want on its own.")?;
@@ -3708,18 +3605,6 @@ pub fn render_sweep(
         .with_zoom_guard(zoom, base_camera.eye())
         .with_supersample(sampling.n)
     };
-    // The glow draws on the output, after the filter: output height, no
-    // supersample factor.
-    let glow_camera = |zoom: Option<&crate::renorm::Renorm>| {
-        CameraUniforms::new(
-            view_proj, base_camera.fov, height as f32, point_size, aspect, 1.0,
-            haze_near, haze_far, haze.transmittance, haze.saturation,
-            color_contrast, scene.background.to_array(),
-            transparent, scene.packs_rgb(),
-        )
-        .with_zoom_guard(zoom, base_camera.eye())
-    };
-
     let target = TileTarget::new(
         &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
@@ -3744,23 +3629,19 @@ pub fn render_sweep(
         }
         let t0 = Instant::now();
         let (compute, point_count, fill) =
-            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed, lit[idx])?;
+            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed, kept[idx])?;
         outcome = outcome.and(fill);
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
             filter_radius, bit_depth, clear, transparent, grade,
         );
         renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
-        let mut glow = Glow::new(&device, bit_depth, &compute, splat, variant.background);
-        if let Some(g) = &glow {
-            g.upload(&queue, &glow_camera(compute.zoom.as_ref()));
-        }
         fill_total += t0.elapsed().as_secs_f32();
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
-            &mut sheet, sheet_w, col, row, glow.as_mut(),
+            &mut sheet, sheet_w, col, row,
         );
         if labels {
             label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, &tile.label);

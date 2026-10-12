@@ -92,6 +92,14 @@ fn guard_weight(pos: vec3<f32>) -> f32 {
     return 1.0 - smoothstep(0.0, 1.0, t);
 }
 
+// A point `--isolate` dropped (see ISOLATE_DROPPED in chaos.wgsl, which this
+// must agree with). Reported as behind the camera, which every vertex shader
+// here already clips. Greater-than rather than equal, so a rewrap that scales
+// the sentinel still counts.
+fn isolate_dropped(pos: vec3<f32>) -> bool {
+    return abs(pos.x) > 1.0e36;
+}
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) corner_index: u32,
@@ -101,7 +109,7 @@ fn vs_main(
 
     // Transform to clip space
     let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
-    let depth = clip.w;
+    let depth = select(clip.w, -1.0, isolate_dropped(point.position));
 
     // Handle points behind camera - move them off screen
     if depth <= 0.0 {
@@ -161,7 +169,7 @@ fn vs_point(@builtin(vertex_index) point_index: u32) -> VertexOutput {
     let point = points[point_index];
 
     let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
-    let depth = clip.w;
+    let depth = select(clip.w, -1.0, isolate_dropped(point.position));
 
     var out: VertexOutput;
     if depth <= 0.0 {

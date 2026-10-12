@@ -22,8 +22,8 @@ runs across columns, the second down rows, so two sweeps at `--sweep-steps 4`
 are sixteen tiles, every pairing of the two. That is the cheap way to find out
 whether two values interact.
 When you can't tell which map made which part of the picture, `--map-grid`
-renders one tile per map with that map's material lit, and `--emphasis <map>`
-lights one in an ordinary still.
+renders one tile per map showing that map's points and nothing else, and
+`--isolate <map>` does the same for one map in any render.
 
 ---
 

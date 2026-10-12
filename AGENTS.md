@@ -3187,17 +3187,27 @@ filled once and re-rendered per tile, so 9 tiles cost barely more than 1):
   tile prints its equivalent `yaw`/`pitch`/`distance`, so a good framing can
   be adopted directly into a `[camera]` block or view file.
 
-**Which map made that?** `--emphasis <map>` draws the app's selected-transform
-glow over a render: the material that moves when that map moves brightens, and
-the rest recedes toward the background. It is the same `EmphasisRenderer` the
-window uses (`offline::Glow`), drawn on the output after the reconstruction
-filter, so a still at 1x lights exactly what the window would. It works on a
-still and on orbit, move and sweep sheets. `--map-grid` is the sheet form: one
-tile per map (up to 36), each lit in turn and labelled with the map's name,
-with each tile's `--emphasis` flag on stdout. The glow reads the point ring the
-chaos game writes, so neither accumulates — an `--effort` tier becomes a buffer
-size, as on any sheet — and both refuse `--spp`, `--transparent` (the unlit
-material recedes toward a background that isn't there) and animation.
+**Which map made that?** `--isolate <map>` draws only the points that map
+placed and leaves the rest of the frame bare. A point belongs to the map that
+moved it last, so the maps' parts partition the picture: each is exactly the
+pixels the full render has there, and together they add up to it. Under
+symmetry a motif's part includes its whole orbit. `--map-grid` is the sheet
+form: one tile per map (up to 36), labelled with the map's name and its share
+of the points, with each tile's `--isolate` flag on stdout.
+
+It is a filter in the chaos pass, not a renderer: the walk runs unchanged, and
+a point from any other map is written at `ISOLATE_DROPPED` (`chaos.wgsl`),
+which both point shaders clip in every vertex entry point —
+`every_point_shader_clips_what_isolate_drops` holds the three files together.
+So it works on every render path, accumulation, transparency and animation
+included. Exposure is still normalized by every point the walk made, which is
+what keeps a map's part at the brightness it has in the full picture; the
+`samples/px` a render reports counts those too, kept or not.
+
+This is deliberately **not** the app's selected-transform glow. That is tuned
+for a person with a mouse in hand: it brightens and dims by degrees, which
+reads in motion and is a judgement call in a still. An agent with weak vision
+needs the answer to be present or absent.
 
 **Parameter sweeps** (`--sweep`, exploring the *scene* rather than the framing):
 
