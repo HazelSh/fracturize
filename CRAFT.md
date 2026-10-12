@@ -811,9 +811,24 @@ recorded dead end is worth as much as a recipe.
   hue. That is what makes this a colour answer to the problem §2.1 frames as
   density: the measure is still flat (`--info` still raises its lacunarity
   note, correctly about density), but the *path* each point took is not, and
-  mix mode records the path. Expect the same of any flat-measure orbit whose
-  maps carry distinct RGBs. `scenes/ledger.toml`; `menger.toml` itself is
+  mix mode records the path. `scenes/ledger.toml`; `menger.toml` itself is
   untouched (it is a zoom scene, and this was measured on the bounded set).
+
+  **Under a native `[[symmetry]]`, mix sees motifs, not copies.** The RGB is
+  per transform (`chaos.wgsl`, `color_rgb`), and the drawn group element never
+  touches it, so every copy of a motif is one colour to mix. That turns out
+  to be enough. I rebuilt the sponge as two motifs under `Octa` (a corner
+  cube at weight 8, an edge cube at 12; lacunarity 1.9, the same set). With
+  just two colours, corner-versus-edge at every level reads as a two-tone
+  fractal, at least as clearly as the 20-colour version, and already at
+  falloff 0. Two symbols are enough for the walk's word to say something;
+  what mix needs is *some* maps that differ, not every copy distinct.
+
+  The same rebuild shows a dimension caveat. `--info` reports 3.52 against
+  menger's 2.72, because it counts all 24 copies of each motif, while a corner
+  cube is fixed by 3 rotations and an edge cube by 2. Those copies differ as
+  maps but land on the same sub-cube. This is §2.1's overlap caveat, not a
+  bug, but it bites hard on a motif that sits on a symmetry axis.
 
   Same session, `scenes/sheaf.toml`, bred rather than designed: a `Dih5` cage
   of tilted struts (`[0.16, 0.5, 0.16]`, 15% `bubble`) plus one off-group map.
