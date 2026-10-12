@@ -34,8 +34,18 @@ use crate::gpu::points::splat::{Grade, SplatPipelines, SplatRenderer};
 use crate::gpu::DEPTH_FORMAT;
 use crate::scene::Scene;
 
-/// The thumbnail's texture format, and what egui samples.
+/// The thumbnail's texture format: what the splat renders into, so the
+/// hardware does the sRGB encode on store as it does for a `--render`.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// What egui samples the same texture as. Not `FORMAT`, and this was a real
+/// bug: egui's shader treats every texel it samples as sRGB-*encoded* (its own
+/// textures are `Rgba8Unorm`), so handing it the sRGB view decoded the texel
+/// to linear on the way in and egui then read linear as encoded — every
+/// thumbnail came out darker than the scene opens, a linear 0.315 background
+/// showing as 80/255 instead of 152. Viewing the same bytes as plain unorm
+/// hands egui exactly the encoded values the sRGB store wrote.
+const EGUI_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Points in a thumbnail's ring.
 pub const POINTS: u32 = 8192;
@@ -70,6 +80,8 @@ pub struct Thumbnail {
     #[cfg_attr(not(test), allow(dead_code))]
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    /// The same texture as egui samples it; see [`EGUI_FORMAT`].
+    egui_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
     width: u32,
     height: u32,
@@ -122,7 +134,7 @@ impl Thumbnail {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats: &[EGUI_FORMAT],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("thumb_depth"),
@@ -135,6 +147,10 @@ impl Thumbnail {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
+        let egui_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(EGUI_FORMAT),
+            ..Default::default()
+        });
         let depth_view = depth.create_view(&Default::default());
 
         let splat = SplatRenderer::with_pipelines(
@@ -154,7 +170,7 @@ impl Thumbnail {
         let seconds = crate::path::resolve(scene.camera_path.as_ref(), &default).duration();
 
         let mut thumb = Self {
-            scene, compute, splat, texture, view, depth_view, width, height, seconds, folded: 0,
+            scene, compute, splat, texture, view, egui_view, depth_view, width, height, seconds, folded: 0,
         };
         thumb.render(device, queue, None);
         Ok(thumb)
@@ -198,7 +214,7 @@ impl Thumbnail {
 
     /// What egui registers and draws.
     pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
+        &self.egui_view
     }
 }
 
