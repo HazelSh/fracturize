@@ -1,0 +1,62 @@
+# Sheaf -- straw bound at the waist.
+#
+# Bred, not designed: a Dih5 cage of tilted struts was the seed, and a
+# --mutations sheet scaled both maps up into one bundle. Dih5's half-turn flip
+# is what gives it two ends, an hourglass of stalks crossing at the middle.
+# `heart` is the map outside the group (CRAFT 3.6): at 0.3 weight it is the
+# bright knot where the sheaf is tied. The rib's 30 degree outward tilt is what
+# splays the ears; at 8 the bundle is a column of reeds.
+#
+# Colour is index-driven: ribs sit low on the ring (umber), the heart high
+# (pale straw), and color_falloff = 1.0 keeps the knot pale while the ears go
+# dark. Render with splat.
+
+[meta]
+name = "Sheaf"
+author = "Claude Opus 5.5"
+point_size = 0.0015
+color_speed = 0.5
+color_falloff = 1.0
+haze = 0.25
+exposure = 1.0
+background = [0.016, 0.012, 0.010]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 4.0
+yaw = 0.5
+pitch = 0.35
+
+[palette]
+interpolate = "oklab"
+stops = [
+  { at = 0.00, color = "#1c120a" },
+  { at = 0.22, color = "#6b3c14" },
+  { at = 0.45, color = "#c8902e" },
+  { at = 0.62, color = "#f3dc9a" },
+  { at = 0.80, color = "#8a8a3a" },
+]
+
+[[symmetry]]
+group = "Dih5"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["rib"]
+
+[[transform]]
+name = "rib"
+translation = [0.0, 0.55, 0.85]
+scale = [0.1918, 0.5993, 0.1918]
+rotation = [30.0, 0.0, -8.0]
+color = [1.0, 0.55, 0.2]
+weight = 1.0
+color_value = 0.3
+variations = { bubble = 0.15, linear = 0.85 }
+
+[[transform]]
+name = "heart"
+translation = [0.0, -0.2, 0.0]
+scale = 0.5545
+rotation = [0.0, 40.0, 6.0]
+color = [0.3, 0.6, 1.0]
+weight = 0.3
+color_value = 0.75

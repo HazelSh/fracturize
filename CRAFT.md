@@ -418,7 +418,8 @@ either, so the thing the sponge is actually *about*, holes within holes within
 holes, never arrives. Keep the scene: it is the repo's clearest evidence that an IFS
 can build a near-solid body, which is a real and non-obvious fact about the medium.
 
-**The one of those three that might be cheap — untested, go and try it.** `menger`
+**The one of those three that might be cheap — tested 2026-10-12, and it works;
+see the discovery log and `scenes/ledger.toml`.** `menger`
 gives each of its 20 sub-cubes a distinct `color`, and under `color_mode = "mix"`
 (`[meta]`, see `src/scene.rs`) the walker carries an RGB EMA over the transforms it
 actually took rather than a scalar index. On this scene that EMA is a record of
@@ -790,3 +791,35 @@ recorded dead end is worth as much as a recipe.
   `share` is a weak brightness lever under the log tonemap (0.3 → 1.0 moved the
   smoke's mean luminance 64 → 76) — use it for grain and balance, and read the
   `density` line in `--info`'s `layers` section before rendering.
+
+- **2026-10-12, Opus 5.5. The sponge's holes arrive through colour (§4.2's open
+  question, settled).** Bounded `menger` (zoom stripped, seen from outside, the
+  points renderer), only the colour changed:
+
+  ```
+  transforms ring, any speed      speckle on a grey-violet brick
+  mix, color_speed 0.2 -> 0.85    0.2 pastel wash; 0.85 the 20 sub-cubes as
+                                  solid blocks, face-centre holes as recesses
+  mix, color_falloff 0.15         a fine lattice, washed toward pastel
+  mix, color_falloff 0.6          three levels of cubes-of-cubes  <- best
+  mix, color_falloff 1.0          two levels, strongly coloured
+  ```
+
+  Fixed `color_speed` can only ever show the top level, because the most
+  recent map dominates the EMA. `color_falloff` weights each step by the
+  scale it controls, so each level of the recursion gets its own share of the
+  hue. That is what makes this a colour answer to the problem §2.1 frames as
+  density: the measure is still flat (`--info` still raises its lacunarity
+  note, correctly about density), but the *path* each point took is not, and
+  mix mode records the path. Expect the same of any flat-measure orbit whose
+  maps carry distinct RGBs. `scenes/ledger.toml`; `menger.toml` itself is
+  untouched (it is a zoom scene, and this was measured on the bounded set).
+
+  Same session, `scenes/sheaf.toml`, bred rather than designed: a `Dih5` cage
+  of tilted struts (`[0.16, 0.5, 0.16]`, 15% `bubble`) plus one off-group map.
+  One `--mutations 8` sheet scaled both maps ~1.15x into a single bundle. The
+  dihedral flip gives it two ends, so it reads as a sheaf of straw tied at
+  the waist. Two sweeps settled it: rib tilt 8 -> 30° (a column of reeds ->
+  splayed ears), and the defect's weight 0.04 -> 0.3, where it stops being a
+  ghost and becomes the knot. d = 2.08 with notes `none`, and it looked right
+  first time, which is §2.1 earning its keep again.
