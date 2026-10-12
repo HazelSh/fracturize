@@ -1,0 +1,79 @@
+[meta]
+name = "clarent-nl-004"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.2479
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [-0.0805, 0.1121, 0.0]
+scale = [0.5422, 0.94, 0.03]
+rotation = [0.0, 0.0, -27.1398]
+color = [0.0432, 0.4851, 0.0829]
+weight = 0.1089
+color_value = 0.0
+variations = { boxfold = 0.204, linear = 0.796 }
+
+[[transform]]
+name = "map-1"
+translation = [0.0291, 0.0122, 0.0]
+scale = [0.3743, 0.94, 0.3008]
+rotation = [0.0, 0.0, 39.5153]
+color = [0.2812, 0.9863, 0.316]
+weight = 0.7433
+color_value = 0.1667
+variations = { julia = 0.2978, linear = 0.7022 }
+
+[[transform]]
+name = "map-2"
+translation = [0.2369, 0.0541, 0.0]
+scale = [0.248, 0.2718, 0.4496]
+rotation = [0.0, 0.0, -1.151]
+color = [0.7684, 0.5997, 0.7162]
+weight = 0.9689
+color_value = 0.3333
+variations = { linear = 0.7087, spherefold = 0.2913 }
+
+[[transform]]
+name = "map-3"
+translation = [-0.2209, 0.0183, 0.0]
+scale = [0.94, 0.8978, 0.0737]
+rotation = [0.0, 0.0, 48.5896]
+color = [0.3162, 0.34, 0.2131]
+weight = 5.4593
+color_value = 0.5
+variations = { linear = 0.7484, sinusoidal = 0.2516 }
+
+[[transform]]
+name = "map-4"
+translation = [-0.5038, -0.5631, 0.0]
+scale = [0.2191, 0.94, 0.2178]
+rotation = [0.0, 0.0, -178.3956]
+color = [0.3462, 0.693, 0.4346]
+weight = 0.8267
+color_value = 0.6667
+variations = { linear = 0.8037, spherical = 0.1963 }
+
+[[transform]]
+name = "map-5"
+translation = [0.7128, -0.109, 0.0]
+scale = [0.1332, 0.94, 0.1537]
+rotation = [0.0, 0.0, 173.157]
+color = [0.09, 0.1538, 0.4454]
+weight = 2.0563
+color_value = 0.8333
+variations = { horseshoe = 0.2881, linear = 0.7119 }

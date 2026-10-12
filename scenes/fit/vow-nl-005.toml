@@ -1,0 +1,79 @@
+[meta]
+name = "vow-nl-005"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.5502
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [0.1678, 0.0027, 0.0]
+scale = [0.6145, 0.1161, 0.3685]
+rotation = [0.0, 0.0, -32.4232]
+color = [0.055, 0.6959, 0.3682]
+weight = 2.2993
+color_value = 0.0
+variations = { linear = 0.55, spherical = 0.45 }
+
+[[transform]]
+name = "map-1"
+translation = [0.6063, -0.0505, 0.0]
+scale = [0.3782, 0.1091, 0.1216]
+rotation = [0.0, 0.0, 142.4716]
+color = [0.3488, 0.3062, 0.2121]
+weight = 0.9358
+color_value = 0.1667
+variations = { linear = 0.9611, spherical = 0.0389 }
+
+[[transform]]
+name = "map-2"
+translation = [0.1501, 0.2102, 0.0]
+scale = [0.6515, 0.5908, 0.1222]
+rotation = [0.0, 0.0, -52.9863]
+color = [0.9302, 0.4548, 0.7427]
+weight = 1.5024
+color_value = 0.3333
+variations = { bent = 0.3882, linear = 0.6118 }
+
+[[transform]]
+name = "map-3"
+translation = [0.1335, -0.007, 0.0]
+scale = [0.3631, 0.5364, 0.4261]
+rotation = [0.0, 0.0, 6.9122]
+color = [0.6758, 0.1381, 0.5124]
+weight = 0.9654
+color_value = 0.5
+variations = { boxfold = 0.1943, linear = 0.8057 }
+
+[[transform]]
+name = "map-4"
+translation = [-0.5383, 0.1617, 0.0]
+scale = [0.4793, 0.94, 0.1443]
+rotation = [0.0, 0.0, -46.172]
+color = [0.0269, 0.4896, 0.7151]
+weight = 1.6862
+color_value = 0.6667
+variations = { linear = 0.9398, spherical = 0.0602 }
+
+[[transform]]
+name = "map-5"
+translation = [-0.0164, -0.0931, 0.0]
+scale = [0.7675, 0.1582, 0.1152]
+rotation = [0.0, 0.0, -39.8076]
+color = [0.851, 0.1767, 0.0355]
+weight = 1.8536
+color_value = 0.8333
+variations = { fisheye = 0.0956, linear = 0.9044 }

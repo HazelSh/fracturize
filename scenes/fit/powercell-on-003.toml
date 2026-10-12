@@ -1,0 +1,73 @@
+[meta]
+name = "powercell-on-003"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.2656
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [-0.1172, 0.3504, 0.0]
+scale = [0.4414, 0.3017, 0.405]
+rotation = [0.0, 0.0, -12.9763]
+color = [1.0, 0.8002, 0.7415]
+weight = 1.1207
+color_value = 0.0
+
+[[transform]]
+name = "map-1"
+translation = [0.2067, -0.2271, 0.0]
+scale = [0.6574, 0.94, 0.0853]
+rotation = [0.0, 0.0, -83.6231]
+color = [0.1302, 0.9773, 0.1231]
+weight = 1.6517
+color_value = 0.1667
+
+[[transform]]
+name = "map-2"
+translation = [0.1169, 0.5044, 0.0]
+scale = [0.4873, 0.2099, 0.456]
+rotation = [0.0, 0.0, 61.5795]
+color = [0.1746, 0.0225, 0.0]
+weight = 1.1704
+color_value = 0.3333
+
+[[transform]]
+name = "map-3"
+translation = [0.6611, 0.0482, 0.0]
+scale = [0.94, 0.1598, 0.049]
+rotation = [0.0, 0.0, 131.611]
+color = [0.2425, 0.2952, 0.0108]
+weight = 0.5225
+color_value = 0.5
+
+[[transform]]
+name = "map-4"
+translation = [-0.1402, -0.0681, 0.0]
+scale = [0.6149, 0.72, 0.0333]
+rotation = [0.0, 0.0, -80.3578]
+color = [0.2244, 0.3306, 0.4228]
+weight = 6.0299
+color_value = 0.6667
+
+[[transform]]
+name = "map-5"
+translation = [0.1853, 0.259, 0.0]
+scale = [0.2216, 0.2279, 0.7466]
+rotation = [0.0, 0.0, 21.9289]
+color = [0.9713, 0.3231, 0.1928]
+weight = 0.6705
+color_value = 0.8333

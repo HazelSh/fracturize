@@ -1,0 +1,73 @@
+[meta]
+name = "shadows-on-002"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.1225
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [-0.3478, 0.0633, 0.0]
+scale = [0.3223, 0.94, 0.03]
+rotation = [0.0, 0.0, 108.3477]
+color = [0.8996, 0.9461, 0.152]
+weight = 2.1674
+color_value = 0.0
+
+[[transform]]
+name = "map-1"
+translation = [0.4529, 0.4326, 0.0]
+scale = [0.1178, 0.8234, 0.0654]
+rotation = [0.0, 0.0, 65.3172]
+color = [0.7593, 0.1172, 0.0461]
+weight = 0.2606
+color_value = 0.1667
+
+[[transform]]
+name = "map-2"
+translation = [0.2895, 0.0126, 0.0]
+scale = [0.4473, 0.3896, 0.6996]
+rotation = [0.0, 0.0, 24.0803]
+color = [0.7372, 0.0968, 0.2639]
+weight = 0.9033
+color_value = 0.3333
+
+[[transform]]
+name = "map-3"
+translation = [-0.0625, -0.0569, 0.0]
+scale = [0.94, 0.738, 0.0331]
+rotation = [0.0, 0.0, 18.429]
+color = [0.1781, 0.013, 0.4301]
+weight = 9.2583
+color_value = 0.5
+
+[[transform]]
+name = "map-4"
+translation = [0.2867, 0.0693, 0.0]
+scale = [0.1616, 0.5818, 0.1063]
+rotation = [0.0, 0.0, 82.6786]
+color = [0.3508, 0.5273, 0.0331]
+weight = 0.5675
+color_value = 0.6667
+
+[[transform]]
+name = "map-5"
+translation = [0.5659, 0.026, 0.0]
+scale = [0.7532, 0.4199, 0.4268]
+rotation = [0.0, 0.0, 54.1876]
+color = [0.4288, 0.7277, 0.663]
+weight = 1.3852
+color_value = 0.8333

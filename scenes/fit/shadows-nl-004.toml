@@ -1,0 +1,79 @@
+[meta]
+name = "shadows-nl-004"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.14
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [0.0031, 0.1826, 0.0]
+scale = [0.627, 0.2638, 0.6515]
+rotation = [0.0, 0.0, 60.8209]
+color = [0.2704, 0.1067, 0.7967]
+weight = 1.0825
+color_value = 0.0
+variations = { bulb = 0.2946, linear = 0.7054 }
+
+[[transform]]
+name = "map-1"
+translation = [-0.5974, -0.422, 0.0]
+scale = [0.94, 0.3962, 0.1079]
+rotation = [0.0, 0.0, -45.6201]
+color = [0.4468, 0.3854, 0.737]
+weight = 0.7534
+color_value = 0.1667
+variations = { linear = 0.7763, spherefold = 0.2237 }
+
+[[transform]]
+name = "map-2"
+translation = [-0.0384, -0.058, 0.0]
+scale = [0.2934, 0.2724, 0.2915]
+rotation = [0.0, 0.0, 11.1656]
+color = [0.4503, 0.7303, 0.5509]
+weight = 1.051
+color_value = 0.3333
+variations = { absfold = 0.2982, linear = 0.7018 }
+
+[[transform]]
+name = "map-3"
+translation = [-0.3794, -0.1439, 0.0]
+scale = [0.3902, 0.4243, 0.1996]
+rotation = [0.0, 0.0, 54.8089]
+color = [0.0969, 0.2453, 0.5826]
+weight = 2.9466
+color_value = 0.5
+variations = { linear = 0.9172, swirl = 0.0828 }
+
+[[transform]]
+name = "map-4"
+translation = [0.1894, -0.0336, 0.0]
+scale = [0.8685, 0.94, 0.03]
+rotation = [0.0, 0.0, 17.7094]
+color = [0.366, 0.1791, 0.1095]
+weight = 11.8378
+color_value = 0.6667
+variations = { bent = 0.3508, linear = 0.6492 }
+
+[[transform]]
+name = "map-5"
+translation = [-0.3177, 0.0798, 0.0]
+scale = [0.1245, 0.8406, 0.1495]
+rotation = [0.0, 0.0, -75.167]
+color = [0.3092, 0.1394, 0.9542]
+weight = 1.8646
+color_value = 0.8333
+variations = { boxfold = 0.1514, linear = 0.8486 }

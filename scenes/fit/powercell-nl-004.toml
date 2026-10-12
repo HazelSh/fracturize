@@ -1,0 +1,79 @@
+[meta]
+name = "powercell-nl-004"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.4068
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [0.1059, 0.2218, 0.0]
+scale = [0.3973, 0.4533, 0.1503]
+rotation = [0.0, 0.0, -34.5256]
+color = [0.015, 0.2367, 0.4314]
+weight = 1.6912
+color_value = 0.0
+variations = { julia = 0.1026, linear = 0.8974 }
+
+[[transform]]
+name = "map-1"
+translation = [-0.2238, -0.5407, 0.0]
+scale = [0.03, 0.94, 0.03]
+rotation = [0.0, 0.0, 99.6396]
+color = [0.5204, 0.6377, 0.3481]
+weight = 2.38
+color_value = 0.1667
+variations = { julia = 0.3438, linear = 0.6562 }
+
+[[transform]]
+name = "map-2"
+translation = [-0.0272, 0.2927, 0.0]
+scale = [0.3281, 0.257, 0.1561]
+rotation = [0.0, 0.0, 22.3778]
+color = [0.6152, 0.4795, 0.4755]
+weight = 1.405
+color_value = 0.3333
+variations = { linear = 0.8122, spherical = 0.1878 }
+
+[[transform]]
+name = "map-3"
+translation = [-0.2538, -0.0393, 0.0]
+scale = [0.4459, 0.4569, 0.614]
+rotation = [0.0, 0.0, -44.6488]
+color = [0.3287, 0.4733, 0.5574]
+weight = 1.8884
+color_value = 0.5
+variations = { linear = 0.7072, sinusoidal = 0.2928 }
+
+[[transform]]
+name = "map-4"
+translation = [0.8226, 0.0187, 0.0]
+scale = [0.5484, 0.94, 0.2389]
+rotation = [0.0, 0.0, -49.9229]
+color = [0.0842, 0.7117, 0.3528]
+weight = 0.7185
+color_value = 0.6667
+variations = { linear = 0.6973, sinusoidal = 0.3027 }
+
+[[transform]]
+name = "map-5"
+translation = [0.0668, -0.0619, 0.0]
+scale = [0.3676, 0.03, 0.4576]
+rotation = [0.0, 0.0, -32.9093]
+color = [0.1005, 0.0804, 0.0617]
+weight = 2.1649
+color_value = 0.8333
+variations = { linear = 0.699, swirl = 0.301 }

@@ -1,0 +1,73 @@
+[meta]
+name = "clarent-on-000"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.1318
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [-0.2642, 0.0731, 0.0]
+scale = [0.3159, 0.6333, 0.2334]
+rotation = [0.0, 0.0, 169.1043]
+color = [0.5662, 0.2228, 0.2129]
+weight = 0.975
+color_value = 0.0
+
+[[transform]]
+name = "map-1"
+translation = [0.2003, 0.1279, 0.0]
+scale = [0.4363, 0.94, 0.1267]
+rotation = [0.0, 0.0, 80.8152]
+color = [0.2234, 0.7777, 0.7688]
+weight = 1.6468
+color_value = 0.1667
+
+[[transform]]
+name = "map-2"
+translation = [0.5129, 0.2978, 0.0]
+scale = [0.3643, 0.2975, 0.3595]
+rotation = [0.0, 0.0, 16.005]
+color = [0.1473, 0.2615, 0.4381]
+weight = 0.6378
+color_value = 0.3333
+
+[[transform]]
+name = "map-3"
+translation = [0.1019, -0.4507, 0.0]
+scale = [0.3579, 0.94, 0.03]
+rotation = [0.0, 0.0, 90.7783]
+color = [0.3611, 0.0485, 0.0733]
+weight = 1.8325
+color_value = 0.5
+
+[[transform]]
+name = "map-4"
+translation = [0.0117, 0.1061, 0.0]
+scale = [0.5452, 0.03, 0.1455]
+rotation = [0.0, 0.0, -29.9952]
+color = [0.8992, 0.34, 0.9728]
+weight = 0.1468
+color_value = 0.6667
+
+[[transform]]
+name = "map-5"
+translation = [-0.4407, -0.0066, 0.0]
+scale = [0.03, 0.94, 0.8143]
+rotation = [0.0, 0.0, -7.4043]
+color = [0.0673, 0.5763, 0.0115]
+weight = 0.9534
+color_value = 0.8333

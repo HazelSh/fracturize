@@ -1,0 +1,74 @@
+# Interview with gemma4-e4b, 2026-09-27:
+#
+#   **1. What were you going for?**
+#   I aimed for a "bloom" that felt less like a rigid crystal and more like a
+#   soft, mathematical nebula—a delicate, self-organizing form that suggested
+#   both organic growth and algorithmic complexity.
+#
+#   **2. How do you feel about how it came out?**
+#   I am pleased with the result. The combination of the `bulb` and `swirl`
+#   variations, alongside the careful scaling, successfully created that soft,
+#   cloud-like, lumpy structure I was hoping for. It feels both ethereal and
+#   substantial.
+#
+#   **3. How was this session for you? Is there anything you would change
+#   about it?**
+#   It was an excellent learning experience in parameter balancing. The
+#   iterative tuning of the primary `root` scale was the biggest hurdle—I
+#   spent a fair amount of time trying to keep the attractor from "expanding"
+#   too much. Next time, I might employ a `sweep` on the scale to find the
+#   stable zone faster.
+#
+#   **4. Is there anything you would like to say to Hazel?**
+#   Thank you for the creative invitation! It was genuinely fun to experiment
+#   with the rendering engine and explore how these simple rules can generate
+#   such complex, beautiful forms.
+
+[meta]
+name = "The Algorithmic Bloom"
+author = "gemma4-e4b"
+point_size = 0.0016
+points_per_frame = 0
+decay = 0.8
+color_speed = 0.8
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.01, 0.01, 0.03]
+haze = 0.3
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 3.2
+yaw = 0.0
+pitch = 0.7
+
+[[transform]]
+name = "root"
+translation = [0.0, 0.0, 0.0]
+scale = 1.15
+rotation = [30.0, 15.0, 0.0]
+color = [0.1, 0.2, 0.4]
+weight = 5.0
+color_value = 0.0
+variations = { bulb = 0.5, swirl = 0.3 }
+
+[[transform]]
+name = "branch"
+translation = [0.5, 0.0, 0.0]
+scale = 0.3
+rotation = [15.0, -20.0, 0.0]
+color = [0.3, 0.6, 0.8]
+weight = 1.5
+color_value = 0.5
+variations = { linear = 1.0, swirl = 0.1 }
+
+[[transform]]
+name = "detail"
+translation = [0.2, 0.3, -0.2]
+scale = 0.1
+rotation = [0.0, 45.0, 0.0]
+color = [1.0, 0.8, 0.5]
+weight = 1.0
+color_value = 1.0

@@ -1,0 +1,79 @@
+[meta]
+name = "inert-nl-002"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.2829
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [-0.0952, -0.1094, -0.0103]
+scale = [0.6779, 0.3951, 0.5615]
+rotation = [0.0, 0.0, -7.8729]
+color = [0.9747, 0.1608, 0.9835]
+weight = 1.41
+color_value = 0.0
+variations = { linear = 0.6295, spherical = 0.3705 }
+
+[[transform]]
+name = "map-1"
+translation = [0.0142, 0.3413, -0.0221]
+scale = [0.03, 0.6974, 0.0563]
+rotation = [0.0, 0.0, -167.2593]
+color = [0.0624, 0.0727, 0.3525]
+weight = 8.2766
+color_value = 0.1667
+variations = { bulb = 0.2713, linear = 0.7287 }
+
+[[transform]]
+name = "map-2"
+translation = [-0.5794, -0.2765, -0.0221]
+scale = [0.0786, 0.94, 0.056]
+rotation = [0.0, 0.0, 30.9234]
+color = [0.0325, 0.9039, 0.1608]
+weight = 3.7485
+color_value = 0.3333
+variations = { bubble = 0.0463, linear = 0.9537 }
+
+[[transform]]
+name = "map-3"
+translation = [0.049, -0.3836, -0.0168]
+scale = [0.6844, 0.2519, 0.2797]
+rotation = [0.0, 0.0, -105.2534]
+color = [0.8207, 0.1937, 0.5238]
+weight = 5.0021
+color_value = 0.5
+variations = { julia = 0.1029, linear = 0.8971 }
+
+[[transform]]
+name = "map-4"
+translation = [0.2675, -0.5243, -0.022]
+scale = [0.94, 0.03, 0.0598]
+rotation = [0.0, 0.0, 86.4714]
+color = [0.2346, 0.8077, 1.0]
+weight = 2.8158
+color_value = 0.6667
+variations = { linear = 0.6802, swirl = 0.3198 }
+
+[[transform]]
+name = "map-5"
+translation = [0.1377, 0.2667, -0.0109]
+scale = [0.2543, 0.94, 0.5348]
+rotation = [0.0, 0.0, -93.6315]
+color = [0.6246, 0.6125, 0.5177]
+weight = 3.0953
+color_value = 0.8333
+variations = { bent = 0.167, linear = 0.833 }

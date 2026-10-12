@@ -1,0 +1,73 @@
+[meta]
+name = "vow-on-000"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.1407
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [0.4227, -0.1384, 0.0]
+scale = [0.4908, 0.94, 0.0583]
+rotation = [0.0, 0.0, 151.2062]
+color = [0.1927, 0.0303, 0.0181]
+weight = 4.2705
+color_value = 0.0
+
+[[transform]]
+name = "map-1"
+translation = [-0.0188, 0.1502, 0.0]
+scale = [0.655, 0.3728, 0.1844]
+rotation = [0.0, 0.0, 4.3477]
+color = [0.4615, 0.0748, 0.7272]
+weight = 1.8908
+color_value = 0.1667
+
+[[transform]]
+name = "map-2"
+translation = [-0.2541, 0.028, 0.0]
+scale = [0.8694, 0.94, 0.03]
+rotation = [0.0, 0.0, -60.4151]
+color = [0.8196, 0.7614, 0.2781]
+weight = 4.5572
+color_value = 0.3333
+
+[[transform]]
+name = "map-3"
+translation = [-0.0404, 0.0076, 0.0]
+scale = [0.3975, 0.6001, 0.2736]
+rotation = [0.0, 0.0, -16.9318]
+color = [0.3795, 0.3818, 0.5349]
+weight = 1.2379
+color_value = 0.5
+
+[[transform]]
+name = "map-4"
+translation = [-0.5634, 0.2068, 0.0]
+scale = [0.1076, 0.7176, 0.3647]
+rotation = [0.0, 0.0, -25.8391]
+color = [0.1649, 0.194, 0.9428]
+weight = 1.2944
+color_value = 0.6667
+
+[[transform]]
+name = "map-5"
+translation = [0.0833, -0.0903, 0.0]
+scale = [0.03, 0.7067, 0.94]
+rotation = [0.0, 0.0, 44.4709]
+color = [0.463, 0.7771, 0.6383]
+weight = 2.13
+color_value = 0.8333

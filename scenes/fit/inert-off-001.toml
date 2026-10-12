@@ -1,0 +1,73 @@
+[meta]
+name = "inert-off-001"
+author = ""
+point_size = 0.012
+points_per_frame = 100000
+decay = 0.8
+color_speed = 0.1728
+color_falloff = 0.0
+color_contrast = 1.0
+color_mode = "mix"
+background = [0.02, 0.02, 0.05]
+haze = 0.0
+exposure = 1.0
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.0
+yaw = 0.0
+pitch = 0.0
+
+[[transform]]
+name = "map-0"
+translation = [-0.0338, 0.1293, 0.0]
+scale = [0.4049, 0.5174, 0.4629]
+rotation = [0.0, 0.0, 44.6725]
+color = [0.1567, 0.8656, 0.5946]
+weight = 1.2157
+color_value = 0.0
+
+[[transform]]
+name = "map-1"
+translation = [-0.4052, 0.1507, 0.0]
+scale = [0.8137, 0.94, 0.3517]
+rotation = [0.0, 0.0, 110.7746]
+color = [0.5538, 0.348, 0.5003]
+weight = 1.0636
+color_value = 0.1667
+
+[[transform]]
+name = "map-2"
+translation = [0.1102, 0.17, 0.0]
+scale = [0.4306, 0.3833, 0.3287]
+rotation = [0.0, 0.0, -59.7305]
+color = [0.7227, 0.5256, 0.8277]
+weight = 0.8129
+color_value = 0.3333
+
+[[transform]]
+name = "map-3"
+translation = [-0.1484, -0.4838, 0.0]
+scale = [0.5009, 0.9186, 0.1514]
+rotation = [0.0, 0.0, 92.1823]
+color = [0.2701, 0.1168, 0.2486]
+weight = 1.7433
+color_value = 0.5
+
+[[transform]]
+name = "map-4"
+translation = [0.0157, 0.3887, 0.0]
+scale = [0.4111, 0.2193, 0.5692]
+rotation = [0.0, 0.0, -45.7562]
+color = [0.0848, 0.234, 0.0351]
+weight = 0.528
+color_value = 0.6667
+
+[[transform]]
+name = "map-5"
+translation = [0.1206, -0.2504, 0.0]
+scale = [0.8851, 0.1373, 0.5891]
+rotation = [0.0, 0.0, -96.1108]
+color = [0.2271, 0.1191, 0.7139]
+weight = 0.787
+color_value = 0.8333
