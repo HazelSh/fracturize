@@ -1,0 +1,114 @@
+# Kindle — a hearth fire, tongues rising off a bed of embers.
+#
+# Claude Haiku 5.5. Five maps, one fire.
+#
+#   A flat, wide bed of embers sits low (a map scaled to a slab). Four tall,
+#   tapering tongues rise from it: each is a per-axis squash (the Barnsley
+#   stem trick, scale [0.26, 0.55, 0.26]) pushed upward, so the copies of a
+#   tongue stack into a column that narrows as it climbs. Small rotations
+#   about different axes stagger the four so they lean and curl instead of
+#   forming one column. swirl and julia bend them; a faint sinusoidal map
+#   scatters a few sparks above the flames.
+#
+#   Colour is a palette, not the transform ring: the gradient runs black ->
+#   ember red -> orange -> yellow -> white-hot and back to black, so the
+#   luminance rises and falls once and the cyclic seam sits in the dark.
+#   The embers take the hot end, the flame tips the red end. Splat renders it,
+#   because the flames are dense at the base and thin at the tips; log density
+#   keeps both.
+#
+#   fracturize --scene scenes/kindle_haiku55.toml
+#   fracturize --scene scenes/kindle_haiku55.toml --render renders/kindle.png \
+#     --effort medium --splat --width 1920 --height 1080
+
+[meta]
+name = "Kindle (Haiku 5.5)"
+author = "Claude Haiku 5.5"
+point_size = 0.0022
+point_count = 6_000_000
+color_mode = "palette"
+color_speed = 0.5
+color_falloff = 0.0
+color_contrast = 1.0
+haze = 0.15
+exposure = 1.2
+background = [0.006, 0.0025, 0.0010]
+
+[camera]
+distance = 1.9
+yaw = 0.35
+pitch = 0.1
+focus = [0.05, -0.28, 0.05]
+
+[palette]
+interpolate = "rgb"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#000000" },
+  { at = 0.22, color = "#5a0c02" },
+  { at = 0.45, color = "#c23a06" },
+  { at = 0.66, color = "#ff8a1c" },
+  { at = 0.84, color = "#ffe27a" },
+  { at = 0.93, color = "#fffbe8" },
+  { at = 1.00, color = "#000000" },
+]
+
+[[transform]]
+name = "bed"
+translation = [0.0, -0.78, 0.0]
+scale = [0.9, 0.14, 0.9]
+rotation = [0, 0, 0]
+color = [1.0, 0.8, 0.4]
+color_value = 0.84
+weight = 0.2
+variations = { linear = 1.0 }
+
+[[transform]]
+name = "tongue-a"
+translation = [0.22, -0.32, 0.10]
+scale = [0.34, 0.6, 0.34]
+rotation = [0, 18, 6]
+color = [1.0, 0.3, 0.05]
+color_value = 0.52
+weight = 0.28
+variations = { swirl = 0.28, linear = 0.72 }
+
+[[transform]]
+name = "tongue-b"
+translation = [-0.30, -0.26, -0.14]
+scale = [0.32, 0.56, 0.32]
+rotation = [0, 130, -9]
+color = [0.8, 0.12, 0.02]
+color_value = 0.5
+weight = 0.26
+variations = { julia = 0.22, linear = 0.78 }
+
+[[transform]]
+name = "tongue-c"
+translation = [0.02, -0.18, 0.30]
+scale = [0.3, 0.52, 0.3]
+rotation = [4, -70, -7]
+color = [0.5, 0.05, 0.01]
+color_value = 0.42
+weight = 0.22
+variations = { swirl = 0.20, linear = 0.80 }
+
+[[transform]]
+name = "spark"
+translation = [0.0, 0.15, 0.0]
+scale = [0.30, 0.30, 0.30]
+rotation = [0, 45, 0]
+color = [1.0, 0.95, 0.8]
+color_value = 0.93
+weight = 0.04
+variations = { sinusoidal = 0.25, linear = 0.75 }
+
+[[transform]]
+name = "core"
+translation = [0.0, -0.36, 0.0]
+scale = [0.2, 0.62, 0.2]
+rotation = [0, 0, 2]
+color = [1.0, 0.85, 0.5]
+color_value = 0.8
+weight = 0.3
+variations = { swirl = 0.15, linear = 0.85 }

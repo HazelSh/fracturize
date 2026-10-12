@@ -1,0 +1,70 @@
+# Wick (Sonnet 5.5): a single tall flame in the dark, as a column of rising ribbons.
+[meta]
+name = "Wick (Sonnet 5.5)"
+author = "Claude Sonnet 5.5"
+point_size = 0.0015
+point_count = 6_000_000
+color_falloff = 0.9
+color_contrast = 1.3
+haze = 0.25
+exposure = 1.2
+background = [0.002, 0.001, 0.004]
+
+[palette]
+name = "wick"
+interpolate = "oklab"
+stops = [
+  { at = 0.00, color = "#04030e" },
+  { at = 0.12, color = "#2342b0" },
+  { at = 0.28, color = "#9a1c3a" },
+  { at = 0.50, color = "#e8501a" },
+  { at = 0.74, color = "#ffb445" },
+  { at = 0.90, color = "#fff2d0" },
+  { at = 1.00, color = "#2a0a24" },
+]
+
+[camera]
+distance = 2.75
+pitch = 0.1
+focus = [-0.1, 0.42, 0.0]
+yaw = 0.5
+
+[[transform]]
+name = "rise"
+color = [1.0, 0.5, 0.1]
+scale = [0.62, 0.78, 0.62]
+translation = [0.0, 0.38, 0.0]
+rotation = [0, 35, 0]
+color_value = 0.55
+weight = 3.0
+variations = { linear = 0.68, swirl = 0.32 }
+
+[[transform]]
+name = "tongue-a"
+color = [1.0, 0.5, 0.1]
+scale = [0.56, 0.62, 0.56]
+translation = [0.26, 0.22, 0.0]
+rotation = [3, 120, 4]
+color_value = 0.75
+weight = 1.5
+variations = { sinusoidal = 0.15, swirl = 0.5, linear = 0.35 }
+
+[[transform]]
+name = "tongue-b"
+color = [1.0, 0.5, 0.1]
+scale = [0.56, 0.62, 0.56]
+translation = [-0.15, 0.14, 0.26]
+rotation = [-3, 240, 4]
+color_value = 0.95
+weight = 1.5
+variations = { sinusoidal = 0.15, swirl = 0.5, linear = 0.35 }
+
+[[transform]]
+name = "root"
+color = [1.0, 0.5, 0.1]
+scale = [0.45, 0.4, 0.45]
+translation = [0.0, -0.4, 0.0]
+color_value = 0.1
+color_speed = 0.85
+weight = 1.6
+variations = { bubble = 0.2, linear = 0.8 }

@@ -1,0 +1,54 @@
+# Anemone — a Cyc5 ring of one swirling petal, and one off-axis spine.
+#
+# CRAFT §3.6: the symmetry gets the form, the one defect gets the picture.
+# The spine is a whisper (about 2% of the walk) and sits off the axis, so
+# it is the one thing that breaks the ring. Its scale is per-axis, so it
+# is a thin vertical segment rather than a blob.
+#
+# Contributed by Claude Haiku 5.5
+
+[meta]
+name = "Anemone"
+author = "Claude Haiku 5.5"
+point_size = 0.0013
+point_count = 2_000_000
+color_speed = 0.6
+background = [0.012, 0.010, 0.025]
+
+[camera]
+distance = 1.1
+pitch = 0.9
+focus = [0.0, 0.2, 0.0]
+yaw = 0.0
+
+[[symmetry]]
+group = "Cyc5"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["petal"]
+color = "shared"
+
+[[transform]]
+name = "petal"
+translation = [0.55, 0.0, 0.0]
+scale = 0.42
+rotation = [12.0, 0.0, 8.0]
+color = [0.95, 0.45, 0.35]
+weight = 1.0
+variations = { swirl = 0.7, linear = 0.3 }
+
+[[transform]]
+name = "spine"
+translation = [0.0, 0.2, 0.9]
+scale = [0.05, 0.62, 0.05]
+color = [0.35, 0.8, 0.95]
+weight = 0.02
+color_speed = 0.5
+variations = { linear = 1.0 }
+
+[[transform]]
+name = "core"
+translation = [0.0, -0.1, 0.0]
+scale = 0.3
+color = [0.9, 0.9, 0.6]
+weight = 0.15
+variations = { bubble = 0.5, linear = 0.5 }
