@@ -554,6 +554,14 @@ pub fn resolve_transform_ref(
 /// scene's own `[[transform]]`s and every `[[subscene]]`'s, so a subscene's
 /// maps mean exactly what they would mean in a scene of their own. Colour
 /// speeds are left as placeholders for [`resolve_color_speeds`].
+/// The colour a transform gets when its file doesn't give one: `i`'s hue spaced
+/// evenly around the wheel, so a scene that leaves every colour out still
+/// renders its maps as distinguishable in `transforms` and `mix` mode.
+pub fn default_transform_color(i: usize, n: usize) -> Vec3 {
+    let hue = 360.0 * i as f32 / n.max(1) as f32;
+    crate::palette::random::hsv_to_linear(hue, 0.65, 0.95)
+}
+
 fn build_transforms(
     defs: &[TransformDef],
     symmetries: &[SymmetryDef],
@@ -564,7 +572,11 @@ fn build_transforms(
     // Collect transform colors for colormap generation
     let transform_colors: Vec<Vec3> = defs
         .iter()
-        .map(|t| Vec3::from(t.color.map(|v| v as f32)))
+        .enumerate()
+        .map(|(i, t)| match t.color {
+            Some(c) => Vec3::from(c.map(|v| v as f32)),
+            None => default_transform_color(i, num_transforms),
+        })
         .collect();
 
 
@@ -1077,7 +1089,12 @@ pub struct TransformDef {
     /// scenes — and `tools/lsystem_to_ifs.py` — carry on unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotvec: Option<[f64; 3]>,
-    pub color: [f64; 3],
+    /// Linear RGB. Optional because palette mode never renders it: omitted,
+    /// a map takes a hue spaced around the wheel by its index (see
+    /// [`default_transform_color`]), which is what the transform ring and
+    /// `mix` then use. Always written on save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f64; 3]>,
     #[serde(default = "default_weight")]
     pub weight: f64,
     /// Color value for Apophysis-style colormap indexing (0.0-1.0)
@@ -2543,7 +2560,7 @@ fn transform_def(spec: &TransformSpec, name: Option<String>, color: Option<Vec3>
                     .as_rotation_vector(),
             )
         }),
-        color: color.to_array().map(tidy),
+        color: Some(color.to_array().map(tidy)),
         weight: tidy(spec.weight),
         color_value: Some(tidy(spec.color_value)),
         color_speed: spec.explicit_color_speed.map(tidy),
@@ -3112,7 +3129,9 @@ fn merge_scene_into_document(
                     set_arr3(t, "rotation", def.rotation, Some([0.0; 3]));
                 }
             }
-            set_arr3(t, "color", def.color, None);
+            if let Some(c) = def.color {
+                set_arr3(t, "color", c, None);
+            }
             set_f64(t, "weight", def.weight, Some(1.0));
             if let Some(cv) = def.color_value {
                 // The loader auto-assigns i/(n-1); don't add an explicit key
@@ -3249,6 +3268,32 @@ mod tests {
                 v,
                 back.point_size
             );
+        }
+    }
+
+    /// `color` may be left out: palette mode never renders it. The maps still
+    /// come out distinguishable for the other two modes, and a save writes the
+    /// colours they were given, so the file reloads to the same scene.
+    #[test]
+    fn a_transform_without_a_colour_gets_one() {
+        let dir = std::env::temp_dir().join("fracturize_colourless_transform");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("colourless.toml");
+        std::fs::write(
+            &p,
+            "[meta]\nname = \"colourless\"\n[palette]\nname = \"ember\"\n\
+             [[transform]]\ntranslation = [0.5, 0.0, 0.0]\nscale = 0.5\n\
+             [[transform]]\ntranslation = [-0.5, 0.0, 0.0]\nscale = 0.5\n",
+        )
+        .unwrap();
+        let scene = super::Scene::load(&p).unwrap();
+        assert_eq!(scene.colors.len(), 2);
+        assert!(scene.colors[0].distance(scene.colors[1]) > 0.1, "{:?}", scene.colors);
+        scene.save(&p).unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("color = ["));
+        let back = super::Scene::load(&p).unwrap();
+        for (a, b) in scene.colors.iter().zip(&back.colors) {
+            assert!(a.distance(*b) < 1e-3, "{a} came back as {b}");
         }
     }
 

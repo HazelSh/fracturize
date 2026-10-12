@@ -1222,7 +1222,9 @@ rotation = [0, 0, 0]           # Euler degrees (XYZ)
                                # about Y reads back as [179.2, 87.6, -179.3],
                                # correct but one rounding error from wrong.
                                # tools/lsystem_to_ifs.py emits it too.
-color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap
+color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap. Optional:
+                               # omitted, maps take hues spaced by index
+                               # (palette mode never renders it anyway)
 weight = 1.0                   # selection probability
 color_value = 0.25             # optional explicit colormap index (0-1)
 color_speed = 0.5              # optional per-transform override (wins over color_falloff)

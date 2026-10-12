@@ -382,7 +382,20 @@ fn wrap(first: &str, hang: usize, text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = first.to_string();
     let mut empty = true;
-    for word in text.split_whitespace() {
+    // A flag and its value break as one word, so a wrapped suggestion still
+    // pastes: `-S` alone at a line's end, its path on the next, is two halves
+    // of a command that neither works.
+    let mut words = text.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        let joined;
+        let word = match (w, words.peek()) {
+            ("-S", Some(v)) => {
+                joined = format!("-S {v}");
+                words.next();
+                joined.as_str()
+            }
+            _ => w,
+        };
         if !empty && line.chars().count() + 1 + word.chars().count() > room {
             out.push(std::mem::replace(&mut line, " ".repeat(hang)));
             empty = true;
@@ -907,14 +920,32 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     // one from the other. Said as a note, never a refusal — CRAFT's own rule.
     if let (Some(d), Some(l)) = (dim, lacunarity) {
         if d > 2.5 && l < 2.0 {
+            // Flat density is not the end of it. In `mix` mode a point's colour
+            // records which maps it took, and `color_falloff` gives each level
+            // of the recursion its share of the hue, so a sponge whose density
+            // shows nothing shows cubes within cubes (CRAFT §4.2, `ledger`).
+            // That needs maps that differ in colour, or there is nothing to
+            // record.
+            let colour_carries = scene.color_mode == crate::scene::ColorMode::Mix
+                && scene.color_falloff > 0.0;
+            let distinct = scene.colors.iter().any(|c| c.distance(scene.colors[0]) > 0.05);
+            let tail = if colour_carries {
+                "Here mix colour with color_falloff is what shows the structure.".to_string()
+            } else if distinct {
+                "A weight spread puts gaps back, or colour can show the structure: \
+                 -S meta.color_mode=mix -S meta.color_falloff=0.6"
+                    .to_string()
+            } else {
+                "A weight spread, or rotations on a shared axis, is what puts gaps back."
+                    .to_string()
+            };
             notes.add(
                 "shape",
                 format!(
                     "dimension {:.2} fills space but lacunarity {:.1} is near a random \
-                     scatter — the measure is smooth, so there may be nothing to resolve \
-                     at any scale. A weight spread, or rotations on a shared axis, is \
-                     what puts gaps back.",
-                    d, l
+                     scatter — the measure is smooth, so density has nothing to resolve \
+                     at any scale. {}",
+                    d, l, tail
                 ),
             );
         }
