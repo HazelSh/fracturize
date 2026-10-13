@@ -2034,7 +2034,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // and the *accumulation* height.
         r.set_volume(
             &queue,
-            VolumeParams::new(sigma, point_count as f64, sampling.target_height(), range),
+            VolumeParams::new(sigma, point_count as f64, sampling.target_height(), sampling.n, range),
         );
     }
 

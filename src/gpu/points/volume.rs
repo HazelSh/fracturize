@@ -39,7 +39,7 @@ pub const MAX_OPACITY: f32 = 100.0;
 /// (see the report: saturated pixels carry ~1/opacity of splat's light).
 pub const DEFAULT_OPACITY: f32 = 2.0;
 
-/// The uniform both volume passes read. 16 bytes, must match `VolumeParams` in
+/// The uniform both volume passes read. 32 bytes, must match `VolumeParams` in
 /// `shaders/points/splat.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -51,19 +51,41 @@ pub struct VolumeParams {
     /// `z = ln(depth) · warp_scale + warp_bias`
     pub warp_scale: f32,
     pub warp_bias: f32,
+    /// Constant emission multiplier for the frame, `emission_gain(opacity)`.
+    pub emission_gain: f32,
+    /// Gaussian sigma, in accumulation pixels, of the blur applied to the
+    /// moments before pass B. 0 is off.
+    pub blur_px: f32,
+    pub _pad: [f32; 2],
 }
 
 impl VolumeParams {
     /// Everything off. What a plain splat leaves in the buffer, and what the
     /// vertex stage reads as "skip the volume work".
-    pub const OFF: VolumeParams =
-        VolumeParams { enabled: 0.0, abs_scale: 0.0, warp_scale: 0.0, warp_bias: 0.0 };
+    pub const OFF: VolumeParams = VolumeParams {
+        enabled: 0.0,
+        abs_scale: 0.0,
+        warp_scale: 0.0,
+        warp_bias: 0.0,
+        emission_gain: 1.0,
+        blur_px: 0.0,
+        _pad: [0.0; 2],
+    };
 
+    /// `supersample` is the factor the target is supersampled by (1 live), since
+    /// the absorbance blur is a width in *output* pixels.
+    ///
     /// `samples` and `screen_height` are exactly the two numbers
     /// `SplatRenderer::upload_params` normalises exposure with — the *same
     /// values*, because the whole invariance claim is that they cancel against
     /// the same density in the same way.
-    pub fn new(opacity: f32, samples: f64, screen_height: f32, range: DepthRange) -> Self {
+    pub fn new(
+        opacity: f32,
+        samples: f64,
+        screen_height: f32,
+        supersample: u32,
+        range: DepthRange,
+    ) -> Self {
         if opacity <= 0.0 || samples <= 0.0 {
             return Self::OFF;
         }
@@ -71,8 +93,76 @@ impl VolumeParams {
             * screen_height as f64
             / samples) as f32;
         let (warp_scale, warp_bias) = range.warp();
-        Self { enabled: 1.0, abs_scale, warp_scale, warp_bias }
+        let blur_px = BLUR_OUTPUT_PX * supersample.max(1) as f32;
+        Self {
+            enabled: 1.0,
+            abs_scale,
+            warp_scale,
+            warp_bias,
+            emission_gain: emission_gain(opacity),
+            blur_px,
+            _pad: [0.0; 2],
+        }
     }
+}
+
+/// Brightness compensation constant; see [`emission_gain`].
+///
+/// **Measured, not chosen** — and the measurement says no single constant
+/// flattens every scene. Whole-image excess luminance above the background,
+/// relative to opacity 0 (4M points, 960x540, blur and overestimation as
+/// shipped), by opacity 1 / 3 / 10 / 30:
+///
+/// ```text
+///                    c = 1.2                    c = 0.4 (shipped)
+///     nautilus       1.00 0.98 0.82 0.53        0.91 0.78 0.58 0.36
+///     censer         0.99 1.00 0.95 0.72        0.89 0.79 0.67 0.48
+///     jellyfish      0.97 1.02 1.06 0.88        0.88 0.81 0.76 0.60
+///     glasshouse     1.12 1.32 1.57 1.57        0.97 0.97 1.07 1.11
+///     galaxy         1.09 1.29 1.56 1.66        0.96 0.97 1.08 1.18
+///     fern_3d        1.26 1.66 2.20 2.42        1.07 1.21 1.54 1.77
+///     ammonite       1.23 1.58 2.09 2.33        1.05 1.16 1.44 1.69
+/// ```
+///
+/// 1.2 is the value that holds nautilus and censer flat (the gain that does,
+/// found by bisection per opacity, follows `cσ/(1 − e^{−cσ})` there out to
+/// opacity 5 within ~10%), and jellyfish with them; it over-brightens the
+/// diffuse, volume-filling scenes by 1.3-2.4x because they absorb less per unit
+/// of splat light. 0.4 is the value that minimises the RMS log deviation over
+/// all seven scenes at opacity 1, 3 and 10 (0.23, against 0.33 for 1.2), and
+/// trades a dimmer filament scene for a milder over-bright diffuse one. The
+/// constant is a function of opacity alone, never of the image.
+///
+/// Past opacity ~10 the gain that would restore a filament scene runs away (a
+/// pixel's front sliver is dimmed by the reconstruction's softness in front, and
+/// no constant undoes that): see `VOLUME-RENDERER-PLAN.md`.
+pub const GAIN_C: f32 = 0.4;
+
+/// Gaussian sigma of the blur on the absorbance field, in *output* pixels.
+///
+/// Per-point absorbance is `opacity · H²/N` of optical depth and stops being
+/// small at high opacity: one point alone can be several units thick, so
+/// occlusion becomes a per-sample coin toss — the points renderer's grain
+/// returning, and brightness that depends on `--points`. Moments are linear, so
+/// blurring them is the same as splatting fatter absorption kernels; emission
+/// stays sharp. 1 output pixel took the grit's seed-to-seed noise at opacity 30
+/// from 0.044 to 0.028 (splat's own is 0.016), and made the picture converge as
+/// points are added; more blur bought little and softened more.
+pub const BLUR_OUTPUT_PX: f32 = 1.0;
+
+/// The constant by which every point's emission is multiplied at opacity
+/// `sigma`: `g = c·σ / (1 − e^{−c·σ})`.
+///
+/// Without it a saturated pixel carries about `1/σ` of splat's light, since
+/// emission per point is fixed while absorbance scales with σ. This is a
+/// **constant for the frame, not a per-pixel normalisation**, and that is the
+/// point: a per-pixel `τ/(1 − e^{−τ})` would erase the darker lanes between
+/// sheets, which are most of the depth cue. And it is a constant of `σ` alone,
+/// never derived from the image — exposure stays scene-independent (AGENTS.md,
+/// "Settling decision 5"). It is exactly 1 at σ = 0 and grows linearly at high σ.
+pub fn emission_gain(sigma: f32) -> f32 {
+    let x = (GAIN_C * sigma) as f64;
+    if x < 1e-6 { 1.0 } else { (x / (1.0 - (-x).exp())) as f32 }
 }
 
 /// The view-space depth interval the moment targets resolve. Points outside it
@@ -170,7 +260,7 @@ mod tests {
 
     #[test]
     fn the_uniform_matches_the_shader() {
-        assert_eq!(std::mem::size_of::<VolumeParams>(), 16);
+        assert_eq!(std::mem::size_of::<VolumeParams>(), 32);
         let wgsl = include_str!("../../../shaders/points/splat.wgsl");
         let at = wgsl.find("struct VolumeParams").expect("splat.wgsl must declare VolumeParams");
         let body = &wgsl[at..at + wgsl[at..].find('}').unwrap()];
@@ -179,7 +269,35 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("///") && l.contains(": f32"))
             .map(|l| l.trim().split(':').next().unwrap())
             .collect();
-        assert_eq!(fields, ["enabled", "abs_scale", "warp_scale", "warp_bias"]);
+        assert_eq!(
+            fields,
+            ["enabled", "abs_scale", "warp_scale", "warp_bias", "emission_gain", "blur_px", "_pad0", "_pad1"]
+        );
+    }
+
+    /// The gain is exactly 1 where opacity is 0 (so the splat identity holds in
+    /// the limit as well as at the point), rises monotonically, and goes
+    /// linearly in opacity once it is large.
+    #[test]
+    fn the_gain_is_one_at_zero_and_linear_at_the_top() {
+        assert_eq!(emission_gain(0.0), 1.0);
+        let mut prev = 1.0;
+        for i in 1..200 {
+            let g = emission_gain(i as f32 * 0.25);
+            assert!(g > prev, "gain fell at {}", i);
+            prev = g;
+        }
+        let (a, b) = (emission_gain(50.0), emission_gain(100.0));
+        assert!((b / a - 2.0).abs() < 0.01, "{} {}", a, b);
+    }
+
+    /// The blur is a width in output pixels, so it follows supersampling.
+    #[test]
+    fn the_blur_scales_with_the_supersample_factor() {
+        let range = DepthRange::for_distance(3.0);
+        let one = VolumeParams::new(1.0, 1.0e6, 720.0, 1, range);
+        let two = VolumeParams::new(1.0, 1.0e6, 720.0, 2, range);
+        assert_eq!(two.blur_px, 2.0 * one.blur_px);
     }
 
     #[test]
@@ -209,11 +327,11 @@ mod tests {
     #[test]
     fn absorbance_scales_like_exposure() {
         let range = DepthRange::for_distance(3.0);
-        let a = VolumeParams::new(1.0, 1.0e6, 720.0, range);
-        let b = VolumeParams::new(1.0, 4.0e6, 720.0, range);
-        let c = VolumeParams::new(1.0, 1.0e6, 1440.0, range);
+        let a = VolumeParams::new(1.0, 1.0e6, 720.0, 1, range);
+        let b = VolumeParams::new(1.0, 4.0e6, 720.0, 1, range);
+        let c = VolumeParams::new(1.0, 1.0e6, 1440.0, 1, range);
         assert!((a.abs_scale / b.abs_scale - 4.0).abs() < 1e-4);
         assert!((c.abs_scale / a.abs_scale - 4.0).abs() < 1e-4);
-        assert_eq!(VolumeParams::new(0.0, 1.0e6, 720.0, range), VolumeParams::OFF);
+        assert_eq!(VolumeParams::new(0.0, 1.0e6, 720.0, 1, range), VolumeParams::OFF);
     }
 }

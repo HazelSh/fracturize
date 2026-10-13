@@ -184,7 +184,7 @@ Things the build showed that the design above did not say.
   subtracts the point's own deposit from the moments (`transmittance_excluding`).
   Setting `overestimation = 0` instead looks crisp but under-absorbs a thick slab
   by 0.6 in T; the subtraction keeps 0.25's slab accuracy (worst 0.20).
-- **Brightness falls ~1/opacity once pixels saturate.** Each point's emission is
+- **Brightness falls ~1/opacity once pixels saturate.** (Addressed in 1b below.) Each point's emission is
   fixed while its absorbance scales with opacity, so an opaque pixel emits only
   its front sliver: in the continuum limit pass B's density tends to
   `(1 − e^{−τ}) / (opacity · K)`. At opacity 2 the whole-image mean luminance
@@ -204,6 +204,40 @@ Things the build showed that the design above did not say.
 - **Requesting `FLOAT32_BLENDABLE` on the live device silently moves live splat
   to fp32** (`accum_format` picks it whenever it can). The window keeps fp16
   emission via `SplatPipelines::with_precision(.., false)`.
+
+## Slice 1b findings
+
+- **Brightness compensation is a constant gain, and one constant does not fit
+  every scene.** `g = cσ/(1 − e^{−cσ})` on each point's emission (1 at σ = 0, so
+  the splat path is untouched). The gain that holds mean excess luminance flat,
+  found by bisection, follows that form closely on filament scenes (nautilus,
+  censer; c ≈ 1.2) and fails on diffuse ones (fern_3d, ammonite, galaxy,
+  glasshouse over-brighten 1.3-2.4x at c = 1.2). Shipped c = 0.4 minimises the RMS
+  log deviation over seven scenes. Tables are on `volume::GAIN_C`.
+- **The gain stops working past σ ≈ 10, for a different reason than the grit.**
+  The ideal gain runs away (nautilus 29 at σ = 10, unbounded at 30). The
+  four-moment reconstruction is soft in front, so the front sliver of a deep
+  pixel is itself dimmed by `exp(−τ·share)`. Lowering the overestimation from
+  0.25 to 0.1 moves the runaway from σ ≈ 5 to ≈ 10-20; 0 removes it, and removes
+  occlusion with it (σ 3 and 30 render alike, near-splat). 0.1 is the compromise.
+  A sharper reconstruction (six moments, or two layers) is the real fix, and is
+  slice-3 territory.
+- **The grit hypothesis holds, in a refined form.** It is not points
+  "being stochastic" as such but *per-point optical depth ≫ 1*: a point's
+  absorbance is `σ·H²/N` (8.7 at σ = 30, N = 4M, 1080p accumulation), so the
+  front point of a pixel is lit and the rest are fully hidden — a coin toss per
+  sample, with each lit point also boosted by the gain. Evidence: at 4x points the
+  grit gets finer and the picture dims (the discrete answer drifting toward the
+  continuum one: excess 0.0402 / 0.0377 / 0.0336 / 0.0332 at 1M / 4M / 16M / 64M
+  points); at 4x exposure it is the identical pattern, brighter. Blurring the
+  absorbance field (sigma 1 output pixel) both removes the grit (seed-to-seed
+  RMSE 0.044 → 0.028 at σ = 30; splat's own 0.016) and fixes the convergence
+  (0.0199 / 0.0237 / 0.0246 / 0.0248, within 1% from 16M). Blurs of 2-8 pixels
+  bought a further 0.003-0.008 of noise and softened silhouettes, so 1 it is.
+- **Infinite-zoom scenes work** with `DepthRange::for_zoom`: wellspiral and
+  astral_lattice render sensibly at opacity 2 and 10 (no clipped bands, no
+  black frames). astral_lattice at 10 shows background snow: the zoom band is
+  full of sparse far dust that the gain lifts.
 
 ## Open questions, decided by looking
 

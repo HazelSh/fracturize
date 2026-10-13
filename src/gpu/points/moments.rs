@@ -55,8 +55,19 @@ pub const BIAS: f32 = 3.0e-5;
 pub const BIAS_VECTOR: [f32; 4] = [0.0, 0.375, 0.0, 0.375];
 
 /// Fraction of the absorbance mass sitting exactly at the queried depth that is
-/// counted as in front of it. The paper's recommended value.
-pub const OVERESTIMATION: f32 = 0.25;
+/// counted as in front of it. The paper recommends 0.25; this is 0.1, **chosen by
+/// measurement for the volume renderer** and not a free parameter to retune.
+///
+/// At 0.25 the reconstruction darkens even the front-most material once a
+/// pixel's optical depth is large (a soft front: on a slab of total 4 the front
+/// face reads T = 0.89 rather than 1, and the loss compounds as `exp(-τ·share)`),
+/// so past opacity ~5 no constant emission gain can restore brightness: the
+/// gain that would is 44x at opacity 5 and unbounded by 10. At 0.1 the gain that
+/// restores it is a smooth `cσ/(1 - e^-cσ)` out to opacity ~10. At 0 there is no
+/// front fuzz at all, but a thick slab under-absorbs by 0.6 in T and the render
+/// barely changes between opacity 3 and 30: occlusion has gone. 0.1 keeps the
+/// slab within the test's bound below.
+pub const OVERESTIMATION: f32 = 0.1;
 
 /// What is left of a pixel's absorbance after a point's own deposit is taken out
 /// is only believed above this fraction of the total. Below it the difference
@@ -260,11 +271,12 @@ mod tests {
             assert!(got <= prev + 0.03, "T rose from {} to {} at z0 {}", prev, got, z0);
             prev = got;
         }
-        // Measured: 0.204, at the slab's middle, always on the see-through side
-        // (four moments under-count the absorbance a thick slab has put in
-        // front of a point). The ends are what matter for the picture and
-        // those are tight; the bound is the measurement with a little room.
-        assert!(worst < 0.25, "worst |T - exact| through the slab was {}", worst);
+        // Measured: 0.204 at overestimation 0.25 and ~0.4 at the shipped 0.1,
+        // at the slab's middle, always on the see-through side (four moments
+        // under-count the absorbance a thick slab has put in front of a
+        // point). The ends are what matter for the picture and those are
+        // tight; the bound is the measurement with a little room.
+        assert!(worst < 0.45, "worst |T - exact| through the slab was {}", worst);
         assert!(transmittance(b0, s, -0.9) > 0.98);
         assert!((transmittance(b0, s, 0.9) - (-total).exp()).abs() < 0.03);
     }
@@ -381,7 +393,7 @@ mod tests {
                 let with_self = transmittance(b0, s, z);
                 let without = transmittance_excluding(b0, s, z, a);
                 assert!(without > 0.999, "a {}, z {}: T excluding self = {}", a, z, without);
-                if a >= 1.0 {
+                if a >= 3.0 {
                     assert!(with_self < 0.8, "a {}: including self T = {}", a, with_self);
                 }
             }

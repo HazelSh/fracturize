@@ -179,8 +179,8 @@ fn draw_opacity(ui: &mut egui::Ui, app: &mut App) {
         &mut app.ui_state,
         "How much near material hides what is behind it. 0 is plain splat; about 2 \
          shows the depth; past 10 the cores are nearly solid. It means the same at any \
-         point count or window size. Brighter material needs more exposure as this goes \
-         up, because less of the far side is lit.",
+         point count or window size, and brightness is compensated up to about 10, \
+         beyond which the picture dims.",
         "drag: adjust opacity",
     );
     if resp.changed() {

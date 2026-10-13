@@ -139,6 +139,8 @@ pub struct SplatRenderer {
     /// and the device able to. At zero, nothing about the volume exists in the
     /// frame and the output is plain splat, byte for byte.
     volume_active: bool,
+    /// Sigma of the moment blur in accumulation pixels; 0 skips the passes.
+    blur_px: f32,
     /// The moment targets, at accumulation resolution, recreated with it.
     moments: Option<MomentTargets>,
     /// Accumulation target + matching tonemap bind group, recreated when
@@ -186,8 +188,18 @@ struct MomentTargets {
     view0: wgpu::TextureView,
     view1: wgpu::TextureView,
     bind_group: BindGroup,
+    /// The same again, the blur's intermediate: horizontal blur reads the
+    /// first set and writes this one, vertical reads this and writes back. Only
+    /// allocated when the blur is on.
+    scratch: Option<MomentSet>,
     width: u32,
     height: u32,
+}
+
+struct MomentSet {
+    view0: wgpu::TextureView,
+    view1: wgpu::TextureView,
+    bind_group: BindGroup,
 }
 
 /// What volume mode adds to the compiled set: pass A (absorbance moments) and
@@ -200,6 +212,9 @@ struct VolumePipelines {
     quad: RenderPipeline,
     point: RenderPipeline,
     moments_layout: BindGroupLayout,
+    /// Separable gaussian over the moment targets (no blending: they replace).
+    blur_h: RenderPipeline,
+    blur_v: RenderPipeline,
 }
 
 struct AccumTarget {
@@ -284,11 +299,12 @@ impl SplatPipelines {
                     },
                     count: None,
                 },
-                // Volume mode's depth warp and absorbance scale. Only the
-                // vertex stage reads it.
+                // Volume mode's depth warp, absorbance scale and emission
+                // gain. The vertex stage reads the first two, pass B's
+                // fragment stage the gain.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -443,12 +459,22 @@ impl SplatPipelines {
                 // pixel, and no format holds five.
                 let abs_targets = [target(MOMENT_FORMAT_0), target(MOMENT_FORMAT_1)];
                 let emit_targets = [target(accum_format)];
-                use wgpu::PrimitiveTopology::{PointList, TriangleStrip};
+                let replace = |format| {
+                    Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
+                };
+                let replace_targets = [replace(MOMENT_FORMAT_0), replace(MOMENT_FORMAT_1)];
+                use wgpu::PrimitiveTopology::{PointList, TriangleList, TriangleStrip};
                 VolumePipelines {
                     abs_quad: make("volume_abs_quad", &accum_pipeline_layout, "vs_splat", "fs_abs", TriangleStrip, &abs_targets),
                     abs_point: make("volume_abs_point", &accum_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &abs_targets),
                     quad: make("volume_quad", &resolve_layout, "vs_splat", "fs_splat_volume", TriangleStrip, &emit_targets),
                     point: make("volume_point", &resolve_layout, "vs_splat_point", "fs_splat_volume", PointList, &emit_targets),
+                    blur_h: make("volume_blur_h", &resolve_layout, "vs_tonemap", "fs_blur_h", TriangleList, &replace_targets),
+                    blur_v: make("volume_blur_v", &resolve_layout, "vs_tonemap", "fs_blur_v", TriangleList, &replace_targets),
                     moments_layout,
                 }
             });
@@ -622,6 +648,7 @@ impl SplatRenderer {
             volume_params_buffer,
             volume_pipelines,
             volume_active: false,
+            blur_px: 0.0,
             moments: None,
             accum_format,
             quad_pipeline,
@@ -827,6 +854,9 @@ impl SplatRenderer {
             // its moments where its emission is.
             self.ensure_moments(device, width * n, height * n);
             self.abs_pass(encoder, 0..point_count, use_point_primitives);
+            if self.blur_px > 0.0 {
+                self.blur_passes(encoder);
+            }
             self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
         } else {
             self.splat_pass(encoder, 0..point_count, use_point_primitives);
@@ -962,6 +992,7 @@ impl SplatRenderer {
     /// it is asked.
     pub fn set_volume(&mut self, queue: &wgpu::Queue, params: VolumeParams) {
         self.volume_active = params.enabled > 0.5 && self.volume_pipelines.is_some();
+        self.blur_px = if self.volume_active { params.blur_px } else { 0.0 };
         let written = if self.volume_active { params } else { VolumeParams::OFF };
         queue.write_buffer(&self.volume_params_buffer, 0, bytemuck::bytes_of(&written));
     }
@@ -969,12 +1000,15 @@ impl SplatRenderer {
     /// (Re)create the moment targets at the accumulation's size.
     fn ensure_moments(&mut self, device: &Device, width: u32, height: u32) {
         if let Some(m) = &self.moments {
-            if m.width == width && m.height == height {
+            if m.width == width
+                && m.height == height
+                && m.scratch.is_some() == (self.blur_px > 0.0)
+            {
                 return;
             }
         }
         let layout = &self.volume_pipelines.as_ref().expect("volume is active").moments_layout;
-        let make = |label, format| {
+        let make = |label: &'static str, format| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -986,19 +1020,71 @@ impl SplatRenderer {
                 view_formats: &[],
             })
         };
-        let view0 = make("volume_moments_0", MOMENT_FORMAT_0)
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let view1 = make("volume_moments_1", MOMENT_FORMAT_1)
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("volume_moments_bind_group"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view0) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view1) },
-            ],
+        let blur = self.blur_px > 0.0;
+        let set = |label: &'static str| {
+            let view0 = make(label, MOMENT_FORMAT_0).create_view(&wgpu::TextureViewDescriptor::default());
+            let view1 = make(label, MOMENT_FORMAT_1).create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view0) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view1) },
+                ],
+            });
+            MomentSet { view0, view1, bind_group }
+        };
+        let main = set("volume_moments");
+        let scratch = blur.then(|| set("volume_moments_scratch"));
+        self.moments = Some(MomentTargets {
+            view0: main.view0,
+            view1: main.view1,
+            bind_group: main.bind_group,
+            scratch,
+            width,
+            height,
         });
-        self.moments = Some(MomentTargets { view0, view1, bind_group, width, height });
+    }
+
+    /// Blur the moment targets with a separable gaussian, horizontal then
+    /// vertical, ending back in the main set. Moments are *linear* — sums of
+    /// deposits — so blurring them is the same as having splatted fatter
+    /// absorption kernels; emission stays sharp.
+    fn blur_passes(&self, encoder: &mut wgpu::CommandEncoder) {
+        let vp = self.volume_pipelines.as_ref().expect("volume is active");
+        let m = self.moments.as_ref().expect("ensured");
+        let scratch = m.scratch.as_ref().expect("blur targets ensured");
+        let run = |encoder: &mut wgpu::CommandEncoder,
+                   pipeline: &RenderPipeline,
+                   read: &BindGroup,
+                   w0: &wgpu::TextureView,
+                   w1: &wgpu::TextureView| {
+            let att = |view| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("volume_moment_blur"),
+                color_attachments: &[att(w0), att(w1)],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.accum_bind_group, &[]);
+            pass.set_bind_group(1, read, &[]);
+            pass.draw(0..3, 0..1);
+        };
+        run(encoder, &vp.blur_h, &m.bind_group, &scratch.view0, &scratch.view1);
+        run(encoder, &vp.blur_v, &scratch.bind_group, &m.view0, &m.view1);
     }
 
     /// Pass A: splat every point's absorbance into the moment targets.

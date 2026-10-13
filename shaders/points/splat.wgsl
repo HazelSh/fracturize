@@ -106,6 +106,12 @@ struct VolumeParams {
     /// ratios of distance get equal room.
     warp_scale: f32,
     warp_bias: f32,
+    /// Constant emission multiplier for the frame (`volume::emission_gain`).
+    emission_gain: f32,
+    /// Sigma of the moment blur, in accumulation pixels. 0 is off.
+    blur_px: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -200,6 +206,23 @@ struct SplatOutput {
     // depth is the point's and not the fragment's.
     @location(3) abs_weight: f32,
     @location(4) @interpolate(flat) z: f32,
+    // Volume mode only: the share of this fragment's own deposit that is still
+    // in the pixel's (blurred) moments at the fragment, so pass B can take back
+    // the right amount. 1 with no blur.
+    @location(5) @interpolate(flat) own: f32,
+}
+
+/// What survives of a gaussian deposit's peak when the moments are blurred by
+/// `volume.blur_px`: variances add, and a normalised 2D gaussian's peak goes as
+/// 1/variance, so `v / (v + s²)`. `var` is the deposit's own (a point
+/// primitive is one texel wide, a box of variance 1/12).
+fn own_share(variance: f32) -> f32 {
+    let s2 = volume.blur_px * volume.blur_px;
+    if s2 <= 0.0 {
+        return 1.0;
+    }
+    let v = max(variance, 1.0 / 12.0);
+    return v / (v + s2);
 }
 
 /// Warped depth for the moment targets. See `VolumeParams`.
@@ -238,6 +261,7 @@ fn vs_splat(
         out.weight = 0.0;
         out.abs_weight = 0.0;
         out.z = 0.0;
+        out.own = 1.0;
         return out;
     }
 
@@ -301,9 +325,11 @@ fn vs_splat(
     // edge guard removes material, so it does.
     out.abs_weight = 0.0;
     out.z = 0.0;
+    out.own = 1.0;
     if volume.enabled > 0.5 {
         out.abs_weight = volume.abs_scale * guard * KERNEL_NORM / (radius_px * radius_px);
         out.z = volume_z(depth);
+        out.own = own_share(radius_px * radius_px * 0.125);
     }
     return out;
 }
@@ -324,6 +350,7 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
         out.weight = 0.0;
         out.abs_weight = 0.0;
         out.z = 0.0;
+        out.own = 1.0;
         return out;
     }
 
@@ -343,9 +370,11 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     out.weight = haze_weight(depth) * guard;
     out.abs_weight = 0.0;
     out.z = 0.0;
+    out.own = 1.0;
     if volume.enabled > 0.5 {
         out.abs_weight = volume.abs_scale * guard;
         out.z = volume_z(depth);
+        out.own = own_share(0.0);
     }
     return out;
 }
@@ -364,7 +393,7 @@ fn fs_splat(in: SplatOutput) -> @location(0) vec4<f32> {
 // reference implementation and carries the reasoning; a test holds the two
 // together.
 const MOMENT_BIAS: f32 = 0.00003;
-const MOMENT_OVERESTIMATION: f32 = 0.25;
+const MOMENT_OVERESTIMATION: f32 = 0.1;
 // What is left of a pixel's absorbance after taking a point's own deposit out
 // is only believed above this fraction of the total: below it the difference is
 // rounding noise in the fp32 sums.
@@ -443,6 +472,41 @@ fn moment_transmittance(b0: f32, sums: vec4<f32>, z0: f32) -> f32 {
     return min(t, 1.0);
 }
 
+// Blur of the moment targets: one separable gaussian pass in each direction,
+// sigma `volume.blur_px` accumulation pixels, taps out to 3 sigma (capped).
+// Both read group 1 (see below) and write both targets.
+const BLUR_MAX_TAPS: i32 = 16;
+
+fn blur(px: vec2<i32>, dir: vec2<i32>) -> AbsOutput {
+    let s = volume.blur_px;
+    let radius = min(i32(ceil(3.0 * s)), BLUR_MAX_TAPS);
+    let dims = vec2<i32>(textureDimensions(moments0));
+    var acc = vec4<f32>(0.0);
+    var acc4 = 0.0;
+    var wsum = 0.0;
+    for (var i = -radius; i <= radius; i += 1) {
+        let q = clamp(px + dir * i, vec2<i32>(0), dims - vec2<i32>(1));
+        let w = exp(-0.5 * f32(i * i) / (s * s));
+        acc += w * textureLoad(moments0, q, 0);
+        acc4 += w * textureLoad(moments1, q, 0).x;
+        wsum += w;
+    }
+    var out: AbsOutput;
+    out.m0 = acc / wsum;
+    out.m1 = acc4 / wsum;
+    return out;
+}
+
+@fragment
+fn fs_blur_h(in: TonemapOutput) -> AbsOutput {
+    return blur(vec2<i32>(in.clip_position.xy), vec2<i32>(1, 0));
+}
+
+@fragment
+fn fs_blur_v(in: TonemapOutput) -> AbsOutput {
+    return blur(vec2<i32>(in.clip_position.xy), vec2<i32>(0, 1));
+}
+
 // Pass B's inputs. Group 1, so pass A's pipeline layout (group 0 only) never
 // names textures it is rendering into.
 @group(1) @binding(0) var moments0: texture_2d<f32>;
@@ -467,7 +531,7 @@ fn fs_splat_volume(in: SplatOutput) -> @location(0) vec4<f32> {
     let m0 = textureLoad(moments0, px, 0);
     let b4 = textureLoad(moments1, px, 0).x;
     let falloff = exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
-    let a = in.abs_weight * falloff;
+    let a = in.abs_weight * falloff * in.own;
     let z = in.z;
     let z2 = z * z;
     let b0 = m0.x - a;
@@ -476,7 +540,7 @@ fn fs_splat_volume(in: SplatOutput) -> @location(0) vec4<f32> {
         let sums = vec4<f32>(m0.y - a * z, m0.z - a * z2, m0.w - a * z2 * z, b4 - a * z2 * z2);
         t = moment_transmittance(b0, sums, z);
     }
-    let w = in.weight * t * falloff;
+    let w = in.weight * t * volume.emission_gain * falloff;
     return vec4<f32>(in.color * w, w);
 }
 

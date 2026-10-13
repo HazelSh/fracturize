@@ -193,10 +193,31 @@ All GPU, three passes per frame:
      * **Depth range** is the measured attractor's bounding sphere padded 1.5x
        (`DepthRange::around`), relative to the eye under infinite zoom
        (`for_zoom`); points outside clamp. Composites measure per layer.
-     * **Brightness falls as opacity rises** — a saturated pixel carries about
-       `1/opacity` of splat's light, because each point's emission is fixed
-       while its absorbance scales. The Render window says so; raise exposure.
-       Whether the tonemap should compensate is an open question in the plan.
+     * **Emission is gained back, by a constant of opacity alone.** Each point's
+       emission is fixed while its absorbance scales, so a saturated pixel would
+       carry ~`1/opacity` of splat's light. Every point's emission is multiplied
+       by `g = cσ/(1 − e^{−cσ})` (`volume::emission_gain`, c = 0.4): exactly 1 at
+       σ = 0, ~linear at high σ, one number for the frame. Deliberately *not*
+       per-pixel — that would erase the dark lanes between sheets, the depth cue
+       — and never derived from the image (exposure stays scene-independent).
+       The calibration table is on `GAIN_C`: no single c flattens every scene
+       (dense filament scenes want ~1.2, diffuse ones ~0.3), brightness is flat
+       to within ±25% across seven scenes through σ = 3 and sags past ~10.
+     * **The absorbance field is blurred** (`BLUR_OUTPUT_PX` = 1 output pixel,
+       two separable gaussian passes over the moment targets before pass B;
+       moments are linear, so this equals splatting fatter absorption kernels,
+       and emission stays sharp). At high opacity one point's absorbance is
+       several optical depths, occlusion becomes a per-sample coin toss, and the
+       result is grit plus a brightness that depends on `--points`; blurring
+       takes the seed-to-seed noise at σ = 30 from 0.044 to 0.028 (splat 0.016)
+       and makes the picture converge as points are added. A point's own
+       deposit is still subtracted, scaled by what survives the blur
+       (`own_share`).
+     * **The overestimation is 0.1, not the paper's 0.25.** At 0.25 the
+       reconstruction darkens even the front-most material once a pixel is
+       optically deep, and past σ ≈ 5 no gain restores it; at 0 there is no front
+       fuzz but also barely any occlusion (σ = 3 and 30 look alike); 0.1 keeps
+       both. Measured in `VOLUME-RENDERER-PLAN.md`.
      * **Opacity is session state** for now (the Render window's "Session"
        heading, `--opacity`, default 2): not a scene key, not undoable, not in
        views or prefs. A view saved in volume mode records the *mode* only.
