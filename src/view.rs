@@ -133,6 +133,13 @@ impl View {
         self.renderer.as_deref() == Some("splat")
     }
 
+    /// Whether this view was captured in volume mode: splat with absorption.
+    /// The mode is in the view; the opacity is not (it is session state until
+    /// it becomes scene data), so a view opens at the default.
+    pub fn is_volume(&self) -> bool {
+        self.renderer.as_deref() == Some("volume")
+    }
+
     /// The grade this view asks for, field by field, falling back to neutral.
     ///
     /// Per field rather than all-or-nothing: a hand-written view that sets only

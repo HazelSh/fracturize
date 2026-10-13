@@ -22,6 +22,7 @@ use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::points::accumulate::Accumulator;
 use crate::gpu::points::splat::Grade;
+use crate::gpu::points::volume::{DepthRange, VolumeParams};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
@@ -248,6 +249,15 @@ pub struct OfflineParams<'a> {
     pub resume_from: Option<std::path::PathBuf>,
     /// Density estimation amount, 0-1. 0 is off and allocates nothing.
     pub density_estimation: crate::gpu::points::density::DensityEstimation,
+    /// Volume mode, and its opacity: `Some` draws the splat with absorption, so
+    /// near material hides what is behind it by this much. `Some(0.0)` is
+    /// plain splat, byte for byte. Implies `splat`.
+    ///
+    /// A ring-buffer still only, for now: an accumulating render would need the
+    /// transmittance resolved once over *all* laps rather than per lap (the
+    /// average of `exp(-x)` is not `exp(-average x)`), and animations and
+    /// sheets are many images. Every other entry point refuses it by name.
+    pub opacity: Option<f32>,
     /// Fraction of the GPU's time this render may take, 0.05-1.0.
     ///
     /// 1.0 is "as fast as possible", which is what a render wants and not
@@ -883,6 +893,23 @@ fn base_render_params(view: &Option<View>, scene: &Scene, haze_enabled: bool) ->
                 Haze { pinned: None, transmittance: fb, saturation: fs },
             )
         }
+    }
+}
+
+/// The depth interval volume mode's moments are warped into, for `camera`
+/// looking at `scene`: the measured attractor, or under infinite zoom (where
+/// there is nothing to measure) a span relative to the eye.
+pub(crate) fn volume_range(
+    scene: &Scene,
+    camera: &OrbitCamera,
+    zoom: Option<&crate::renorm::Renorm>,
+) -> DepthRange {
+    if let Some(z) = zoom {
+        return DepthRange::for_zoom(camera.eye(), camera.forward(), z.fixed_point, z.radius);
+    }
+    match crate::gpu::points::volume::scene_bounds(scene) {
+        Some((centre, radius)) => DepthRange::around(camera.eye(), camera.forward(), centre, radius),
+        None => DepthRange::for_distance(camera.distance),
     }
 }
 
@@ -1887,6 +1914,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         params.out_path,
     );
     if accumulating {
+        // `render_accumulated` refuses a volume render by name.
         return render_accumulated(params);
     }
     // The ring path has no histogram to save or continue, and saying so beats
@@ -1941,10 +1969,17 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // The ring path has no accumulate->filter->tonemap chain for DE to sit
         // in; refused above alongside the checkpoint flags.
         density_estimation: _,
+        opacity,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
         gpu_share: _,
     } = params;
+    if opacity.is_some() && !matches!(grid, GridMode::Single) {
+        reject_volume(opacity, "an orbit or move grid", "Render the tile you want on its own.")?;
+    }
+    if opacity.is_some() && !splat {
+        return Err("--volume is a splat renderer with absorption, so it needs the splat renderer".into());
+    }
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -1981,6 +2016,23 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     // is unchanged either way — and it is what makes a *run* of stills along a
     // flight comparable frame to frame. See `effective_camera_folded`.
     compute.rewrap(&device, &queue, folded);
+
+    if let Some(sigma) = opacity {
+        let TileRenderer::Splat(r) = &mut renderer else { unreachable!("checked splat above") };
+        if !r.volume_available() {
+            return Err("--volume needs fp32 blending (FLOAT32_BLENDABLE), which this GPU does not \
+                        offer. The moments it accumulates are useless at fp16 precision, so there \
+                        is no fallback."
+                .into());
+        }
+        let range = volume_range(&scene, &base_camera, zoom.as_ref());
+        // The same two numbers exposure is normalised by: the ring's point count
+        // and the *accumulation* height.
+        r.set_volume(
+            &queue,
+            VolumeParams::new(sigma, point_count as f64, sampling.target_height(), range),
+        );
+    }
 
     let aspect = width as f32 / height as f32;
     let tiles = build_tiles(&base_camera, grid, aspect);
@@ -2086,6 +2138,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             spp: None,
             grade,
             density_estimation: 0.0,
+            opacity,
             splat,
             exposure,
             transparent,
@@ -2154,6 +2207,21 @@ fn reject_density_estimation(
     Err(format!(
         "--density-estimation runs inside one still's accumulate->filter->tonemap chain; \
          {} does not have one. {}",
+        what, fix
+    ))
+}
+
+/// Volume mode is a one-pass still for now; see [`OfflineParams::opacity`].
+/// Named so that `--volume` reads as a refusal, not as a flag that quietly did
+/// something else — rendering plain splat here would look like it had worked.
+fn reject_volume(opacity: Option<f32>, what: &str, fix: &str) -> Result<(), String> {
+    if opacity.is_none() {
+        return Ok(());
+    }
+    Err(format!(
+        "--volume (the volume renderer) draws one pass of the point buffer, and {} is not \
+         that yet: absorption has to be resolved over every sample before any is lit, which \
+         a lap or a sheet of renders cannot do. {}",
         what, fix
     ))
 }
@@ -2264,9 +2332,15 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         checkpoint_out,
         resume_from,
         density_estimation,
+        opacity,
         gpu_reserve,
         gpu_share,
     } = params;
+    reject_volume(
+        opacity,
+        "an accumulating render (--spp, --resume, or an --effort tier)",
+        "Use --points to set the sample count of a one-pass still, or drop --volume.",
+    )?;
     // `--resume` alone is legal and means "reach the target this checkpoint was
     // already heading for", so the sample target is optional here even though
     // `--spp` is the usual way in.
@@ -2895,6 +2969,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
             spp: Some(achieved_spp),
             grade,
             density_estimation: density_estimation.clamped().amount,
+            opacity: None,
             splat,
             exposure,
             transparent,
@@ -3058,6 +3133,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         checkpoint_out,
         resume_from,
         density_estimation,
+        opacity,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
         gpu_share: _,
@@ -3066,6 +3142,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     reject_grade_out(grade_out, "an animation", "Render the frame you want as a single still.")?;
     reject_checkpoint(checkpoint_out, resume_from, "an animation", "Render the frame you want as a single still.")?;
     reject_density_estimation(density_estimation, "an animation", "Render the frame you want as a single still.")?;
+    reject_volume(opacity, "an animation", "Render the frame you want as a single still.")?;
     // 4:2:0 chroma needs even dimensions
     let (width, height) = (width & !1, height & !1);
     let sampling = Sampling::new(supersample, height);
@@ -3257,6 +3334,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             spp: None,
             grade,
             density_estimation: 0.0,
+            opacity: None,
             splat,
             exposure,
             transparent,
@@ -3337,6 +3415,7 @@ pub fn render_mutations(
         checkpoint_out,
         resume_from,
         density_estimation,
+        opacity,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
         gpu_share: _,
@@ -3346,6 +3425,7 @@ pub fn render_mutations(
     reject_grade_out(grade_out, "a variant sheet", "Render the tile you want on its own.")?;
     reject_checkpoint(checkpoint_out, resume_from, "a variant sheet", "Render the tile you want on its own.")?;
     reject_density_estimation(density_estimation, "a variant sheet", "Render the tile you want on its own.")?;
+    reject_volume(opacity, "a variant sheet", "Render the tile you want on its own.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -3550,6 +3630,7 @@ pub fn render_sweep(
         checkpoint_out,
         resume_from,
         density_estimation,
+        opacity,
         // Only the accumulating path tiles, so only it budgets against this.
         gpu_reserve: _,
         gpu_share: _,
@@ -3560,6 +3641,7 @@ pub fn render_sweep(
     reject_grade_out(grade_out, "a sweep sheet", "Render the tile you want on its own.")?;
     reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet", "Render the tile you want on its own.")?;
     reject_density_estimation(density_estimation, "a sweep sheet", "Render the tile you want on its own.")?;
+    reject_volume(opacity, "a sweep sheet", "Render the tile you want on its own.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -3776,6 +3858,7 @@ mod tests {
                 spp: None,
                 grade: Grade::NEUTRAL,
                 density_estimation: 0.0,
+                opacity: None,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

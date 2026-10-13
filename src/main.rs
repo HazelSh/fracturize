@@ -788,6 +788,25 @@ struct Args {
     #[arg(long, help_heading = "Offline render")]
     splat: bool,
 
+    /// Use the volume renderer: splat with absorption
+    ///
+    /// Near material hides what is behind it, by the opacity: dense cores
+    /// block, thin filaments stay see-through. Opacity 0 is --splat exactly.
+    /// R cycles to it in the app. Needs a GPU with fp32 blending. For now it
+    /// renders a one-pass still: --spp, --effort tiers, animations and
+    /// sheets refuse it by name.
+    #[arg(long, help_heading = "Offline render")]
+    volume: bool,
+
+    /// Opacity for --volume, 0 for none [else 1.0]
+    ///
+    /// A property of the material, not of the point count: it means the same at
+    /// any --points, size or --supersample, the way exposure does. Useful
+    /// values run from about 0.1 (a faint veil) to 30 (nearly solid cores).
+    /// Not saved anywhere yet; the app's slider is per session too.
+    #[arg(long, value_name = "X", help_heading = "Offline render")]
+    opacity: Option<f32>,
+
     /// Splat-renderer exposure multiplier [--view, else 1.0]
     ///
     /// W / Shift+W adjust it in-app.
@@ -1776,6 +1795,8 @@ impl ApplicationHandler for AppWrapper {
             view,
             self.args.fov.map(camera::Fov::from_degrees),
             self.args.splat,
+            self.args.volume,
+            self.args.opacity,
             self.args.exposure,
             resolve_grade(&self.args, view_for_grade.as_ref()),
         ));
@@ -2547,8 +2568,9 @@ fn main() {
         // tier degrades to the buffer that best approximates it.
         let pixels = args.width as u64 * args.height as u64;
         let splat_render = args.splat
+            || args.volume
             || args.view.as_ref().is_some_and(|p| {
-                View::load(p).map(|v| v.is_splat()).unwrap_or(false)
+                View::load(p).map(|v| v.is_splat() || v.is_volume()).unwrap_or(false)
             });
         // Accumulation renders one still. Anything that renders many images —
         // a contact sheet, a mutation or sweep sheet, an animation — shares one
@@ -2631,8 +2653,22 @@ fn main() {
             (None, None) => offline::GridMode::Single,
         };
 
-        // --splat wins; otherwise a splat-captured view selects the renderer
-        let splat = args.splat || view.as_ref().is_some_and(|v| v.is_splat());
+        // --volume is splat with absorption, so it implies the splat renderer;
+        // otherwise a view captured in either mode selects it.
+        let volume = args.volume || view.as_ref().is_some_and(|v| v.is_volume());
+        if args.opacity.is_some() && !volume {
+            eprintln!("--opacity is the volume renderer's dial. Add --volume.");
+            std::process::exit(1);
+        }
+        let opacity = volume.then(|| {
+            let o = args.opacity.unwrap_or(gpu::points::volume::DEFAULT_OPACITY);
+            if !(o >= 0.0 && o.is_finite()) {
+                eprintln!("--opacity must be 0 or more, not {}", o);
+                std::process::exit(1);
+            }
+            o.min(gpu::points::volume::MAX_OPACITY)
+        });
+        let splat = args.splat || volume || view.as_ref().is_some_and(|v| v.is_splat());
         let exposure = args
             .exposure
             .or(view.as_ref().and_then(|v| v.exposure))
@@ -2703,6 +2739,7 @@ fn main() {
             density_estimation: gpu::points::density::DensityEstimation {
                 amount: args.density_estimation.unwrap_or(0.0),
             },
+            opacity,
             grade_out: args.grade_out.as_ref().map(|p| {
                 // Bare `--grade-out` means "beside the render".
                 if p.is_empty() {

@@ -81,7 +81,10 @@ src/
     points/      # Active renderer: chaos compute + point rendering
       compute.rs   # Chaos game dispatch, circular buffer bookkeeping
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
-      splat.rs     # Splat mode: additive log-density accumulation + tonemap
+      splat.rs     # Splat mode: additive log-density accumulation + tonemap;
+                   # also volume mode's two passes (moments, then weighted emission)
+      volume.rs    # Volume mode's uniform, depth warp/range, opacity limits
+      moments.rs   # Moment-based transmittance, Rust mirror of the WGSL (tested)
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # In-world line renderer (traces, camera path, indicators)
@@ -116,8 +119,9 @@ All GPU, three passes per frame:
    10x faster during warmup). Per iteration: pick transform by cumulative weight,
    apply affine matrix, then blend the 20 variation functions by weight. Diverged or
    NaN walkers are re-seeded randomly (important for nonlinear variations).
-2. **Point render** — two interchangeable modes over the same point buffer
-   (`R` toggles live; `--splat` / a view's `renderer = "splat"` select at launch):
+2. **Point render** — three interchangeable modes over the same point buffer
+   (`R` cycles live; `--splat`, `--volume` / a view's `renderer = "splat"` or
+   `"volume"` select at launch):
    - **points** (`points/render.wgsl`, default): opaque depth-tested points with
      adaptive pipeline selection. When the projected point size at orbit distance
      is subpixel (the common case), points are drawn as native 1px point
@@ -140,6 +144,70 @@ All GPU, three passes per frame:
      Exposure is normalized by point capacity and resolution, so brightness is
      stable across effort levels and render sizes; `W`/`Shift+W` (or
      `--exposure`) scale it. ~75% of the point renderer's FPS.
+   - **volume** (`points/splat.wgsl`, `volume.rs`, `moments.rs`): splat with
+     absorption, so near material hides what is behind it. The fractal is a
+     glowing fog: every point emits (as in splat) and also absorbs, and a point
+     reaches the eye attenuated by `T(z) = exp(−τ(z))`, τ the absorbance in front
+     of it. Plan and later slices are in `VOLUME-RENDERER-PLAN.md`; slice 1 is
+     live and the one-pass still. Two passes over the point buffer:
+     **A** splats each point's absorbance into fp32 targets holding the total
+     `b0` and four power moments `Σ a·zᵏ` of a log-warped depth `z ∈ [−1, 1]`
+     (`Rgba32Float` + `R32Float`, at *accumulation* resolution); **B** is the
+     ordinary splat accumulation with each fragment's weight multiplied by `T`
+     reconstructed from its pixel's moments (Münstermann et al. 2018,
+     `moment_transmittance` in the shader, mirrored and unit-tested in
+     `moments.rs`). The tonemap is unchanged.
+
+     Things that are load-bearing, and easy to undo by accident:
+
+     * **Opacity 0 is not "almost splat", it is splat.** The host draws the
+       plain splat pipelines and never runs pass A (`SplatRenderer::set_volume`
+       with `VolumeParams::OFF`), so `--volume --opacity 0` is pixel-identical to
+       `--splat` (checked on `blossom` and `censer`; the PNG *files* differ only
+       by their embedded record).
+     * **Opacity belongs to the density, not the point.** A point deposits
+       absorbance `opacity · H² / samples · kernel`, the same `H²/samples`
+       ratio exposure uses, so the picture does not change with `--points`,
+       resolution or `--supersample` (`VolumeParams::new`; the call sites pass
+       the very `samples` and `screen_height` they pass `upload_params`). A
+       constant per-point alpha would make more points look more solid.
+     * **A point does not shadow itself.** Pass B subtracts the point's own
+       deposit from the pixel's moments before reconstructing
+       (`moments::transmittance_excluding`). The reconstruction counts a share
+       of the mass at the queried depth as in front of it, which suits a
+       surface and is wrong for emission: without the subtraction a lone point
+       carrying absorbance 11 rendered at 6% of its brightness, so *thin*
+       material went dark first. Below `NOISE_FLOOR` of the total the
+       difference is fp32 noise and the answer is 1.
+     * **Haze scales emission only; the zoom edge guard scales both** (haze sits
+       between eye and point, the guard removes material). `--isolate`d points
+       deposit no absorbance (the vertex stage already clips them).
+     * **It needs `FLOAT32_BLENDABLE`**, which the live device now requests
+       (`gpu/context.rs`; the offline device always did). Without it the radio's
+       volume segment is greyed with the reason, `R` skips it, and `--volume`
+       exits with an error — there is no fp16 fallback, the moments are noise
+       there. The live window keeps its *emission* accumulation at fp16 anyway
+       (`SplatPipelines::with_precision(.., false)`): requesting the feature
+       would otherwise have moved ordinary live splat to fp32, ~17% of its
+       frame rate at 8M points.
+     * **Depth range** is the measured attractor's bounding sphere padded 1.5x
+       (`DepthRange::around`), relative to the eye under infinite zoom
+       (`for_zoom`); points outside clamp. Composites measure per layer.
+     * **Brightness falls as opacity rises** — a saturated pixel carries about
+       `1/opacity` of splat's light, because each point's emission is fixed
+       while its absorbance scales. The Render window says so; raise exposure.
+       Whether the tonemap should compensate is an open question in the plan.
+     * **Opacity is session state** for now (the Render window's "Session"
+       heading, `--opacity`, default 2): not a scene key, not undoable, not in
+       views or prefs. A view saved in volume mode records the *mode* only.
+     * **One-pass stills and the window only.** `--spp`, `--effort` tiers that
+       accumulate, `--resume`, animations, grids and sheets refuse `--volume` by
+       name (`offline::reject_volume`); a render job from the dialog renders
+       plain splat and says so. The shaders' vertex stage is shared with splat
+       (`vs_splat*` carry the extra `abs_weight`/`z` varyings, zero when volume
+       is off).
+     * Cost: ~2.6x splat's render stage offline (20M points, 1080p, ss2);
+       live, ~1.5x frame time at 8M points on the GTX 1080.
 3. **Gizmos, traces + indicators**: optional overlays (see keybinds). Traces
    (X) are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl —
    keep them in sync!) rendered as alpha-faded line segments; they regenerate
@@ -412,7 +480,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | J / K / L | selected transform's color: hue / saturation / value up (+Shift = down) |
 | E / Shift+E | cycle the variation slot targeted by - / = (shown in the status bar) |
 | - / = | targeted variation weight down / up (0.05 steps) on selected transform |
-| R | toggle renderer: points / splat (additive log-density) |
+| R | cycle renderer: points / splat (additive log-density) / volume (splat with absorption; skipped without fp32 blending) |
 | W / Shift+W | splat exposure up / down |
 | [ / ] | shrink / grow point size |
 | D / Shift+D | finer / coarser color detail (color_falloff) |
@@ -3159,6 +3227,11 @@ encode+save | total`) to stdout so you can budget effort. Options:
 - No `--scene`? `--random` rolls a flame, `--blank` opens the empty canvas
   (see "Random Flames" and "Starting From Nothing"); otherwise you get the
   built-in default. All three work windowed and with `--render`.
+- `--volume [--opacity X]` — the volume renderer (see "Rendering Approach"):
+  splat with absorption, opacity default 2, 0 is plain splat. One-pass stills
+  only; it refuses `--spp`, accumulating `--effort` tiers, grids, sheets and
+  animations by name, and `--opacity` without `--volume`. A view's
+  `renderer = "volume"` selects it too, at the default opacity.
 - `--splat [--exposure X]` — render with the splat renderer (also implied by a
   view saved in splat mode; explicit flags win). Works with all grid modes.
   Exposure is capacity-normalized, so the same value looks the same at every

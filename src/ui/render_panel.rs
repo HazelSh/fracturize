@@ -54,6 +54,23 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             );
             draw_grade(ui, app);
 
+            // Volume mode's opacity lives under a heading of its own because
+            // it is saved nowhere yet, and the other three headings would each
+            // be a small lie about it. Only drawn when it is the mode in use:
+            // the dial is meaningless to the other two renderers, and this is
+            // the one place it is not worth a greyed row to advertise it (the
+            // radio's own volume segment is where the mode announces itself).
+            if app.render_mode == RenderMode::Volume {
+                ui.add_space(6.0);
+                class_heading(
+                    ui,
+                    "Session",
+                    "Lasts until you quit. Not saved with the scene, a view or your \
+                     preferences.",
+                );
+                draw_opacity(ui, app);
+            }
+
             ui.add_space(6.0);
             class_heading(
                 ui,
@@ -67,12 +84,14 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.render_open = open;
 }
 
-/// The points/splat segmented radio, shared by this panel and the toolbar.
+/// The points/splat/volume segmented radio, shared by this panel and the
+/// toolbar.
 ///
-/// A radio rather than two toggles: there are exactly two renderers and the
+/// A radio rather than toggles: there are exactly three renderers and the
 /// point buffer is always going through one of them, so "neither" isn't a
 /// state this control can be in. See `ui::radio`.
 pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
+    let volume_ok = app.volume_available();
     let chosen = super::radio::radio(&mut app.ui_state, "render_mode", app.render_mode)
         .option(
             RenderMode::Points,
@@ -87,6 +106,23 @@ pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
              slider applies (R)",
             "click: switch to the splat renderer",
         )
+        .option_enabled(
+            volume_ok,
+            RenderMode::Volume,
+            "volume",
+            if volume_ok {
+                "Splat with depth: near material hides what is behind it, by the opacity \
+                 setting. Dense cores block and thin filaments stay see-through (R)"
+            } else {
+                "Needs a GPU that can blend into 32-bit float textures, which this one \
+                 can't. Splat and points still work."
+            },
+            if volume_ok {
+                "click: switch to the volume renderer"
+            } else {
+                "unavailable on this GPU"
+            },
+        )
         .show(ui);
     if let Some(mode) = chosen {
         app.set_render_mode(mode);
@@ -99,7 +135,7 @@ fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
         render_mode(ui, app);
     });
 
-    let splat = app.render_mode == RenderMode::Splat;
+    let splat = app.render_mode.is_splat_family();
     ui.add_enabled_ui(splat, |ui| {
         let mut exposure = app.exposure;
         let resp = ui.add(
@@ -121,6 +157,35 @@ fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
             app.set_exposure(exposure);
         }
     });
+}
+
+/// Volume mode's opacity: how much near material hides what is behind it.
+///
+/// Logarithmic, because the useful range spans decades (a faint veil near 0.1,
+/// nearly solid cores near 30), and it reaches 0, which is plain splat, through
+/// `smallest_positive` — a log scale has no zero of its own. Not an edit: it is
+/// session state, so it does not touch the history or the dirty bit.
+fn draw_opacity(ui: &mut egui::Ui, app: &mut App) {
+    use crate::gpu::points::volume::{MAX_OPACITY, MIN_OPACITY};
+    let mut opacity = app.opacity;
+    let resp = ui.add(
+        egui::Slider::new(&mut opacity, 0.0..=MAX_OPACITY)
+            .logarithmic(true)
+            .smallest_positive(MIN_OPACITY as f64)
+            .text("opacity"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "How much near material hides what is behind it. 0 is plain splat; about 2 \
+         shows the depth; past 10 the cores are nearly solid. It means the same at any \
+         point count or window size. Brighter material needs more exposure as this goes \
+         up, because less of the far side is lit.",
+        "drag: adjust opacity",
+    );
+    if resp.changed() {
+        app.set_opacity(opacity);
+    }
 }
 
 /// One grade row: its name on its own line, then a full-width slider under it.
@@ -173,7 +238,7 @@ fn grade_row(
 /// with no log curve for a grade to act on — greyed rather than hidden, per the
 /// house rule, so the feature can still say it exists.
 fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
-    let splat = app.render_mode == RenderMode::Splat;
+    let splat = app.render_mode.is_splat_family();
     ui.add_enabled_ui(splat, |ui| {
         let mut grade = app.grade;
 

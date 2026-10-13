@@ -93,6 +93,9 @@ pub struct Quality {
     /// Density estimation amount. Written only when non-zero, so records made
     /// before it existed are byte-identical and an absent key means "off".
     pub density_estimation: f32,
+    /// Volume mode and its opacity. `Some` writes `renderer = "volume"` and the
+    /// value; `None` leaves the record as it always was.
+    pub opacity: Option<f32>,
     pub transparent: bool,
     pub supersample: u32,
     pub filter: Filter,
@@ -166,13 +169,21 @@ impl RenderRecord {
         let _ = writeln!(s, "[render]");
         let _ = writeln!(s, "width = {}", q.width);
         let _ = writeln!(s, "height = {}", q.height);
-        let _ = writeln!(s, "renderer = {}", if q.splat { "\"splat\"" } else { "\"points\"" });
+        let renderer = match (q.splat, q.opacity) {
+            (_, Some(_)) => "\"volume\"",
+            (true, None) => "\"splat\"",
+            (false, None) => "\"points\"",
+        };
+        let _ = writeln!(s, "renderer = {}", renderer);
         let _ = writeln!(s, "points = {}", q.points);
         let _ = writeln!(s, "accumulate = {}", q.accumulate);
         if let Some(spp) = q.spp {
             let _ = writeln!(s, "spp = {}", num(spp));
         }
         let _ = writeln!(s, "exposure = {}", num(q.exposure));
+        if let Some(opacity) = q.opacity {
+            let _ = writeln!(s, "opacity = {}", num(opacity));
+        }
         if q.density_estimation > 0.0 {
             let _ = writeln!(s, "density_estimation = {}", num(q.density_estimation));
         }
@@ -353,6 +364,7 @@ mod tests {
                 spp: None,
                 grade: Grade::NEUTRAL,
                 density_estimation: 0.0,
+                opacity: None,
                 splat: true,
                 exposure: 1.0,
                 transparent: false,

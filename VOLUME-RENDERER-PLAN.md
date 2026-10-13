@@ -5,7 +5,8 @@ the inside; splat shows the inside and loses front from back. This one has a
 single opacity control between the two, and later the lighting that occlusion
 makes possible.
 
-Status: plan. Nothing is built yet.
+Status: slice 1 built (live window, one-pass stills, session-only opacity); see
+"Slice 1 findings" below. Slices 2-7 are plan.
 
 ## The model
 
@@ -170,6 +171,39 @@ Colditz & Deussen 2006, *unsharp masking the depth buffer*). It works on the
 points renderer, and on this one via the depth where `T` crosses 0.5, which the
 moments give smoothed for free. Done last on purpose: it is lighting for
 surfaces, and the volume renderer is the thing worth lighting.
+
+## Slice 1 findings
+
+Things the build showed that the design above did not say.
+
+- **A point must not be absorbed by itself.** The paper's reconstruction counts
+  a share (`overestimation`, 0.25) of the absorbance *at* the queried depth as in
+  front of it. For a transparent surface that is a hedge; for emission the
+  querying point is itself that mass. At opacity 30 a lone point (absorbance ~11)
+  came out at 6% of its brightness, so thin material died first. Pass B now
+  subtracts the point's own deposit from the moments (`transmittance_excluding`).
+  Setting `overestimation = 0` instead looks crisp but under-absorbs a thick slab
+  by 0.6 in T; the subtraction keeps 0.25's slab accuracy (worst 0.20).
+- **Brightness falls ~1/opacity once pixels saturate.** Each point's emission is
+  fixed while its absorbance scales with opacity, so an opaque pixel emits only
+  its front sliver: in the continuum limit pass B's density tends to
+  `(1 − e^{−τ}) / (opacity · K)`. At opacity 2 the whole-image mean luminance
+  falls ~10% (nautilus 0.204 → 0.184), at 10 ~16%, with the lit material falling
+  much more; raising exposure by the opacity restores it. Whether the tonemap
+  should compensate (e.g. scale density by `τ / (1 − e^{−τ})` per pixel, which
+  conserves energy and leaves occlusion in the *colour*) is the decision the
+  "background compositing" question below should be made together with.
+- **Four moments are soft in front.** On a thick uniform slab the reconstruction
+  is smooth and monotone with correct ends but under-absorbs mid-slab by up to
+  0.2 in T and leaks ~5-10% darkening just ahead of the slab's front face.
+  No ringing or black holes were seen in renders.
+- **The bias is not the constraint.** On f32-built single-layer pixels the
+  reconstruction survives down to a bias of 3e-8 and fails at 0 (exactly
+  degenerate layers). The shipped 3e-5 is the paper's order and a thousand times
+  above where it breaks on the CPU; it is insurance for GPU rounding, not tuned.
+- **Requesting `FLOAT32_BLENDABLE` on the live device silently moves live splat
+  to fp32** (`accum_format` picks it whenever it can). The window keeps fp16
+  emission via `SplatPipelines::with_precision(.., false)`.
 
 ## Open questions, decided by looking
 

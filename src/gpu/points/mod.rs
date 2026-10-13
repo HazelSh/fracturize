@@ -10,8 +10,11 @@ pub mod compute;
 pub mod density;
 pub mod downsample;
 pub mod emphasis;
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod moments;
 pub mod renderer;
 pub mod splat;
+pub mod volume;
 
 pub use compute::PointCompute;
 pub use downsample::Filter;

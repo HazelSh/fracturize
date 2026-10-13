@@ -578,11 +578,29 @@ pub enum HelpAction {
 
 /// Which point renderer draws the fractal. Points is the classic opaque
 /// depth-tested renderer; Splat is additive log-density accumulation
-/// (flame-style, no occlusion). R toggles at runtime.
+/// (flame-style, no occlusion); Volume is splat with absorption, so near
+/// material hides what is behind it by the opacity setting. R cycles them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderMode {
     Points,
     Splat,
+    Volume,
+}
+
+impl RenderMode {
+    /// Both the splat family: they share the accumulation and tonemap, so
+    /// exposure, the grade and the emphasis glow all treat them alike.
+    pub fn is_splat_family(self) -> bool {
+        matches!(self, RenderMode::Splat | RenderMode::Volume)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RenderMode::Points => "points",
+            RenderMode::Splat => "splat (additive log-density)",
+            RenderMode::Volume => "volume (splat with absorption)",
+        }
+    }
 }
 
 /// Outcome of `App::render`'s attempt to acquire and present a frame.
@@ -926,6 +944,15 @@ pub struct App {
     pub render_mode: RenderMode,
     /// Splat-renderer exposure multiplier (W / Shift+W)
     pub exposure: f32,
+    /// Volume-mode opacity. **Session state**, deliberately: nothing writes it
+    /// to the scene, a view or the preferences yet (that is the next slice, and
+    /// it will be scene data). 0 is plain splat.
+    pub opacity: f32,
+    /// The bounding sphere volume mode frames, for a composite, whose
+    /// attractor `refresh_attractor` does not describe. Keyed on
+    /// `attractor_fingerprint`.
+    volume_bounds: Option<(Vec3, f32)>,
+    volume_bounds_key: u64,
 
     /// The tonemap grade — gamma, its threshold, and vibrancy.
     ///
@@ -1087,6 +1114,10 @@ impl App {
         // you don't want to edit.
         fov_override: Option<crate::camera::Fov>,
         splat: bool,
+        // `--volume`: start in volume mode. The opacity is `--opacity`, else the
+        // default; either way it is session state and nothing saves it.
+        volume: bool,
+        opacity: Option<f32>,
         exposure: Option<f32>,
         // `grade` arrives already resolved against the view and the CLI flags
         // — see `resolve_grade` in `main.rs`, which the headless path shares.
@@ -1105,7 +1136,11 @@ impl App {
         // Compiled once for the life of the app: rebuilding the chaos game on
         // a transform add, and every thumbnail in the scene browser, share them.
         let chaos_pipelines = crate::gpu::points::compute::ChaosPipelines::new(&gpu.device);
-        let splat_pipelines = crate::gpu::points::splat::SplatPipelines::new(&gpu.device, gpu.format);
+        // fp16 emission accumulation, as the window has always had; see
+        // `SplatPipelines::with_precision`. Volume mode's moments are fp32
+        // whatever this says.
+        let splat_pipelines =
+            crate::gpu::points::splat::SplatPipelines::with_precision(&gpu.device, gpu.format, false);
         let thumbs = crate::gpu::thumbs::ThumbCache::new(&gpu.device, &chaos_pipelines);
 
         // Create point compute pipeline
@@ -1144,7 +1179,21 @@ impl App {
 
         // --splat / a splat-captured view starts in splat mode; an explicit
         // --exposure wins over the view's saved exposure
-        let render_mode = if splat || view.as_ref().is_some_and(|v| v.is_splat()) {
+        let volume_ok = splat_pipelines.volume_available();
+        if volume && !volume_ok {
+            eprintln!(
+                "--volume needs fp32 blending (FLOAT32_BLENDABLE), which this GPU does not \
+                 offer. The moments it accumulates are useless at fp16 precision, so there is \
+                 no fallback."
+            );
+            std::process::exit(1);
+        }
+        let view_volume = view.as_ref().is_some_and(|v| v.is_volume());
+        let render_mode = if volume || (view_volume && volume_ok) {
+            RenderMode::Volume
+        } else if splat || view_volume || view.as_ref().is_some_and(|v| v.is_splat()) {
+            // A view saved in volume mode on a GPU that cannot do it opens as
+            // the splat it is a refinement of, rather than refusing to open.
             RenderMode::Splat
         } else {
             RenderMode::Points
@@ -1325,6 +1374,11 @@ impl App {
             last_capacity_change: Instant::now(),
             render_mode,
             exposure,
+            opacity: opacity
+                .unwrap_or(crate::gpu::points::volume::DEFAULT_OPACITY)
+                .clamp(0.0, crate::gpu::points::volume::MAX_OPACITY),
+            volume_bounds: None,
+            volume_bounds_key: 0,
             grade: grade.clamped(),
             show_traces: false,
             scene,
@@ -1451,7 +1505,9 @@ impl App {
             self.refresh_color_speeds();
         }
         if with_renderer {
-            self.render_mode = if v.is_splat() {
+            self.render_mode = if v.is_volume() && self.splat_renderer.volume_available() {
+                RenderMode::Volume
+            } else if v.is_splat() || v.is_volume() {
                 RenderMode::Splat
             } else {
                 RenderMode::Points
@@ -2085,10 +2141,12 @@ impl App {
             renderer: match self.render_mode {
                 RenderMode::Points => None,
                 RenderMode::Splat => Some("splat".to_string()),
+                // The mode is saved; the opacity is session state and is not.
+                RenderMode::Volume => Some("volume".to_string()),
             },
             exposure: match self.render_mode {
                 RenderMode::Points => None,
-                RenderMode::Splat => Some(self.exposure),
+                RenderMode::Splat | RenderMode::Volume => Some(self.exposure),
             },
             // Only under splat, and only when the grade actually says
             // something. The points renderer has no tonemap to grade, and
@@ -4348,6 +4406,9 @@ impl App {
                 checkpoint_out: None,
                 resume_from: None,
                 density_estimation,
+                // The dialog has no volume render yet (it accumulates by
+                // default, which volume mode cannot); see the form's note.
+                opacity: None,
             };
             let result = match kind {
                 JobKind::Still { .. } => crate::offline::render(base),
@@ -5482,17 +5543,14 @@ impl App {
     }
 
     pub fn toggle_render_mode(&mut self) {
+        // Points, splat, volume, round again. A GPU without fp32 blending has
+        // no volume mode, and the cycle simply skips it.
         self.render_mode = match self.render_mode {
             RenderMode::Points => RenderMode::Splat,
-            RenderMode::Splat => RenderMode::Points,
+            RenderMode::Splat if self.volume_available() => RenderMode::Volume,
+            RenderMode::Splat | RenderMode::Volume => RenderMode::Points,
         };
-        log::info!(
-            "Renderer: {}",
-            match self.render_mode {
-                RenderMode::Points => "points",
-                RenderMode::Splat => "splat (additive log-density)",
-            }
-        );
+        log::info!("Renderer: {}", self.render_mode.label());
     }
 
     pub fn adjust_exposure(&mut self, increase: bool) {
@@ -5582,16 +5640,69 @@ impl App {
     // the keyboard path (`toggle_render_mode`) exactly.
 
     pub fn set_render_mode(&mut self, mode: RenderMode) {
+        if mode == RenderMode::Volume && !self.volume_available() {
+            return;
+        }
         if self.render_mode != mode {
             self.render_mode = mode;
-            log::info!(
-                "Renderer: {}",
-                match mode {
-                    RenderMode::Points => "points",
-                    RenderMode::Splat => "splat (additive log-density)",
-                }
-            );
+            log::info!("Renderer: {}", self.render_mode.label());
         }
+    }
+
+    /// Whether this GPU can run volume mode (it needs fp32 blending). The
+    /// Render window greys the segment out, saying why, when it cannot.
+    pub fn volume_available(&self) -> bool {
+        self.splat_renderer.volume_available()
+    }
+
+    /// Set the volume-mode opacity (the Render window's slider). Session state:
+    /// not an edit, not in the history, not saved.
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.0, crate::gpu::points::volume::MAX_OPACITY);
+    }
+
+    /// The depth interval volume mode warps into, for this frame's camera.
+    ///
+    /// The measured attractor's bounding sphere, so the moments spend their
+    /// range on where material is; under infinite zoom, which has nothing to
+    /// measure, relative to the eye.
+    fn volume_depth_range(&mut self) -> crate::gpu::points::volume::DepthRange {
+        use crate::gpu::points::volume::{self, DepthRange};
+        let (eye, forward) = (self.camera.eye(), self.camera.forward());
+        if let Some(z) = self.zoom() {
+            return DepthRange::for_zoom(eye, forward, z.fixed_point, z.radius);
+        }
+        let sphere = if self.scene.is_composite() {
+            // `self.attractor` walks every map as one IFS, which describes no
+            // composite; measure it layer by layer, and only when it changes.
+            let key = self.attractor_fingerprint();
+            if self.volume_bounds_key != key {
+                self.volume_bounds = volume::scene_bounds(&self.scene);
+                self.volume_bounds_key = key;
+            }
+            self.volume_bounds
+        } else {
+            self.attractor.as_ref().map(volume::bounding_sphere)
+        };
+        match sphere {
+            Some((centre, radius)) => DepthRange::around(eye, forward, centre, radius),
+            None => DepthRange::for_distance(self.camera.distance),
+        }
+    }
+
+    /// Hand the splat renderer its volume state for the frame about to be
+    /// drawn: on in volume mode with opacity above zero, off otherwise. `samples`
+    /// and `height` are exactly what exposure is normalised by at that call
+    /// site, so absorbance scales the way brightness does.
+    fn sync_volume(&mut self, samples: f64, height: f32) {
+        use crate::gpu::points::volume::VolumeParams;
+        let params = if self.render_mode == RenderMode::Volume {
+            let range = self.volume_depth_range();
+            VolumeParams::new(self.opacity, samples, height, range)
+        } else {
+            VolumeParams::OFF
+        };
+        self.splat_renderer.set_volume(&self.gpu.queue, params);
     }
 
     pub fn set_point_size(&mut self, size: f32) {
@@ -6619,7 +6730,7 @@ impl App {
                     self.use_point_primitives(SCREENSHOT_HEIGHT as f32),
                 );
             }
-            RenderMode::Splat => {
+            RenderMode::Splat | RenderMode::Volume => {
                 // The accum texture resizes to the screenshot dimensions
                 // here and back to the window's on the next frame
                 self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
@@ -6635,6 +6746,7 @@ impl App {
                     // different picture from the one on screen.
                     self.grade,
                 );
+                self.sync_volume(self.buffer_capacity as f64, SCREENSHOT_HEIGHT as f32);
                 self.splat_renderer.render(
                     &self.gpu.device,
                     &mut encoder,
@@ -6932,7 +7044,7 @@ impl App {
                     );
                 }
             }
-            RenderMode::Splat => {
+            RenderMode::Splat | RenderMode::Volume => {
                 self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
                 self.splat_renderer.upload_params(
                     &self.gpu.queue,
@@ -6950,6 +7062,8 @@ impl App {
                     // live control rather than a render setting.
                     self.grade,
                 );
+                // Absorbance is normalised by the same two numbers exposure is.
+                self.sync_volume(self.buffer_capacity.min(point_count.max(1)) as f64, height as f32);
                 self.splat_renderer.render(
                     &self.gpu.device,
                     &mut encoder,
@@ -6978,7 +7092,7 @@ impl App {
                     run_len,
                     capacity: self.point_compute.buffer_capacity,
                     // Gather the glow the way the picture under it was drawn.
-                    splat_mode: u32::from(matches!(self.render_mode, RenderMode::Splat)),
+                    splat_mode: u32::from(self.render_mode.is_splat_family()),
                     background: self.scene.background.to_array(),
                     ..self.emphasis_params
                 },
@@ -7082,8 +7196,8 @@ fn grade_for_view(
 ) -> Option<crate::gpu::points::splat::Grade> {
     match mode {
         RenderMode::Points => None,
-        RenderMode::Splat if grade.is_neutral() => None,
-        RenderMode::Splat => Some(grade),
+        RenderMode::Splat | RenderMode::Volume if grade.is_neutral() => None,
+        RenderMode::Splat | RenderMode::Volume => Some(grade),
     }
 }
 

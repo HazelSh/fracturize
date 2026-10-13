@@ -261,7 +261,9 @@ pub fn open(app: &mut App) {
         open: true,
         threads: app.render_threads(),
         gpu_share: app.render_gpu_share(),
-        splat: app.render_mode == crate::app::RenderMode::Splat,
+        // Volume mode seeds this as splat, and the dialog says so below: a
+        // job cannot render volume yet.
+        splat: app.render_mode.is_splat_family(),
         exposure: app.exposure,
         transparent: app.transparent_render,
         // Start well above the interactive buffer without being reckless: this
@@ -939,6 +941,18 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
         });
 
     });
+    if app.render_mode == crate::app::RenderMode::Volume {
+        // Said out loud rather than leaving the job to render something other
+        // than the window: the dialog accumulates by default, and accumulating
+        // volume renders are not built yet.
+        ui.label(
+            egui::RichText::new(
+                "The window is in volume mode, but render jobs can't draw it yet. \
+                 This job renders splat, without the depth.",
+            )
+            .small(),
+        );
+    }
 
     // Bit depth rides with transparency rather than with supersampling: both
     // describe the *file* that leaves the app, not how the picture is drawn.

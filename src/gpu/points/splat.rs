@@ -12,6 +12,7 @@ use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFo
 
 use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source};
+use crate::gpu::points::volume::VolumeParams;
 use crate::gpu::points::renderer::DEPTH_FORMAT;
 
 /// HDR accumulation format, chosen per device.
@@ -35,8 +36,8 @@ use crate::gpu::points::renderer::DEPTH_FORMAT;
 /// `Features::FLOAT32_BLENDABLE` reports. Not universal — it is an optional
 /// feature and integrated parts often lack it — so fp16 remains the fallback
 /// and `accumulation_is_exact` tells a caller which one it got.
-fn accum_format(device: &Device) -> TextureFormat {
-    if device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+fn accum_format(device: &Device, exact: bool) -> TextureFormat {
+    if exact && device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
         TextureFormat::Rgba32Float
     } else {
         TextureFormat::Rgba16Float
@@ -126,6 +127,20 @@ pub struct SplatRenderer {
     tonemap_layout: BindGroupLayout,
     pub camera_buffer: Buffer,
     params_buffer: Buffer,
+    /// Volume mode's uniform. Bound to every splat draw, plain ones included
+    /// (they never read it), so the layout is one layout; zero-initialised,
+    /// which is `VolumeParams::OFF`.
+    volume_params_buffer: Buffer,
+    /// The volume passes' pipelines, `None` on a device that cannot blend into
+    /// fp32 — where volume mode does not exist rather than running on fp16
+    /// moments, which would be noise.
+    volume_pipelines: Option<VolumePipelines>,
+    /// Whether the next `render` draws the volume passes: opacity above zero
+    /// and the device able to. At zero, nothing about the volume exists in the
+    /// frame and the output is plain splat, byte for byte.
+    volume_active: bool,
+    /// The moment targets, at accumulation resolution, recreated with it.
+    moments: Option<MomentTargets>,
     /// Accumulation target + matching tonemap bind group, recreated when
     /// the render size changes (window resize, screenshots)
     accum: Option<AccumTarget>,
@@ -165,6 +180,28 @@ struct Resolved {
     height: u32,
 }
 
+/// Pass A's output: `(b0, b1, b2, b3)` and `b4`, fp32, and the group-1 bind
+/// group pass B reads them through.
+struct MomentTargets {
+    view0: wgpu::TextureView,
+    view1: wgpu::TextureView,
+    bind_group: BindGroup,
+    width: u32,
+    height: u32,
+}
+
+/// What volume mode adds to the compiled set: pass A (absorbance moments) and
+/// pass B (emission weighted by transmittance), each in the two primitive
+/// flavours splat has.
+#[derive(Clone)]
+struct VolumePipelines {
+    abs_quad: RenderPipeline,
+    abs_point: RenderPipeline,
+    quad: RenderPipeline,
+    point: RenderPipeline,
+    moments_layout: BindGroupLayout,
+}
+
 struct AccumTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -184,11 +221,29 @@ pub struct SplatPipelines {
     tonemap_pipeline: RenderPipeline,
     accum_layout: BindGroupLayout,
     tonemap_layout: BindGroupLayout,
+    volume: Option<VolumePipelines>,
 }
 
 impl SplatPipelines {
+    /// Pipelines that accumulate in fp32 wherever the device will blend into
+    /// it: what every offline render and thumbnail has always used.
     pub fn new(device: &Device, format: TextureFormat) -> Self {
-        let accum_format = accum_format(device);
+        Self::with_precision(device, format, true)
+    }
+
+    /// `exact = false` keeps the emission accumulation at fp16 even on a device
+    /// that could do better, which is what the *live window* wants.
+    ///
+    /// The window's device asks for `FLOAT32_BLENDABLE` now, for volume mode's
+    /// moment targets — and without this, that request would have quietly moved
+    /// the window's ordinary splat from an 8-byte to a 16-byte accumulation
+    /// texel, which measured about 17% of the frame rate at 8M points
+    /// (28 -> 23 FPS on the GTX 1080). The fp16 stall at a density of 2048 is a
+    /// ring-buffer curiosity in the window, where the picture is redrawn every
+    /// frame; it is the accumulating renders that cannot have it. The moments
+    /// are fp32 regardless — they are a separate pair of targets.
+    pub fn with_precision(device: &Device, format: TextureFormat, exact: bool) -> Self {
+        let accum_format = accum_format(device, exact);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("splat_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/points/splat.wgsl").into()),
@@ -224,6 +279,18 @@ impl SplatPipelines {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Volume mode's depth warp and absorbance scale. Only the
+                // vertex stage reads it.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -298,6 +365,93 @@ impl SplatPipelines {
             "vs_splat_point",
             wgpu::PrimitiveTopology::PointList,
         );
+
+        let volume = device
+            .features()
+            .contains(wgpu::Features::FLOAT32_BLENDABLE)
+            .then(|| {
+                // Pass B reads the moments through group 1. Pass A renders
+                // *into* them, so its layout has no group 1 at all: a texture
+                // that is both bound and attached is a usage conflict even if
+                // the shader never touches it.
+                let moment_texture = |binding| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                };
+                let moments_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("volume_moments_bind_group_layout"),
+                        entries: &[moment_texture(0), moment_texture(1)],
+                    });
+                let resolve_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("volume_resolve_pipeline_layout"),
+                        bind_group_layouts: &[Some(&accum_layout), Some(&moments_layout)],
+                        immediate_size: 0,
+                    });
+                let primitive = |topology| wgpu::PrimitiveState {
+                    topology,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                };
+                let make = |label: &str,
+                            layout: &wgpu::PipelineLayout,
+                            vs: &str,
+                            fs: &str,
+                            topology: wgpu::PrimitiveTopology,
+                            targets: &[Option<wgpu::ColorTargetState>]| {
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some(vs),
+                            buffers: &[],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some(fs),
+                            targets,
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: primitive(topology),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+                };
+                let target = |format| {
+                    Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(additive),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
+                };
+                // b0..b3 in one fp32 target and b4 in a second: five numbers a
+                // pixel, and no format holds five.
+                let abs_targets = [target(MOMENT_FORMAT_0), target(MOMENT_FORMAT_1)];
+                let emit_targets = [target(accum_format)];
+                use wgpu::PrimitiveTopology::{PointList, TriangleStrip};
+                VolumePipelines {
+                    abs_quad: make("volume_abs_quad", &accum_pipeline_layout, "vs_splat", "fs_abs", TriangleStrip, &abs_targets),
+                    abs_point: make("volume_abs_point", &accum_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &abs_targets),
+                    quad: make("volume_quad", &resolve_layout, "vs_splat", "fs_splat_volume", TriangleStrip, &emit_targets),
+                    point: make("volume_point", &resolve_layout, "vs_splat_point", "fs_splat_volume", PointList, &emit_targets),
+                    moments_layout,
+                }
+            });
 
         // Tonemap bind group: accumulation texture + params
         let tonemap_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -374,9 +528,29 @@ impl SplatPipelines {
             cache: None,
         });
 
-        Self { accum_format, quad_pipeline, point_pipeline, tonemap_pipeline, accum_layout, tonemap_layout }
+        Self {
+            accum_format,
+            quad_pipeline,
+            point_pipeline,
+            tonemap_pipeline,
+            accum_layout,
+            tonemap_layout,
+            volume,
+        }
+    }
+
+    /// Whether this device can run volume mode at all. It needs fp32 blending
+    /// (`Features::FLOAT32_BLENDABLE`): the moments are sums of products of
+    /// depth, and fp16 stalls and loses the high moments long before a pixel
+    /// holds enough deposits to matter.
+    pub fn volume_available(&self) -> bool {
+        self.volume.is_some()
     }
 }
+
+/// The two moment targets' formats. Five floats a pixel do not fit one format.
+const MOMENT_FORMAT_0: TextureFormat = TextureFormat::Rgba32Float;
+const MOMENT_FORMAT_1: TextureFormat = TextureFormat::R32Float;
 
 impl SplatRenderer {
     pub fn new(
@@ -403,12 +577,20 @@ impl SplatRenderer {
             tonemap_pipeline,
             accum_layout,
             tonemap_layout,
+            volume: volume_pipelines,
         } = pipelines.clone();
 
         let camera_buffer = create_camera_buffer(device);
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("splat_params_buffer"),
             size: std::mem::size_of::<SplatParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let volume_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_params_buffer"),
+            size: std::mem::size_of::<VolumeParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -429,10 +611,18 @@ impl SplatRenderer {
                     binding: 2,
                     resource: colormap_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: volume_params_buffer.as_entire_binding(),
+                },
             ],
         });
 
         Self {
+            volume_params_buffer,
+            volume_pipelines,
+            volume_active: false,
+            moments: None,
             accum_format,
             quad_pipeline,
             point_pipeline,
@@ -630,7 +820,17 @@ impl SplatRenderer {
                 height,
             );
         }
-        self.splat_pass(encoder, 0..point_count, use_point_primitives);
+        if self.volume_active {
+            // Volume mode: absorbance moments first, then the same splat with
+            // each fragment's weight scaled by the transmittance they give.
+            // Both at accumulation resolution, so a supersampled render has
+            // its moments where its emission is.
+            self.ensure_moments(device, width * n, height * n);
+            self.abs_pass(encoder, 0..point_count, use_point_primitives);
+            self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
+        } else {
+            self.splat_pass(encoder, 0..point_count, use_point_primitives);
+        }
 
         let accum = self.accum.as_ref().unwrap();
         // Whichever texture holds output-sized linear density: the resolved
@@ -688,6 +888,23 @@ impl SplatRenderer {
         use_point_primitives: bool,
         clear: bool,
     ) {
+        debug_assert!(
+            !self.volume_active,
+            "volume mode is a ring-buffer render: a lap's splat cannot weight itself by transmittance"
+        );
+        self.draw_splats(encoder, points, use_point_primitives, clear, false);
+    }
+
+    /// The splat draw itself. `volume` swaps the fragment stage for the one
+    /// that multiplies by transmittance; the moments must have been drawn first.
+    fn draw_splats(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        points: std::ops::Range<u32>,
+        use_point_primitives: bool,
+        clear: bool,
+        volume: bool,
+    ) {
         let accum = self.accum.as_ref().expect("accumulation target must be ensured first");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("splat_accum_pass"),
@@ -711,17 +928,117 @@ impl SplatRenderer {
         });
         if !points.is_empty() {
             pass.set_bind_group(0, &self.accum_bind_group, &[]);
+            let vp = if volume { self.volume_pipelines.as_ref() } else { None };
+            if vp.is_some() {
+                let moments = self.moments.as_ref().expect("pass A ran first");
+                pass.set_bind_group(1, &moments.bind_group, &[]);
+            }
             // Both entry points read the point index straight off a builtin
             // (`vertex_index` for points, `instance_index` for quads), and
             // WebGPU includes the draw's first index in both — so a range is a
             // range either way.
             if use_point_primitives {
-                pass.set_pipeline(&self.point_pipeline);
+                pass.set_pipeline(vp.map_or(&self.point_pipeline, |v| &v.point));
                 pass.draw(points, 0..1);
             } else {
-                pass.set_pipeline(&self.quad_pipeline);
+                pass.set_pipeline(vp.map_or(&self.quad_pipeline, |v| &v.quad));
                 pass.draw(0..4, points);
             }
+        }
+    }
+
+    /// Whether this device can run volume mode (see
+    /// [`SplatPipelines::volume_available`]).
+    pub fn volume_available(&self) -> bool {
+        self.volume_pipelines.is_some()
+    }
+
+    /// Turn volume mode on for the following renders, or off.
+    ///
+    /// `VolumeParams::OFF` (or any opacity of zero) turns it off, and off means
+    /// *absent*: no moment pass, no multiply, the plain splat pipelines — which
+    /// is what makes `--volume --opacity 0` byte-identical to `--splat` instead
+    /// of merely close. On a device without fp32 blending it stays off whatever
+    /// it is asked.
+    pub fn set_volume(&mut self, queue: &wgpu::Queue, params: VolumeParams) {
+        self.volume_active = params.enabled > 0.5 && self.volume_pipelines.is_some();
+        let written = if self.volume_active { params } else { VolumeParams::OFF };
+        queue.write_buffer(&self.volume_params_buffer, 0, bytemuck::bytes_of(&written));
+    }
+
+    /// (Re)create the moment targets at the accumulation's size.
+    fn ensure_moments(&mut self, device: &Device, width: u32, height: u32) {
+        if let Some(m) = &self.moments {
+            if m.width == width && m.height == height {
+                return;
+            }
+        }
+        let layout = &self.volume_pipelines.as_ref().expect("volume is active").moments_layout;
+        let make = |label, format| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let view0 = make("volume_moments_0", MOMENT_FORMAT_0)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view1 = make("volume_moments_1", MOMENT_FORMAT_1)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_moments_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view0) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view1) },
+            ],
+        });
+        self.moments = Some(MomentTargets { view0, view1, bind_group, width, height });
+    }
+
+    /// Pass A: splat every point's absorbance into the moment targets.
+    fn abs_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        points: std::ops::Range<u32>,
+        use_point_primitives: bool,
+    ) {
+        let vp = self.volume_pipelines.as_ref().expect("volume is active");
+        let moments = self.moments.as_ref().expect("ensured above");
+        let clear = |view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("volume_moment_pass"),
+            color_attachments: &[clear(&moments.view0), clear(&moments.view1)],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if points.is_empty() {
+            return;
+        }
+        pass.set_bind_group(0, &self.accum_bind_group, &[]);
+        if use_point_primitives {
+            pass.set_pipeline(&vp.abs_point);
+            pass.draw(points, 0..1);
+        } else {
+            pass.set_pipeline(&vp.abs_quad);
+            pass.draw(0..4, points);
         }
     }
 
