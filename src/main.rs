@@ -39,6 +39,7 @@ mod ui;
 mod version;
 mod video;
 mod view;
+mod xaos;
 
 use std::sync::Arc;
 
@@ -2289,6 +2290,7 @@ fn default_scene() -> Scene {
         subscenes: Vec::new(),
         root_share: 1.0,
         root_visible: true,
+        xaos_matrix_layers: Vec::new(),
         name: "Default Sierpinski".to_string(),
         author: "Claude Opus 4.5 (Claude Code 2.0.76)".to_string(),
         point_size: 0.002,
@@ -2326,6 +2328,7 @@ fn default_scene() -> Scene {
             explicit_color_speed: None,
             symmetry: None,
             variations: TransformSpec::linear_variations(),
+            xaos: Default::default(),
         })
         .collect(),
         palette: None,

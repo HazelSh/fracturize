@@ -217,6 +217,10 @@ pub struct SubsceneDef {
     pub symmetries: Vec<SymmetryDef>,
     #[serde(default, rename = "transform", skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<TransformDef>,
+    /// An inline subscene's xaos as one matrix (`[subscene.xaos]`); see
+    /// `crate::scene::XaosMatrixDef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xaos: Option<crate::scene::XaosMatrixDef>,
 }
 
 impl Placement {

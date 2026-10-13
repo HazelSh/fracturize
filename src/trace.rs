@@ -174,6 +174,11 @@ pub struct Walker<'a> {
     transforms: &'a [TransformSpec],
     /// Cumulative selection weights (0 for disabled transforms)
     cumulative: Vec<f32>,
+    /// Xaos rows, built from `cumulative` exactly as the GPU's are, one per
+    /// map (`None` = plain weights). Empty when no map has one.
+    xaos: Vec<Option<crate::xaos::Row>>,
+    /// The map applied last, for xaos; `None` fresh or just re-seeded.
+    last: Option<usize>,
     pub pos: Vec3,
     pub color_val: f32,
 }
@@ -201,9 +206,16 @@ impl<'a> Walker<'a> {
             }
             cumulative.push(acc);
         }
+        let xaos = if crate::xaos::layer_has_xaos(transforms) || crate::xaos::forced() {
+            crate::xaos::build_rows(transforms, &cumulative, crate::xaos::forced())
+        } else {
+            Vec::new()
+        };
         Some(Self {
             transforms,
             cumulative,
+            xaos,
+            last: None,
             pos: Vec3::new(
                 rng.gen_range(-1.0..1.0),
                 rng.gen_range(-1.0..1.0),
@@ -216,11 +228,14 @@ impl<'a> Walker<'a> {
     /// One chaos-game step; returns the index of the transform applied
     pub fn step(&mut self, rng: &mut impl Rng) -> usize {
         let r: f32 = rng.r#gen();
-        let idx = self
-            .cumulative
-            .iter()
-            .position(|&c| r < c)
-            .unwrap_or(self.transforms.len() - 1);
+        // The same choice chaos.wgsl makes: the last map's xaos row if it has
+        // one, else the plain cumulative search.
+        let row = self.last.and_then(|l| self.xaos.get(l)).and_then(Option::as_ref);
+        let idx = match row {
+            Some(row) => crate::xaos::sample(row, &self.cumulative, r),
+            None => crate::xaos::select_base(&self.cumulative, r),
+        };
+        self.last = Some(idx);
         let t = &self.transforms[idx];
 
         let affine = t.matrix.transform_point3(self.pos);
@@ -245,6 +260,7 @@ impl<'a> Walker<'a> {
 
         // Re-seed diverged/NaN walkers, like the shader
         if !(self.pos.dot(self.pos) < 1e12) {
+            self.last = None;
             self.pos = Vec3::new(
                 rng.gen_range(-1.0..1.0),
                 rng.gen_range(-1.0..1.0),
@@ -768,6 +784,7 @@ mod tests {
             explicit_color_speed: None,
             symmetry: None,
             variations: TransformSpec::linear_variations(),
+            xaos: Default::default(),
         })
         .collect()
     }
@@ -788,6 +805,7 @@ mod tests {
             explicit_color_speed: None,
             symmetry,
             variations: TransformSpec::linear_variations(),
+            xaos: Default::default(),
         }]
     }
 

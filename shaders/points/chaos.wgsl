@@ -31,6 +31,11 @@ struct Transform {
     group_count: u32,
     // 1 when the colormap index is offset by the drawn group element.
     orbit_color: f32,
+    // This map's xaos row in `xaos_rows`: where it starts and how many
+    // exceptions follow its header. XAOS_NO_ROW selects by plain weight.
+    // These two words were the struct's tail padding.
+    xaos_start: u32,
+    xaos_len: u32,
 }
 
 // The walker carries colour two ways at once, and they cost the same because
@@ -62,7 +67,9 @@ struct WalkerState {
     // through the maps that come after, and only a vector can be. See the
     // emphasis block in `main`. Zero, and untouched, unless the emphasis is on.
     tangent: vec3<f32>,
-    _pad_tangent: f32,
+    // The map this walker applied last (GPU order), for xaos. XAOS_NO_ROW when
+    // it has no history: fresh, or just re-seeded. Was padding.
+    last: u32,
 }
 
 // Must match PointComputeParams in buffers.rs (208 bytes)
@@ -150,13 +157,20 @@ struct Layer {
     mix: u32,
     contrast: f32,
     scale: f32,
-    _pad0: f32,
+    // 1 when any of this layer's maps has an xaos row; see select_xaos.
+    xaos: u32,
     _pad1: f32,
 }
 const MAX_LAYERS: u32 = 16u;
 @group(0) @binding(7) var<uniform> layers: array<Layer, 16>;
 // 256 entries per layer, layer k's at k * 256. Read only in a composite.
 @group(0) @binding(8) var<storage, read> layer_colormaps: array<vec4<f32>>;
+// Xaos rows, built by crate::xaos::build_rows. A row is a header
+//   (rest multiplier c, exception mass X, total mass, last positive exception)
+// then one entry per exception, sorted by target:
+//   (target as bits, cumulative x-mass, gap position, cumulative base mass).
+@group(0) @binding(9) var<storage, read> xaos_rows: array<vec4<f32>>;
+const XAOS_NO_ROW: u32 = 0xFFFFFFFFu;
 
 const PI: f32 = 3.14159265358979;
 
@@ -193,6 +207,85 @@ fn select_transform(r: f32, start: u32, count: u32) -> u32 {
         }
     }
     return lo;
+}
+
+// Whether layer position `target` is one of a row's exceptions.
+fn xaos_is_exception(row: u32, len: u32, pos: u32) -> bool {
+    var lo = 0u;
+    var hi = len;
+    while lo < hi {
+        let mid = (lo + hi) / 2u;
+        let t = bitcast<u32>(xaos_rows[row + 1u + mid].x);
+        if t == pos {
+            return true;
+        }
+        if t < pos {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    return false;
+}
+
+// Draw the map that follows one with an xaos row: P(j) = w_j·x_j / total, in
+// two binary searches and never an N-wide scan. See src/xaos.rs, whose
+// `sample` is this function transcribed line for line — keep them in step.
+//
+// With no exceptions and c = 1 every step is exact in f32 (total is 1, s = r,
+// nothing is added back), so this returns exactly what select_transform would
+// for the same draw. That is what makes a scene of all-`{ "*" = 1 }` rows
+// render byte-identically to one without them.
+fn select_xaos(row: u32, len: u32, rand: f32, start: u32, count: u32) -> u32 {
+    let h = xaos_rows[row];
+    let c = h.x;
+    let x_total = h.y;
+    let r = min(rand, 0.99999994) * h.z;
+    if r < x_total || c <= 0.0 {
+        // The exceptions' own CDF.
+        var lo = 0u;
+        var hi = len - 1u;
+        while lo < hi {
+            let mid = (lo + hi) / 2u;
+            if r < xaos_rows[row + 1u + mid].y {
+                hi = mid;
+            } else {
+                lo = mid + 1u;
+            }
+        }
+        if !(r < xaos_rows[row + 1u + lo].y) {
+            lo = bitcast<u32>(h.w);
+        }
+        return start + bitcast<u32>(xaos_rows[row + 1u + lo].x);
+    }
+    // A position on the base CDF with the exceptions squeezed out; put back
+    // the mass of every gap at or before it.
+    let s = (r - x_total) / c;
+    var lo = 0u;
+    var hi = len;
+    while lo < hi {
+        let mid = (lo + hi) / 2u;
+        if s < xaos_rows[row + 1u + mid].z {
+            hi = mid;
+        } else {
+            lo = mid + 1u;
+        }
+    }
+    var u = s;
+    if lo > 0u {
+        u = s + xaos_rows[row + lo].w;
+    }
+    var idx = select_transform(u, start, count);
+    // Rounding can leave u a hair inside a squeezed-out interval: step past
+    // it, so a cut edge is never drawn rather than almost never.
+    for (var k = 0u; k < len; k++) {
+        if u >= 1.0 || !xaos_is_exception(row, len, idx - start) {
+            break;
+        }
+        u = transforms[idx].cumulative_weight;
+        idx = select_transform(u, start, count);
+    }
+    return idx;
 }
 
 // Fetch a variation weight by slot index from the packed vec4 array
@@ -707,11 +800,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         walker_states[walker_id].current_rgb_b,
     );
     var tangent = walker_states[walker_id].tangent;
+    var last = walker_states[walker_id].last;
 
     for (var i = 0u; i < params.iterations_per_walker; i++) {
-        // Select random transform based on weights
+        // Select random transform based on weights — or, under xaos, on the
+        // row of the map applied last. A `last` outside this layer (stale
+        // after an edit re-dealt the walkers) is no history at all.
         let r = rand_float(&rng);
-        let transform_idx = select_transform(r, layer.t_start, layer.t_count);
+        var transform_idx: u32;
+        if layer.xaos != 0u && last >= layer.t_start && last < layer.t_start + layer.t_count
+            && transforms[last].xaos_start != XAOS_NO_ROW {
+            transform_idx = select_xaos(
+                transforms[last].xaos_start, transforms[last].xaos_len, r,
+                layer.t_start, layer.t_count,
+            );
+        } else {
+            transform_idx = select_transform(r, layer.t_start, layer.t_count);
+        }
+        last = transform_idx;
 
         // The whole step — affine, variations, post-affine, symmetry — so
         // that the emphasis probe below can be pushed through the same one.
@@ -747,6 +853,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             // A re-seeded walker has no history, so it has no sensitivity
             // either: whatever the tangent said was about a point that is gone.
             tangent = vec3<f32>(0.0);
+            last = XAOS_NO_ROW;
         }
 
         // Blend color toward transform's color. Both channels advance at the
@@ -835,6 +942,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     walker_states[walker_id].current_rgb_b = color_rgb.b;
     walker_states[walker_id].rng_state = rng;
     walker_states[walker_id].tangent = tangent;
+    walker_states[walker_id].last = last;
 }
 
 // The reference the glow normalizes against: the mean sensitivity over the

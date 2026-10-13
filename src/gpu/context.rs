@@ -90,6 +90,10 @@ impl GpuContext {
         let required_limits = wgpu::Limits {
             max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
             max_buffer_size: adapter_limits.max_buffer_size,
+            // The chaos pass binds eight storage buffers since xaos — exactly the
+            // WebGPU default. Ask for the adapter's figure so the next one isn't a
+            // device-creation failure.
+            max_storage_buffers_per_shader_stage: adapter_limits.max_storage_buffers_per_shader_stage,
             ..wgpu::Limits::default()
         };
         log::info!(

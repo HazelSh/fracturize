@@ -106,7 +106,8 @@ impl ChaosCompute {
                 // `(0, 0)`: this renderer has no group-element buffer bound, so
                 // it draws the plain attractor. Symmetry is a points-renderer
                 // feature; see the note on `Transform` in density/chaos.wgsl.
-                GpuTransform::new(t, cumulative, t.weight, glam::Vec3::ONE, (0, 0))
+                // Nor an xaos row table: plain weights.
+                GpuTransform::new(t, cumulative, t.weight, glam::Vec3::ONE, (0, 0), (crate::xaos::NO_ROW, 0))
             })
             .collect();
 

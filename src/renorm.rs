@@ -482,6 +482,12 @@ impl Renorm {
             return Err(format!("transform {} has a linear weight of 0, so there's nothing to zoom into", spec.map));
         }
 
+        // Under xaos the zoom's invariance `f(S) ⊆ S` survives only if every
+        // map that fires may be followed by this one; see `crate::xaos`.
+        if let Some(e) = crate::xaos::zoom_conflict(transforms, &[], spec.map) {
+            return Err(e);
+        }
+
         Self::from_affine(t.matrix, linear_weight, spec, reference_distance).map(|mut r| {
             r.map = spec.map;
             r

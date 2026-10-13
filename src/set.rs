@@ -287,6 +287,7 @@ const TRANSFORM_FIELDS: &[&str] = struct_fields!(
     post_translation,
     post_scale,
     post_rotation,
+    xaos,
 );
 
 const SUBSCENE_FIELDS: &[&str] = struct_fields!(
@@ -309,6 +310,7 @@ const SUBSCENE_FIELDS: &[&str] = struct_fields!(
     palette,
     symmetries,
     transforms,
+    xaos,
 );
 
 /// Check that `path` names a real, settable parameter — independent of any
@@ -364,6 +366,14 @@ pub fn validate_path(path: &str) -> Result<(), String> {
                 "'{path}': expected a field after the transform, e.g. transform.{}.weight",
                 segs[1]
             ));
+        }
+        // `xaos_p.<to>` is not a field: it sets `xaos.<to>` to whatever
+        // multiplier gives that probability.
+        if segs[2] == "xaos_p" {
+            return match segs.get(3) {
+                Some(_) => Ok(()),
+                None => Err(format!("'{path}': expected transform.{}.xaos_p.<to>", segs[1])),
+            };
         }
         check_field("transform field", &[TRANSFORM_FIELDS], segs[2], path)?;
         if segs[2] == "variations" {
@@ -564,9 +574,252 @@ fn set_in_transform(
         }
     };
 
+    if matches!(rest[0], "xaos" | "xaos_p") {
+        return set_xaos(doc, idx, rest, value, path);
+    }
     let table = arr.get_mut(idx).expect("index checked above");
     refuse_shadowed(table, rest, path, "this transform's rotation")?;
     set_path(&mut TableRef::Table(table), rest, value, path, "transform")
+}
+
+/// `transform.<from>.xaos…`: one edge (`xaos.<to>`), the rest of the row
+/// (`xaos.*`), the whole row (`xaos={...}`, `{}` to reset), or a probability
+/// (`xaos_p.<to>=0.4`, solved for the multiplier with the rest of the row
+/// held). One spelling whichever form the file is in: in a scene that writes
+/// its xaos as one `[xaos]` matrix, the edit lands in the matrix cell.
+///
+/// `doc` is the table holding the `[[transform]]` array — the document, or an
+/// inline `[[subscene]]` — so its `xaos` matrix is the layer's own.
+fn set_xaos(
+    doc: &mut Table,
+    from: usize,
+    rest: &[&str],
+    value: Value,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let arr = doc.get("transform").and_then(Item::as_array_of_tables).expect("resolved by caller");
+    let names: Vec<Option<String>> =
+        arr.iter().map(|t| t.get("name").and_then(|i| i.as_str()).map(str::to_string)).collect();
+    let weights: Vec<f64> = arr
+        .iter()
+        .map(|t| t.get("weight").and_then(|i| i.as_value()).and_then(number).unwrap_or(1.0))
+        .collect();
+    let n = names.len();
+    let resolve = |key: &str| -> Result<usize, String> {
+        let holders: Vec<usize> = (0..n).filter(|&i| names[i].as_deref() == Some(key)).collect();
+        match holders.as_slice() {
+            [i] => Ok(*i),
+            [] => match key.parse::<usize>() {
+                Ok(i) if i < n => Ok(i),
+                _ => Err(format!(
+                    "--set '{path}': no map '{key}' to point an edge at. This layer has {}",
+                    (0..n)
+                        .map(|i| format!("{i}:{}", names[i].as_deref().unwrap_or("<unnamed>")))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            },
+            _ => Err(format!("--set '{path}': '{key}' names {} maps; use an index", holders.len())),
+        }
+    };
+    let key_of = |j: usize| -> String {
+        match names[j].as_deref() {
+            Some(nm) if names.iter().filter(|m| m.as_deref() == Some(nm)).count() == 1 => nm.to_string(),
+            _ => j.to_string(),
+        }
+    };
+    // The row as it stands, dense: from the matrix, or the transform's table.
+    let matrix_form = doc.get("xaos").is_some_and(|i| i.is_table());
+    let row_of_table = |t: &InlineTable| -> Result<Vec<f64>, String> {
+        let star = t.get("*").and_then(number).unwrap_or(1.0);
+        let mut row = vec![star; n];
+        for (k, v) in t.iter().filter(|(k, _)| *k != "*") {
+            row[resolve(k)?] = number(v).ok_or_else(|| format!("--set '{path}': xaos.{k} is not a number"))?;
+        }
+        Ok(row)
+    };
+    let current: Vec<f64> = if matrix_form {
+        let m = matrix_cells(doc, &names)?;
+        m.get(from).cloned().ok_or_else(|| format!("--set '{path}': [xaos] has no row for this map"))?
+    } else {
+        match doc["transform"].as_array_of_tables().unwrap().get(from).unwrap().get("xaos") {
+            Some(i) => match i.as_value().and_then(Value::as_inline_table) {
+                Some(t) => row_of_table(t)?,
+                None => return Err(format!("--set '{path}': this map's xaos is not an inline table")),
+            },
+            None => vec![1.0; n],
+        }
+    };
+
+    // The row's rest (`"*"`) as written. It is kept through an edge edit,
+    // because it is what decides whether a map added later may follow.
+    let star_of = |t: Option<&InlineTable>| t.and_then(|t| t.get("*")).and_then(number).unwrap_or(1.0);
+    let existing_star = star_of(
+        doc["transform"]
+            .as_array_of_tables()
+            .unwrap()
+            .get(from)
+            .unwrap()
+            .get("xaos")
+            .and_then(|i| i.as_value())
+            .and_then(Value::as_inline_table),
+    );
+
+    // What the edit asks for: the new dense row, its rest, and what it displaced.
+    let field = rest.get(1).copied();
+    let (row, rest_v, was) = match (rest[0], field) {
+        ("xaos", None) => {
+            let t = value.as_inline_table().ok_or_else(|| {
+                format!("--set '{path}': a whole row is a table, e.g. xaos={{ b = 0 }} (or {{}} to reset)")
+            })?;
+            (row_of_table(t)?, star_of(Some(t)), None)
+        }
+        ("xaos", Some("*")) => {
+            if matrix_form {
+                return Err(format!(
+                    "--set '{path}': this scene writes its xaos as one [xaos] matrix, where every                      cell is listed and there is no rest. Set the cells, or the row as a table"
+                ));
+            }
+            let v = number(&value).ok_or_else(|| format!("--set '{path}': expected a number"))?;
+            check_odds(v, path)?;
+            let mut t = match doc["transform"].as_array_of_tables().unwrap().get(from).unwrap().get("xaos") {
+                Some(i) => i.as_value().and_then(Value::as_inline_table).cloned().unwrap_or_default(),
+                None => InlineTable::new(),
+            };
+            let was = t.get("*").map(shown);
+            t.insert("*", Value::from(v));
+            let table = doc["transform"].as_array_of_tables_mut().unwrap().get_mut(from).unwrap();
+            table["xaos"] = toml_edit::value(t);
+            return Ok(was);
+        }
+        ("xaos", Some(to)) => {
+            let j = resolve(to)?;
+            let v = number(&value).ok_or_else(|| format!("--set '{path}': expected a number"))?;
+            check_odds(v, path)?;
+            let mut row = current.clone();
+            row[j] = v;
+            (row, existing_star, Some(current[j].to_string()))
+        }
+        ("xaos_p", Some(to)) => {
+            let j = resolve(to)?;
+            let p = number(&value).ok_or_else(|| format!("--set '{path}': expected a probability"))?;
+            if !(0.0..=1.0).contains(&p) {
+                return Err(format!("--set '{path}': a probability is between 0 and 1"));
+            }
+            if weights[j] <= 0.0 {
+                return Err(format!("--set '{path}': '{to}' has weight 0, so no multiplier can make it follow"));
+            }
+            let mut row = current.clone();
+            let mut rest_v = existing_star;
+            if p >= 1.0 {
+                rest_v = 0.0;
+                // The only exit.
+                row.iter_mut().for_each(|v| *v = 0.0);
+                row[j] = 1.0;
+            } else {
+                let others: f64 = (0..n).filter(|&k| k != j).map(|k| weights[k] * current[k]).sum();
+                if p > 0.0 && others <= 0.0 {
+                    return Err(format!(
+                        "--set '{path}': every other exit is cut, so '{to}' is the only one and                          its probability is 1 whatever its multiplier"
+                    ));
+                }
+                row[j] = p * others / ((1.0 - p) * weights[j]);
+            }
+            let total: f64 = (0..n).map(|k| weights[k] * current[k]).sum();
+            let p_was = if total > 0.0 { weights[j] * current[j] / total } else { 0.0 };
+            (row, rest_v, Some(format!("p {p_was:.4}")))
+        }
+        _ => return Err(format!("--set '{path}': expected xaos.<to>, xaos.*, xaos={{...}} or xaos_p.<to>")),
+    };
+
+    if matrix_form {
+        let m = doc.get_mut("xaos").and_then(Item::as_table_mut).unwrap();
+        let maps: Vec<String> = m
+            .get("maps")
+            .and_then(|i| i.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let order: Vec<usize> = maps.iter().map(|k| resolve(k)).collect::<Result<_, _>>()?;
+        let r = order.iter().position(|&i| i == from).ok_or_else(|| {
+            format!("--set '{path}': [xaos] maps doesn't list this map")
+        })?;
+        let cells = m.get_mut("matrix").and_then(|i| i.as_array_mut()).unwrap();
+        let line = cells.get_mut(r).and_then(Value::as_array_mut).ok_or_else(|| {
+            format!("--set '{path}': [xaos] matrix has no row {}", r + 1)
+        })?;
+        for (c, &col) in order.iter().enumerate() {
+            if c < line.len() && line.get(c).and_then(number) != Some(row[col]) {
+                set_array_elem(line, c, Value::from(tidy(row[col])));
+            }
+        }
+        return Ok(was.or(Some(format!("{current:?}"))));
+    }
+
+    // Rows: the rest, then every map that differs from it, by name.
+    let mut t = InlineTable::new();
+    if rest_v != 1.0 {
+        t.insert("*", Value::from(tidy(rest_v)));
+    }
+    for (j, &v) in row.iter().enumerate().filter(|&(_, &v)| v != rest_v) {
+        t.insert(&key_of(j), Value::from(tidy(v)));
+    }
+    let table = doc["transform"].as_array_of_tables_mut().unwrap().get_mut(from).unwrap();
+    let old = table.get("xaos").and_then(|i| i.as_value()).map(shown);
+    if t.is_empty() {
+        table.remove("xaos");
+    } else {
+        t.fmt();
+        let mut item = toml_edit::value(t);
+        // Keep a trailing `# comment` on the row.
+        if let (Some(old), Some(new)) = (
+            table.get("xaos").and_then(|i| i.as_value()),
+            item.as_value_mut(),
+        ) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        table["xaos"] = item;
+    }
+    Ok(was.or(old))
+}
+
+/// A layer's `[xaos]` matrix as dense rows in the layer's own map order.
+fn matrix_cells(doc: &Table, names: &[Option<String>]) -> Result<Vec<Vec<f64>>, String> {
+    let m = doc.get("xaos").and_then(Item::as_table).ok_or("no [xaos] table")?;
+    let maps: Vec<&str> =
+        m.get("maps").and_then(|i| i.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    let n = names.len();
+    let find = |k: &str| {
+        names.iter().position(|nm| nm.as_deref() == Some(k)).or_else(|| k.parse::<usize>().ok().filter(|&i| i < n))
+    };
+    let order: Vec<usize> = maps
+        .iter()
+        .map(|k| find(k).ok_or_else(|| format!("[xaos] maps names '{k}', which isn't a map")))
+        .collect::<Result<_, _>>()?;
+    let mut out = vec![vec![1.0; n]; n];
+    if let Some(rows) = m.get("matrix").and_then(|i| i.as_array()) {
+        for (r, line) in rows.iter().enumerate() {
+            let Some(line) = line.as_array() else { continue };
+            for (c, v) in line.iter().enumerate() {
+                if let (Some(&from), Some(&to), Some(v)) = (order.get(r), order.get(c), number(v)) {
+                    out[from][to] = v;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn number(v: &Value) -> Option<f64> {
+    v.as_float().or(v.as_integer().map(|i| i as f64))
+}
+
+/// Four decimal places, as a save writes them.
+fn tidy(v: f64) -> f64 {
+    (v * 10_000.0).round() / 10_000.0 + 0.0
+}
+
+fn check_odds(v: f64, path: &str) -> Result<(), String> {
+    crate::xaos::check_value(v).map_err(|e| format!("--set '{path}': {e}"))
 }
 
 /// A container we can descend through: either a real `[table]` or an inline
@@ -1060,5 +1313,98 @@ variations = { swirl = 0.35, linear = 0.65 }
         // camera.focus: None loads as the origin (scene.rs, `unwrap_or(Vec3::ZERO)`)
         assert_eq!(bare.camera.unwrap().focus, None);
         assert_eq!(as3(implied_default("camera", "focus").unwrap()), [0.0; 3]);
+    }
+}
+
+#[cfg(test)]
+mod xaos_tests {
+    use super::*;
+
+    const ROWS: &str = r#"
+[meta]
+name = "X"
+
+[[transform]]
+name = "a"
+translation = [0.5, 0.0, 0.0]
+weight = 1.0
+
+[[transform]]
+name = "b"
+translation = [-0.5, 0.0, 0.0]
+weight = 2.0
+xaos = { "*" = 0, a = 1 }   # b only hands back to a
+
+[[transform]]
+name = "c"
+translation = [0.0, 0.5, 0.0]
+"#;
+
+    fn set(src: &str, specs: &[&str]) -> Result<String, String> {
+        let owned: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
+        apply_recording(src, &owned).map(|r| r.0)
+    }
+
+    fn rows(text: &str) -> Vec<Vec<f32>> {
+        let d = std::env::temp_dir().join(format!("fracturize-set-xaos-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join(format!("{:x}.toml", text.len() * 31 + text.bytes().map(|b| b as usize).sum::<usize>()));
+        std::fs::write(&p, text).unwrap();
+        let s = crate::scene::Scene::load(&p).unwrap();
+        s.transforms.iter().map(|t| t.xaos.dense(3)).collect()
+    }
+
+    #[test]
+    fn an_edge_lands_and_keeps_the_rest_and_the_comment() {
+        let out = set(ROWS, &["transform.b.xaos.c=2"]).unwrap();
+        assert!(out.contains("# b only hands back to a"), "{out}");
+        assert_eq!(rows(&out)[1], vec![1.0, 0.0, 2.0]);
+        let out = set(ROWS, &["transform.a.xaos.a=0"]).unwrap();
+        assert_eq!(rows(&out)[0], vec![0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn the_rest_and_the_whole_row() {
+        let out = set(ROWS, &["transform.a.xaos.*=0.5"]).unwrap();
+        assert_eq!(rows(&out)[0], vec![0.5; 3]);
+        let out = set(ROWS, &["transform.b.xaos={}"]).unwrap();
+        assert_eq!(rows(&out)[1], vec![1.0; 3]);
+        assert!(!out.contains("xaos ="), "a reset row is no row:\n{out}");
+    }
+
+    #[test]
+    fn a_probability_is_solved_for() {
+        let out = set(ROWS, &["transform.a.xaos_p.c=0.5"]).unwrap();
+        let s_rows = rows(&out);
+        // weights 1, 2, 1: P(c|a) = x / (1 + 2 + x) = 0.5 at x = 3.
+        assert!((s_rows[0][2] - 3.0).abs() < 1e-4, "{:?}", s_rows[0]);
+        let out = set(ROWS, &["transform.a.xaos_p.b=1"]).unwrap();
+        assert_eq!(rows(&out)[0], vec![0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_matrix_takes_the_same_spelling() {
+        let src = format!(
+            "{}\n[xaos]\nmaps = [\"a\", \"b\", \"c\"]\nmatrix = [\n  [1, 1, 1],\n  [1, 0, 0],\n  [1, 1, 1],\n]\n",
+            ROWS.replace("xaos = { \"*\" = 0, a = 1 }   # b only hands back to a\n", "")
+        );
+        let out = set(&src, &["transform.c.xaos.c=0", "transform.b.xaos.c=4"]).unwrap();
+        assert_eq!(rows(&out)[2], vec![1.0, 1.0, 0.0]);
+        assert_eq!(rows(&out)[1], vec![1.0, 0.0, 4.0]);
+        assert!(set(&src, &["transform.a.xaos.*=0"]).unwrap_err().contains("no rest"));
+    }
+
+    #[test]
+    fn bad_edges_say_why() {
+        assert!(set(ROWS, &["transform.a.xaos.d=0"]).unwrap_err().contains("no map 'd'"));
+        assert!(set(ROWS, &["transform.a.xaos.b=-1"]).unwrap_err().contains("relative odds"));
+        assert!(set(ROWS, &["transform.a.xaos_p.b=2"]).unwrap_err().contains("between 0 and 1"));
+    }
+
+    #[test]
+    fn a_sweep_path_validates() {
+        assert!(validate_path("transform.a.xaos.b").is_ok());
+        assert!(validate_path("transform.a.xaos_p.b").is_ok());
+        assert!(validate_path("transform.a.xaos_p").is_err());
     }
 }

@@ -135,6 +135,11 @@ pub struct TransformSpec {
     /// subscenes' attractors rather than one mixed-up IFS — see
     /// `crate::subscene`.
     pub layer: u16,
+    /// Xaos: this map's outgoing row of transition multipliers, over the
+    /// targets' positions within this map's layer. The step after this map
+    /// picks `j` with odds `weight_j * xaos.get(j)`; the default row is every
+    /// target at 1, an ordinary map. See `crate::xaos`.
+    pub xaos: crate::xaos::Xaos,
 }
 
 /// Resolve each transform's effective color_speed.
@@ -202,33 +207,17 @@ pub fn similarity_dimension_weighted(
     // `element_scales`, which is all ones for a group and a geometric run for a
     // repeat — without it a tapering helix reads as `count` copies of its
     // widest turn, which overstates the dimension badly.
+    // Under xaos the sum becomes a spectral radius over the transition graph
+    // (Mauldin–Williams); see `crate::xaos`. Scenes without it keep the
+    // closed form below, bit for bit.
+    if crate::xaos::layer_has_xaos(transforms) {
+        return crate::xaos::dimension_cached(transforms, weights);
+    }
     let contractions: Vec<f32> = transforms
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| {
-            let w = weights.map_or(t.weight, |ws| ws.get(i).copied().unwrap_or(0.0));
-            if w > 0.0 {
-                let s = t.linear_determinant().abs().powf(1.0 / 3.0);
-                if s > 0.0 && s < 1.0 {
-                    let scales = t
-                        .symmetry
-                        .as_ref()
-                        .map_or_else(|| vec![1.0], |g| g.element_scales());
-                    Some(
-                        scales
-                            .into_iter()
-                            .map(move |e| s * e)
-                            .filter(|c| *c > 0.0 && *c < 1.0)
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .flatten()
+        .filter(|&(i, t)| weights.map_or(t.weight, |ws| ws.get(i).copied().unwrap_or(0.0)) > 0.0)
+        .flat_map(|(_, t)| copy_contractions(t))
         .collect();
 
     if contractions.is_empty() {
@@ -263,6 +252,18 @@ pub fn similarity_dimension_weighted(
     }
 
     Some((lo + hi) / 2.0)
+}
+
+/// One contraction per copy a map makes: its own, times each symmetry
+/// element's scale (all ones for a group, a geometric run for a repeat).
+/// Empty for a map that doesn't contract, which adds nothing to a dimension.
+pub fn copy_contractions(t: &TransformSpec) -> Vec<f32> {
+    let s = t.linear_determinant().abs().powf(1.0 / 3.0);
+    if !(s > 0.0 && s < 1.0) {
+        return Vec::new();
+    }
+    let scales = t.symmetry.as_ref().map_or_else(|| vec![1.0], |g| g.element_scales());
+    scales.into_iter().map(|e| s * e).filter(|c| *c > 0.0 && *c < 1.0).collect()
 }
 
 /// The factor every *other* map's contraction must be multiplied by to hold
@@ -565,6 +566,7 @@ pub fn default_transform_color(i: usize, n: usize) -> Vec3 {
 fn build_transforms(
     defs: &[TransformDef],
     symmetries: &[SymmetryDef],
+    xaos_matrix: Option<&XaosMatrixDef>,
     layer: u16,
 ) -> Result<(Vec<TransformSpec>, Vec<Option<String>>, Vec<Vec3>), String> {
     let num_transforms = defs.len();
@@ -664,13 +666,206 @@ fn build_transforms(
                 symmetry: None,
                 variations,
                 layer,
+                xaos: Default::default(),
             })
         })
         .collect::<Result<_, String>>()?;
 
     let mut transforms: Vec<TransformSpec> = transforms;
     apply_symmetries(symmetries, &mut transforms, &transform_names)?;
+    apply_xaos(defs, xaos_matrix, &mut transforms, &transform_names)?;
     Ok((transforms, transform_names, transform_colors))
+}
+
+/// A map named by an `xaos` key: a name that finds exactly one map of the
+/// layer, or an index as a string. Stricter than [`resolve_transform_ref`],
+/// which takes the first of several namesakes — an edge that silently went to
+/// the wrong one of two `petal`s would be a structural edit nobody made.
+fn resolve_xaos_target(key: &str, names: &[Option<String>]) -> Result<usize, String> {
+    let key = key.trim();
+    let holders: Vec<usize> =
+        (0..names.len()).filter(|&i| names[i].as_deref() == Some(key)).collect();
+    match holders.as_slice() {
+        [i] => Ok(*i),
+        [] => resolve_transform_ref(key, names).map_err(|e| {
+            format!(
+                "{e}. Xaos targets are maps of the same scene or subscene — \
+                 coupling between subscenes isn't supported yet"
+            )
+        }),
+        many => Err(format!(
+            "'{key}' names {} maps (#{}); give them distinct names, or key the edge \
+             by index as a string",
+            many.len(),
+            many.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", #")
+        )),
+    }
+}
+
+/// Resolve a layer's xaos — per-transform `xaos = { target = odds }` rows, or
+/// one `[xaos]` matrix, never both — onto its maps' runtime rows.
+fn apply_xaos(
+    defs: &[TransformDef],
+    matrix: Option<&XaosMatrixDef>,
+    transforms: &mut [TransformSpec],
+    names: &[Option<String>],
+) -> Result<(), String> {
+    let label = |i: usize| match names[i].as_deref() {
+        Some(n) => format!("'{n}'"),
+        None => format!("#{i}"),
+    };
+    if let Some(i) = names.iter().position(|n| n.as_deref() == Some("*")) {
+        return Err(format!(
+            "transform #{i} is named '*', which xaos reserves for \"every other map\". Rename it"
+        ));
+    }
+    if let Some(m) = matrix {
+        if let Some(i) = defs.iter().position(|d| d.xaos.is_some()) {
+            return Err(format!(
+                "[xaos] gives a whole matrix, and transform {} has its own `xaos =` row too. \
+                 Use one form: two spellings of one edge would be two sources of truth",
+                label(i)
+            ));
+        }
+        let n = transforms.len();
+        let mut order = Vec::with_capacity(m.maps.len());
+        let mut seen = vec![false; n];
+        for key in &m.maps {
+            let i = resolve_xaos_target(key, names).map_err(|e| format!("[xaos] maps: {e}"))?;
+            if seen[i] {
+                return Err(format!("[xaos] maps lists {} twice", label(i)));
+            }
+            seen[i] = true;
+            order.push(i);
+        }
+        let missing: Vec<String> = (0..n).filter(|&i| !seen[i]).map(label).collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "[xaos] maps must list every map once; missing {}",
+                missing.join(", ")
+            ));
+        }
+        if m.matrix.len() != n {
+            return Err(format!("[xaos] matrix has {} rows for {n} maps", m.matrix.len()));
+        }
+        for (r, row) in m.matrix.iter().enumerate() {
+            if row.len() != n {
+                return Err(format!(
+                    "[xaos] matrix row {} (from {}) has {} entries for {n} maps",
+                    r + 1,
+                    label(order[r]),
+                    row.len()
+                ));
+            }
+            for &v in row {
+                crate::xaos::check_value(v).map_err(|e| format!("[xaos] from {}: {e}", label(order[r])))?;
+            }
+            // The commonest value becomes the rest, so a matrix that spells
+            // out a cycle is stored as one exception per row, as a `"*" = 0`
+            // row would be.
+            let mut values: Vec<f32> = row.iter().map(|&v| v as f32).collect();
+            values.sort_by(f32::total_cmp);
+            let rest = values
+                .chunk_by(|a, b| a == b)
+                .max_by_key(|run| run.len())
+                .map_or(1.0, |run| run[0]);
+            let x = &mut transforms[order[r]].xaos;
+            x.set_rest(rest);
+            for (c, &v) in row.iter().enumerate() {
+                x.set(order[c], v as f32);
+            }
+        }
+        return Ok(());
+    }
+    for (i, def) in defs.iter().enumerate() {
+        let Some(table) = &def.xaos else { continue };
+        let mut row = crate::xaos::Xaos::default();
+        if let Some(&rest) = table.get("*") {
+            crate::xaos::check_value(rest).map_err(|e| format!("transform {}: {e}", label(i)))?;
+            row.set_rest(rest as f32);
+        }
+        for (target, &odds) in table.iter().filter(|(k, _)| k.as_str() != "*") {
+            crate::xaos::check_value(odds).map_err(|e| format!("transform {}: {e}", label(i)))?;
+            let j = resolve_xaos_target(target, names)
+                .map_err(|e| format!("transform {}: xaos: {e}", label(i)))?;
+            row.set(j, odds as f32);
+        }
+        transforms[i].xaos = row;
+    }
+    Ok(())
+}
+
+/// How a layer's names spell map `j` as an xaos key: its name where that finds
+/// it and only it, else its index.
+fn xaos_key(j: usize, names: &[Option<String>]) -> String {
+    match names.get(j).and_then(|n| n.as_deref()) {
+        Some(n) if names.iter().filter(|m| m.as_deref() == Some(n)).count() == 1 => n.to_string(),
+        _ => j.to_string(),
+    }
+}
+
+/// A map's xaos row as the file writes it: `"*"` when the rest isn't 1, then
+/// the exceptions, keyed by name. `None` when the row says nothing.
+fn xaos_def(row: &crate::xaos::Xaos, names: &[Option<String>]) -> Option<BTreeMap<String, f64>> {
+    if row.is_default() {
+        return None;
+    }
+    let mut table = BTreeMap::new();
+    if row.rest != 1.0 {
+        table.insert("*".to_string(), tidy(row.rest));
+    }
+    for &(j, v) in row.exceptions.iter().filter(|e| (e.0 as usize) < names.len()) {
+        table.insert(xaos_key(j as usize, names), tidy(v));
+    }
+    Some(table)
+}
+
+/// A layer's xaos as one `[xaos]` matrix, in the layer's own order. `None`
+/// when no row says anything.
+fn xaos_matrix_def(specs: &[TransformSpec], names: &[Option<String>]) -> Option<XaosMatrixDef> {
+    if !crate::xaos::layer_has_xaos(specs) {
+        return None;
+    }
+    let n = specs.len();
+    Some(XaosMatrixDef {
+        maps: (0..n).map(|j| xaos_key(j, names)).collect(),
+        matrix: specs.iter().map(|t| t.xaos.dense(n).into_iter().map(tidy).collect()).collect(),
+    })
+}
+
+/// Lay out each `matrix = [[...], [...]]` one row per line, so the file reads
+/// as the grid it is. serde writes it on one line, which is legal and hides
+/// exactly the structure the form exists to show.
+fn layout_xaos_matrices(content: &str) -> Option<String> {
+    fn layout(table: &mut toml_edit::Table) {
+        let Some(m) = table.get_mut("matrix").and_then(|i| i.as_array_mut()) else { return };
+        for row in m.iter_mut() {
+            row.decor_mut().set_prefix("\n  ");
+            if let Some(cells) = row.as_array_mut() {
+                for (k, cell) in cells.iter_mut().enumerate() {
+                    cell.decor_mut().set_prefix(if k == 0 { "" } else { " " });
+                    cell.decor_mut().set_suffix("");
+                }
+            }
+        }
+        m.set_trailing_comma(true);
+        m.set_trailing("\n");
+    }
+    if !content.contains("[xaos]") && !content.contains(".xaos]") {
+        return None;
+    }
+    let mut doc: toml_edit::DocumentMut = content.parse().ok()?;
+    if let Some(t) = doc.get_mut("xaos").and_then(|i| i.as_table_mut()) {
+        layout(t);
+    }
+    if let Some(subs) = doc.get_mut("subscene").and_then(|t| t.as_array_of_tables_mut()) {
+        for sub in subs.iter_mut() {
+            if let Some(t) = sub.get_mut("xaos").and_then(|i| i.as_table_mut()) {
+                layout(t);
+            }
+        }
+    }
+    Some(doc.to_string())
 }
 
 /// Resolve a layer's colour source: the `[palette]` presence rule, overridden
@@ -800,7 +995,7 @@ fn load_subscenes(
                     ));
                 }
                 let (ts, ns, cs) =
-                    build_transforms(&def.transforms, &def.symmetries, layer).map_err(err)?;
+                    build_transforms(&def.transforms, &def.symmetries, def.xaos.as_ref(), layer).map_err(err)?;
                 let colour = LayerColour {
                     color_mode: ColorMode::Transforms,
                     palette: None,
@@ -903,7 +1098,7 @@ pub(crate) fn maps_toml(
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                transform_def(t, names.get(i).cloned().flatten(), colors.get(i).copied())
+                transform_def(t, names.get(i).cloned().flatten(), colors.get(i).copied(), names)
             })
             .collect(),
     };
@@ -1118,6 +1313,22 @@ pub struct TransformDef {
     /// Post-affine rotation in degrees (applied after variations). Default [0,0,0].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_rotation: Option<[f64; 3]>,
+    /// Xaos: odds multipliers for which map may follow this one, keyed by the
+    /// target's name (or index as a string), e.g. `{ stem = 0.0, leaf = 2.0 }`.
+    /// `"*"` is every unlisted target, 1 when absent. See `crate::xaos`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xaos: Option<BTreeMap<String, f64>>,
+}
+
+/// `[xaos]`: a layer's whole transition matrix at once — sugar over the
+/// per-transform rows, for scenes small enough to read as a grid. Strict:
+/// `maps` names every map of the layer once, and `matrix[r][c]` is the
+/// multiplier from `maps[r]` to `maps[c]`.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct XaosMatrixDef {
+    pub maps: Vec<String>,
+    pub matrix: Vec<Vec<f64>>,
 }
 
 fn default_scale() -> ScaleDef {
@@ -1377,6 +1588,10 @@ pub struct SceneFile {
     /// made of nothing but `[[subscene]]`s — has none of its own.
     #[serde(default, rename = "transform", skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<TransformDef>,
+    /// The scene's own maps' xaos as one matrix, instead of per-transform
+    /// `xaos =` rows (never both). See [`XaosMatrixDef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xaos: Option<XaosMatrixDef>,
     /// Other attractors composed into this one; see `crate::subscene`.
     #[serde(default, rename = "subscene", skip_serializing_if = "Vec::is_empty")]
     pub subscenes: Vec<crate::subscene::SubsceneDef>,
@@ -1506,6 +1721,10 @@ pub struct Scene {
     /// Composed attractors, layers `1..=n` (see `TransformSpec::layer`). Empty
     /// for an ordinary scene, which is then exactly what it always was.
     pub subscenes: Vec<crate::subscene::Subscene>,
+    /// Layers whose file gave xaos as one `[xaos]` matrix rather than per-map
+    /// rows, so a save writes it back the way it was written. A layer edited
+    /// into xaos in the app gets rows, which scale. See `crate::xaos`.
+    pub xaos_matrix_layers: Vec<u16>,
     /// The scene's own layer's share of the point budget (`[meta] share`).
     pub root_share: f32,
     /// Whether the scene's own layer is drawn (`[meta] visible`).
@@ -1566,6 +1785,7 @@ impl Scene {
             symmetry: None,
             variations: TransformSpec::linear_variations(),
             layer: 0,
+            xaos: Default::default(),
         };
         let colormap = generate_colormap(&colors);
         Self {
@@ -1605,6 +1825,7 @@ impl Scene {
             subscenes: Vec::new(),
             root_share: 1.0,
             root_visible: true,
+            xaos_matrix_layers: Vec::new(),
         }
     }
 
@@ -1643,6 +1864,7 @@ impl Scene {
         let (mut transforms, transform_names, transform_colors) = build_transforms(
             &scene_file.transforms,
             &scene_file.symmetries,
+            scene_file.xaos.as_ref(),
             0,
         )?;
         resolve_color_speeds(&mut transforms, global_speed, scene_file.meta.color_falloff as f32);
@@ -1876,6 +2098,12 @@ impl Scene {
             }),
             None => None,
         };
+        // Xaos can break the zoom's invariance `f(S) ⊆ S`; say which edge.
+        if let Some(z) = &zoom {
+            if let Some(e) = crate::xaos::zoom_conflict(&transforms, &transform_names, z.map) {
+                return Err(format!("[zoom]: {e}"));
+            }
+        }
 
         // A zoom-looping path closes under the renormalizing map, so it can
         // only be resolved once that map is known.
@@ -1963,6 +2191,12 @@ impl Scene {
             subscenes,
             root_share: scene_file.meta.share.map(|v| v as f32).unwrap_or(1.0).max(0.0),
             root_visible,
+            xaos_matrix_layers: std::iter::once(scene_file.xaos.is_some())
+                .chain(scene_file.subscenes.iter().map(|d| d.xaos.is_some()))
+                .enumerate()
+                .filter(|&(_, m)| m)
+                .map(|(k, _)| k as u16)
+                .collect(),
         };
         // Subscene colormaps are resolved here, from their own maps' colours.
         scene.regenerate_colormap();
@@ -2184,8 +2418,14 @@ impl Scene {
             .iter()
             .zip(&root_names)
             .zip(&root_colors)
-            .map(|((spec, name), color)| transform_def(spec, name.clone(), Some(*color)))
+            .map(|((spec, name), color)| transform_def(spec, name.clone(), Some(*color), &root_names))
             .collect();
+        // The form the file used: one `[xaos]` matrix, or a row per map.
+        let matrix_form = self.xaos_matrix_layers.contains(&0) && crate::xaos::layer_has_xaos(&root_specs);
+        let mut transforms = transforms;
+        if matrix_form {
+            transforms.iter_mut().for_each(|d| d.xaos = None);
+        }
 
         SceneFile {
             meta: SceneMeta {
@@ -2303,6 +2543,7 @@ impl Scene {
             // enrolled or withdrawn in the panel comes back out as the right
             // blocks. Motifs sharing a group share a block.
             symmetries: symmetry_blocks(&root_specs, &root_names),
+            xaos: matrix_form.then(|| xaos_matrix_def(&root_specs, &root_names)).flatten(),
             transforms,
             subscenes: (1..=self.subscenes.len()).map(|k| self.subscene_def(k)).collect(),
         }
@@ -2310,6 +2551,55 @@ impl Scene {
 
     /// Layer `k`'s maps, names and colours, in order (clones: this is the
     /// save path and `--info`, never per frame).
+    /// Map `i`'s position within its own layer — what its xaos column is.
+    pub fn layer_position(&self, i: usize) -> usize {
+        let layer = self.transforms[i].layer;
+        self.transforms[..i].iter().filter(|t| t.layer == layer).count()
+    }
+
+    /// Insert a map at scene index `at`, with its name and colour, keeping
+    /// every xaos row pointing at the maps it pointed at. `copy_of` (a scene
+    /// index, before the insert) makes the new map a duplicate of that one in
+    /// the chain too: it takes the original's column, so whatever could go to
+    /// the original may go to the copy. Its row is whatever `spec` carries —
+    /// a clone of the original's, for a duplicate — renumbered here.
+    ///
+    /// The one place a map is added to a scene, so the remap can't be skipped.
+    pub fn insert_transform(
+        &mut self,
+        at: usize,
+        mut spec: TransformSpec,
+        name: Option<String>,
+        color: Vec3,
+        copy_of: Option<usize>,
+    ) {
+        let layer = spec.layer;
+        let pos = self.transforms[..at].iter().filter(|t| t.layer == layer).count();
+        crate::xaos::insert_column(&mut self.transforms, layer, pos);
+        crate::xaos::shift_row(&mut spec.xaos, pos);
+        self.transforms.insert(at, spec);
+        self.transform_names.insert(at, name);
+        self.colors.insert(at, color);
+        if let Some(src) = copy_of {
+            let src = if src >= at { src + 1 } else { src };
+            if self.transforms[src].layer == layer {
+                let src_pos = self.layer_position(src);
+                crate::xaos::copy_column(&mut self.transforms, layer, src_pos, pos);
+            }
+        }
+    }
+
+    /// Remove map `idx` and its name and colour, dropping every xaos edge
+    /// into it and renumbering the rest. The one place a map leaves a scene.
+    pub fn remove_transform(&mut self, idx: usize) {
+        let layer = self.transforms[idx].layer;
+        let pos = self.layer_position(idx);
+        self.transforms.remove(idx);
+        self.transform_names.remove(idx);
+        self.colors.remove(idx);
+        crate::xaos::remove_column(&mut self.transforms, layer, pos);
+    }
+
     pub fn layer_maps(&self, k: usize) -> (Vec<TransformSpec>, Vec<Option<String>>, Vec<Vec3>) {
         let mut out = (Vec::new(), Vec::new(), Vec::new());
         for (i, t) in self.transforms.iter().enumerate() {
@@ -2359,6 +2649,7 @@ impl Scene {
             palette: None,
             symmetries: Vec::new(),
             transforms: Vec::new(),
+            xaos: None,
         };
         sub.placement.write_into(&mut def);
         match linked {
@@ -2384,8 +2675,14 @@ impl Scene {
                 def.transforms = specs
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| transform_def(t, names[i].clone(), Some(colors[i])))
+                    .map(|(i, t)| transform_def(t, names[i].clone(), Some(colors[i]), &names))
                     .collect();
+                if self.xaos_matrix_layers.contains(&(k as u16)) {
+                    def.xaos = xaos_matrix_def(&specs, &names);
+                    if def.xaos.is_some() {
+                        def.transforms.iter_mut().for_each(|d| d.xaos = None);
+                    }
+                }
             }
         }
         def
@@ -2424,6 +2721,7 @@ impl Scene {
             spec,
             self.transform_names.get(i).cloned().flatten(),
             self.colors.get(i).copied(),
+            &self.layer_maps(spec.layer as usize).1,
         );
         let text = toml::to_string(&One { transform: [&def] })
             .map_err(|e| format!("Failed to serialize transform: {}", e))?;
@@ -2436,7 +2734,8 @@ impl Scene {
             .map_err(|e| format!("Failed to serialize scene: {}", e))?;
         let fresh = inline_variation_tables(&fresh).unwrap_or(fresh);
         let fresh = rewrite_palette_table(&fresh, file.palette.as_ref()).unwrap_or(fresh);
-        Ok(rewrite_subscene_palettes(&fresh, &file.subscenes).unwrap_or(fresh))
+        let fresh = rewrite_subscene_palettes(&fresh, &file.subscenes).unwrap_or(fresh);
+        Ok(layout_xaos_matrices(&fresh).unwrap_or(fresh))
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
@@ -2488,7 +2787,14 @@ impl Scene {
 
 /// One transform as it is written to a file: degrees where they reproduce the
 /// matrix, `rotvec` where they don't, variations only when not pure linear.
-fn transform_def(spec: &TransformSpec, name: Option<String>, color: Option<Vec3>) -> TransformDef {
+/// `names` are the names of every map in `spec`'s layer, which its xaos
+/// row is keyed by.
+fn transform_def(
+    spec: &TransformSpec,
+    name: Option<String>,
+    color: Option<Vec3>,
+    names: &[Option<String>],
+) -> TransformDef {
     let trs = crate::rot::Trs::of(spec.matrix);
     let (scale, trans) = (trs.scale, trs.translation);
     // Degrees while they reproduce the matrix, which is nearly
@@ -2572,6 +2878,7 @@ fn transform_def(spec: &TransformSpec, name: Option<String>, color: Option<Vec3>
         post_translation,
         post_scale,
         post_rotation,
+        xaos: xaos_def(&spec.xaos, names),
     }
 }
 
@@ -2786,12 +3093,23 @@ fn set_arr3(table: &mut toml_edit::Table, key: &str, v: [f64; 3], default: Optio
 }
 
 fn set_variations(table: &mut toml_edit::Table, vars: &Option<BTreeMap<String, f64>>) {
+    set_number_table(table, "variations", vars);
+}
+
+/// Write a `key = { name = number, ... }` inline table — `variations` and
+/// `xaos` — leaving the existing one untouched (comments and all) when it
+/// already says the same thing, and removing it when there is nothing to say.
+fn set_number_table(
+    table: &mut toml_edit::Table,
+    key: &str,
+    vars: &Option<BTreeMap<String, f64>>,
+) {
     let Some(map) = vars else {
-        table.remove("variations");
+        table.remove(key);
         return;
     };
     // Compare against the existing table (inline or section form)
-    let old: Option<BTreeMap<String, f64>> = match table.get("variations") {
+    let old: Option<BTreeMap<String, f64>> = match table.get(key) {
         Some(toml_edit::Item::Value(toml_edit::Value::InlineTable(t))) => Some(
             t.iter()
                 .filter_map(|(k, v)| value_as_f64(v).map(|f| (k.to_string(), f)))
@@ -2821,9 +3139,8 @@ fn set_variations(table: &mut toml_edit::Table, vars: &Option<BTreeMap<String, f
         it.insert(k, (*v).into());
     }
     it.fmt();
-    let had = table.remove("variations").is_some();
-    let _ = had;
-    table["variations"] = toml_edit::value(it);
+    table.remove(key);
+    table[key] = toml_edit::value(it);
 }
 
 /// Edit an existing scene document in place so comments and formatting
@@ -3075,6 +3392,13 @@ fn merge_scene_into_document(
         let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
         doc["symmetry"] = fresh_doc.get("symmetry")?.clone();
     }
+    // `[xaos]` likewise: a matrix is one value whose shape follows the map
+    // list, so it is replaced whole rather than merged cell by cell.
+    doc.remove("xaos");
+    if file.xaos.is_some() {
+        let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
+        doc["xaos"] = fresh_doc.get("xaos")?.clone();
+    }
 
     // Subscenes are rebuilt wholesale, like the symmetry blocks and for the
     // same reason: importing, removing or detaching one changes the block's
@@ -3147,6 +3471,7 @@ fn merge_scene_into_document(
                 }
             }
             set_variations(t, &def.variations);
+            set_number_table(t, "xaos", &def.xaos);
         }
     } else {
         // Transform count changed: rebuild the array from the fresh
@@ -3214,12 +3539,14 @@ fn inline_variation_tables(content: &str) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = content.parse().ok()?;
     fn inline_in(arr: &mut toml_edit::ArrayOfTables) {
         for t in arr.iter_mut() {
-            if let Some(toml_edit::Item::Table(vars)) = t.get("variations") {
-                let mut inline = vars.clone().into_inline_table();
-                inline.fmt();
-                // Remove first so the fresh key gets clean `key = value` decor
-                t.remove("variations");
-                t["variations"] = toml_edit::value(inline);
+            for key in ["variations", "xaos"] {
+                if let Some(toml_edit::Item::Table(vars)) = t.get(key) {
+                    let mut inline = vars.clone().into_inline_table();
+                    inline.fmt();
+                    // Remove first so the fresh key gets clean `key = value` decor
+                    t.remove(key);
+                    t[key] = toml_edit::value(inline);
+                }
             }
         }
     }
@@ -3333,6 +3660,7 @@ mod tests {
                 explicit_color_speed: None,
                 symmetry: None,
                 variations: TransformSpec::linear_variations(),
+                xaos: Default::default(),
             })
             .collect()
     }
@@ -3788,7 +4116,15 @@ color = [0.2, 0.5, 1.0]
                 // the KIFS way silently loads back as a different attractor.
                 let diff = worst(a.post_affine, b.post_affine);
                 assert!(diff < 1e-3, "{} transform {}: post_affine moved {:.6}", name, i, diff);
+                // And its xaos row: a lost cut is a structural edit nobody made.
+                let n = before.layer_sizes()[a.layer as usize];
+                let (da, db) = (a.xaos.dense(n), b.xaos.dense(n));
+                assert!(
+                    da.iter().zip(&db).all(|(p, q)| (p - q).abs() < 1e-4),
+                    "{name} transform {i}: xaos {da:?} came back {db:?}"
+                );
             }
+            assert_eq!(before.xaos_matrix_layers, after.xaos_matrix_layers, "{name}: xaos form");
         }
         let _ = std::fs::remove_file(&tmp);
     }
@@ -5188,5 +5524,192 @@ color = [0.0, 1.0, 1.0]
             .err()
             .unwrap();
         assert!(err.contains("borrows its maps"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod xaos_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("fracturize-xaos-{tag}-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn scene(xaos_a: &str, xaos_b: &str, tail: &str) -> String {
+        format!(
+            r#"
+[meta]
+name = "X"
+
+[[transform]]
+name = "a"
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+{xaos_a}
+
+[[transform]]
+name = "b"
+translation = [-0.5, 0.0, 0.0]
+scale = 0.5
+{xaos_b}
+
+[[transform]]
+name = "c"
+translation = [0.0, 0.5, 0.0]
+scale = 0.5
+{tail}
+"#
+        )
+    }
+
+    fn load(text: &str) -> Result<Scene, String> {
+        let d = dir("load");
+        let p = d.join("s.toml");
+        fs::write(&p, text).unwrap();
+        Scene::load(&p)
+    }
+
+    #[test]
+    fn rows_load_by_name_with_a_rest() {
+        let s = load(&scene("xaos = { a = 0, c = 2.5 }", r#"xaos = { "*" = 0, a = 1 }"#, "")).unwrap();
+        assert_eq!(s.transforms[0].xaos.dense(3), vec![0.0, 1.0, 2.5]);
+        assert_eq!(s.transforms[1].xaos.dense(3), vec![1.0, 0.0, 0.0]);
+        assert!(s.transforms[2].xaos.is_default());
+    }
+
+    #[test]
+    fn rows_round_trip_through_a_save_over_the_file() {
+        let d = dir("rows");
+        let p = d.join("s.toml");
+        let text = scene("xaos = { a = 0, c = 2.5 }   # no self-loop", r#"xaos = { "*" = 0, a = 1 }"#, "");
+        fs::write(&p, &text).unwrap();
+        let mut s = Scene::load(&p).unwrap();
+        s.transforms[2].xaos.set(1, 0.0);
+        s.save(&p).unwrap();
+        let out = fs::read_to_string(&p).unwrap();
+        assert!(out.contains("# no self-loop"), "{out}");
+        // An unchanged row is left exactly as written; a changed one rewritten.
+        assert!(out.contains(r#"xaos = { "*" = 0, a = 1 }"#), "{out}");
+        assert!(out.contains("xaos = { b = 0.0 }"), "{out}");
+        let back = Scene::load(&p).unwrap();
+        for i in 0..3 {
+            assert_eq!(back.transforms[i].xaos, s.transforms[i].xaos, "map {i}");
+        }
+    }
+
+    #[test]
+    fn a_scene_without_xaos_writes_none() {
+        let s = load(&scene("", "", "")).unwrap();
+        assert!(!s.to_toml_string().unwrap().contains("xaos"));
+    }
+
+    const MATRIX: &str = r#"
+[xaos]
+maps = ["c", "a", "b"]
+matrix = [
+  [1, 1, 1],
+  [0, 0, 1],
+  [1, 0, 2],
+]
+"#;
+
+    #[test]
+    fn the_matrix_form_loads_in_its_own_order_and_saves_back_as_a_matrix() {
+        let s = load(&scene("", "", MATRIX)).unwrap();
+        // Row "a" = [c 0, a 0, b 1] in a/b/c order is [0, 1, 0].
+        assert_eq!(s.transforms[0].xaos.dense(3), vec![0.0, 1.0, 0.0]);
+        assert_eq!(s.transforms[1].xaos.dense(3), vec![0.0, 2.0, 1.0]);
+        assert_eq!(s.xaos_matrix_layers, vec![0]);
+        let out = s.to_toml_string().unwrap();
+        assert!(out.contains("[xaos]") && !out.contains("xaos = {"), "{out}");
+        assert!(out.contains("\n  [0.0, 1.0, 0.0],\n"), "one row per line:\n{out}");
+        let back = load(&out).unwrap();
+        for i in 0..3 {
+            assert_eq!(back.transforms[i].xaos.dense(3), s.transforms[i].xaos.dense(3));
+        }
+    }
+
+    #[test]
+    fn a_matrix_survives_a_save_over_its_file() {
+        let d = dir("matrix");
+        let p = d.join("s.toml");
+        fs::write(&p, scene("", "", MATRIX)).unwrap();
+        let mut s = Scene::load(&p).unwrap();
+        s.transforms[2].xaos.set(2, 0.0);
+        s.save(&p).unwrap();
+        let back = Scene::load(&p).unwrap();
+        assert_eq!(back.transforms[2].xaos.dense(3), vec![1.0, 1.0, 0.0]);
+        assert_eq!(back.xaos_matrix_layers, vec![0]);
+    }
+
+    #[test]
+    fn bad_xaos_is_refused_by_name() {
+        let cases = [
+            (scene("xaos = { d = 0 }", "", ""), "no transform named 'd'"),
+            (scene("xaos = { b = -1 }", "", ""), "relative odds"),
+            (scene("xaos = { a = 0 }", "", MATRIX), "Use one form"),
+            (scene("", "", "[xaos]\nmaps = [\"a\", \"b\"]\nmatrix = [[1, 1], [1, 1]]\n"), "missing 'c'"),
+            (scene("", "", "[xaos]\nmaps = [\"a\", \"b\", \"c\"]\nmatrix = [[1, 1, 1], [1, 1], [1, 1, 1]]\n"), "has 2 entries"),
+        ];
+        for (text, want) in cases {
+            let e = load(&text).err().unwrap_or_else(|| panic!("loaded:\n{text}"));
+            assert!(e.contains(want), "wanted '{want}', got: {e}");
+        }
+        let twins = scene("xaos = { b = 0 }", "", "").replace("name = \"c\"", "name = \"b\"");
+        assert!(load(&twins).err().unwrap().contains("names 2 maps"));
+        let star = scene("", "", "").replace("name = \"c\"", "name = \"*\"");
+        assert!(load(&star).err().unwrap().contains("reserves"));
+    }
+
+    #[test]
+    fn a_dead_end_loads_and_is_left_for_the_report() {
+        let s = load(&scene(r#"xaos = { "*" = 0 }"#, "", "")).unwrap();
+        let chain = crate::xaos::Chain::build(&s.transforms, &[]).unwrap();
+        assert_eq!(chain.dead, vec![0]);
+    }
+
+    #[test]
+    fn inserting_and_removing_maps_keeps_the_edges() {
+        let mut s = load(&scene("xaos = { c = 0 }", "xaos = { b = 3 }", "")).unwrap();
+        // Duplicate b to the end: a still cuts c, and nothing yet cuts the copy.
+        let copy = s.transforms[1].clone();
+        s.insert_transform(3, copy, Some("b2".into()), Vec3::ONE, Some(1));
+        assert_eq!(s.transforms[0].xaos.dense(4), vec![1.0, 1.0, 0.0, 1.0]);
+        // The copy goes where b goes, and b treats it as itself.
+        assert_eq!(s.transforms[3].xaos.dense(4), vec![1.0, 3.0, 1.0, 3.0]);
+        assert_eq!(s.transforms[1].xaos.dense(4), vec![1.0, 3.0, 1.0, 3.0]);
+        s.remove_transform(1);
+        assert_eq!(s.transforms[0].xaos.dense(3), vec![1.0, 0.0, 1.0]);
+        assert_eq!(s.transforms[2].xaos.dense(3), vec![1.0, 1.0, 3.0]);
+    }
+
+    #[test]
+    fn a_zoom_map_that_some_map_cuts_is_refused() {
+        let zoom = "[zoom]\nmap = \"a\"\n";
+        assert!(load(&scene("", "", zoom)).is_ok());
+        let e = load(&scene("", "xaos = { a = 0 }", zoom)).err().unwrap();
+        assert!(e.contains("infinite zoom"), "{e}");
+    }
+
+    #[test]
+    fn an_inline_subscene_takes_rows_and_a_matrix() {
+        let text = format!(
+            "{}\n[[subscene]]\nname = \"s\"\n\n[[subscene.transform]]\nname = \"p\"\n\
+             translation = [0.0, 0.0, 0.0]\nscale = 0.5\nxaos = {{ p = 0 }}\n\n\
+             [[subscene.transform]]\nname = \"q\"\ntranslation = [1.0, 0.0, 0.0]\nscale = 0.5\n",
+            scene("", "", "")
+        );
+        let s = load(&text).unwrap();
+        assert_eq!(s.transforms[3].xaos.dense(2), vec![0.0, 1.0]);
+        // A target in another layer is not a target.
+        let e = load(&text.replace("xaos = { p = 0 }", "xaos = { a = 0 }")).err().unwrap();
+        assert!(e.contains("coupling between subscenes"), "{e}");
+        let back = load(&s.to_toml_string().unwrap()).unwrap();
+        assert_eq!(back.transforms[3].xaos, s.transforms[3].xaos);
     }
 }

@@ -165,11 +165,14 @@ pub struct GpuTransform {
     /// drawn (`OrbitColor::Orbit`), 0 for the shared default. A float because
     /// it is multiplied rather than branched on in the shader.
     pub orbit_color: f32,            // 4 bytes
-    /// WGSL gives `color_rgb: vec3<f32>` an alignment of 16, so it lands at
-    /// offset 224 and the three scalars after it run 236..248; the struct then
-    /// rounds up to 256. Rust's `repr(C)` would stop at 248 and every transform
-    /// after the first would read the wrong memory.
-    pub _pad: [f32; 2],              // 8 bytes
+    /// Where this map's xaos row starts in the row table, and how many
+    /// exceptions it holds (see `crate::xaos::build_rows`). `xaos_start ==
+    /// xaos::NO_ROW` selects by plain weight. These two words were the padding
+    /// WGSL's `vec3` alignment forced — `color_rgb` lands at offset 224, the
+    /// scalars after it run 236..248, and the struct rounds up to 256 — so
+    /// xaos costs a transform no memory.
+    pub xaos_start: u32,             // 4 bytes
+    pub xaos_len: u32,               // 4 bytes
     // Total: 256 bytes (was 240, and 176 before the post-affine slot)
 }
 
@@ -182,6 +185,9 @@ impl GpuTransform {
         // Where this transform's group sits in the element buffer, from
         // `points::compute::GroupTable`. `(0, 0)` for no symmetry.
         group: (u32, u32),
+        // Its xaos row in the row table: `(start, exceptions)`, or
+        // `(xaos::NO_ROW, 0)` for plain selection.
+        xaos: (u32, u32),
     ) -> Self {
         Self {
             matrix: spec.matrix.to_cols_array_2d(),
@@ -198,7 +204,8 @@ impl GpuTransform {
                 Some(crate::symmetry::OrbitColor::Orbit) => 1.0,
                 _ => 0.0,
             },
-            _pad: [0.0; 2],
+            xaos_start: xaos.0,
+            xaos_len: xaos.1,
         }
     }
 }

@@ -2873,6 +2873,12 @@ impl App {
             }
         }
         self.scene.subscenes.remove(k - 1);
+        self.scene.xaos_matrix_layers.retain(|&l| l as usize != k);
+        for l in &mut self.scene.xaos_matrix_layers {
+            if *l as usize > k {
+                *l -= 1;
+            }
+        }
         self.selected_subscene = None;
         self.selected_transform = None;
         self.current_layer = 0;
@@ -4894,6 +4900,7 @@ impl App {
     /// default one. Rebuilds the GPU pipelines for the new transform count.
     pub fn add_transform(&mut self, fresh: bool) {
         let before = self.edit_snapshot();
+        let copy_of = if fresh { None } else { self.selection() };
         let (spec, name, color) = if fresh || self.selection().is_none() {
             (
                 TransformSpec {
@@ -4917,6 +4924,7 @@ impl App {
                     // is how you build the deliberate defect (CRAFT §3.6), and
                     // "dup" is how you add a second motif to a group.
                     symmetry: None,
+                    xaos: Default::default(),
                 },
                 None,
                 Vec3::splat(0.9),
@@ -4940,9 +4948,7 @@ impl App {
             .iter()
             .rposition(|t| t.layer <= spec.layer)
             .map_or(0, |i| i + 1);
-        self.scene.transforms.insert(at, spec);
-        self.scene.transform_names.insert(at, name);
-        self.scene.colors.insert(at, color);
+        self.scene.insert_transform(at, spec, name, color, copy_of);
         self.transform_enabled.insert(at, true);
         self.selected_transform = Some(at);
         self.selected_subscene = None;
@@ -4962,9 +4968,7 @@ impl App {
             return;
         }
         let before = self.edit_snapshot();
-        self.scene.transforms.remove(idx);
-        self.scene.transform_names.remove(idx);
-        self.scene.colors.remove(idx);
+        self.scene.remove_transform(idx);
         self.transform_enabled.remove(idx);
         self.selected_transform = Some(idx.min(self.scene.transforms.len() - 1));
         self.drag = Drag::None;
@@ -5512,7 +5516,7 @@ impl App {
         // one to happen.
         self.indicator_key = (None, None);
         let table = self.layer_table();
-        self.point_compute.update_weights(&self.gpu.queue, &table);
+        self.point_compute.update_weights(&self.gpu.device, &self.gpu.queue, &table);
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.gizmo_enabled());
         self.refresh_zoom();
         self.frame_count = 0;
@@ -5527,7 +5531,7 @@ impl App {
         // Contraction feeds falloff-derived color speeds, so re-resolve
         self.scene.resolve_all_color_speeds(self.color_falloff);
         let table = self.layer_table();
-        self.point_compute.update_weights(&self.gpu.queue, &table);
+        self.point_compute.update_weights(&self.gpu.device, &self.gpu.queue, &table);
         let specs = self.gizmo_specs();
         if self.gizmo_renderer.instance_count() == specs.len() as u32 + 1 {
             self.gizmo_renderer.update_transforms(&self.gpu.queue, &specs);
@@ -5597,7 +5601,7 @@ impl App {
     fn refresh_color_speeds(&mut self) {
         self.scene.resolve_all_color_speeds(self.color_falloff);
         let table = self.layer_table();
-        self.point_compute.update_weights(&self.gpu.queue, &table);
+        self.point_compute.update_weights(&self.gpu.device, &self.gpu.queue, &table);
         self.reset();
     }
 
@@ -6137,7 +6141,7 @@ impl App {
         );
 
         let table = self.layer_table();
-        self.point_compute.update_weights(&self.gpu.queue, &table);
+        self.point_compute.update_weights(&self.gpu.device, &self.gpu.queue, &table);
         self.gizmo_renderer.update_alpha(&self.gpu.queue, &self.gizmo_enabled());
         self.reset();
         let label = if self.transform_enabled[idx] {

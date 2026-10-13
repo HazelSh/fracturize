@@ -298,6 +298,7 @@ impl Params {
                 symmetry: self.symmetry.and_then(|kind| {
                     Symmetry::new(kind, self.axis_of(), false, OrbitColor::Shared).ok()
                 }),
+                xaos: Default::default(),
             })
             .collect()
     }

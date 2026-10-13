@@ -456,6 +456,10 @@ pub(crate) fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), Str
     let required_limits = wgpu::Limits {
         max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
         max_buffer_size: adapter_limits.max_buffer_size,
+        // The chaos pass binds eight storage buffers since xaos — exactly the
+        // WebGPU default. Ask for the adapter's figure so the next one isn't a
+        // device-creation failure.
+        max_storage_buffers_per_shader_stage: adapter_limits.max_storage_buffers_per_shader_stage,
         // The default is 8192 whatever the adapter can do, and this one reports
         // 32768 — which is the difference between `--supersample 4` working at
         // 4K and dying inside wgpu. Asked for, never required: `check_fits`

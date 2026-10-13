@@ -32,7 +32,9 @@ pub struct WalkerState {
     /// emphasis is watching, carried forward through every map since. Zero and
     /// untouched while the emphasis is off; see `carry_tangent` in chaos.wgsl.
     pub tangent: [f32; 3],
-    pub _pad4: f32,
+    /// The (GPU-order) index of the map this walker applied last, for xaos;
+    /// `xaos::NO_ROW` when it has no history — fresh, or just re-seeded.
+    pub last: u32,
 }
 
 impl WalkerState {
@@ -58,7 +60,7 @@ impl WalkerState {
             _pad3: 0.0,
             rng_state: state,
             tangent: [0.0; 3],
-            _pad4: 0.0,
+            last: crate::xaos::NO_ROW,
         }
     }
 }
@@ -133,7 +135,10 @@ pub struct GpuLayer {
     pub contrast: f32,
     /// The placement's uniform scale, which carries an emphasis sensitivity.
     pub scale: f32,
-    pub _pad: [f32; 2],
+    /// 1 when any map of this layer has an xaos row, so its walkers consult
+    /// the row table; 0 takes the plain selection, exactly as before xaos.
+    pub xaos: u32,
+    pub _pad: f32,
 }
 
 /// Everything the chaos pass needs to know about a scene's layers, built once
@@ -153,6 +158,10 @@ pub struct LayerTable {
     /// `MAX_LAYERS * 256` colormap entries, layer k's at `k * 256`.
     pub colormaps: Vec<[f32; 4]>,
     pub composite: bool,
+    /// Every layer's xaos rows end to end (`crate::xaos::Row`), indexed by
+    /// `GpuTransform::xaos_start`. Never empty: a buffer can't be bound at
+    /// zero size, so a scene without xaos still uploads one unread entry.
+    pub xaos_rows: Vec<[f32; 4]>,
 }
 
 impl LayerTable {
@@ -175,6 +184,7 @@ impl LayerTable {
         let mut gpu_transforms = Vec::with_capacity(order.len());
         let mut layers = Vec::with_capacity(n_layers);
         let mut colormaps = vec![[0.0f32; 4]; crate::subscene::MAX_LAYERS * 256];
+        let mut xaos_rows: Vec<[f32; 4]> = Vec::new();
         let mut pos = 0usize;
         for k in 0..n_layers {
             let start = pos;
@@ -187,18 +197,43 @@ impl LayerTable {
                 .map(|p| if is_on(order[p]) { transforms[order[p]].weight } else { 0.0 })
                 .sum();
             let mut cumulative = 0.0;
+            let mut cum = Vec::with_capacity(run.len());
             for p in run.clone() {
                 let i = order[p];
                 let w = if is_on(i) { transforms[i].weight } else { 0.0 };
                 if total > 0.0 {
                     cumulative += w / total;
                 }
+                cum.push(cumulative);
+            }
+            // Xaos rows, built from exactly the cumulative weights uploaded
+            // below, so the shader's squeezed-axis arithmetic lands on the
+            // same intervals its plain search does.
+            let maps: Vec<TransformSpec> = run.clone().map(|p| transforms[order[p]].clone()).collect();
+            let has_xaos = crate::xaos::layer_has_xaos(&maps) || crate::xaos::forced();
+            let rows = if has_xaos {
+                crate::xaos::build_rows(&maps, &cum, crate::xaos::forced())
+            } else {
+                vec![None; maps.len()]
+            };
+            for (n, p) in run.clone().enumerate() {
+                let i = order[p];
+                let w = if is_on(i) { transforms[i].weight } else { 0.0 };
+                let xaos = match &rows[n] {
+                    Some(row) => {
+                        let at = xaos_rows.len() as u32;
+                        xaos_rows.extend_from_slice(row);
+                        (at, row.len() as u32 - 1)
+                    }
+                    None => (crate::xaos::NO_ROW, 0),
+                };
                 gpu_transforms.push(GpuTransform::new(
                     &transforms[i],
-                    cumulative,
+                    cum[n],
                     w,
                     transform_color(&scene.colors, i),
                     groups.slices.get(p).copied().unwrap_or((0, 0)),
+                    xaos,
                 ));
             }
             let (mode, contrast, colormap) = scene.layer_colour(k);
@@ -223,12 +258,16 @@ impl LayerTable {
                     mix: u32::from(mode.packs_rgb()),
                     contrast,
                     scale: placement.x_axis.truncate().length(),
-                    _pad: [0.0; 2],
+                    xaos: u32::from(has_xaos),
+                    _pad: 0.0,
                 },
                 share,
             ));
         }
-        Self { order, gpu_transforms, groups, layers, colormaps, composite }
+        if xaos_rows.is_empty() {
+            xaos_rows.push([0.0; 4]);
+        }
+        Self { order, gpu_transforms, groups, layers, colormaps, composite, xaos_rows }
     }
 
     /// The uniform: layers with their walker ranges dealt.
@@ -302,10 +341,25 @@ pub struct PointCompute {
     /// composite resolves its colour through.
     pub layer_buffer: wgpu::Buffer,
     pub layer_colormap_buffer: wgpu::Buffer,
+    /// The xaos row table (`LayerTable::xaos_rows`). Sized to the scene and
+    /// grown — with a bind-group rebuild — only when an edit outgrows it.
+    xaos_buffer: wgpu::Buffer,
     num_layers: u32,
     composite: bool,
     /// Scene index -> GPU index, for the emphasis target.
     gpu_order: Vec<usize>,
+}
+
+/// The xaos row buffer, with headroom: a live edit that adds an exception or
+/// two should be a write, not a bind-group rebuild.
+fn create_xaos_buffer(device: &wgpu::Device, rows: &[[f32; 4]]) -> wgpu::Buffer {
+    let mut contents = rows.to_vec();
+    contents.resize((rows.len() * 2).max(64), [0.0; 4]);
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("xaos_rows"),
+        contents: bytemuck::cast_slice(&contents),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    })
 }
 
 /// A transform's colour, or white if the parallel `colors` array is short.
@@ -515,6 +569,19 @@ impl ChaosPipelines {
                     },
                     count: None,
                 },
+                // Xaos rows (see crate::xaos). The eighth storage binding in
+                // this stage — exactly the WebGPU default limit, which the
+                // device also asks the adapter to raise where it can.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -691,6 +758,8 @@ impl PointCompute {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        let xaos_buffer = create_xaos_buffer(device, &table.xaos_rows);
+
         // Bind group layout
         let ChaosPipelines { pipeline, rewrap_pipeline, stats_pipeline, bind_group_layout } =
             pipelines.clone();
@@ -738,6 +807,10 @@ impl PointCompute {
                     binding: 8,
                     resource: layer_colormap_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: xaos_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -771,6 +844,7 @@ impl PointCompute {
             seed,
             layer_buffer,
             layer_colormap_buffer,
+            xaos_buffer,
             num_layers: table.layers.len() as u32,
             composite: table.composite,
             gpu_order: table.order.clone(),
@@ -934,6 +1008,11 @@ impl PointCompute {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        self.rebuild_bind_group(device);
+    }
+
+    /// After a buffer the bind group holds has been replaced.
+    fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("point_compute_bind_group"),
             layout: &self.bind_group_layout,
@@ -947,6 +1026,7 @@ impl PointCompute {
                 wgpu::BindGroupEntry { binding: 6, resource: self.stats_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: self.layer_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.layer_colormap_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.xaos_buffer.as_entire_binding() },
             ],
         });
     }
@@ -1071,7 +1151,18 @@ impl PointCompute {
     /// Also re-uploads the symmetry groups, because a live edit can change one
     /// (the panel's group picker) and there is no cheaper place to notice: the
     /// table is 32 KB and this already runs only on edits, never per frame.
-    pub fn update_weights(&mut self, queue: &wgpu::Queue, table: &LayerTable) {
+    ///
+    /// The xaos rows too, which change size under editing (cutting an edge
+    /// adds an exception), so this is the one write that may need the device:
+    /// a table that outgrows its buffer gets a new one.
+    pub fn update_weights(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, table: &LayerTable) {
+        let xaos_bytes = std::mem::size_of_val(table.xaos_rows.as_slice()) as u64;
+        if xaos_bytes > self.xaos_buffer.size() {
+            self.xaos_buffer = create_xaos_buffer(device, &table.xaos_rows);
+            self.rebuild_bind_group(device);
+        } else {
+            queue.write_buffer(&self.xaos_buffer, 0, bytemuck::cast_slice(&table.xaos_rows));
+        }
         queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&table.gpu_transforms));
         queue.write_buffer(&self.group_buffer, 0, bytemuck::cast_slice(&table.groups.padded()));
         queue.write_buffer(&self.layer_buffer, 0, bytemuck::cast_slice(&table.gpu_layers(self.num_walkers)));

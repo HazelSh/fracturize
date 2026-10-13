@@ -760,6 +760,7 @@ fn random_transform(settings: &RandomSettings, rng: &mut impl Rng) -> TransformS
         explicit_color_speed: None,
         symmetry: None,
         variations,
+        xaos: Default::default(),
     }
 }
 
@@ -823,6 +824,7 @@ fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Sc
         subscenes: Vec::new(),
         root_share: 1.0,
         root_visible: true,
+        xaos_matrix_layers: Vec::new(),
         name: format!("random-{}", crate::app::unix_timestamp()),
         author: "fracturize random flame".to_string(),
         // Scale the dot size with the attractor: the same point size that

@@ -140,16 +140,12 @@ fn apply_random_op(scene: &mut Scene, rng: &mut impl Rng, strength: f32, log: &m
         let mut spec = scene.transforms[i].clone();
         let d = random_unit(rng) * rng.gen_range(0.05..0.2) * strength;
         spec.matrix.w_axis += d.extend(0.0);
-        scene.transforms.push(spec);
-        scene
-            .transform_names
-            .push(scene.transform_names[i].as_ref().map(|s| format!("{} mut", s)));
-        scene.colors.push(scene.colors[i]);
+        let name = scene.transform_names[i].as_ref().map(|s| format!("{} mut", s));
+        let color = scene.colors[i];
+        scene.insert_transform(n, spec, name, color, Some(i));
         log.push(format!("duplicate T{} -> T{}", i, n));
     } else if n > 2 {
-        scene.transforms.remove(i);
-        scene.transform_names.remove(i);
-        scene.colors.remove(i);
+        scene.remove_transform(i);
         log.push(format!("delete T{}", i));
     } else {
         // Fallback when structural ops aren't allowed: small translate
