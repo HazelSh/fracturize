@@ -6519,6 +6519,10 @@ impl App {
     /// sparkline, and which told the window switcher nothing at all about what
     /// you had open. The FPS line still goes to `RUST_LOG` once a second.
     ///
+    /// A build from any branch but main appends `[branch]`
+    /// (`version::feature_branch`), so a worktree's build open beside main's
+    /// can be told apart from the taskbar.
+    ///
     /// Recomputed every frame but only *set* when it changes: `set_title` is a
     /// round trip to the window manager, and the string is stable for minutes
     /// at a time.
@@ -6537,9 +6541,10 @@ impl App {
             })
             .unwrap_or_else(|| format!("{} (unsaved)", self.scene.name));
         let title = format!(
-            "{}{} — Fracturize",
+            "{}{} — Fracturize{}",
             if self.is_dirty() { "*" } else { "" },
             doc,
+            crate::version::feature_branch().map(|b| format!(" [{b}]")).unwrap_or_default(),
         );
         if self.window_title != title {
             self.window.set_title(&title);
