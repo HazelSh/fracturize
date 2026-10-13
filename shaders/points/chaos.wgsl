@@ -112,8 +112,9 @@ struct ComputeParams {
     // src/subscene.rs): how many layers, and whether the scene composes them.
     num_layers: u32,
     composite: u32,
-    // `--isolate`: 0 is off; k + 1 keeps only points whose last map was slot k.
-    // The rest go to ISOLATE_DROPPED, which every point shader clips.
+    // `--isolate`: 0 is off; k + 1 keeps only points whose last map was slot k,
+    // and a non-zero high half (m + 1) << 16 only those whose map before that
+    // was slot m. The rest go to ISOLATE_DROPPED, which every point shader clips.
     isolate: u32,
     zoom_fixed: vec4<f32>,      // xyz = fixed point, w = target radius
     zoom_axis_angle: vec4<f32>, // xyz = rotation axis of A, w = its angle
@@ -807,6 +808,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // row of the map applied last. A `last` outside this layer (stale
         // after an edit re-dealt the walkers) is no history at all.
         let r = rand_float(&rng);
+        let prev_map = last;
         var transform_idx: u32;
         if layer.xaos != 0u && last >= layer.t_start && last < layer.t_start + layer.t_count
             && transforms[last].xaos_start != XAOS_NO_ROW {
@@ -923,8 +925,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // and therefore every point that is kept — is exactly the full
         // picture's. Under symmetry `transform_idx` is the motif, so a motif's
         // tile holds its whole orbit.
-        if params.isolate != 0u && transform_idx + 1u != params.isolate {
-            out_pos = vec3<f32>(ISOLATE_DROPPED, 0.0, 0.0);
+        // The high half, when set, also asks for the map before: one xaos
+        // edge's own points (`Isolate` in compute.rs).
+        if params.isolate != 0u {
+            let want = params.isolate & 0xFFFFu;
+            let after = params.isolate >> 16u;
+            if transform_idx + 1u != want || (after != 0u && prev_map + 1u != after) {
+                out_pos = vec3<f32>(ISOLATE_DROPPED, 0.0, 0.0);
+            }
         }
         points[output_idx] = Point(out_pos, word);
         // Behind the flag because the buffer bound here is a sixteen-byte

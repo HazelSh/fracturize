@@ -574,6 +574,34 @@ pub fn dimension_cached(maps: &[TransformSpec], weights: Option<&[f32]>) -> Opti
     d
 }
 
+/// Each of a layer's maps as scene indices, and the layer's chain — `None`
+/// when the layer has no xaos (its weights already say everything) or nothing
+/// to walk.
+pub fn layer_chain(scene: &crate::scene::Scene, k: usize) -> Option<(Vec<usize>, Chain)> {
+    let idx: Vec<usize> =
+        (0..scene.transforms.len()).filter(|&i| scene.transforms[i].layer as usize == k).collect();
+    let maps: Vec<TransformSpec> = idx.iter().map(|&i| scene.transforms[i].clone()).collect();
+    if !layer_has_xaos(&maps) {
+        return None;
+    }
+    Chain::build(&maps, &[]).map(|c| (idx, c))
+}
+
+/// Per scene transform, its share of its own layer's walk under xaos — the
+/// chain's stationary distribution — or `None` in a layer without xaos, where
+/// the weights already say it.
+pub fn scene_walk_shares(scene: &crate::scene::Scene) -> Vec<Option<f64>> {
+    let mut out = vec![None; scene.transforms.len()];
+    for k in 0..scene.layer_count() {
+        if let Some((idx, chain)) = layer_chain(scene, k) {
+            for (n, share) in chain.shares().into_iter().enumerate() {
+                out[idx[n]] = Some(share);
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // The sampling table: built once, read by the GPU and the CPU walkers.
 // ---------------------------------------------------------------------------

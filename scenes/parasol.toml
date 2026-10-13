@@ -1,0 +1,72 @@
+# Parasol — xaos as a structural edit. Two cut edges, nothing else.
+#
+# The maps are a 5-fold petal, a spine up the axis and a relic at the heart:
+# three transforms, seven maps in the attractor. Without xaos the relic is
+# carried into every petal (it is a map like any other, so every copy of the
+# whole holds a copy of it) and the canopy is a pink-and-blue blur. Two edges
+# fix that, and they are the whole point of the file:
+#
+#   petal -/-> relic   no relic straight after a petal, so no petal ever holds
+#                      a relic. The heart stays the only place it appears.
+#   spine -/-> petal   no petal straight after the spine, which removes every
+#                      petal sub-copy hung from the spine's frame — the lace
+#                      under the canopy goes, and the petals arch into domes.
+#
+# Weights did none of this and could not: a cut removes material (only zeros
+# change the shape, XAOS-PLAN.md §1), a weight only moves density.
+#
+# Look at it:
+#   fracturize -s scenes/parasol.toml --splat
+#   fracturize -s scenes/parasol.toml --info         # the xaos section
+#   fracturize -s scenes/parasol.toml --splat -r renders/parasol-sweep.png \
+#     --sweep transform.spine.xaos.petal=1,0.3,0.1,0 --effort small
+#
+# That sweep is the edge being cut by degrees, and it shows fact 1 plainly:
+# at 1, 0.3 and 0.1 the silhouette is the same and only the lace hanging
+# under the canopy thins. At 0 the lace is gone and the petals arch into
+# domes. A small multiplier is still a non-zero one.
+
+[meta]
+name = "Parasol"
+author = "Claude Opus 5.5"
+point_size = 0.0012
+color_speed = 0.45
+haze = 0.22
+exposure = 1.2
+background = [0.010, 0.010, 0.020]
+
+[camera]
+focus = [0.0, 0.4, 0.0]
+distance = 2.5
+yaw = 0.0
+pitch = 0.62
+
+[[symmetry]]
+group = "Cyc5"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["petal"]
+
+[[transform]]
+name = "petal"
+translation = [0.0, 0.18, 0.62]
+scale = [0.36, 0.42, 0.5]
+rotation = [20.0, 12.0, 0.0]
+color = [1.0, 0.62, 0.25]
+xaos = { relic = 0 }
+
+[[transform]]
+name = "spine"
+translation = [0.0, 0.55, 0.0]
+scale = [0.16, 0.5, 0.16]
+rotation = [0.0, 36.0, 0.0]
+color = [0.35, 0.75, 1.0]
+weight = 0.4
+xaos = { petal = 0 }
+
+[[transform]]
+name = "relic"
+translation = [0.0, -0.1, 0.0]
+scale = 0.45
+rotation = [0.0, 50.0, 18.0]
+color = [0.95, 0.3, 0.6]
+weight = 0.5

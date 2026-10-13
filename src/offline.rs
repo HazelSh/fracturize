@@ -225,7 +225,7 @@ pub struct OfflineParams<'a> {
     /// share of the picture, exactly. A scene transform index. The walk is
     /// unchanged, so what is kept is pixel for pixel what the full render has
     /// there. See `PointCompute::set_isolate`.
-    pub isolate: Option<usize>,
+    pub isolate: Option<crate::gpu::points::compute::Isolate>,
     /// Target samples per **output** pixel, accumulated into a persistent
     /// histogram. `None` is the ring-buffer render this program has always
     /// done, where the sample count is the buffer's capacity and nothing more.
@@ -551,7 +551,7 @@ fn fill_points(
     control: Option<&JobControl>,
     gpu_timing: bool,
     chaos_seed: u64,
-    isolate: Option<usize>,
+    isolate: Option<crate::gpu::points::compute::Isolate>,
 ) -> Result<(PointCompute, u32, Outcome), String> {
     let mut compute = PointCompute::new(
         device,
@@ -561,7 +561,7 @@ fn fill_points(
     );
     compute.zoom = scene_zoom(scene)?;
     // Before the first dispatch, so no point in the ring predates it.
-    compute.set_isolate(isolate.map(|i| i as u32));
+    compute.set_isolate(isolate);
     let total_frames = compute.warmup_frames + accumulate.max(1);
     log::info!(
         "Filling {} point buffer: {} warmup + {} accumulation frames",
@@ -984,7 +984,7 @@ impl TileRenderer {
 
 /// `--isolate` keeps the maps a scene has, and a mutation sheet's variants may
 /// not have the same ones.
-fn reject_isolate(isolate: Option<usize>, what: &str, fix: &str) -> Result<(), String> {
+fn reject_isolate(isolate: Option<crate::gpu::points::compute::Isolate>, what: &str, fix: &str) -> Result<(), String> {
     if isolate.is_some() {
         return Err(format!("--isolate names a map of the scene, and {} changes its maps. {}", what, fix));
     }
@@ -2412,7 +2412,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
         crate::gpu::points::compute::resume_seed(chaos_seed, prior_laps),
     );
     compute.zoom = scene_zoom(&scene)?;
-    compute.set_isolate(isolate.map(|i| i as u32));
+    compute.set_isolate(isolate);
     let capacity = compute.buffer_capacity;
 
     // Laps to reach the target. `--spp` counts against *output* pixels, so
@@ -3598,7 +3598,7 @@ pub fn render_sweep(
     build: &dyn Fn(&[String]) -> Result<Scene, String>,
     // The map each tile isolates, by tile; a tile without one isolates
     // whatever `--isolate` asked for, if anything. This is what `--map-grid` is.
-    tile_isolate: &[Option<usize>],
+    tile_isolate: &[Option<crate::gpu::points::compute::Isolate>],
 ) -> Result<Outcome, String> {
     print_start("sweep sheet", params.width, params.height, params.out_path);
     let OfflineParams {
@@ -3640,7 +3640,7 @@ pub fn render_sweep(
         gpu_share: _,
     } = params;
     reject_spp(spp, "a sweep sheet", "Set the sheet's density with --points instead.")?;
-    let kept: Vec<Option<usize>> =
+    let kept: Vec<Option<crate::gpu::points::compute::Isolate>> =
         (0..tiles.len()).map(|i| tile_isolate.get(i).copied().flatten().or(isolate)).collect();
     reject_grade_out(grade_out, "a sweep sheet", "Render the tile you want on its own.")?;
     reject_checkpoint(checkpoint_out, resume_from, "a sweep sheet", "Render the tile you want on its own.")?;

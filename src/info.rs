@@ -555,6 +555,10 @@ fn build(subject: &Subject) -> Report {
     if scene.transforms.iter().any(|t| t.symmetry.is_some()) {
         sections.push(symmetry_section(subject, &mut notes));
     }
+    // Likewise only where a row is authored, so no golden file moves.
+    if crate::xaos::layer_has_xaos(&scene.transforms) {
+        sections.push(xaos_section(subject, &mut notes));
+    }
     sections.push(render_section(scene));
     sections.push(colour_section(subject, &resolved, &mut notes));
     sections.push(camera_section(subject, &effective, layered, &mut notes));
@@ -628,14 +632,38 @@ fn notes_section(notes: &Notes) -> Section {
 /// command that exists to answer it.
 fn set_section(subject: &Subject) -> Section {
     let mut s = Section::new("set");
-    s.text(format!(
-        "{} override{} applied to {}",
-        subject.set.len(),
-        if subject.set.len() == 1 { "" } else { "s" },
-        subject.source
-    ));
-    let vw = subject.set.iter().map(|a| a.to.chars().count()).max().unwrap_or(0);
+    for line in wrap(
+        "",
+        0,
+        &format!(
+            "{} override{} applied to {}",
+            subject.set.len(),
+            if subject.set.len() == 1 { "" } else { "s" },
+            subject.source
+        ),
+    ) {
+        s.text(line);
+    }
+    // A value that is a whole table (an xaos row, a palette's stops) is far
+    // wider than a column, so those overrides take a block of their own rows
+    // instead of breaking the margin for every override beside them.
+    let long = |a: &crate::set::Applied| {
+        a.path.chars().count() > 36
+            || a.to.chars().count() > 20
+            || a.from.as_deref().is_some_and(|f| f.chars().count() > 20)
+    };
+    let vw = subject.set.iter().filter(|a| !long(a)).map(|a| a.to.chars().count()).max().unwrap_or(0);
     for a in subject.set {
+        if long(a) {
+            s.text(a.path.clone());
+            for line in wrap("    to   ", 9, &a.to) {
+                s.text(line);
+            }
+            for line in wrap("    was  ", 9, a.from.as_deref().unwrap_or("(unset)")) {
+                s.text(line);
+            }
+            continue;
+        }
         s.cells(vec![
             Cell::new(&a.path, format!("{:>vw$}", a.to)),
             Cell::new("was", a.from.as_deref().unwrap_or("(unset)")),
@@ -1244,6 +1272,8 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
         scene.transforms.iter().filter(|t| t.layer == k).map(|t| t.weight).sum()
     };
     let composite = scene.is_composite();
+    // Under xaos a map's share of the walk is the chain's, not its weight's.
+    let walk = crate::xaos::scene_walk_shares(scene);
 
     s.text(format!(
         "{}   share of the walk, contraction, colour as rendered",
@@ -1280,7 +1310,11 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
         let (_, rot, trans) = t.matrix.to_scale_rotation_translation();
         let (rx, ry, rz) = rot.to_euler(glam::EulerRot::XYZ);
         let total = layer_total(t.layer);
-        let share = if total > 0.0 { t.weight / total * 100.0 } else { 0.0 };
+        let share = match &walk[i] {
+            Some(w) => *w as f32 * 100.0,
+            None if total > 0.0 => t.weight / total * 100.0,
+            None => 0.0,
+        };
         let c = contraction_of(t);
 
         // The colour a map actually renders as, which is the thing you cannot
@@ -1483,8 +1517,14 @@ fn symmetry_section(subject: &Subject, notes: &mut Notes) -> Section {
     } else if loose.is_empty() {
         s.text("defect    none authored — the repeat's taper carries the variance");
     } else {
-        let share: f32 = loose.iter().map(|i| scene.transforms[*i].weight).sum();
-        let share = if total > 0.0 { share / total * 100.0 } else { 0.0 };
+        let walk = crate::xaos::scene_walk_shares(scene);
+        let share: f32 = match walk.iter().all(Option::is_some) {
+            true => loose.iter().map(|i| walk[*i].unwrap_or(0.0) as f32).sum::<f32>() * 100.0,
+            false => {
+                let w: f32 = loose.iter().map(|i| scene.transforms[*i].weight).sum();
+                if total > 0.0 { w / total * 100.0 } else { 0.0 }
+            }
+        };
         s.text(format!(
             "defect    {}, {} map{} outside the group, {} of the walk",
             loose.iter().map(|i| names[*i].clone()).collect::<Vec<_>>().join(", "),
@@ -1498,6 +1538,241 @@ fn symmetry_section(subject: &Subject, notes: &mut Notes) -> Section {
     s.text("`maps` above, and on the GPU. `effective` is what the attractor is");
     s.text("made of: sum over motifs of |G|, which is what `dimension` counts");
     s
+}
+
+/// The grids are drawn for layers up to this size; past it the per-map rows
+/// carry the graph, and `-S`/the GUI's matrix are the way to see it whole.
+const XAOS_GRID_MAX: usize = 12;
+
+/// Which map may follow which. Only for scenes that author a row.
+///
+/// Per map: its weight's share against its share of the walk — the gap is the
+/// "why is this map invisible" signal (XAOS-PLAN.md §1, fact 2) — and how many
+/// maps it may follow and be followed by. Then, for a small layer, the whole
+/// graph twice: the multipliers as written, and what they come to as
+/// probabilities. A grid is twelve lines an agent can read the whole graph in.
+fn xaos_section(subject: &Subject, notes: &mut Notes) -> Section {
+    let scene = subject.scene;
+    let mut s = Section::new("xaos");
+    let names: Vec<String> = (0..scene.transforms.len()).map(|i| name_of(scene, i)).collect();
+
+    let authored = scene.transforms.iter().filter(|t| !t.xaos.is_default()).count();
+    let form = if scene.xaos_matrix_layers.is_empty() { "rows" } else { "a matrix" };
+    s.text(format!(
+        "{}   map{} carry a row, written as {}",
+        authored,
+        if authored == 1 { "" } else { "s" },
+        form
+    ));
+
+    for k in 0..scene.layer_count() {
+        let idx: Vec<usize> =
+            (0..scene.transforms.len()).filter(|&i| scene.transforms[i].layer as usize == k).collect();
+        let maps: Vec<TransformSpec> = idx.iter().map(|&i| scene.transforms[i].clone()).collect();
+        if !crate::xaos::layer_has_xaos(&maps) {
+            continue;
+        }
+        let Some(chain) = crate::xaos::Chain::build(&maps, &[]) else { continue };
+        let n = maps.len();
+        let lname = |j: usize| names[idx[j]].clone();
+        if scene.is_composite() {
+            s.text(format!("-- {}", scene.layer_name(k)));
+        }
+        let (shares, settled) = chain.shares_and_settled();
+        let cuts: usize = (0..n).map(|i| (0..n).filter(|&j| chain.start[j] > 0.0 && !chain.allowed(i, j)).count()).sum();
+        let contractions: Vec<Vec<f32>> = maps.iter().map(crate::scene::copy_contractions).collect();
+        let d = chain.dimension(&contractions);
+        let mut plain = maps.clone();
+        plain.iter_mut().for_each(|t| t.xaos = Default::default());
+        let d_plain = crate::scene::similarity_dimension(&plain);
+        s.text(format!(
+            "edges     {} cut of {}, {} dead end{}",
+            cuts,
+            n * n,
+            chain.dead.len(),
+            if chain.dead.len() == 1 { "" } else { "s" }
+        ));
+        s.text(format!(
+            "dimension {}   without the cuts {}   (graph-directed)",
+            d.map_or("n/a".into(), |d| format!("{d:.2}")),
+            d_plain.map_or("n/a".into(), |d| format!("{d:.2}")),
+        ));
+        s.text(format!(
+            "walk      {}",
+            if settled { "settled" } else { "did not settle in 20000 steps — the chain mixes slowly" }
+        ));
+        if !settled {
+            notes.add(
+                "xaos",
+                format!(
+                    "{}'s chain mixes slowly, so walk shares are approximate and a short \
+                     render shows its starting distribution. Raise a weak edge",
+                    scene.layer_name(k)
+                ),
+            );
+        }
+
+        let nw = (0..n).map(|j| lname(j).chars().count()).max().unwrap_or(6).clamp(6, 14);
+        for j in 0..n {
+            let ins = (0..n).filter(|&i| shares[i] > 1e-7 && chain.allowed(i, j)).count();
+            let live_n = (0..n).filter(|&i| shares[i] > 1e-7).count();
+            let outs = (0..n).filter(|&m| chain.allowed(j, m)).count();
+            s.text(format!(
+                "{:<4} {:<nw$} weight {}   walk {}   from {:>2}/{:<2} to {:>2}/{:<2}",
+                format!("[{}]", idx[j]),
+                lname(j),
+                percent(chain.start[j] as f32 * 100.0),
+                percent(shares[j] as f32 * 100.0),
+                ins,
+                live_n,
+                outs,
+                n,
+                nw = nw
+            ));
+        }
+
+        // Judgements, each with the flag that fixes it.
+        for &i in &chain.dead {
+            notes.add(
+                "xaos",
+                format!(
+                    "{} is a dead end: its row leaves nowhere to go, so the walk restarts \
+                     from the plain weights after it. -S transform.{}.xaos.*=1 reopens it",
+                    lname(i),
+                    lname(i)
+                ),
+            );
+        }
+        let live: Vec<usize> = (0..n).filter(|&i| shares[i] > 1e-7).collect();
+        let drained: Vec<usize> = (0..n).filter(|&j| chain.start[j] > 0.0 && shares[j] <= 1e-7).collect();
+        if !drained.is_empty() {
+            let reconnect = drained.iter().find_map(|&j| {
+                live.iter().find(|&&i| !chain.allowed(i, j)).map(|&i| (i, j))
+            });
+            notes.add(
+                "xaos",
+                format!(
+                    "after burn-in only {} fire; {} {} drained and draw nothing{}",
+                    live.iter().map(|&i| lname(i)).collect::<Vec<_>>().join(", "),
+                    drained.iter().map(|&i| lname(i)).collect::<Vec<_>>().join(", "),
+                    if drained.len() == 1 { "is" } else { "are" },
+                    match reconnect {
+                        Some((i, j)) => format!(". -S transform.{}.xaos.{}=1 reconnects", lname(i), lname(j)),
+                        None => String::new(),
+                    }
+                ),
+            );
+        }
+        // Several closed classes are several attractors sharing walkers, each
+        // getting however many fresh walkers happen to fall into it — the job
+        // subscenes do with exact shares. Worth saying, not refusing: it is
+        // what blocks:N is for. Quadratic, so only for layers a person reads.
+        if n <= 2000 {
+            let classes = closed_classes(&chain, &live);
+            if classes.len() > 1 {
+                notes.add(
+                    "xaos",
+                    format!(
+                        "{} splits into {} closed groups that never meet ({}): separate                          attractors, dealt walkers by chance rather than by share",
+                        scene.layer_name(k),
+                        classes.len(),
+                        classes
+                            .iter()
+                            .map(|c| c.iter().map(|&i| lname(i)).collect::<Vec<_>>().join(" "))
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ),
+                );
+            }
+        }
+        for &j in &live {
+            let walk = shares[j] * 100.0;
+            if walk < 2.0 && chain.start[j] * 100.0 >= 2.0 * walk.max(0.5) {
+                notes.add(
+                    "xaos",
+                    format!(
+                        "{} draws {:.1}% of the walk though its weight asks {:.1}% — \
+                         the chain starves it",
+                        lname(j),
+                        walk,
+                        chain.start[j] * 100.0
+                    ),
+                );
+            }
+        }
+
+        if n <= XAOS_GRID_MAX {
+            let head: String = (0..n).map(|j| format!("{:>5}", format!("[{}]", idx[j]))).collect();
+            s.text(format!("x  to {head}"));
+            for i in 0..n {
+                let row: String = (0..n)
+                    .map(|j| {
+                        let v = maps[i].xaos.get(j);
+                        format!("{:>5}", if v == 1.0 { "·".to_string() } else { cell(v) })
+                    })
+                    .collect();
+                s.text(format!("{:<6}{row}", format!("[{}]", idx[i])));
+            }
+            s.text(format!("P% to {head}"));
+            for i in 0..n {
+                let row: String = (0..n)
+                    .map(|j| {
+                        let p = chain.prob(i, j) * 100.0;
+                        format!("{:>5}", if p == 0.0 { "-".to_string() } else { format!("{p:.0}") })
+                    })
+                    .collect();
+                s.text(format!("{:<6}{row}", format!("[{}]", idx[i])));
+            }
+        }
+    }
+    s.text("rows are from, columns to. x is the multiplier as written (· is 1,");
+    s.text("0 a cut); P% the chance each map follows the row's map. Only zeros");
+    s.text("change the shape — a non-zero multiplier only moves density. Set an");
+    s.text("edge with -S transform.<from>.xaos.<to>=x, or xaos_p.<to>=p");
+    s
+}
+
+/// The chain's closed communicating classes among the maps it visits in the
+/// long run: those are exactly the live maps, and two of them are in one class
+/// when each can reach the other.
+fn closed_classes(chain: &crate::xaos::Chain, live: &[usize]) -> Vec<Vec<usize>> {
+    let reach = |from: usize| -> Vec<bool> {
+        let mut seen = vec![false; chain.len()];
+        let mut stack = vec![from];
+        seen[from] = true;
+        while let Some(i) = stack.pop() {
+            for &j in live {
+                if !seen[j] && chain.allowed(i, j) {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        seen
+    };
+    let mut classes: Vec<Vec<usize>> = Vec::new();
+    let mut placed = vec![false; chain.len()];
+    for &i in live {
+        if placed[i] {
+            continue;
+        }
+        let from_i = reach(i);
+        let class: Vec<usize> = live.iter().copied().filter(|&j| from_i[j] && reach(j)[i]).collect();
+        class.iter().for_each(|&j| placed[j] = true);
+        classes.push(class);
+    }
+    classes
+}
+
+/// A multiplier in a grid cell: at most four characters.
+fn cell(v: f32) -> String {
+    match v {
+        0.0 => "0".into(),
+        v if v >= 100.0 => format!("{v:.0}"),
+        v if v >= 10.0 => format!("{v:.1}"),
+        v if v >= 1.0 => format!("{v:.2}").trim_end_matches('0').trim_end_matches('.').to_string(),
+        v => format!("{v:.2}").trim_start_matches('0').to_string(),
+    }
 }
 
 fn render_section(scene: &Scene) -> Section {

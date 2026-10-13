@@ -146,16 +146,29 @@ struct Args {
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
     solo: Option<String>,
 
-    /// Draw only the points one map placed, and nothing else [every map]
+    /// Draw only the points one map (or edge, `a>b`) placed [every map]
     ///
     /// A map by name or index. A point belongs to the map that moved it last,
     /// so this is that map's part of the picture, exactly: the same pixels the
     /// full render has there, with every other map's removed and the
     /// background left bare. The maps' parts add up to the whole picture.
     /// Under symmetry a motif's part includes its whole orbit. Works on any
-    /// render: stills, sheets, animations.
+    /// render: stills, sheets, animations. `from>to` (quote it for the shell)
+    /// keeps only the points `to` placed straight after `from`: one xaos
+    /// edge's own material.
     #[arg(long, value_name = "NAME|INDEX", help_heading = "Scene")]
     isolate: Option<String>,
+
+    /// Rewrite every map's xaos row from a preset, before any -S [the file's]
+    ///
+    /// One of no-self-loops, cycle (each map hands on to the next, in list
+    /// order), blocks:N (N groups in list order, closed to each other) or
+    /// reset. It writes rows, exactly as `-S transform.<m>.xaos={...}` would
+    /// for each map, so a -S given alongside edits the preset's rows rather
+    /// than being overwritten by them. The rows are printed, to paste into
+    /// the scene if they're keepers.
+    #[arg(long, value_name = "PRESET", requires = "scene", help_heading = "Scene")]
+    xaos: Option<String>,
 
     /// Start from a randomly generated flame instead of a scene file
     ///
@@ -859,6 +872,16 @@ struct Args {
     #[arg(long, help_heading = "Contact sheets")]
     map_grid: bool,
 
+    /// One tile per xaos edge: what each map places straight after another
+    ///
+    /// Rows are the map that ran first, columns the map that ran next; each
+    /// tile shows only the points the column's map placed straight after the
+    /// row's — that edge's own material, and the first thing cutting it
+    /// removes. A cut edge is an empty tile. Up to 6 maps; for one edge,
+    /// --isolate 'from>to'. Works on any scene, xaos or not.
+    #[arg(long, help_heading = "Contact sheets")]
+    edge_grid: bool,
+
     /// Sheet of views nudged across the view plane, e.g. 3x3 [one view]
     ///
     /// Left/right (columns) and up/down (rows), all still looking at the
@@ -1385,15 +1408,116 @@ fn run_map_grid(
             }
         })
         .collect();
-    let lit: Vec<Option<usize>> = (0..n).map(Some).collect();
+    let lit: Vec<Option<gpu::points::compute::Isolate>> = (0..n).map(|i| Some(i.into())).collect();
     let (cols, rows) = offline::grid_shape(n);
     let build = sheet_scene_builder(args, scene_path, effort_points);
     offline::render_sweep(params, &tiles, cols, rows, &build, &lit)
 }
 
+/// `--isolate`'s argument: a map, or `a>b` for one xaos edge — the points `b`
+/// placed straight after `a`. Both ends in one layer, because a walker never
+/// crosses between layers.
+fn parse_isolate(reference: &str, scene: &Scene) -> Result<gpu::points::compute::Isolate, String> {
+    let names = &scene.transform_names;
+    match reference.split_once('>') {
+        None => Ok(scene::resolve_transform_ref(reference, names)?.into()),
+        Some((from, to)) => {
+            let after = scene::resolve_transform_ref(from, names)?;
+            let map = scene::resolve_transform_ref(to, names)?;
+            if scene.transforms[after].layer != scene.transforms[map].layer {
+                return Err(format!(
+                    "'{from}' and '{to}' are in different layers, and a walker never                      crosses from one layer's maps to another's — that edge has no points"
+                ));
+            }
+            Ok(gpu::points::compute::Isolate { map, after: Some(after) })
+        }
+    }
+}
+
+/// The share of the points an xaos edge `from>to` places: `from`'s share times
+/// the chance `to` follows it.
+fn edge_share(scene: &Scene, from: usize, to: usize) -> f32 {
+    let k = scene.transforms[from].layer as usize;
+    let p = match xaos::layer_chain(scene, k) {
+        Some((idx, chain)) => {
+            let (Some(i), Some(j)) =
+                (idx.iter().position(|&x| x == from), idx.iter().position(|&x| x == to))
+            else {
+                return 0.0;
+            };
+            chain.prob(i, j) as f32
+        }
+        None => {
+            let total: f32 =
+                scene.transforms.iter().filter(|t| t.layer as usize == k).map(|t| t.weight.max(0.0)).sum();
+            if total > 0.0 { scene.transforms[to].weight.max(0.0) / total } else { 0.0 }
+        }
+    };
+    map_shares(scene)[from] * p
+}
+
+/// `--edge-grid`: one tile per xaos edge, `from` down the rows and `to` across
+/// the columns, each showing only the points `to` placed straight after `from`
+/// — so a cut edge is an empty tile, and the tile of an edge you are thinking
+/// of cutting is the material that goes first.
+fn run_edge_grid(
+    params: offline::OfflineParams,
+    args: &Args,
+    grid: offline::GridMode,
+    effort_points: Option<usize>,
+) -> Result<render_job::Outcome, String> {
+    if !matches!(grid, offline::GridMode::Single) || args.mutations.is_some() || !args.sweep.is_empty() || args.map_grid {
+        eprintln!("--edge-grid is a sheet of its own: it cannot be combined with --orbit-grid, \
+                   --move-grid, --map-grid, --mutations or --sweep");
+        std::process::exit(1);
+    }
+    if args.isolate.is_some() {
+        eprintln!("--edge-grid isolates every edge in turn, so --isolate has nothing to add. Drop one.");
+        std::process::exit(1);
+    }
+    let Some(scene_path) = args.scene.clone() else {
+        eprintln!("--edge-grid needs --scene");
+        std::process::exit(1);
+    };
+    // One layer's edges: the one --solo names, else the scene's own.
+    let scene = &params.scene;
+    let k = (0..scene.layer_count()).find(|&k| scene.layer_visible(k) && scene.layer_sizes()[k] > 0).unwrap_or(0);
+    let idx: Vec<usize> = (0..scene.transforms.len()).filter(|&i| scene.transforms[i].layer as usize == k).collect();
+    let n = idx.len();
+    if n == 0 || n > 6 {
+        eprintln!(
+            "--edge-grid draws a tile per edge, n x n, up to 6 maps (36 tiles); this layer \
+             has {n}. Look at one edge with --isolate <from>><to>, or read --info's grid"
+        );
+        std::process::exit(1);
+    }
+    let name = |i: usize| scene.transform_names[i].clone().unwrap_or_else(|| i.to_string());
+    let mut tiles = Vec::new();
+    let mut lit = Vec::new();
+    for &from in &idx {
+        for &to in &idx {
+            let share = edge_share(scene, from, to);
+            let label = if share > 0.0 {
+                format!("{}>{} {:.1}%", name(from), name(to), share * 100.0)
+            } else {
+                format!("{}>{} cut", name(from), name(to))
+            };
+            tiles.push(sweep::Tile {
+                sets: Vec::new(),
+                label,
+                description: format!("--isolate '{}>{}'  ({:.1}% of the points)", name(from), name(to), share * 100.0),
+            });
+            lit.push(Some(gpu::points::compute::Isolate { map: to, after: Some(from) }));
+        }
+    }
+    let build = sheet_scene_builder(args, scene_path, effort_points);
+    offline::render_sweep(params, &tiles, n as u32, n as u32, &build, &lit)
+}
+
 /// Each map's share of the points: the chance it is the one drawn, which is
-/// its weight over its layer's, times the layer's share of the walkers in a
-/// composite. Exactly the fraction of the ring `--isolate` keeps.
+/// its weight over its layer's — or under xaos its share of the chain's walk —
+/// times the layer's share of the walkers in a composite. Exactly the
+/// fraction of the ring `--isolate` keeps.
 fn map_shares(scene: &Scene) -> Vec<f32> {
     let layers = scene.layer_count();
     let visible: f32 = (0..layers)
@@ -1419,6 +1543,22 @@ fn map_shares(scene: &Scene) -> Vec<f32> {
                 1.0
             };
             if total > 0.0 { t.weight.max(0.0) / total * layer } else { 0.0 }
+        })
+        .zip(xaos::scene_walk_shares(scene))
+        .zip(&scene.transforms)
+        .map(|((plain, walk), t)| match walk {
+            Some(w) => {
+                let k = t.layer as usize;
+                let layer = if layers > 1 && visible > 0.0 && scene.layer_visible(k) {
+                    scene.layer_share(k) / visible
+                } else if layers > 1 {
+                    0.0
+                } else {
+                    1.0
+                };
+                w as f32 * layer
+            }
+            None => plain,
         })
         .collect()
 }
@@ -1482,6 +1622,41 @@ fn load_scene_reporting(args: &Args) -> (Scene, Vec<set::Applied>, Option<u64>) 
         }
         None => (default_scene(), warn_set_cannot_apply(args), None),
     }
+}
+
+/// The whole-row `-S` edits a `--xaos` preset comes to on this scene file, and
+/// a printout of the rows on stderr (stdout may be an `--info` report).
+///
+/// Built from the loaded scene so the rows fit each layer's map count, and
+/// keyed by name where a name is unique. A subscene that borrows its maps
+/// from another file has no rows here to write, and is skipped with a word.
+fn xaos_preset_sets(path: &str, preset: &str) -> Result<Vec<String>, String> {
+    let preset = xaos::Preset::parse(preset)?;
+    let scene = Scene::load(path)?;
+    let mut sets = Vec::new();
+    eprintln!("xaos {} writes these rows:", preset.name());
+    for k in 0..scene.layer_count() {
+        let (maps, names, _) = scene.layer_maps(k);
+        if k > 0 && scene.subscenes[k - 1].file.is_some() {
+            eprintln!(
+                "  (subscene '{}' borrows its maps from a file, so it keeps its own rows)",
+                scene.layer_name(k)
+            );
+            continue;
+        }
+        let rows = preset.rows(maps.len());
+        for (pos, row) in rows.iter().enumerate() {
+            let table = scene::xaos_row_toml(row, &names);
+            let target = match k {
+                0 => format!("transform.{pos}"),
+                _ => format!("subscene.{}.transform.{pos}", k - 1),
+            };
+            let label = names[pos].clone().unwrap_or_else(|| format!("#{pos}"));
+            eprintln!("  {:<14} xaos = {}", label, table);
+            sets.push(format!("{target}.xaos={table}"));
+        }
+    }
+    Ok(sets)
 }
 
 /// `-S` patches a scene file's TOML text before it is parsed, so it has nothing
@@ -2348,7 +2523,18 @@ fn main() {
     env_logger::init();
 
     // Parse CLI args
-    let args = Args::parse();
+    let mut args = Args::parse();
+    // --xaos becomes whole-row -S edits ahead of the user's own, so every path
+    // that reads a scene file — render, sheets, --info, the window — gets it.
+    if let Some(preset) = args.xaos.clone() {
+        match xaos_preset_sets(args.scene.as_deref().unwrap_or_default(), &preset) {
+            Ok(sets) => args.set.splice(0..0, sets),
+            Err(e) => {
+                eprintln!("--xaos: {e}");
+                std::process::exit(2);
+            }
+        };
+    }
 
     // --palettes: show the library and stop. No scene, no device.
     if args.palettes {
@@ -2587,6 +2773,7 @@ fn main() {
             || args.mutations.is_some()
             || !args.sweep.is_empty()
             || args.map_grid
+            || args.edge_grid
             || crate::video::Format::from_path(std::path::Path::new(out)).is_some();
         let tier_accumulates = splat_render && !many_images;
         let accumulating = args.spp.is_some() || (args.effort.is_some() && tier_accumulates);
@@ -2678,17 +2865,26 @@ fn main() {
             .unwrap_or(1.0);
 
         let isolate = args.isolate.as_ref().map(|reference| {
-            let i = scene::resolve_transform_ref(reference, &scene.transform_names).unwrap_or_else(|e| {
+            let iso = parse_isolate(reference, &scene).unwrap_or_else(|e| {
                 eprintln!("--isolate: {}", e);
                 std::process::exit(1);
             });
-            println!(
-                "isolating map {} ({}): {:.1}% of the points",
-                i,
-                scene.transform_names[i].as_deref().unwrap_or("unnamed"),
-                map_shares(&scene)[i] * 100.0
-            );
-            i
+            let name = |i: usize| scene.transform_names[i].clone().unwrap_or_else(|| i.to_string());
+            match iso.after {
+                None => println!(
+                    "isolating map {} ({}): {:.1}% of the points",
+                    iso.map,
+                    scene.transform_names[iso.map].as_deref().unwrap_or("unnamed"),
+                    map_shares(&scene)[iso.map] * 100.0
+                ),
+                Some(a) => println!(
+                    "isolating edge {}>{}: {:.1}% of the points",
+                    name(a),
+                    name(iso.map),
+                    edge_share(&scene, a, iso.map) * 100.0
+                ),
+            }
+            iso
         });
         let params = offline::OfflineParams {
             // A terminal render owns the GPU; nothing else is on it.
@@ -2760,6 +2956,7 @@ fn main() {
                 || args.mutations.is_some()
                 || !args.sweep.is_empty()
                 || args.map_grid
+                || args.edge_grid
             {
                 eprintln!(
                     "animation (.{}) cannot be combined with grid, mutation or sweep sheets",
@@ -2791,6 +2988,7 @@ fn main() {
         } else {
             match (args.sweep.is_empty(), args.mutations) {
                 _ if args.map_grid => run_map_grid(params, &args, grid, effort_points),
+                _ if args.edge_grid => run_edge_grid(params, &args, grid, effort_points),
                 (false, _) => run_sweep(params, &args, grid, effort_points),
                 (true, Some(n)) => {
                     if !matches!(grid, offline::GridMode::Single) {

@@ -820,6 +820,17 @@ fn xaos_def(row: &crate::xaos::Xaos, names: &[Option<String>]) -> Option<BTreeMa
     Some(table)
 }
 
+/// A row as the inline table a file (or `-S ...xaos=`) would write: `{}` for
+/// the default row.
+pub fn xaos_row_toml(row: &crate::xaos::Xaos, names: &[Option<String>]) -> String {
+    let mut t = toml_edit::InlineTable::new();
+    for (k, v) in xaos_def(row, names).unwrap_or_default() {
+        t.insert(&k, v.into());
+    }
+    t.fmt();
+    t.to_string()
+}
+
 /// A layer's xaos as one `[xaos]` matrix, in the layer's own order. `None`
 /// when no row says anything.
 fn xaos_matrix_def(specs: &[TransformSpec], names: &[Option<String>]) -> Option<XaosMatrixDef> {

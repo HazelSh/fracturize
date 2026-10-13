@@ -284,6 +284,26 @@ impl LayerTable {
     }
 }
 
+/// What `--isolate` keeps: the points `map` placed (scene index) — and with
+/// `after`, only those it placed straight after that map, which is one xaos
+/// edge's own material: what that edge puts down at the top level, and the
+/// first thing cutting it removes.
+///
+/// Both ride in the one `isolate` word of the compute params, sixteen bits
+/// each, one up so zero means "any". A layer of more than 65,534 maps can't
+/// name its last ones; isolating one of those keeps nothing, which says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Isolate {
+    pub map: usize,
+    pub after: Option<usize>,
+}
+
+impl From<usize> for Isolate {
+    fn from(map: usize) -> Self {
+        Self { map, after: None }
+    }
+}
+
 /// Simple chaos game compute pipeline
 /// Writes points directly to a circular buffer
 pub struct PointCompute {
@@ -329,8 +349,8 @@ pub struct PointCompute {
     /// Which transform the emphasis is measuring, and `written_total` when it
     /// was chosen.
     emphasis: Option<(u32, u64)>,
-    /// `--isolate`: the scene transform whose points alone are drawn.
-    isolate: Option<u32>,
+    /// `--isolate`: the points alone that are drawn.
+    isolate: Option<Isolate>,
     /// Infinite-zoom renormalization applied to every emitted point, if the
     /// scene asked for one (see `renorm.rs`). Rebuilt on transform edits.
     pub zoom: Option<crate::renorm::Renorm>,
@@ -919,8 +939,13 @@ impl PointCompute {
             composite: u32::from(self.composite),
             // Chosen by scene index, like the emphasis; stored one up so that
             // zero can mean "off".
-            isolate: self.isolate.map_or(0, |t| {
-                self.gpu_order.iter().position(|&j| j == t as usize).map_or(u32::MAX, |k| k as u32 + 1)
+            isolate: self.isolate.map_or(0, |iso| {
+                // Low half: the map, one up. High half: the map that must have
+                // run just before it, one up, or 0 for any. See `Isolate`.
+                let gpu = |t: usize| {
+                    self.gpu_order.iter().position(|&j| j == t).map_or(0xFFFF, |k| (k as u32 + 1).min(0xFFFF))
+                };
+                gpu(iso.map) | iso.after.map_or(0, |a| gpu(a) << 16)
             }),
             emphasis_run_start: run_start,
             emphasis_run_len: run_len,
@@ -964,7 +989,7 @@ impl PointCompute {
     /// so the kept points are exactly the ones the full picture has — but at a
     /// position every point shader clips. Points already in the ring are not
     /// touched, so set this before filling it.
-    pub fn set_isolate(&mut self, target: Option<u32>) {
+    pub fn set_isolate(&mut self, target: Option<Isolate>) {
         self.isolate = target;
     }
 
