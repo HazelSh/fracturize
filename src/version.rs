@@ -26,6 +26,16 @@ pub const COMMIT: &str = env!("FRACTURIZE_COMMIT");
 /// same commit always stamps the same. Empty without git.
 pub const COMMIT_DATE: &str = env!("FRACTURIZE_COMMIT_DATE");
 
+/// The branch this was built on, or empty on a detached HEAD.
+pub const BRANCH: &str = env!("FRACTURIZE_BRANCH");
+
+/// The branch, when it isn't the one everything lands on: a build from an
+/// agent's worktree says so in its window title, so two copies of the app open
+/// side by side can be told apart. `None` on main, master or a detached HEAD.
+pub fn feature_branch() -> Option<&'static str> {
+    (!matches!(BRANCH, "" | "main" | "master")).then_some(BRANCH)
+}
+
 /// Everything at once, for people: `α-0.5 (15698f9, 2026-09-27)`.
 pub const BUILD: &str = env!("FRACTURIZE_BUILD");
 

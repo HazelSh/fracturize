@@ -3028,6 +3028,39 @@ commit that exists only in the desktop checkout is invisible to the laptop and
 to every other session, and it is the only copy. Pushing is what made today's
 apparent revert a non-event. Cheap, so take it — but it is sync, not release.
 
+### Worktrees, and handing a build to Hazel: `tryout`
+
+Agent work can go in a git worktree (`.claude/worktrees/<name>`, on its own
+branch), and that is now the better default whenever another session is in
+the main checkout. What made worktrees unworkable before was that Hazel had no
+way to *use* the result; `tryout` (`~/code/tryout`, on PATH) is that way.
+
+1. **First thing in a new worktree: `tryout prep`.** It clones main's
+   `target/` copy-on-write (btrfs), so the dependencies cost no disk and no
+   build time; only fracturize itself recompiles (~1m16s release). It also
+   copies main's `Cargo.lock`, which is gitignored — without it a worktree
+   resolves newer versions and rebuilds half the tree. Do it before your first
+   `cargo` command, or it throws that build away to replace it.
+2. **Never share a target dir between checkouts** (`CARGO_TARGET_DIR`, a
+   `target-dir`/`build-dir` setting). Cargo keys this workspace's own crate by
+   its path *relative to the workspace root*, which is the same in every
+   worktree, so one checkout gets another's binary while reporting "Fresh".
+   Measured, not theorised. `tryout prep` refuses to run if it sees one.
+3. **A GUI change isn't done until it's staged:** `tryout stage --notes FILE`
+   (or `-m`, repeatable). The notes are for Hazel, not for you: what changed,
+   what to try and on which scene, what is deliberately not done, anything
+   that will look wrong but isn't. Plain words, per the interface text style.
+   Then name the build (`fracturize/<branch>`) in your final report; she
+   launches it from `tryout` (the picker) whenever she likes.
+4. A staged build runs with **its worktree as cwd** (so `scenes/` and `views/`
+   are the branch's), against **a fresh copy of her prefs** each launch (so a
+   branch can't damage `~/.config/fracturize`), and with `[branch]` in the
+   window title.
+
+`tryout gc` drops builds of branches that are merged or gone; `tryout du` shows
+what worktree build dirs really cost (plain `du` counts shared blocks once per
+file and wildly overstates it).
+
 If a branch does exist, keep it a *superset* of `main` — merge `main` into it
 whenever `main` moves, so the merge back is a fast-forward and never conflicts.
 `git log --oneline <branch>..main | wc -l` returning zero means exactly that.
