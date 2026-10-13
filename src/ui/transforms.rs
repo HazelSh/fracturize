@@ -1124,6 +1124,9 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     block_heading(ui, "Behaviour");
     draw_weight(ui, app, idx);
     draw_variations(ui, app, idx);
+    // Which maps may follow this one: the other half of "how often", since
+    // under xaos the weight alone no longer says it.
+    super::xaos::draw_block(ui, app, idx);
 
     block_heading(ui, "Appearance");
     draw_appearance(ui, app, idx);

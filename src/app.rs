@@ -708,6 +708,26 @@ enum Drag {
     },
 }
 
+/// One layer's xaos chain, for the panels: see [`App::xaos_summary`].
+pub struct XaosSummary {
+    pub layer: usize,
+    /// The layer's maps as scene indices, in layer order — what the chain's
+    /// positions mean.
+    pub idx: Vec<usize>,
+    pub chain: crate::xaos::Chain,
+    /// Each map's share of the walk, by layer position.
+    pub shares: Vec<f64>,
+    /// Whether any row in the layer says anything.
+    pub has_xaos: bool,
+}
+
+impl XaosSummary {
+    /// Layer position of scene index `i`.
+    pub fn pos(&self, i: usize) -> Option<usize> {
+        self.idx.iter().position(|&x| x == i)
+    }
+}
+
 pub struct App {
     pub gpu: GpuContext,
     pub window: Arc<Window>,
@@ -1013,6 +1033,11 @@ pub struct App {
     /// by (transform_index, matrix_generation) so live typing/dragging in
     /// an inspector field isn't clobbered by a same-frame re-decompose.
     matrix_generation: u64,
+    /// One layer's xaos chain — walk shares, probabilities, dead ends — keyed
+    /// by a hash of what it was built from, so the Xaos block, the rail's
+    /// walk-share marks and the matrix window share one computation per edit
+    /// rather than one per frame per widget. See [`App::xaos_summary`].
+    xaos_cache: Option<(u64, std::rc::Rc<XaosSummary>)>,
 
     // Scene browser (B, Ctrl+O)
     pub show_browser: bool,
@@ -1403,6 +1428,7 @@ impl App {
             transform_enabled: vec![true; num_transforms],
             selected_variation: 0,
             matrix_generation: 0,
+            xaos_cache: None,
             // Reopened below once the app exists — the browser has a directory
             // scan behind it, so it can't just be a bool set here.
             show_browser: false,
@@ -5248,6 +5274,12 @@ impl App {
     /// `d` as an exact fixed point, so re-measuring re-anchors to the truth
     /// each frame instead of accumulating the drift a held target would.
     fn apply_dimension_lock(&mut self, edited_idx: usize, old_s: f32, new_s: f32) {
+        // Under xaos the dimension is a spectral radius over the transition
+        // graph, not `Σ sᵈ`, and no single factor on the other maps balances
+        // it. The status bar greys the lock and says so.
+        if crate::xaos::layer_has_xaos(&self.measured_maps().0) {
+            return;
+        }
         let Some(d) = crate::scene::similarity_dimension(&self.scene.transforms) else {
             return;
         };
@@ -5301,6 +5333,200 @@ impl App {
     }
 
     /// Rename a transform (inspector name field / list row's inline rename).
+    // === Xaos: which map may follow which (see crate::xaos) ===
+
+    /// The chain of `layer`'s maps, built once per change to its rows, weights
+    /// or enabled flags. Built for a layer without xaos too — its rows are the
+    /// plain weights — so the inspector can show probabilities before the
+    /// first edge is ever cut.
+    pub fn xaos_summary(&mut self, layer: usize) -> Option<std::rc::Rc<XaosSummary>> {
+        use std::hash::{Hash, Hasher};
+        let idx: Vec<usize> =
+            (0..self.scene.transforms.len()).filter(|&i| self.scene.transforms[i].layer as usize == layer).collect();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        layer.hash(&mut h);
+        for &i in &idx {
+            let t = &self.scene.transforms[i];
+            i.hash(&mut h);
+            t.weight.to_bits().hash(&mut h);
+            self.is_transform_enabled(i).hash(&mut h);
+            t.xaos.rest.to_bits().hash(&mut h);
+            for e in &t.xaos.exceptions {
+                (e.0, e.1.to_bits()).hash(&mut h);
+            }
+        }
+        let key = h.finish();
+        if let Some((k, s)) = &self.xaos_cache {
+            if *k == key {
+                return Some(s.clone());
+            }
+        }
+        let maps: Vec<TransformSpec> = idx.iter().map(|&i| self.scene.transforms[i].clone()).collect();
+        let enabled: Vec<bool> = idx.iter().map(|&i| self.is_transform_enabled(i)).collect();
+        let chain = crate::xaos::Chain::build(&maps, &enabled)?;
+        let shares = chain.shares();
+        let summary = std::rc::Rc::new(XaosSummary {
+            layer,
+            has_xaos: crate::xaos::layer_has_xaos(&maps),
+            idx,
+            chain,
+            shares,
+        });
+        self.xaos_cache = Some((key, summary.clone()));
+        Some(summary)
+    }
+
+    /// Run one xaos edit: snapshot, change the rows, re-upload, commit.
+    fn xaos_edit(&mut self, label: String, key: Option<String>, edit: impl FnOnce(&mut Scene)) {
+        let before = self.edit_snapshot();
+        edit(&mut self.scene);
+        self.sync_transforms_to_gpu();
+        self.commit_edit(label, key.as_deref(), before);
+    }
+
+    fn short_name(&self, i: usize) -> String {
+        self.scene.transform_names.get(i).cloned().flatten().unwrap_or_else(|| format!("T{i}"))
+    }
+
+    /// Set the multiplier from map `from` to map `to` (scene indices, one
+    /// layer). A drag lands as one undo step per edge.
+    pub fn set_xaos_edge(&mut self, from: usize, to: usize, v: f32) {
+        self.set_xaos_edges(&[(from, to, v)], None);
+    }
+
+    /// Several edges as one edit — the matrix's paint stroke and the
+    /// viewport knife. `label` names it in History; one edge names itself.
+    pub fn set_xaos_edges(&mut self, edges: &[(usize, usize, f32)], label: Option<String>) {
+        let n = self.scene.transforms.len();
+        let edges: Vec<(usize, usize, f32)> = edges
+            .iter()
+            .copied()
+            .filter(|&(f, t, _)| f < n && t < n && self.scene.transforms[f].layer == self.scene.transforms[t].layer)
+            .map(|(f, t, v)| (f, t, if v.is_finite() { v.max(0.0) } else { 1.0 }))
+            .collect();
+        let Some(&(f0, t0, v0)) = edges.first() else { return };
+        let (label, key) = match (label, edges.len()) {
+            (Some(l), _) => (l, None),
+            (None, _) => (
+                format!("Xaos {} → {} ×{}", self.short_name(f0), self.short_name(t0), crate::ui::num::fixed(v0, 2)),
+                Some(format!("xaos:T{f0}>T{t0}")),
+            ),
+        };
+        self.xaos_edit(label, key, |scene| {
+            for (f, t, v) in edges {
+                let pos = scene.layer_position(t);
+                scene.transforms[f].xaos.set(pos, v);
+            }
+        });
+    }
+
+    /// Set the multiplier for every target `from`'s row doesn't list.
+    pub fn set_xaos_rest(&mut self, from: usize, c: f32) {
+        if from >= self.scene.transforms.len() {
+            return;
+        }
+        let c = if c.is_finite() { c.max(0.0) } else { 1.0 };
+        let label = format!("Xaos {} → every other ×{}", self.short_name(from), crate::ui::num::fixed(c, 2));
+        self.xaos_edit(label, Some(format!("xaos:T{from}>*")), |scene| scene.transforms[from].xaos.set_rest(c));
+    }
+
+    /// Back to "any map may follow".
+    pub fn reset_xaos_row(&mut self, from: usize) {
+        if from >= self.scene.transforms.len() {
+            return;
+        }
+        let label = format!("Xaos {}: reset", self.short_name(from));
+        self.xaos_edit(label, None, |scene| scene.transforms[from].xaos = Default::default());
+    }
+
+    /// Make `to` follow `from` with probability `p`, holding the rest of the
+    /// row: solved for the multiplier exactly (`xaos::multiplier_for`). `p = 1`
+    /// is "only this exit". Does nothing when no multiplier can do it.
+    pub fn set_xaos_probability(&mut self, from: usize, to: usize, p: f32) {
+        let Some(sum) = self.xaos_summary(self.scene.transforms.get(from).map_or(0, |t| t.layer as usize)) else {
+            return;
+        };
+        let (Some(i), Some(j)) = (sum.idx.iter().position(|&x| x == from), sum.idx.iter().position(|&x| x == to)) else {
+            return;
+        };
+        let maps: Vec<TransformSpec> = sum.idx.iter().map(|&k| self.scene.transforms[k].clone()).collect();
+        match crate::xaos::multiplier_for(&maps, i, j, p as f64) {
+            Some(x) if x.is_infinite() => {
+                let label = format!("Xaos {}: only → {}", self.short_name(from), self.short_name(to));
+                self.xaos_edit(label, None, |scene| {
+                    let mut row = crate::xaos::Xaos::default();
+                    row.set_rest(0.0);
+                    row.set(j, 1.0);
+                    scene.transforms[from].xaos = row;
+                });
+            }
+            Some(x) => self.set_xaos_edge(from, to, x),
+            None => {}
+        }
+    }
+
+    /// Write a preset's rows over every map of `layer`.
+    pub fn apply_xaos_preset(&mut self, layer: usize, preset: crate::xaos::Preset) {
+        let label = format!("Xaos preset: {}", preset.name());
+        self.xaos_edit(label, None, |scene| {
+            let idx: Vec<usize> =
+                (0..scene.transforms.len()).filter(|&i| scene.transforms[i].layer as usize == layer).collect();
+            for (row, &i) in preset.rows(idx.len()).into_iter().zip(&idx) {
+                scene.transforms[i].xaos = row;
+            }
+        });
+    }
+
+    /// Apophysis 7X's linked transform: a new map that fires right after
+    /// `after` and only there. `after`'s row becomes "only → the new map", the
+    /// new map takes `after`'s old row (so the walk carries on as it would
+    /// have), and every other row cuts the new map. It starts as the identity,
+    /// so nothing moves until it is edited — it is a slot for a post-like
+    /// effect on one map, which is how flame artists used it before final
+    /// transforms existed.
+    pub fn insert_linked_transform(&mut self, after: usize) {
+        if after >= self.scene.transforms.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let layer = self.scene.transforms[after].layer;
+        let old_row = self.scene.transforms[after].xaos.clone();
+        let spec = TransformSpec {
+            layer,
+            matrix: Mat4::IDENTITY,
+            post_affine: Mat4::IDENTITY,
+            color_value: self.scene.transforms[after].color_value,
+            weight: 1.0,
+            color_speed: self.scene.color_speed,
+            explicit_color_speed: None,
+            variations: TransformSpec::linear_variations(),
+            symmetry: None,
+            xaos: old_row,
+        };
+        let name = Some(format!("{} link", self.short_name(after)));
+        let color = self.scene.colors.get(after).copied().unwrap_or(Vec3::ONE);
+        let at = self.scene.transforms.iter().rposition(|t| t.layer <= layer).map_or(0, |i| i + 1);
+        self.scene.insert_transform(at, spec, name, color, None);
+        self.transform_enabled.insert(at, true);
+        let after = if after >= at { after + 1 } else { after };
+        let pos = self.scene.layer_position(at);
+        for i in 0..self.scene.transforms.len() {
+            if self.scene.transforms[i].layer == layer && i != after {
+                self.scene.transforms[i].xaos.set(pos, 0.0);
+            }
+        }
+        let mut only = crate::xaos::Xaos::default();
+        only.set_rest(0.0);
+        only.set(pos, 1.0);
+        self.scene.transforms[after].xaos = only;
+        self.selected_transform = Some(at);
+        self.selected_subscene = None;
+        self.bump_matrix_generation();
+        self.scene.regenerate_colormap();
+        self.rebuild_pipelines();
+        self.commit_edit(format!("Linked map after {}", self.short_name(after)), None, before);
+    }
+
     pub fn rename_transform(&mut self, idx: usize, name: Option<String>) {
         if idx >= self.scene.transform_names.len() {
             return;

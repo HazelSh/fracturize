@@ -43,6 +43,7 @@ pub mod status_bar;
 pub mod subscenes;
 pub mod toolbar;
 pub mod transforms;
+pub mod xaos;
 
 /// Plain-data UI state living on `App` (not on `AppWrapper`/`EguiLayer` —
 /// those own the egui machinery itself).
@@ -104,6 +105,18 @@ pub struct UiState {
     /// list only via their explicit remove button. Reset when the selected
     /// transform changes.
     pub variation_rows: (usize, Vec<usize>),
+    /// The inspector's Xaos block: listing where this map goes (false) or
+    /// where it comes from (true). Apophysis 7X's to/from toggle.
+    pub xaos_from: bool,
+    /// The Xaos block's target filter, past a dozen maps.
+    pub xaos_filter: String,
+    /// The matrix window shows probabilities rather than multipliers.
+    pub xaos_show_p: bool,
+    /// A shift+drag paint stroke across the matrix: the value it paints, and
+    /// the cells it has already painted, committed as one edit on release.
+    pub xaos_paint: Option<(f32, Vec<(usize, usize)>)>,
+    /// The viewport's edge overlay (the toggle beside Gizmos).
+    pub xaos_overlay: bool,
     /// Which browser row the list has already scrolled into view. Scrolling
     /// to the selection on *every* frame makes the list impossible to scroll
     /// by hand — it snaps back the instant the selection leaves the viewport
@@ -173,6 +186,11 @@ impl UiState {
             pending_ui_scale: None,
             transform_menu: None,
             variation_rows: (usize::MAX, Vec::new()),
+            xaos_from: false,
+            xaos_filter: String::new(),
+            xaos_show_p: false,
+            xaos_paint: None,
+            xaos_overlay: false,
             browser_scrolled_to: None,
             browser_tree: Default::default(),
             browser_arrived: None,

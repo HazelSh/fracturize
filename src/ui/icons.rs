@@ -135,3 +135,12 @@ pub const UP: &str = "\u{E08E}";
 /// Scene browser: read the folder again — Phosphor `arrow-clockwise`, the
 /// mirror of [`RESET`] beside it.
 pub const REFRESH: &str = "\u{E036}";
+/// Xaos: cut an edge (Phosphor `scissors`). Located, like every icon added
+/// since, by reading the font's GSUB ligature table rather than guessing.
+pub const SCISSORS: &str = "\u{EAE0}";
+/// Xaos: the matrix window's toolbar toggle (Phosphor `graph`).
+pub const GRAPH: &str = "\u{EB58}";
+/// Xaos: insert a linked map (Phosphor `link`).
+pub const LINK: &str = "\u{E2E2}";
+/// Xaos: the viewport's edge overlay toggle (Phosphor `flow-arrow`).
+pub const FLOW_ARROW: &str = "\u{E6EC}";
