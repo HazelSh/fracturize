@@ -517,7 +517,7 @@ share of the ring replaced per frame. My hypothesis (fewer points, each heavier,
 re-rolled by the turnover) had the direction right and the cause wrong: weight per
 point is not what changed, the turnover rate was. The fix is
 `compute::interactive_workgroups`: the live window asks for fewer walkers at small
-sizes (1M: 5 workgroups of 256, 12M: 47, never above the 64 a render uses, and
+sizes (1M: 5 workgroups of 256, 12M: 59, never above the 64 a render uses, and
 only the window asks, since the walker count is part of the image). Flicker is
 now flat in point count (volume 0.099 / 0.065 / 0.070), and volume is at or below
 splat's. It is not volume-specific, so it also quietens points and splat at small
