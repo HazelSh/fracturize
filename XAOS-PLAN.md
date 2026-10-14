@@ -3,7 +3,8 @@
 *Status, 2026-10-14: phases 1–5 built (Claude Opus 5.5) — format, engine,
 CLI, `--info`, inspector block, rail mark, linked map, matrix window, viewport
 overlay — plus `--isolate a>b` / `--edge-grid`, which this plan didn't have.
-The §9 decisions were taken as recommended, pending Hazel's call. Phases 6
+The §9 decisions were taken as recommended, and Hazel confirmed them
+2026-10-14 (decisions 1–5; 6–8 untouched). Phases 6
 (random/mutation) and 7 (coupling) remain. AGENTS.md "Xaos" is the reference.*
 
 *Original status: plan, 2026-09-26. Not started. Built from `XAOS-AND-BEYOND-BRAINSTORM.md`
