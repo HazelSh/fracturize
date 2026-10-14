@@ -1208,6 +1208,55 @@ impl TileTarget {
         self.read_into_sheet(device, sheet, sheet_w, col, row);
     }
 
+    /// Time the volume renderer's passes: `iterations` full renders, each pass's
+    /// GPU-busy time read after every one, medians printed. A measurement for
+    /// `FRACTURIZE_VOLUME_PROFILE=<iterations>`, not part of any render.
+    fn profile_volume(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut SplatRenderer,
+        point_count: u32,
+        use_point_primitives: bool,
+        iterations: usize,
+    ) {
+        if !renderer.enable_profile(device, queue) {
+            eprintln!("this device has no timestamp queries");
+            return;
+        }
+        let mut rows: Vec<(&'static str, Vec<f32>)> = Vec::new();
+        let mut wall = Vec::new();
+        for i in 0..iterations + 2 {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("profile") });
+            renderer.render(device, &mut encoder, &self.color_view, &self.depth_view, self.width, self.height, point_count, use_point_primitives);
+            let t = Instant::now();
+            queue.submit(std::iter::once(encoder.finish()));
+            let times = renderer.read_profile(device, queue);
+            if i < 2 {
+                continue; // warm-up: pipeline creation, first allocation
+            }
+            wall.push(t.elapsed().as_secs_f32() * 1000.0);
+            if rows.is_empty() {
+                rows = times.iter().map(|(n, _)| (*n, Vec::new())).collect();
+            }
+            for (row, (_, ms)) in rows.iter_mut().zip(&times) {
+                row.1.push(*ms);
+            }
+        }
+        let median = |v: &mut Vec<f32>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let mut total = 0.0;
+        println!("volume passes, GPU ms (median of {}), {} points:", iterations, point_count);
+        for (name, v) in rows.iter_mut() {
+            let m = median(v);
+            total += m;
+            println!("  {:<9} {:7.3}", name, m);
+        }
+        println!("  {:<9} {:7.3}   (submit to read, wall: {:.3})", "total", total, median(&mut wall));
+    }
+
     /// Queue the colour target's copy into the readback buffer.
     fn copy_out(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.copy_texture_to_buffer(
@@ -2115,6 +2164,14 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             }
         }
     }
+    // `FRACTURIZE_VOLUME_PROFILE=<iterations>`: per-pass GPU time of volume mode.
+    {
+        if let Some(n) = std::env::var("FRACTURIZE_VOLUME_PROFILE").ok().and_then(|v| v.parse::<usize>().ok()) {
+            if let TileRenderer::Splat(r) = &mut renderer {
+                target.profile_volume(&device, &queue, r, point_count, use_point_primitives, n);
+            }
+        }
+    }
     // `FRACTURIZE_VOLUME_REFERENCE=<prefix>`: the exact transport for the same
     // points, the GPU path's error against it, and the reference drawn through
     // the same tonemap. See `volume_ref.rs`.
@@ -2122,7 +2179,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         if let Some(prefix) = std::env::var_os("FRACTURIZE_VOLUME_REFERENCE") {
             if let TileRenderer::Splat(r) = &mut renderer {
                 volume_reference(
-                    &device, &queue, r, point_count, use_point_primitives, sampling.n, width, height,
+                    &device, &queue, r, point_count, sampling.n, width, height,
                     &prefix, bit_depth,
                 )?;
             }
@@ -2243,7 +2300,6 @@ fn volume_reference(
     queue: &wgpu::Queue,
     r: &mut SplatRenderer,
     points: u32,
-    use_point_primitives: bool,
     supersample: u32,
     width: u32,
     height: u32,
@@ -2258,7 +2314,7 @@ fn volume_reference(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30)
         * 1_000_000;
-    let dump = r.dump_fragments(device, queue, points, use_point_primitives, capacity)?;
+    let dump = r.dump_fragments(device, queue, points, capacity)?;
     if dump.count > capacity {
         eprintln!(
             "warning: {} fragments overflowed the {} the reference kept; it is a truncated sample. \
@@ -2269,6 +2325,16 @@ fn volume_reference(
     let reference = crate::volume_ref::composite(&dump, width, height);
     let gpu_l = read_float_texture(device, queue, r.output_texture().ok_or("no accumulation")?, width, height);
     let (gpu_b0, _, _) = read_total_absorbance(device, queue, r).ok_or("no slices")?;
+    {
+        let mut v: Vec<(f32, usize)> = (0..(width * height) as usize)
+            .filter(|&p| reference.l[p][3] > 0.05)
+            .map(|p| (gpu_l[p * 4 + 3] / reference.l[p][3], p))
+            .collect();
+        v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for (ratio, p) in v.iter().take(8) {
+            eprintln!("WORST pixel {} ({},{}) gpu/ref L {:.3} ref L {:.3} tau ref {:.2} gpu {:.2}", p, p % width as usize, p / width as usize, ratio, reference.l[*p][3], reference.tau[*p], gpu_b0[p * 4]);
+        }
+    }
     let text = crate::volume_ref::report(&reference, &gpu_l, &gpu_b0);
     println!("{}", text);
     let base = std::path::PathBuf::from(prefix);

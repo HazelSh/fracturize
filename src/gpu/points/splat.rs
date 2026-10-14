@@ -144,6 +144,9 @@ pub struct SplatRenderer {
     /// What the tonemap reads as `volume_n`: the supersample factor, or 0 when
     /// volume is off.
     volume_n: f32,
+    /// Per-pass GPU timestamps for volume mode, when a measurement asks for them
+    /// (`enable_profile`). `None` costs nothing.
+    profile: Option<PassProfile>,
     /// The absorbance slices and each pixel's depth span, at accumulation
     /// resolution, recreated with it.
     bins: Option<BinTargets>,
@@ -186,6 +189,29 @@ struct Resolved {
     height: u32,
 }
 
+/// Volume mode's passes, in the order they are timed. Each owns two timestamp
+/// slots in a [`PassProfile`].
+const PASS_SPAN: u32 = 0;
+const PASS_RANGE: u32 = 1;
+const PASS_SLICE: u32 = 2;
+const PASS_PREFIX: u32 = 3;
+const PASS_EMIT: u32 = 4;
+const PASS_TONEMAP: u32 = 5;
+const PASS_NAMES: [&str; 6] = ["span", "range", "slice", "prefix", "emission", "tonemap"];
+
+/// GPU timestamps around each volume pass: a measurement instrument, absent
+/// unless `enable_profile` is called (and then only on a device that has
+/// `Features::TIMESTAMP_QUERY`).
+struct PassProfile {
+    queries: wgpu::QuerySet,
+    resolve: Buffer,
+    readback: Buffer,
+    period_ns: f32,
+    /// Passes stamped since the last read, as a bit set. Resolving a query
+    /// that was never written waits forever on this driver.
+    written: std::cell::Cell<u32>,
+}
+
 /// Volume mode's per-pixel storage, at accumulation resolution: `BINS` slices of
 /// absorbance, and the depth span they are measured against.
 struct BinTargets {
@@ -194,8 +220,10 @@ struct BinTargets {
     /// Two words a pixel: the farthest depth's bits and the complement of the
     /// nearest's.
     ranges: Buffer,
-    /// Both, as group 1 of every volume pass.
+    /// Both, as group 1 of every pass that writes them.
     bind_group: BindGroup,
+    /// The same two buffers read-only, as group 1 of the emission pass.
+    bind_group_ro: BindGroup,
     /// Stands in as the colour target of the two passes that only write storage;
     /// nothing is written to it, but a pass needs one.
     front_target: wgpu::TextureView,
@@ -208,17 +236,15 @@ struct BinTargets {
 /// the transmittance those give), each in the two primitive flavours splat has.
 #[derive(Clone)]
 struct VolumePipelines {
-    abs_quad: RenderPipeline,
     abs_point: RenderPipeline,
-    quad: RenderPipeline,
     point: RenderPipeline,
     bins_layout: BindGroupLayout,
+    bins_ro_layout: BindGroupLayout,
     /// Fullscreen passes: the spans to log form, and the slices to running
     /// totals.
     range_pipe: RenderPipeline,
     prefix_pipe: RenderPipeline,
     /// Pass A0: each pixel's nearest and farthest depth.
-    a0_quad: RenderPipeline,
     a0_point: RenderPipeline,
     /// The tonemap that also dims the background by the absorbance field, and
     /// the layout of its three bindings (input density, params, slices).
@@ -232,7 +258,6 @@ struct VolumePipelines {
 }
 
 struct DumpPipelines {
-    quad: RenderPipeline,
     point: RenderPipeline,
     layout: BindGroupLayout,
 }
@@ -434,13 +459,40 @@ impl SplatPipelines {
                         label: Some("volume_bins_bind_group_layout"),
                         entries: &[storage_entry(0), storage_entry(1)],
                     });
+                // The emission pass only reads the slices and spans, so it gets
+                // them read-only: plain loads, which the hardware may cache,
+                // where an atomic load goes to L2 every time.
+                let ro_entry = |binding| wgpu::BindGroupLayoutEntry {
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ..storage_entry(binding)
+                };
+                let ro_entry = |binding| {
+                    let mut e = ro_entry(binding);
+                    e.ty = wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    };
+                    e
+                };
+                let bins_ro_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("volume_bins_ro_bind_group_layout"),
+                        entries: &[ro_entry(0), ro_entry(1)],
+                    });
+                let emit_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("volume_emit_pipeline_layout"),
+                        bind_group_layouts: &[Some(&accum_layout), Some(&bins_ro_layout)],
+                        immediate_size: 0,
+                    });
                 let front_pipeline_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("volume_pipeline_layout"),
                         bind_group_layouts: &[Some(&accum_layout), Some(&bins_layout)],
                         immediate_size: 0,
                     });
-                let resolve_layout = &front_pipeline_layout;
+                let resolve_layout = &emit_pipeline_layout;
                 let primitive = |topology| wgpu::PrimitiveState {
                     topology,
                     strip_index_format: None,
@@ -491,7 +543,7 @@ impl SplatPipelines {
                     write_mask: wgpu::ColorWrites::empty(),
                 })];
                 let emit_targets = [target(accum_format)];
-                use wgpu::PrimitiveTopology::{PointList, TriangleList, TriangleStrip};
+                use wgpu::PrimitiveTopology::{PointList, TriangleList};
                 let tonemap_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: Some("volume_tonemap_bind_group_layout"),
@@ -568,13 +620,11 @@ impl SplatPipelines {
                     cache: None,
                 });
                 VolumePipelines {
-                    abs_quad: make("volume_abs_quad", &front_pipeline_layout, "vs_splat", "fs_abs", TriangleStrip, &front_targets),
                     abs_point: make("volume_abs_point", &front_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &front_targets),
-                    a0_quad: make("volume_a0_quad", &front_pipeline_layout, "vs_splat", "fs_front", TriangleStrip, &front_targets),
                     a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_splat_point", "fs_front", PointList, &front_targets),
-                    quad: make("volume_quad", resolve_layout, "vs_splat", "fs_splat_volume", TriangleStrip, &emit_targets),
                     point: make("volume_point", resolve_layout, "vs_splat_point", "fs_splat_volume", PointList, &emit_targets),
                     bins_layout,
+                    bins_ro_layout,
                     range_pipe: make("volume_range", &front_pipeline_layout, "vs_tonemap", "fs_range", TriangleList, &front_targets),
                     prefix_pipe: make("volume_prefix", &front_pipeline_layout, "vs_tonemap", "fs_prefix", TriangleList, &front_targets),
                     tonemap,
@@ -751,6 +801,7 @@ impl SplatRenderer {
             volume_n: 0.0,
             dump_pipelines: None,
             bins: None,
+            profile: None,
             accum_format,
             quad_pipeline,
             point_pipeline,
@@ -958,11 +1009,11 @@ impl SplatRenderer {
             let m = self.bins.as_ref().expect("just ensured");
             encoder.clear_buffer(&m.slices, 0, None);
             encoder.clear_buffer(&m.ranges, 0, None);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, true);
+            self.storage_pass(encoder, 0..point_count, true);
             self.fullscreen_storage_pass(encoder, true);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, false);
+            self.storage_pass(encoder, 0..point_count, false);
             self.fullscreen_storage_pass(encoder, false);
-            self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
+            self.draw_splats(encoder, 0..point_count, true, true, true);
         } else {
             self.splat_pass(encoder, 0..point_count, use_point_primitives);
         }
@@ -992,9 +1043,9 @@ impl SplatRenderer {
                     wgpu::BindGroupEntry { binding: 2, resource: m.slices.as_entire_binding() },
                 ],
             });
-            Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
+            Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group, self.stamp(PASS_TONEMAP));
         } else {
-            Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group);
+            Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group, self.stamp(PASS_TONEMAP));
         }
     }
 
@@ -1074,7 +1125,7 @@ impl SplatRenderer {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: self.stamp(PASS_EMIT),
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -1083,7 +1134,7 @@ impl SplatRenderer {
             let vp = if volume { self.volume_pipelines.as_ref() } else { None };
             if vp.is_some() {
                 let bins = self.bins.as_ref().expect("pass A ran first");
-                pass.set_bind_group(1, &bins.bind_group, &[]);
+                pass.set_bind_group(1, &bins.bind_group_ro, &[]);
             }
             // Both entry points read the point index straight off a builtin
             // (`vertex_index` for points, `instance_index` for quads), and
@@ -1093,7 +1144,7 @@ impl SplatRenderer {
                 pass.set_pipeline(vp.map_or(&self.point_pipeline, |v| &v.point));
                 pass.draw(points, 0..1);
             } else {
-                pass.set_pipeline(vp.map_or(&self.quad_pipeline, |v| &v.quad));
+                pass.set_pipeline(&self.quad_pipeline);
                 pass.draw(0..4, points);
             }
         }
@@ -1121,7 +1172,7 @@ impl SplatRenderer {
                 wgpu::BindGroupEntry { binding: 2, resource: slices.as_entire_binding() },
             ],
         });
-        Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
+        Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group, None);
     }
 
     /// Draw every point through the volume vertex stage and write each fragment
@@ -1134,7 +1185,6 @@ impl SplatRenderer {
         device: &Device,
         queue: &wgpu::Queue,
         points: u32,
-        use_point_primitives: bool,
         capacity: u64,
     ) -> Result<FragmentDump, String> {
         let vp = self.volume_pipelines.as_ref().ok_or("volume mode is not available")?;
@@ -1196,7 +1246,6 @@ impl SplatRenderer {
                 })
             };
             self.dump_pipelines = Some(DumpPipelines {
-                quad: make("vs_splat", wgpu::PrimitiveTopology::TriangleStrip),
                 point: make("vs_splat_point", wgpu::PrimitiveTopology::PointList),
                 layout,
             });
@@ -1265,13 +1314,8 @@ impl SplatRenderer {
             pass.set_bind_group(0, &self.accum_bind_group, &[]);
             pass.set_bind_group(1, &bins.bind_group, &[]);
             pass.set_bind_group(2, &bind, &[]);
-            if use_point_primitives {
-                pass.set_pipeline(&dp.point);
-                pass.draw(0..points, 0..1);
-            } else {
-                pass.set_pipeline(&dp.quad);
-                pass.draw(0..4, 0..points);
-            }
+            pass.set_pipeline(&dp.point);
+            pass.draw(0..points, 0..1);
         }
         encoder.copy_buffer_to_buffer(&counter, 0, &count_read, 0, 4);
         queue.submit(std::iter::once(encoder.finish()));
@@ -1306,6 +1350,82 @@ impl SplatRenderer {
             Vec::new()
         };
         Ok(FragmentDump { words, count })
+    }
+
+    /// Time each volume pass on the GPU from now on. Returns whether the device
+    /// can (it needs `Features::TIMESTAMP_QUERY`). Read the last frame with
+    /// [`SplatRenderer::read_profile`].
+    pub fn enable_profile(&mut self, device: &Device, queue: &wgpu::Queue) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        let count = PASS_NAMES.len() as u32 * 2;
+        // One alignment unit a pass: each is resolved on its own.
+        let bytes = PASS_NAMES.len() as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+        self.profile = Some(PassProfile {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("volume_pass_queries"),
+                ty: wgpu::QueryType::Timestamp,
+                count,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("volume_pass_resolve"),
+                size: bytes,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            readback: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("volume_pass_readback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            period_ns: queue.get_timestamp_period(),
+            written: std::cell::Cell::new(0),
+        });
+        true
+    }
+
+    fn stamp(&self, pass: u32) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        self.profile.as_ref().map(|p| {
+            p.written.set(p.written.get() | 1 << pass);
+            wgpu::RenderPassTimestampWrites {
+            query_set: &p.queries,
+            beginning_of_pass_write_index: Some(pass * 2),
+            end_of_pass_write_index: Some(pass * 2 + 1),
+            }
+        })
+    }
+
+    /// GPU-busy milliseconds of each volume pass in the last frame submitted,
+    /// by name. Blocks on the queue: a measuring path only. A pass that did
+    /// not run reads as zero.
+    pub fn read_profile(&self, device: &Device, queue: &wgpu::Queue) -> Vec<(&'static str, f32)> {
+        let Some(p) = &self.profile else { return Vec::new() };
+        let n = PASS_NAMES.len() as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT / 8;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("volume_pass_resolve") });
+        let written = p.written.replace(0);
+        for i in (0..PASS_NAMES.len() as u32).filter(|i| written >> i & 1 == 1) {
+            encoder.resolve_query_set(&p.queries, i * 2..i * 2 + 2, &p.resolve, i as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
+        }
+        encoder.copy_buffer_to_buffer(&p.resolve, 0, &p.readback, 0, n * 8);
+        queue.submit(std::iter::once(encoder.finish()));
+        let slice = p.readback.slice(..n * 8);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let out = {
+            let data = slice.get_mapped_range();
+            let ticks: Vec<u64> = data.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+            let stride = (wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT / 8) as usize;
+            PASS_NAMES
+                .iter()
+                .zip(ticks.chunks_exact(stride))
+                .enumerate()
+                .map(|(i, (name, t))| (*name, if written >> i & 1 == 1 { t[1].saturating_sub(t[0]) as f32 * p.period_ns / 1.0e6 } else { 0.0 }))
+                .collect()
+        };
+        p.readback.unmap();
+        out
     }
 
     /// Whether this device can run volume mode (see
@@ -1372,7 +1492,15 @@ impl SplatRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: ranges.as_entire_binding() },
             ],
         });
-        self.bins = Some(BinTargets { slices, ranges, bind_group, front_target, width, height });
+        let bind_group_ro = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_bins_ro_bind_group"),
+            layout: &vp.bins_ro_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: slices.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: ranges.as_entire_binding() },
+            ],
+        });
+        self.bins = Some(BinTargets { slices, ranges, bind_group, bind_group_ro, front_target, width, height });
     }
 
     /// The two passes that only write storage: A0 (each pixel's depth span) and
@@ -1382,7 +1510,6 @@ impl SplatRenderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         points: std::ops::Range<u32>,
-        use_point_primitives: bool,
         spans: bool,
     ) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
@@ -1402,24 +1529,14 @@ impl SplatRenderer {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: self.stamp(if spans { PASS_SPAN } else { PASS_SLICE }),
             occlusion_query_set: None,
             multiview_mask: None,
         });
         pass.set_bind_group(0, &self.accum_bind_group, &[]);
         pass.set_bind_group(1, &m.bind_group, &[]);
-        let pipeline = match (spans, use_point_primitives) {
-            (true, true) => &vp.a0_point,
-            (true, false) => &vp.a0_quad,
-            (false, true) => &vp.abs_point,
-            (false, false) => &vp.abs_quad,
-        };
-        pass.set_pipeline(pipeline);
-        if use_point_primitives {
-            pass.draw(points, 0..1);
-        } else {
-            pass.draw(0..4, points);
-        }
+        pass.set_pipeline(if spans { &vp.a0_point } else { &vp.abs_point });
+        pass.draw(points, 0..1);
     }
 
     /// The two per-pixel housekeeping passes: `range` rewrites the depth spans
@@ -1440,7 +1557,7 @@ impl SplatRenderer {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: self.stamp(if range { PASS_RANGE } else { PASS_PREFIX }),
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -1542,7 +1659,7 @@ impl SplatRenderer {
         depth: &wgpu::TextureView,
         bind_group: &BindGroup,
     ) {
-        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, bind_group);
+        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, bind_group, None);
     }
 
     fn encode_tonemap(
@@ -1551,6 +1668,7 @@ impl SplatRenderer {
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         bind_group: &BindGroup,
+        stamp: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("splat_tonemap_pass"),
@@ -1572,7 +1690,7 @@ impl SplatRenderer {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: stamp,
             occlusion_query_set: None,
             multiview_mask: None,
         });
