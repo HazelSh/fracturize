@@ -415,6 +415,21 @@ fn draw_tab(
     };
     let pane_fill = ui.visuals().window_fill;
     let accent = color32_from_vec3(row.color);
+    // Under xaos, where the walk actually puts this map, as the weight that
+    // would put it there with no xaos: weight × walk share / weight share. A
+    // tick on the same track as the weight bar, so the two read as one axis
+    // and the gap between them is the "why is this map invisible" signal.
+    let walk = app
+        .scene
+        .transforms
+        .get(i)
+        .map(|t| t.layer as usize)
+        .and_then(|k| app.xaos_summary(k))
+        .filter(|s| s.has_xaos)
+        .and_then(|s| {
+            let p = s.pos(i)?;
+            (s.chain.start[p] > 0.0).then(|| (s.shares[p], row.weight * (s.shares[p] / s.chain.start[p]) as f32))
+        });
 
     let tab_resp = ui
         .scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
@@ -533,6 +548,14 @@ fn draw_tab(
                 };
                 ui.painter().set(bar_idx, egui::Shape::rect_filled(bar, 1.0, color));
             }
+            if let Some((_, eq)) = walk {
+                let x = track.min.x + track.width() * (eq / max_weight).clamp(0.0, 1.0);
+                let tick = egui::Rect::from_center_size(
+                    egui::pos2(x, track.center().y),
+                    egui::vec2(2.0, BAR_THICKNESS * 3.0),
+                );
+                ui.painter().rect_filled(tick, 0.0, ui.visuals().strong_text_color());
+            }
         })
         .response;
 
@@ -605,10 +628,17 @@ fn draw_tab(
     let bar_resp = hinted(
         bar_resp,
         &mut app.ui_state,
-        format!(
-            "Weight {}: how often this transform is picked. Drag sideways to change it.",
-            super::num::fixed(row.weight, 2)
-        ),
+        match walk {
+            None => format!(
+                "Weight {}: how often this transform is picked. Drag sideways to change it.",
+                super::num::fixed(row.weight, 2)
+            ),
+            Some((share, _)) => format!(
+                "Weight {}: how often this transform is picked, before xaos. The tick is where                  the walk actually puts it: {}% of the points. Drag sideways to change the weight.",
+                super::num::fixed(row.weight, 2),
+                super::num::fixed(share as f32 * 100.0, 1)
+            ),
+        },
         "drag: adjust this transform's weight",
     );
     if bar_resp.dragged() {

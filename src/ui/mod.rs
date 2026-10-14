@@ -117,6 +117,13 @@ pub struct UiState {
     pub xaos_paint: Option<(f32, Vec<(usize, usize)>)>,
     /// The viewport's edge overlay (the toggle beside Gizmos).
     pub xaos_overlay: bool,
+    /// The overlay edge clicked for editing, `(from, to)` as scene indices:
+    /// its popover is open at the edge's midpoint.
+    pub xaos_edge: Option<(usize, usize)>,
+    /// An overlay edge's right-click menu, pinned where it opened.
+    pub xaos_edge_menu: Option<((usize, usize), Option<egui::Pos2>)>,
+    /// A ctrl+right-drag knife stroke in progress, in physical pixels.
+    pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
     /// to the selection on *every* frame makes the list impossible to scroll
     /// by hand — it snaps back the instant the selection leaves the viewport
@@ -191,6 +198,9 @@ impl UiState {
             xaos_show_p: false,
             xaos_paint: None,
             xaos_overlay: false,
+            xaos_edge: None,
+            xaos_edge_menu: None,
+            xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),
             browser_arrived: None,
@@ -237,6 +247,7 @@ pub enum WindowKey {
     Transforms,
     Camera,
     Subscenes,
+    Xaos,
 }
 
 impl WindowKey {
@@ -252,6 +263,7 @@ impl WindowKey {
             Self::Transforms => "transforms",
             Self::Camera => "camera",
             Self::Subscenes => "subscenes",
+            Self::Xaos => "xaos",
         }
     }
 
@@ -295,6 +307,8 @@ impl WindowKey {
             Self::Random => egui::vec2(200.0, 260.0),
             // The variation rows are a name and a min-max pair.
             Self::RandomSettings => egui::vec2(300.0, 260.0),
+            // The preset row and the radio above a grid of at least a few cells.
+            Self::Xaos => egui::vec2(300.0, 220.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -339,6 +353,12 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::Subscenes => (
             egui::pos2((right_x - 340.0).max(20.0), top),
             egui::vec2(320.0, 360.0),
+        ),
+        // Below Subscenes, also beside the Transforms window whose selection
+        // it shares.
+        WindowKey::Xaos => (
+            egui::pos2((right_x - 400.0).max(20.0), top + 380.0),
+            egui::vec2(380.0, 380.0),
         ),
     }
 }
@@ -424,6 +444,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     subscenes::draw(&ctx, app);
     step("subscenes", t, &mut timings);
     let t = std::time::Instant::now();
+    xaos::draw_window(&ctx, app);
+    step("xaos", t, &mut timings);
+    let t = std::time::Instant::now();
     camera_panel::draw(&ctx, app);
     step("camera", t, &mut timings);
     let t = std::time::Instant::now();
@@ -451,6 +474,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     // encircling it.
     gizmo_ring::draw(&ctx, app);
     labels::draw(&ctx, app);
+    xaos::draw_overlay(&ctx, app);
     step("labels", t, &mut timings);
     let t = std::time::Instant::now();
     axis_widget::draw(&ctx, app);

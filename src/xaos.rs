@@ -146,15 +146,6 @@ impl Xaos {
         out
     }
 
-    /// How many of `0..n` this row cuts.
-    pub fn cut_count(&self, n: usize) -> usize {
-        let cut_exc = self.exceptions.iter().filter(|e| e.1 == 0.0 && (e.0 as usize) < n).count();
-        if self.rest == 0.0 {
-            n - self.exceptions.iter().filter(|e| e.1 != 0.0 && (e.0 as usize) < n).count()
-        } else {
-            cut_exc
-        }
-    }
 }
 
 /// Whether any map of this layer weights its transitions.
@@ -288,6 +279,7 @@ impl Preset {
 }
 
 /// Apply a preset to every layer of a transform list.
+#[cfg(test)]
 pub fn apply_preset(transforms: &mut [TransformSpec], preset: Preset) {
     let layers: std::collections::BTreeSet<u16> = transforms.iter().map(|t| t.layer).collect();
     for layer in layers {

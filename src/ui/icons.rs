@@ -144,3 +144,8 @@ pub const GRAPH: &str = "\u{EB58}";
 pub const LINK: &str = "\u{E2E2}";
 /// Xaos: the viewport's edge overlay toggle (Phosphor `flow-arrow`).
 pub const FLOW_ARROW: &str = "\u{E6EC}";
+/// Xaos: the arrow in "petal → spike" (Phosphor `arrow-right`), written as
+/// `\u{E06C}` in the strings that use it. U+2192 is in none of the app's text
+/// fonts and renders as tofu — found by looking at the running app.
+#[allow(dead_code)]
+pub const ARROW: &str = "\u{E06C}";

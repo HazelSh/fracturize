@@ -44,6 +44,9 @@ pub struct PanelPrefs {
     /// The Subscenes window (composing several attractors into one scene).
     #[serde(default)]
     pub subscenes_open: bool,
+    /// The Xaos window: a layer's whole transition matrix.
+    #[serde(default)]
+    pub xaos_open: bool,
 }
 
 fn default_mutate_strength() -> f32 {

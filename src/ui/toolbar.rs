@@ -43,6 +43,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Subscenes window",
             );
 
+            let resp = ui.toggle_value(&mut app.ui_state.panels.xaos_open, (icons::GRAPH, "Xaos"));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "Which transform may follow which: the whole graph as a grid",
+                "toggle the Xaos window",
+            );
+
             ui.separator();
 
             let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, (icons::VIDEO_CAMERA, "Camera"));
@@ -514,6 +522,29 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     );
     if resp.clicked() {
         app.toggle_emphasis();
+    }
+    // The xaos edge overlay: the Gizmos control's other sibling, for the same
+    // reason — it draws between gizmo origins, so it has nothing to show in
+    // view mode.
+    let overlay = app.ui_state.xaos_overlay;
+    let resp = ui.add_enabled(
+        app.show_gizmos,
+        egui::Button::selectable(overlay && app.show_gizmos, icons::FLOW_ARROW),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if !app.show_gizmos {
+            "Draw which transform may follow which, as arrows between gizmos. Only in edit mode"
+        } else if overlay {
+            "Drawing xaos edges: the selected transform's exits, or every edge that isn't 1.              Click an edge to edit it, alt+scroll to scale it, ctrl+right-drag to cut several.              Click to stop"
+        } else {
+            "Draw which transform may follow which, as arrows between gizmos"
+        },
+        if overlay { "click: hide the xaos edges" } else { "click: show the xaos edges" },
+    );
+    if resp.clicked() {
+        app.ui_state.xaos_overlay = !app.ui_state.xaos_overlay;
     }
 
     let mode_width =

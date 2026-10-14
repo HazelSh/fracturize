@@ -2098,6 +2098,10 @@ impl ApplicationHandler for AppWrapper {
                             // on "step transforms" forever.
                             if app.ui_state.transform_menu.is_some() {
                                 app.ui_state.transform_menu = None;
+                            } else if app.ui_state.xaos_edge_menu.is_some() {
+                                app.ui_state.xaos_edge_menu = None;
+                            } else if app.ui_state.xaos_edge.is_some() {
+                                app.ui_state.xaos_edge = None;
                             } else if app.pending_action.is_some() {
                                 app.pending_action = None;
                             } else if app.ui_state.save_as.is_open() {
