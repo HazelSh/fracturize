@@ -1161,8 +1161,8 @@ impl App {
         // a transform add, and every thumbnail in the scene browser, share them.
         let chaos_pipelines = crate::gpu::points::compute::ChaosPipelines::new(&gpu.device);
         // fp16 emission accumulation, as the window has always had; see
-        // `SplatPipelines::with_precision`. Volume mode's moments are fp32
-        // whatever this says.
+        // `SplatPipelines::with_precision`. Volume mode keeps its absorbance
+        // in a storage buffer, so this does not touch it.
         let splat_pipelines =
             crate::gpu::points::splat::SplatPipelines::with_precision(&gpu.device, gpu.format, false);
         let thumbs = crate::gpu::thumbs::ThumbCache::new(&gpu.device, &chaos_pipelines);
@@ -1206,9 +1206,8 @@ impl App {
         let volume_ok = splat_pipelines.volume_available();
         if volume && !volume_ok {
             eprintln!(
-                "--volume needs fp32 blending (FLOAT32_BLENDABLE), which this GPU does not \
-                 offer. The moments it accumulates are useless at fp16 precision, so there is \
-                 no fallback."
+                "--volume needs a fragment stage that can write six storage buffers, which this \
+                 GPU does not offer. There is no fallback."
             );
             std::process::exit(1);
         }

@@ -900,9 +900,10 @@ fn base_render_params(view: &Option<View>, scene: &Scene, haze_enabled: bool) ->
     }
 }
 
-/// The depth interval volume mode's moments are warped into, for `camera`
-/// looking at `scene`: the measured attractor, or under infinite zoom (where
-/// there is nothing to measure) a span relative to the eye.
+/// The reference length volume mode's absorbance is measured against, for
+/// `camera` looking at `scene`: the measured attractor's radius, or under
+/// infinite zoom (where there is nothing to measure) the eye's distance from
+/// the fixed point.
 pub(crate) fn volume_range(
     scene: &Scene,
     camera: &OrbitCamera,
@@ -2042,9 +2043,8 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     if let Some(sigma) = opacity {
         let TileRenderer::Splat(r) = &mut renderer else { unreachable!("checked splat above") };
         if !r.volume_available() {
-            return Err("--volume needs fp32 blending (FLOAT32_BLENDABLE), which this GPU does not \
-                        offer. The moments it accumulates are useless at fp16 precision, so there \
-                        is no fallback."
+            return Err("--volume needs a fragment stage that can write six storage buffers, which this \
+                        GPU does not offer. There is no fallback."
                 .into());
         }
         let range = volume_range(&scene, &base_camera, zoom.as_ref());
@@ -2120,20 +2120,10 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     // the same tonemap. See `volume_ref.rs`.
     if opacity.is_some() {
         if let Some(prefix) = std::env::var_os("FRACTURIZE_VOLUME_REFERENCE") {
-            // The frame-wide depth warp the slice-1c estimator would have used
-            // (scene bounds padded 1.5x, log-warped), for the OLD line.
-            let old_warp = crate::gpu::points::volume::scene_bounds(&scene).filter(|_| zoom.is_none()).map(|(centre, radius)| {
-                let d = (centre - base_camera.eye()).dot(base_camera.forward());
-                let r = radius.max(1e-9) * 1.5;
-                let far = (d + r).max(1e-9);
-                let near = (d - r).max(far / 100.0);
-                let scale = 2.0 / (far.ln() - near.ln()).max(1e-6);
-                (scale, -1.0 - near.ln() * scale)
-            });
             if let TileRenderer::Splat(r) = &mut renderer {
                 volume_reference(
                     &device, &queue, r, point_count, use_point_primitives, sampling.n, width, height,
-                    &prefix, bit_depth, old_warp,
+                    &prefix, bit_depth,
                 )?;
             }
         }
@@ -2259,7 +2249,6 @@ fn volume_reference(
     height: u32,
     prefix: &std::ffi::OsStr,
     depth: BitDepth,
-    old_warp: Option<(f32, f32)>,
 ) -> Result<(), String> {
     if supersample != 1 || depth.bits() != 8 {
         return Err("the exact reference compares fields pixel for pixel: use --supersample 1 and 8-bit".into());
@@ -2280,29 +2269,10 @@ fn volume_reference(
     let reference = crate::volume_ref::composite(&dump, width, height);
     let gpu_l = read_float_texture(device, queue, r.output_texture().ok_or("no accumulation")?, width, height);
     let (gpu_b0, _, _) = read_total_absorbance(device, queue, r).ok_or("no slices")?;
-    let mut text = crate::volume_ref::report(&reference, &gpu_l, &gpu_b0);
-    if let Some(warp) = old_warp {
-        // What the slice-1c estimator, which this replaced, scored on the same
-        // fragments: four moments of one frame-wide depth, blurred 1 output
-        // pixel, overestimation 0.1.
-        let (lr, l1, tf, tt) = crate::volume_ref::emulate_moments_1c(&reference, warp, 1.0, 0.1);
-        text += &format!("OLD(1c moments) l_ratio={:.4} l_l1={:.4} t_frag={:.4} t_total_abs={:.4}\n", lr, l1, tf, tt);
-    }
+    let text = crate::volume_ref::report(&reference, &gpu_l, &gpu_b0);
     println!("{}", text);
     let base = std::path::PathBuf::from(prefix);
     let _ = std::fs::write(base.with_extension("report.txt"), &text);
-    if std::env::var_os("FRACTURIZE_VOLUME_EMULATE").is_some() {
-        use crate::volume_ref::{emulate, Emulation, Range};
-        println!("opacity-shadow-map bins, per-pixel span (L ratio, L L1, per-fragment |dT|):");
-        for nb in [4usize, 8, 16, 32] {
-            for k in [0usize, 4] {
-                let (lr, l1, tf) =
-                    emulate(&reference, Emulation { range: Range::PerPixel, front_k: k, overestimation: 0.0, bins: Some(nb) });
-                println!("  bins {:<2} front {}: {:.3} {:.3} {:.4}", nb, k, lr, l1, tf);
-            }
-        }
-    }
-
     // The reference through the same tonemap, as a picture.
     let make = |label: &str, data: &[f32]| {
         let tex = device.create_texture(&wgpu::TextureDescriptor {

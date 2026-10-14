@@ -1,11 +1,11 @@
-//! Volume mode's host-side numbers: the uniform the shaders read, the depth
-//! range the moments are warped into, and the opacity control's limits.
+//! Volume mode's host-side numbers: the uniform the shaders read, the reference
+//! length absorbance is measured against, and the opacity control's limits.
 //!
 //! The model is in `VOLUME-RENDERER-PLAN.md`; the short version is that splat
 //! is additive emission, and volume mode adds absorption so near material hides
-//! what is behind it. Two passes — absorbance moments, then emission weighted
-//! by the transmittance those moments give (see `moments.rs`) — over the same
-//! point buffer. Opacity 0 is today's splat, byte for byte: neither pass runs.
+//! what is behind it: each pixel's depth span, absorbance into slices of that
+//! span, then emission weighted by the transmittance the slices give, over the
+//! same point buffer. Opacity 0 is today's splat, byte for byte: none of it runs.
 
 use glam::Vec3;
 
@@ -128,13 +128,13 @@ pub const SOURCE: f32 = 1.0;
 
 /// Absorbance is stored as u32 fixed point, this many units to 1.0. Mirrored
 /// in `splat.wgsl`.
+#[cfg(test)]
 pub const FIXED: f32 = 1_048_576.0;
 
 /// What opacity is measured against: the scene's reference length `L`.
 ///
-/// Under the old moment reconstruction this was also the depth interval the
-/// estimator resolved, padded generously; per-pixel slicing needs no such
-/// interval, only the length.
+/// Per-pixel slicing finds each pixel's own depth interval, so the only thing
+/// the scene has to supply is this length.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Framing {
     /// `L`, in world units: the attractor's radius, or the eye's distance from

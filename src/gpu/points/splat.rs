@@ -133,8 +133,7 @@ pub struct SplatRenderer {
     /// which is `VolumeParams::OFF`.
     volume_params_buffer: Buffer,
     /// The volume passes' pipelines, `None` on a device that cannot blend into
-    /// fp32 — where volume mode does not exist rather than running on fp16
-    /// moments, which would be noise.
+    /// storage from a fragment stage.
     volume_pipelines: Option<VolumePipelines>,
     /// Whether the next `render` draws the volume passes: opacity above zero
     /// and the device able to. At zero, nothing about the volume exists in the
@@ -147,7 +146,7 @@ pub struct SplatRenderer {
     volume_n: f32,
     /// The absorbance slices and each pixel's depth span, at accumulation
     /// resolution, recreated with it.
-    moments: Option<BinTargets>,
+    bins: Option<BinTargets>,
     /// Accumulation target + matching tonemap bind group, recreated when
     /// the render size changes (window resize, screenshots)
     accum: Option<AccumTarget>,
@@ -204,9 +203,9 @@ struct BinTargets {
     height: u32,
 }
 
-/// What volume mode adds to the compiled set: pass A (absorbance moments) and
-/// pass B (emission weighted by transmittance), each in the two primitive
-/// flavours splat has.
+/// What volume mode adds to the compiled set: the span and slice passes
+/// (absorbance into per-pixel depth slices) and the emission pass (weighted by
+/// the transmittance those give), each in the two primitive flavours splat has.
 #[derive(Clone)]
 struct VolumePipelines {
     abs_quad: RenderPipeline,
@@ -222,7 +221,7 @@ struct VolumePipelines {
     a0_quad: RenderPipeline,
     a0_point: RenderPipeline,
     /// The tonemap that also dims the background by the absorbance field, and
-    /// the layout of its three bindings (input density, params, moments).
+    /// the layout of its three bindings (input density, params, slices).
     tonemap: RenderPipeline,
     tonemap_layout: BindGroupLayout,
     /// What the exact reference needs to build its own pipelines on demand
@@ -280,9 +279,10 @@ impl SplatPipelines {
     /// `exact = false` keeps the emission accumulation at fp16 even on a device
     /// that could do better, which is what the *live window* wants.
     ///
-    /// The window's device asks for `FLOAT32_BLENDABLE` now, for volume mode's
-    /// moment targets — and without this, that request would have quietly moved
-    /// the window's ordinary splat from an 8-byte to a 16-byte accumulation
+    /// Volume mode no longer needs fp32 blending (its absorbance is fixed point in
+    /// a storage buffer), so the window's device does not ask for
+    /// `FLOAT32_BLENDABLE`. The risk this guards is still real wherever a device
+    /// has it: asking would move the window's ordinary splat from an 8-byte to a 16-byte accumulation
     /// texel, which measured about 17% of the frame rate at 8M points
     /// (28 -> 23 FPS on the GTX 1080). The fp16 stall at a density of 2048 is a
     /// ring-buffer curiosity in the window, where the picture is redrawn every
@@ -750,7 +750,7 @@ impl SplatRenderer {
             volume_active: false,
             volume_n: 0.0,
             dump_pipelines: None,
-            moments: None,
+            bins: None,
             accum_format,
             quad_pipeline,
             point_pipeline,
@@ -954,8 +954,8 @@ impl SplatRenderer {
             // the transmittance the slices give. All at accumulation
             // resolution, so a supersampled render has them where its emission
             // is.
-            self.ensure_moments(device, width * n, height * n);
-            let m = self.moments.as_ref().expect("just ensured");
+            self.ensure_bins(device, width * n, height * n);
+            let m = self.bins.as_ref().expect("just ensured");
             encoder.clear_buffer(&m.slices, 0, None);
             encoder.clear_buffer(&m.ranges, 0, None);
             self.storage_pass(encoder, 0..point_count, use_point_primitives, true);
@@ -979,7 +979,7 @@ impl SplatRenderer {
             None => (&accum.tonemap_bind_group, &accum.view),
         };
         if let (true, Some(vp), Some(m)) =
-            (self.volume_active, self.volume_pipelines.as_ref(), self.moments.as_ref())
+            (self.volume_active, self.volume_pipelines.as_ref(), self.bins.as_ref())
         {
             // The same tonemap, reading the absorbance field as well so it can
             // dim the background by it.
@@ -1048,7 +1048,7 @@ impl SplatRenderer {
     }
 
     /// The splat draw itself. `volume` swaps the fragment stage for the one
-    /// that multiplies by transmittance; the moments must have been drawn first.
+    /// that multiplies by transmittance; the slices must have been drawn first.
     fn draw_splats(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1082,8 +1082,8 @@ impl SplatRenderer {
             pass.set_bind_group(0, &self.accum_bind_group, &[]);
             let vp = if volume { self.volume_pipelines.as_ref() } else { None };
             if vp.is_some() {
-                let moments = self.moments.as_ref().expect("pass A ran first");
-                pass.set_bind_group(1, &moments.bind_group, &[]);
+                let bins = self.bins.as_ref().expect("pass A ran first");
+                pass.set_bind_group(1, &bins.bind_group, &[]);
             }
             // Both entry points read the point index straight off a builtin
             // (`vertex_index` for points, `instance_index` for quads), and
@@ -1099,9 +1099,6 @@ impl SplatRenderer {
         }
     }
 
-    /// The (blurred) absorbance moments' first target, `(b0, b1, b2, b3)`, as the
-    /// last volume render left it — what a measurement reads `b0` from. `None`
-    /// before one has run.
     /// The volume tonemap over an arbitrary output-sized density texture and an
     /// arbitrary absorbance field (`x` = optical depth `b0`) — what the exact
     /// reference is drawn through, so it and the GPU path share one tonemap.
@@ -1127,19 +1124,10 @@ impl SplatRenderer {
         Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
     }
 
-    /// Size of the moment targets (the accumulation's), once they exist.
-    pub fn moments_size(&self) -> Option<(u32, u32)> {
-        self.moments.as_ref().map(|m| (m.width, m.height))
-    }
-
-    pub fn slices_buffer(&self) -> Option<&Buffer> {
-        self.moments.as_ref().map(|m| &m.slices)
-    }
-
     /// Draw every point through the volume vertex stage and write each fragment
     /// it produces to a list instead of blending it: the input of the exact
     /// reference (`volume_ref.rs`). Must follow a volume `render` with the same
-    /// camera, since it reads the moments that render left to evaluate the
+    /// camera, since it reads the slices that render left to evaluate the
     /// GPU path's transmittance per fragment. `capacity` is in fragments.
     pub fn dump_fragments(
         &mut self,
@@ -1150,7 +1138,7 @@ impl SplatRenderer {
         capacity: u64,
     ) -> Result<FragmentDump, String> {
         let vp = self.volume_pipelines.as_ref().ok_or("volume mode is not available")?;
-        let moments = self.moments.as_ref().ok_or("render a volume frame first")?;
+        let bins = self.bins.as_ref().ok_or("render a volume frame first")?;
         if self.dump_pipelines.is_none() {
             let storage = |binding| wgpu::BindGroupLayoutEntry {
                 binding,
@@ -1239,7 +1227,7 @@ impl SplatRenderer {
         let dummy = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("volume_dump_target"),
-                size: wgpu::Extent3d { width: moments.width, height: moments.height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: bins.width, height: bins.height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1275,7 +1263,7 @@ impl SplatRenderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.accum_bind_group, &[]);
-            pass.set_bind_group(1, &moments.bind_group, &[]);
+            pass.set_bind_group(1, &bins.bind_group, &[]);
             pass.set_bind_group(2, &bind, &[]);
             if use_point_primitives {
                 pass.set_pipeline(&dp.point);
@@ -1346,8 +1334,8 @@ impl SplatRenderer {
     }
 
     /// (Re)create the slices and the span buffer at the accumulation's size.
-    fn ensure_moments(&mut self, device: &Device, width: u32, height: u32) {
-        if let Some(m) = &self.moments {
+    fn ensure_bins(&mut self, device: &Device, width: u32, height: u32) {
+        if let Some(m) = &self.bins {
             if m.width == width && m.height == height {
                 return;
             }
@@ -1384,7 +1372,7 @@ impl SplatRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: ranges.as_entire_binding() },
             ],
         });
-        self.moments = Some(BinTargets { slices, ranges, bind_group, front_target, width, height });
+        self.bins = Some(BinTargets { slices, ranges, bind_group, front_target, width, height });
     }
 
     /// The two passes that only write storage: A0 (each pixel's depth span) and
@@ -1398,7 +1386,7 @@ impl SplatRenderer {
         spans: bool,
     ) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
-        let m = self.moments.as_ref().expect("ensured above");
+        let m = self.bins.as_ref().expect("ensured above");
         if points.is_empty() {
             return;
         }
@@ -1439,7 +1427,7 @@ impl SplatRenderer {
     /// running totals. A fullscreen triangle each, over the one-byte target.
     fn fullscreen_storage_pass(&self, encoder: &mut wgpu::CommandEncoder, range: bool) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
-        let m = self.moments.as_ref().expect("ensured above");
+        let m = self.bins.as_ref().expect("ensured above");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(if range { "volume_range_pass" } else { "volume_prefix_pass" }),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1470,7 +1458,7 @@ impl SplatRenderer {
         device: &Device,
         queue: &wgpu::Queue,
     ) -> Option<(Vec<f32>, u32, u32)> {
-        let m = self.moments.as_ref()?;
+        let m = self.bins.as_ref()?;
         let bytes = m.slices.size();
         let read = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("volume_slices_read"),
