@@ -2034,7 +2034,9 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // and the *accumulation* height.
         r.set_volume(
             &queue,
-            VolumeParams::new(sigma, point_count as f64, sampling.target_height(), sampling.n, range),
+            VolumeParams::new(
+                sigma, point_count as f64, sampling.target_height(), sampling.n, base_camera.fov, range,
+            ),
         );
     }
 
@@ -2121,6 +2123,25 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             ),
         }
     };
+    // `FRACTURIZE_VOLUME_STATS=1`: read the absorbance field back and say how
+    // thick it is. A measuring instrument, not a feature — it is how the claim
+    // "optical depth does not depend on camera distance" was checked.
+    if opacity.is_some() && std::env::var_os("FRACTURIZE_VOLUME_STATS").is_some() {
+        if let TileRenderer::Splat(r) = &renderer {
+            if let Some(tex) = r.moments_texture() {
+                let (w, h) = (tex.width(), tex.height());
+                let px = read_float_texture(&device, &queue, tex, w, h);
+                let mut b0: Vec<f32> = px.chunks_exact(4).map(|p| p[0]).filter(|&b| b > 1e-6).collect();
+                b0.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let q = |f: f32| b0.get(((b0.len() as f32 - 1.0) * f) as usize).copied().unwrap_or(0.0);
+                println!(
+                    "volume b0 stats: lit {} of {} ({:.1}%), median {:.4}, p90 {:.4}, p99 {:.4}, distance {:.4}",
+                    b0.len(), w * h, 100.0 * b0.len() as f32 / (w * h) as f32, q(0.5), q(0.9), q(0.99),
+                    base_camera.distance
+                );
+            }
+        }
+    }
     let t_render = Instant::now();
 
     if let Some(c) = &control {

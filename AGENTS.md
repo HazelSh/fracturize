@@ -165,12 +165,28 @@ All GPU, three passes per frame:
        with `VolumeParams::OFF`), so `--volume --opacity 0` is pixel-identical to
        `--splat` (checked on `blossom` and `censer`; the PNG *files* differ only
        by their embedded record).
-     * **Opacity belongs to the density, not the point.** A point deposits
-       absorbance `opacity · H² / samples · kernel`, the same `H²/samples`
-       ratio exposure uses, so the picture does not change with `--points`,
-       resolution or `--supersample` (`VolumeParams::new`; the call sites pass
-       the very `samples` and `screen_height` they pass `upload_params`). A
-       constant per-point alpha would make more points look more solid.
+     * **Absorbance is a world quantity.** A point carries a cross-section
+       `opacity · K · L² / N` in world area (`L` the scene's reference length:
+       the attractor's radius, under infinite zoom the eye's distance to the
+       fixed point, which is what keeps it wrap-invariant; `K` = 2, a
+       calibration) and deposits that over the world area of a pixel at its
+       depth, `(H / (2·z·tan(fov/2)))²` (`VolumeParams`, `volume_deposit` in the
+       shader). So optical depth is a property of the material: it does not
+       change with point count, resolution, `--supersample` (H still appears
+       squared), or **camera distance**. The first two versions normalised in
+       screen space (`opacity · H² / N`, as exposure is), which is right for a
+       brightness and wrong for an absorbance: zoom out k times and the
+       attractor covers k² fewer pixels, so per-pixel optical depth grew ~k²
+       (median `b0` over lit pixels on nautilus, opacity 2, at 0.5/1/2/4x the
+       authored distance: 0.53 / 2.9 / 12.3 / 46.9; world-space: 1.89 / 2.04 /
+       2.03 / 1.90). That is what read as background bleeding through, and as
+       flicker once each point's deposit became several optical depths thick.
+       `FRACTURIZE_VOLUME_STATS=1` with `--volume --render` prints that median
+       (and p90, p99, lit share) from the absorbance field; it is how this was
+       checked. Near the eye a point's footprint is capped at
+       `max_point_pixels`, and past the cap its deposit is scaled by the area
+       it no longer covers, so a mote the camera brushes past does not turn
+       solid.
      * **A point does not shadow itself.** Pass B subtracts the point's own
        deposit from the pixel's moments before reconstructing
        (`moments::transmittance_excluding`). The reconstruction counts a share
@@ -193,16 +209,24 @@ All GPU, three passes per frame:
      * **Depth range** is the measured attractor's bounding sphere padded 1.5x
        (`DepthRange::around`), relative to the eye under infinite zoom
        (`for_zoom`); points outside clamp. Composites measure per layer.
-     * **Emission is gained back, by a constant of opacity alone.** Each point's
-       emission is fixed while its absorbance scales, so a saturated pixel would
-       carry ~`1/opacity` of splat's light. Every point's emission is multiplied
-       by `g = cσ/(1 − e^{−cσ})` (`volume::emission_gain`, c = 0.4): exactly 1 at
-       σ = 0, ~linear at high σ, one number for the frame. Deliberately *not*
-       per-pixel — that would erase the dark lanes between sheets, the depth cue
-       — and never derived from the image (exposure stays scene-independent).
-       The calibration table is on `GAIN_C`: no single c flattens every scene
-       (dense filament scenes want ~1.2, diffuse ones ~0.3), brightness is flat
-       to within ±25% across seven scenes through σ = 3 and sags past ~10.
+     * **The tonemap dims the background by the absorbance** (`fs_tonemap_volume`):
+       `alpha = 1 − (1 − coverage)·T_total`, `T_total` the mean of `exp(−b0)`
+       over the output pixel's block of accumulation texels, which is today's
+       coverage exactly where nothing absorbs. On a pale background this is what
+       stops absorbing material reading as a ghost (a sponge at opacity 2 on
+       `[0.6, 0.6, 0.62]` was a faint grey print and is now solid); on a dark
+       one it changes little. What fills the extra alpha matters: only dimming
+       the background paints optically thick, dim-emitting pixels (a strand end
+       on, the centre of an infinite zoom) *black*; letting the colour take the
+       alpha makes every pixel with an optical depth over ~1 solid-bright at
+       opacity 0.5 and is the points renderer again. So a thick pixel is filled
+       with `OPAQUE_FILL` = 0.3 of its own mean colour, the smallest of
+       {0, 0.3, 0.6} with no black left, by eye.
+     * **There is no emission gain.** Slice 1b had one (`cσ/(1 − e^{−cσ})`) to
+       win back the ~1/opacity of splat's light a saturated pixel loses; once
+       the tonemap fills thick pixels it stops helping (the best c over seven
+       scenes, by RMS log deviation of mean luminance against opacity 0, is 0),
+       and it was removed rather than left as a knob that does nothing.
      * **The absorbance field is blurred** (`BLUR_OUTPUT_PX` = 1 output pixel,
        two separable gaussian passes over the moment targets before pass B;
        moments are linear, so this equals splatting fatter absorption kernels,

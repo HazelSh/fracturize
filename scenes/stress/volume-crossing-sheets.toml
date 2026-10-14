@@ -1,0 +1,73 @@
+# Volume stress: two dense sheets, crossing.
+#
+# Two flat squares, one the scene's own maps and one a subscene turned 70 degrees
+# about the vertical and shifted behind. They cross along a line, so every pixel
+# near the crossing holds material at two depths a long way apart, and every
+# pixel elsewhere holds one sheet. This is the case the moment reconstruction is
+# for: a pixel with two separated layers, in front of each other on one side of
+# the crossing and the other way round on the other.
+#
+# What to look for in volume mode: the near sheet should hide the far one where
+# they overlap in the picture and the crossing line should be a clean seam. Zoom
+# out and the same should hold; if the sheets go ghostly or flicker as the
+# camera recedes, absorbance is depending on camera distance.
+#
+# Claude Sonnet 5.5, 2026-10-14.
+
+[meta]
+name = "Volume: crossing sheets"
+author = "Claude Sonnet 5.5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.5
+background = [0.015, 0.015, 0.03]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.6
+yaw = 0.5
+pitch = 0.45
+
+[[transform]]
+translation = [-0.25, -0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.95, 0.55, 0.25]
+
+[[transform]]
+translation = [-0.25, 0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.95, 0.75, 0.35]
+
+[[transform]]
+translation = [0.25, -0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.85, 0.45, 0.3]
+
+[[transform]]
+translation = [0.25, 0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [1.0, 0.65, 0.2]
+[[subscene]]
+name = "second sheet"
+rotation = [0.0, 70.0, 0.0]
+translation = [0.0, 0.0, -0.15]
+
+[[subscene.transform]]
+translation = [-0.25, -0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.25, 0.65, 0.95]
+
+[[subscene.transform]]
+translation = [-0.25, 0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.35, 0.85, 0.9]
+
+[[subscene.transform]]
+translation = [0.25, -0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.3, 0.5, 0.85]
+
+[[subscene.transform]]
+translation = [0.25, 0.25, 0.0]
+scale = [0.5, 0.5, 0.1]
+color = [0.2, 0.75, 1.0]

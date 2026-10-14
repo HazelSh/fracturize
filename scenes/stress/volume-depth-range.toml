@@ -1,0 +1,68 @@
+# Volume stress: a large depth range in one view.
+#
+# Four long strands run along the view axis, from well behind the focus to
+# nearly into the lens, so a single frame holds material from a few tenths of a
+# unit to several units away. The depth warp has to spend its range on all of
+# it: log-warped depth keeps a near strand and a far one from sharing a moment
+# bin, and material that clamps at either end of the range shows up here as
+# strands that stop short or go flat-lit.
+#
+# Zoom in until the nearest strands brush past the camera: the per-point
+# absorbance cap is for exactly that moment.
+#
+# Claude Sonnet 5.5, 2026-10-14.
+
+[meta]
+name = "Volume: depth range"
+author = "Claude Sonnet 5.5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.5
+background = [0.02, 0.02, 0.03]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 1.7
+yaw = 0.18
+pitch = 0.12
+
+[[transform]]
+translation = [-0.18, -0.18, -0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.95,0.5,0.3]
+
+[[transform]]
+translation = [-0.18, -0.18, 0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.95,0.5,0.3]
+
+[[transform]]
+translation = [-0.18, 0.18, -0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.4,0.8,0.9]
+
+[[transform]]
+translation = [-0.18, 0.18, 0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.4,0.8,0.9]
+
+[[transform]]
+translation = [0.18, -0.18, -0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.9,0.85,0.4]
+
+[[transform]]
+translation = [0.18, -0.18, 0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.9,0.85,0.4]
+
+[[transform]]
+translation = [0.18, 0.18, -0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.6,0.5,0.95]
+
+[[transform]]
+translation = [0.18, 0.18, 0.5]
+scale = [0.14, 0.14, 0.5]
+color = [0.6,0.5,0.95]
+

@@ -1,0 +1,95 @@
+# Volume stress: a dense core inside a sparse shell.
+#
+# The shell is a Sierpinski octahedron, an open lattice with a lot of air in it;
+# the core is a small dense tetrahedron-fractal at its centre, given most of the
+# points. Looking in from outside, every ray to the core crosses shell material
+# first. This is the "thin in front of thick" case at scale: the shell must stay
+# visible and lightly absorbing, the core must read as solid and its far side
+# must be hidden by its own near side.
+#
+# Claude Sonnet 5.5, 2026-10-14.
+
+[meta]
+name = "Volume: core in shell"
+author = "Claude Sonnet 5.5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.5
+background = [0.02, 0.02, 0.035]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 3.4
+yaw = 0.7
+pitch = 0.35
+
+# The shell: six maps at the octahedron's vertices, radius 1.
+[[transform]]
+name = "shell"
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+color = [0.3,0.55,0.9]
+weight = 0.4
+
+[[transform]]
+name = "shell"
+translation = [-0.5, 0.0, 0.0]
+scale = 0.5
+color = [0.3,0.8,0.7]
+weight = 0.4
+
+[[transform]]
+name = "shell"
+translation = [0.0, 0.5, 0.0]
+scale = 0.5
+color = [0.55,0.4,0.9]
+weight = 0.4
+
+[[transform]]
+name = "shell"
+translation = [0.0, -0.5, 0.0]
+scale = 0.5
+color = [0.4,0.7,0.95]
+weight = 0.4
+
+[[transform]]
+name = "shell"
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+color = [0.35,0.5,0.85]
+weight = 0.4
+
+[[transform]]
+name = "shell"
+translation = [0.0, 0.0, -0.5]
+scale = 0.5
+color = [0.5,0.85,0.8]
+weight = 0.4
+
+# The core: four maps at a tetrahedron's corners, placed small and given most of
+# the points by its share.
+[[subscene]]
+name = "core"
+share = 3.0
+scale = 0.28
+
+[[subscene.transform]]
+translation = [0.5, 0.5, 0.5]
+scale = 0.5
+color = [1.0,0.75,0.3]
+
+[[subscene.transform]]
+translation = [0.5, -0.5, -0.5]
+scale = 0.5
+color = [1.0,0.45,0.25]
+
+[[subscene.transform]]
+translation = [-0.5, 0.5, -0.5]
+scale = 0.5
+color = [0.95,0.9,0.5]
+
+[[subscene.transform]]
+translation = [-0.5, -0.5, 0.5]
+scale = 0.5
+color = [1.0,0.6,0.35]
+

@@ -5928,7 +5928,7 @@ impl App {
         use crate::gpu::points::volume::VolumeParams;
         let params = if self.render_mode == RenderMode::Volume {
             let range = self.volume_depth_range();
-            VolumeParams::new(self.opacity, samples, height, 1, range)
+            VolumeParams::new(self.opacity, samples, height, 1, self.camera.fov, range)
         } else {
             VolumeParams::OFF
         };

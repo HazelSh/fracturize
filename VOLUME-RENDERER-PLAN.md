@@ -239,6 +239,46 @@ Things the build showed that the design above did not say.
   black frames). astral_lattice at 10 shows background snow: the zoom band is
   full of sparse far dust that the gain lifts.
 
+## Slice 1c findings
+
+Prompted by Hazel using volume mode live: "the background bleeds through,
+especially on a zoom-out, and points can flicker really badly".
+
+- **The diagnosis was right.** Absorbance was normalised in screen space
+  (`σ·H²/N`, as exposure is), so a ray's optical depth depended on camera
+  distance. Median `b0` over lit pixels at opacity 2, at 0.5 / 1 / 2 / 4 times the
+  authored distance: nautilus 0.53 / 2.86 / 12.3 / 46.9 and censer 1.37 / 5.1 / 20
+  / 72.6 before, against 1.89 / 2.04 / 2.03 / 1.90 and 2.00 / 1.89 / 1.85 / 1.71
+  after. Absorbance is now a world quantity: `σ·K·L²/N` of cross-section over the
+  pixel's world area at the point's depth. Invariance to point count and
+  supersample is kept (median `b0` 3.057 / 3.056 / 3.056 at 1M / 4M / 16M points;
+  3.01 / 3.06 / 3.04 at supersample 1 / 2 / 3). One scene departs: jellyfish's
+  median falls 1.78 → 0.73 over 0.5-4x, because its far dust becomes lit
+  pixels as it shrinks (its p90 is flat, 4.28 → 3.93).
+- **Flicker, measured live** (Xephyr, camera held by a view file, 100 frames at
+  30 fps of the attractor, mean absolute difference of consecutive frames over
+  its lit pixels; the gizmos are in frame and static, which dilutes all three
+  alike): at 4x the authored distance on nautilus splat 0.045, volume before
+  0.174 (3.9x splat), after 0.067 (1.5x). Censer at 4x: 0.067 / 0.132 (2.0x) /
+  0.083 (1.2x). At the authored distance on nautilus: splat 0.102, volume before 0.177
+  (1.7x), after 0.130 (1.3x); single runs, so read them to about ±0.02. What remains, 1.2-1.8x splat, is the ring turning over under a
+  transmittance that amplifies it; the mean level at 4x was 117 before, 167 after,
+  against splat's 169 — the dimming that read as bleed.
+- **Background compositing by `T_total` helps on a pale ground and needs a
+  filler.** `alpha = 1 − (1 − coverage)·T_total` alone makes a sponge on
+  `[0.6, 0.6, 0.62]` solid instead of a ghost, but paints thick, dim-emitting
+  pixels black (strands end-on, the centre of an infinite zoom). Letting the
+  colour take the alpha instead fills everything solid and loses the lanes.
+  0.3 of the pixel's own mean colour is the compromise.
+- **The emission gain was removed.** With the fill it no longer helps.
+- **Near the eye** a point's deposit climbs as 1/z² once its footprint hits the
+  cap; it is now scaled by the area past the cap. Median `b0` stays 0.8-2.8 and
+  p99 6-60 from 0.5x down to a tenth of the authored distance.
+- **Not fixed.** At opacity 10 and beyond, dense sheets sag toward grey (the
+  reconstruction's soft front), jellyfish-like translucent forms go flat milky,
+  and the infinite-zoom centre can show a few black holes at opacity 3-10
+  (reduced, not removed, by the fill).
+
 ## Open questions, decided by looking
 
 - **Background compositing.** Splat composites `mix(bg, colour, coverage)`, with

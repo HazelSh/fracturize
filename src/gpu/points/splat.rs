@@ -68,7 +68,8 @@ struct SplatParams {
     /// LSBs of triangular dither before the 8-bit quantize. 0 is off, and off
     /// takes the shader's early return, so an undithered render is untouched.
     dither: f32,
-    _pad: f32,
+    /// Volume mode's tonemap only; see `volume_n` in splat.wgsl. 0 otherwise.
+    volume_n: f32,
 }
 
 /// The tonemap grade, as the CLI and the record speak about it.
@@ -141,6 +142,9 @@ pub struct SplatRenderer {
     volume_active: bool,
     /// Sigma of the moment blur in accumulation pixels; 0 skips the passes.
     blur_px: f32,
+    /// What the tonemap reads as `volume_n`: the supersample factor, or 0 when
+    /// volume is off.
+    volume_n: f32,
     /// The moment targets, at accumulation resolution, recreated with it.
     moments: Option<MomentTargets>,
     /// Accumulation target + matching tonemap bind group, recreated when
@@ -185,6 +189,7 @@ struct Resolved {
 /// Pass A's output: `(b0, b1, b2, b3)` and `b4`, fp32, and the group-1 bind
 /// group pass B reads them through.
 struct MomentTargets {
+    texture0: wgpu::Texture,
     view0: wgpu::TextureView,
     view1: wgpu::TextureView,
     bind_group: BindGroup,
@@ -197,6 +202,7 @@ struct MomentTargets {
 }
 
 struct MomentSet {
+    texture0: wgpu::Texture,
     view0: wgpu::TextureView,
     view1: wgpu::TextureView,
     bind_group: BindGroup,
@@ -212,6 +218,10 @@ struct VolumePipelines {
     quad: RenderPipeline,
     point: RenderPipeline,
     moments_layout: BindGroupLayout,
+    /// The tonemap that also dims the background by the absorbance field, and
+    /// the layout of its three bindings (input density, params, moments).
+    tonemap: RenderPipeline,
+    tonemap_layout: BindGroupLayout,
     /// Separable gaussian over the moment targets (no blending: they replace).
     blur_h: RenderPipeline,
     blur_v: RenderPipeline,
@@ -299,9 +309,9 @@ impl SplatPipelines {
                     },
                     count: None,
                 },
-                // Volume mode's depth warp, absorbance scale and emission
-                // gain. The vertex stage reads the first two, pass B's
-                // fragment stage the gain.
+                // Volume mode's depth warp, absorbance scale and blur width.
+                // The vertex stage reads the first two, the blur's fragment
+                // stage the third.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -468,6 +478,81 @@ impl SplatPipelines {
                 };
                 let replace_targets = [replace(MOMENT_FORMAT_0), replace(MOMENT_FORMAT_1)];
                 use wgpu::PrimitiveTopology::{PointList, TriangleList, TriangleStrip};
+                let tonemap_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("volume_tonemap_bind_group_layout"),
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 2,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                        ],
+                    });
+                let tonemap_layout_pl =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("volume_tonemap_pipeline_layout"),
+                        bind_group_layouts: &[Some(&tonemap_layout)],
+                        immediate_size: 0,
+                    });
+                // Same state as the plain tonemap: it carries the frame's depth
+                // attachment so the overlay passes can Load it.
+                let tonemap = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("volume_tonemap_pipeline"),
+                    layout: Some(&tonemap_layout_pl),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_tonemap"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_tonemap_volume"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: primitive(TriangleList),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                });
                 VolumePipelines {
                     abs_quad: make("volume_abs_quad", &accum_pipeline_layout, "vs_splat", "fs_abs", TriangleStrip, &abs_targets),
                     abs_point: make("volume_abs_point", &accum_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &abs_targets),
@@ -476,6 +561,8 @@ impl SplatPipelines {
                     blur_h: make("volume_blur_h", &resolve_layout, "vs_tonemap", "fs_blur_h", TriangleList, &replace_targets),
                     blur_v: make("volume_blur_v", &resolve_layout, "vs_tonemap", "fs_blur_v", TriangleList, &replace_targets),
                     moments_layout,
+                    tonemap,
+                    tonemap_layout,
                 }
             });
 
@@ -649,6 +736,7 @@ impl SplatRenderer {
             volume_pipelines,
             volume_active: false,
             blur_px: 0.0,
+            volume_n: 0.0,
             moments: None,
             accum_format,
             quad_pipeline,
@@ -763,7 +851,7 @@ impl SplatRenderer {
             gamma_threshold: grade.gamma_threshold,
             vibrancy: grade.vibrancy,
             dither: self.dither,
-            _pad: 0.0,
+            volume_n: self.volume_n,
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
     }
@@ -865,15 +953,32 @@ impl SplatRenderer {
         let accum = self.accum.as_ref().unwrap();
         // Whichever texture holds output-sized linear density: the resolved
         // one under supersampling, the accumulation itself otherwise.
-        let tonemap_bind_group = match self.supersample.as_ref() {
+        let (tonemap_bind_group, input_view) = match self.supersample.as_ref() {
             Some(ss) => {
                 let resolved = ss.resolved.as_ref().expect("ensured above");
                 ss.downsampler.pass(device, encoder, &accum.view, &resolved.view);
-                &resolved.tonemap_bind_group
+                (&resolved.tonemap_bind_group, &resolved.view)
             }
-            None => &accum.tonemap_bind_group,
+            None => (&accum.tonemap_bind_group, &accum.view),
         };
-        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group);
+        if let (true, Some(vp), Some(m)) =
+            (self.volume_active, self.volume_pipelines.as_ref(), self.moments.as_ref())
+        {
+            // The same tonemap, reading the absorbance field as well so it can
+            // dim the background by it.
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("volume_tonemap_bind_group"),
+                layout: &vp.tonemap_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(input_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.params_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&m.view0) },
+                ],
+            });
+            Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
+        } else {
+            Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group);
+        }
     }
 
     /// Splat `points` — a half-open range of point-buffer indices — into the
@@ -977,6 +1082,13 @@ impl SplatRenderer {
         }
     }
 
+    /// The (blurred) absorbance moments' first target, `(b0, b1, b2, b3)`, as the
+    /// last volume render left it — what a measurement reads `b0` from. `None`
+    /// before one has run.
+    pub fn moments_texture(&self) -> Option<&wgpu::Texture> {
+        self.moments.as_ref().map(|m| &m.texture0)
+    }
+
     /// Whether this device can run volume mode (see
     /// [`SplatPipelines::volume_available`]).
     pub fn volume_available(&self) -> bool {
@@ -993,6 +1105,12 @@ impl SplatRenderer {
     pub fn set_volume(&mut self, queue: &wgpu::Queue, params: VolumeParams) {
         self.volume_active = params.enabled > 0.5 && self.volume_pipelines.is_some();
         self.blur_px = if self.volume_active { params.blur_px } else { 0.0 };
+        self.volume_n = if self.volume_active { self.supersample() as f32 } else { 0.0 };
+        queue.write_buffer(
+            &self.params_buffer,
+            (std::mem::size_of::<SplatParams>() - 4) as u64,
+            bytemuck::bytes_of(&self.volume_n),
+        );
         let written = if self.volume_active { params } else { VolumeParams::OFF };
         queue.write_buffer(&self.volume_params_buffer, 0, bytemuck::bytes_of(&written));
     }
@@ -1016,13 +1134,16 @@ impl SplatRenderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
         };
         let blur = self.blur_px > 0.0;
         let set = |label: &'static str| {
-            let view0 = make(label, MOMENT_FORMAT_0).create_view(&wgpu::TextureViewDescriptor::default());
+            let texture0 = make(label, MOMENT_FORMAT_0);
+            let view0 = texture0.create_view(&wgpu::TextureViewDescriptor::default());
             let view1 = make(label, MOMENT_FORMAT_1).create_view(&wgpu::TextureViewDescriptor::default());
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
@@ -1032,11 +1153,12 @@ impl SplatRenderer {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view1) },
                 ],
             });
-            MomentSet { view0, view1, bind_group }
+            MomentSet { texture0, view0, view1, bind_group }
         };
         let main = set("volume_moments");
         let scratch = blur.then(|| set("volume_moments_scratch"));
         self.moments = Some(MomentTargets {
+            texture0: main.texture0,
             view0: main.view0,
             view1: main.view1,
             bind_group: main.bind_group,

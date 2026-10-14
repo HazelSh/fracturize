@@ -1,0 +1,101 @@
+# Volume stress: very thin filaments in front of a bright mass.
+#
+# The mass is a dense flat square far behind, in warm light colours; the
+# filaments are a few hair-thin strands hanging in front of it. The filaments
+# carry almost no material, so they should barely dim the mass, and they should
+# stay visible against it rather than being swallowed by the mass's own
+# emission. The failure to look for is the bleed: filaments that fade into the
+# mass, or the mass showing through *and* lightening where a strand crosses it.
+#
+# Also the case where the compositing of the background matters: try it with a
+# pale background (-S meta.background=[0.6,0.6,0.62]).
+#
+# Claude Sonnet 5.5, 2026-10-14.
+
+[meta]
+name = "Volume: thin before bright"
+author = "Claude Sonnet 5.5"
+point_size = 0.002
+point_count = 4_000_000
+color_speed = 0.5
+background = [0.02, 0.02, 0.035]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.6
+yaw = 0.35
+pitch = 0.2
+
+[[transform]]
+name = "mass"
+translation = [-0.25, -0.25, -0.5]
+scale = [0.5, 0.5, 0.08]
+color = [1.0, 0.7000000000000001, 0.35]
+weight = 1.5
+
+[[transform]]
+name = "mass"
+translation = [-0.25, 0.25, -0.5]
+scale = [0.5, 0.5, 0.08]
+color = [1.0, 0.7000000000000001, 0.55]
+weight = 1.5
+
+[[transform]]
+name = "mass"
+translation = [0.25, -0.25, -0.5]
+scale = [0.5, 0.5, 0.08]
+color = [1.0, 0.86, 0.35]
+weight = 1.5
+
+[[transform]]
+name = "mass"
+translation = [0.25, 0.25, -0.5]
+scale = [0.5, 0.5, 0.08]
+color = [1.0, 0.86, 0.55]
+weight = 1.5
+
+# The strands: vertical hairs, a hundredth as wide as they are tall, in front.
+[[subscene]]
+name = "hairs"
+share = 0.25
+
+[[subscene.transform]]
+translation = [-0.5, -0.45, 0.4]
+scale = [0.006, 0.55, 0.006]
+color = [0.3,0.7,1.0]
+
+[[subscene.transform]]
+translation = [-0.5, 0.45, 0.4]
+scale = [0.006, 0.55, 0.006]
+color = [0.3,0.7,1.0]
+
+[[subscene.transform]]
+translation = [0.0, -0.45, 0.7]
+scale = [0.006, 0.55, 0.006]
+color = [0.5,0.9,1.0]
+
+[[subscene.transform]]
+translation = [0.0, 0.45, 0.7]
+scale = [0.006, 0.55, 0.006]
+color = [0.5,0.9,1.0]
+
+[[subscene.transform]]
+translation = [0.45, -0.45, 0.3]
+scale = [0.006, 0.55, 0.006]
+color = [0.35,0.6,1.0]
+
+[[subscene.transform]]
+translation = [0.45, 0.45, 0.3]
+scale = [0.006, 0.55, 0.006]
+color = [0.35,0.6,1.0]
+
+[[subscene.transform]]
+translation = [0.2, -0.45, 0.1]
+scale = [0.006, 0.55, 0.006]
+color = [0.6,0.8,1.0]
+
+[[subscene.transform]]
+translation = [0.2, 0.45, 0.1]
+scale = [0.006, 0.55, 0.006]
+color = [0.6,0.8,1.0]
+

@@ -89,7 +89,10 @@ struct SplatParams {
     /// 1 LSB of triangular dither before the hardware quantizes to 8 bits.
     /// 0 is off, and off is exact — see `dither_srgb`.
     dither: f32,
-    _pad0: f32,
+    /// Volume mode's tonemap only: the supersample factor, so it can average
+    /// the absorbance field over an output pixel's block. 0 for the plain
+    /// tonemap, which never reads it.
+    volume_n: f32,
 }
 
 /// Volume mode's per-frame numbers (16 bytes; `VolumeParams` in volume.rs).
@@ -97,19 +100,22 @@ struct VolumeParams {
     /// 1 when the host is drawing the volume passes, else 0. The vertex stage
     /// skips the depth and absorbance work entirely when it is 0.
     enabled: f32,
-    /// Absorbance per unit of kernel weight: opacity * K * H^2 / samples. The
-    /// same normalisation `exposure_scale` applies to density, which is what
-    /// makes opacity a property of the scene rather than of the point count.
+    /// A point's absorbing cross-section in world area: opacity * K * L^2 /
+    /// samples, with L the scene's reference length. The vertex stage divides
+    /// it by the world area of a pixel at the point's depth (`volume_deposit`),
+    /// so optical depth is a property of the material and not of where the
+    /// camera stands, nor of the point count.
     abs_scale: f32,
     /// Depth warp: z = ln(view depth) * warp_scale + warp_bias, clamped to
     /// [-1, 1]. Logarithmic, as the moment-OIT paper recommends, so equal
     /// ratios of distance get equal room.
     warp_scale: f32,
     warp_bias: f32,
-    /// Constant emission multiplier for the frame (`volume::emission_gain`).
-    emission_gain: f32,
     /// Sigma of the moment blur, in accumulation pixels. 0 is off.
     blur_px: f32,
+    /// Pixels per world unit at unit depth: a pixel's world area at depth z is
+    /// (z / ppu)^2.
+    ppu: f32,
     _pad0: f32,
     _pad1: f32,
 }
@@ -225,6 +231,13 @@ fn own_share(variance: f32) -> f32 {
     return v / (v + s2);
 }
 
+/// A point's whole absorbance deposit, in pixels' worth of optical depth: its
+/// world cross-section over the world area of a pixel at its depth.
+fn volume_deposit(depth: f32) -> f32 {
+    let s = volume.ppu / depth;
+    return volume.abs_scale * s * s;
+}
+
 /// Warped depth for the moment targets. See `VolumeParams`.
 fn volume_z(depth: f32) -> f32 {
     return clamp(log(depth) * volume.warp_scale + volume.warp_bias, -1.0, 1.0);
@@ -327,7 +340,16 @@ fn vs_splat(
     out.z = 0.0;
     out.own = 1.0;
     if volume.enabled > 0.5 {
-        out.abs_weight = volume.abs_scale * guard * KERNEL_NORM / (radius_px * radius_px);
+        // A point's deposit is its world cross-section over a pixel's world
+        // area, which grows as 1/z^2 as the point nears the eye, and so does the
+        // area its footprint is spread over — until the footprint is capped at
+        // `max_point_pixels`. Past the cap the footprint stops growing and the
+        // peak would climb as 1/z^2: a mote the eye brushes past would turn
+        // optically solid. So beyond the cap the deposit is held at what it was
+        // at the cap, in proportion to the area it covers.
+        let cap = camera.max_point_pixels;
+        let cap_share = select(1.0, (cap * cap) / (base_radius * base_radius), base_radius > cap);
+        out.abs_weight = volume_deposit(depth) * cap_share * guard * KERNEL_NORM / (radius_px * radius_px);
         out.z = volume_z(depth);
         out.own = own_share(radius_px * radius_px * 0.125);
     }
@@ -372,7 +394,7 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     out.z = 0.0;
     out.own = 1.0;
     if volume.enabled > 0.5 {
-        out.abs_weight = volume.abs_scale * guard;
+        out.abs_weight = volume_deposit(depth) * guard;
         out.z = volume_z(depth);
         out.own = own_share(0.0);
     }
@@ -397,6 +419,9 @@ const MOMENT_OVERESTIMATION: f32 = 0.1;
 // What is left of a pixel's absorbance after taking a point's own deposit out
 // is only believed above this fraction of the total: below it the difference is
 // rounding noise in the fp32 sums.
+// Share of its own mean colour an optically thick pixel is filled with by the
+// volume tonemap. Mirrored in `volume::OPAQUE_FILL`; see the comment at its use.
+const OPAQUE_FILL: f32 = 0.3;
 const MOMENT_NOISE_FLOOR: f32 = 0.00001;
 const MOMENT_BIAS_VECTOR: vec4<f32> = vec4<f32>(0.0, 0.375, 0.0, 0.375);
 
@@ -540,7 +565,7 @@ fn fs_splat_volume(in: SplatOutput) -> @location(0) vec4<f32> {
         let sums = vec4<f32>(m0.y - a * z, m0.z - a * z2, m0.w - a * z2 * z, b4 - a * z2 * z2);
         t = moment_transmittance(b0, sums, z);
     }
-    let w = in.weight * t * volume.emission_gain * falloff;
+    let w = in.weight * t * falloff;
     return vec4<f32>(in.color * w, w);
 }
 
@@ -712,6 +737,103 @@ fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(dither_srgb(straight, px, params.dither), coverage);
     }
     let composited = params.background.rgb * (1.0 - coverage) + emitted;
+    return vec4<f32>(dither_srgb(composited, px, params.dither), 1.0);
+}
+
+// Volume mode's tonemap: the same pass, with the background dimmed by the
+// absorbance field. Keep in step with `fs_tonemap` above.
+@group(0) @binding(2) var tonemap_moments: texture_2d<f32>;
+
+@fragment
+fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
+    let transparent = params.transparent > 0.5;
+    let acc = textureLoad(accum, vec2<i32>(in.clip_position.xy), 0);
+    let density = acc.a;
+    // The share of the background that survives the material in front of it:
+    // mean of exp(-b0) over this output pixel's block of accumulation texels
+    // (a transmittance averages as itself, not as its logarithm).
+    let n = i32(params.volume_n);
+    var t_total = 0.0;
+    for (var dy = 0; dy < n; dy += 1) {
+        for (var dx = 0; dx < n; dx += 1) {
+            let b0 = textureLoad(tonemap_moments, vec2<i32>(in.clip_position.xy) * n + vec2<i32>(dx, dy), 0).x;
+            t_total += exp(-b0);
+        }
+    }
+    t_total = t_total / f32(n * n);
+    if density <= 0.0 {
+        if transparent {
+            return vec4<f32>(0.0);
+        }
+        return vec4<f32>(params.background.rgb, 1.0);
+    }
+    // Density-weighted mean color, brightness from log density
+    let mean_color = acc.rgb / density;
+    let brightness = log2(1.0 + density * params.exposure_scale) * params.gain;
+    // Coverage, not gain. This used to be `background + mean_color *
+    // brightness` — pure emission, which is right only if the background is
+    // black. Once the background became a scene parameter it stopped being:
+    // add a fractal to a light background and every pixel clips to white,
+    // which is what happened the first time this was tried at 0.9 grey.
+    //
+    // Treating log-density as *coverage* and compositing fixes that and
+    // unifies the two output modes — the opaque render is now exactly the
+    // transparent one composited over the background, one model instead of
+    // two. On the near-black default background the difference from the old
+    // formula is bounded by the background itself (~2% of full scale), so
+    // existing scenes are visually unchanged.
+    let raw = clamp(brightness, 0.0, 1.0);
+    let gi = params.gamma_inv;
+    let th = params.gamma_threshold;
+
+    // Gamma reaches the picture by two routes, and `vibrancy` picks between
+    // them. Through *coverage* the hue is untouched, so a bright core keeps
+    // its colour and stays saturated. Through each *channel* of the emitted
+    // colour, the dim channels of a bright pixel get lifted further than the
+    // strong one — which is a highlight rolling off toward white, the way film
+    // does it. flam3 calls the blend vibrancy and so does this.
+    let coverage = gamma_curve(raw, gi, th);
+    let vibrant = mean_color * coverage;
+    let desaturated = vec3<f32>(
+        gamma_curve(mean_color.r * raw, gi, th),
+        gamma_curve(mean_color.g * raw, gi, th),
+        gamma_curve(mean_color.b * raw, gi, th),
+    );
+    // Premultiplied by coverage, which is what makes the two branches below
+    // one compositing model rather than two.
+    var emitted = mix(desaturated, vibrant, params.vibrancy);
+    // Material blocks the background as well as hiding what is behind it:
+    // alpha = 1 - (1 - coverage) * T_total, which is `coverage` exactly where
+    // nothing absorbs, and 1 under enough material whatever the emission did.
+    //
+    // What the extra alpha is *filled with* is the question, and the two easy
+    // answers are both wrong. Nothing (only the background dims) leaves a pixel
+    // that is optically thick but emits little -- a strand seen end-on, the
+    // centre of an infinite zoom -- darker than the ground it hides: black
+    // strands and black holes on a dark scene. Everything (the colour takes the
+    // alpha, so a thick pixel shows its mean colour at full strength) turns
+    // every pixel with an optical depth over about 1 solid at opacity 0.5, loses
+    // the dark lanes between sheets and is the points renderer again. So the
+    // thick pixel is filled with OPAQUE_FILL of its own mean colour: enough that
+    // absorbing material never goes black, little enough that what separates
+    // near from far survives. 0.3 was the smallest of {0, 0.3, 0.6} with no
+    // black left, by eye, on `volume-depth-range`, `volume-zoom-tetra` and
+    // `nautilus`.
+    let alpha = 1.0 - (1.0 - coverage) * t_total;
+    emitted = emitted + mean_color * (alpha - coverage) * OPAQUE_FILL;
+
+    // Dither the colour and never the alpha. Coverage is not a colour: it is
+    // read as a mask, and noise in a mask is a ragged edge rather than a finer
+    // gradient.
+    let px = vec2<i32>(in.clip_position.xy);
+    if transparent {
+        // Straight (non-premultiplied) alpha, which is what PNG stores:
+        // colour is the palette hue, coverage is the log density, so the
+        // dusty edges stay dusty instead of turning into a cutout.
+        let straight = emitted / max(coverage, 1e-6);
+        return vec4<f32>(dither_srgb(straight, px, params.dither), alpha);
+    }
+    let composited = params.background.rgb * (1.0 - alpha) + emitted;
     return vec4<f32>(dither_srgb(composited, px, params.dither), 1.0);
 }
 

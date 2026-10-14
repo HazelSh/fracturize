@@ -1,0 +1,58 @@
+# Volume stress: infinite zoom, on a dense scale-invariant set.
+#
+# A Sierpinski tetrahedron whose first map has no translation, so its fixed point
+# is the origin and it can be the zoom symmetry. The set is dense and the same at
+# every scale, so the picture is full of material at every depth the band holds.
+# Under infinite zoom there are no bounds to measure and the volume renderer's
+# depth range and its reference length are both taken from the eye's distance to
+# the fixed point; this scene checks that the opacity means the same thing
+# before and after a zoom wrap, and at every distance in between.
+#
+# Scroll in. Nothing should brighten, dim, flicker or change opacity at the wrap.
+#
+# Claude Sonnet 5.5, 2026-10-14.
+
+[meta]
+name = "Volume: zoom tetra"
+author = "Claude Sonnet 5.5"
+point_size = 0.002
+point_count = 6_000_000
+color_speed = 0.5
+color_falloff = 0.6
+color_contrast = 1.5
+haze = 0.3
+background = [0.015, 0.015, 0.03]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.2
+yaw = 0.6
+pitch = 0.5
+
+[[transform]]
+name = "descent"
+translation = [0.0, 0.0, 0.0]
+scale = 0.5
+rotation = [0.0, 20.0, 0.0]
+color = [0.95, 0.5, 0.3]
+
+[[transform]]
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+color = [0.4, 0.8, 0.9]
+
+[[transform]]
+translation = [0.25, 0.433, 0.0]
+scale = 0.5
+color = [0.9, 0.85, 0.4]
+
+[[transform]]
+translation = [0.25, 0.144, 0.408]
+scale = 0.5
+color = [0.6, 0.5, 0.95]
+
+[zoom]
+map = "descent"
+radius = 4.8
+levels = 15
+edge_guard = 1.0
