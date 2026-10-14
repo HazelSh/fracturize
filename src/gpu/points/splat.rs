@@ -140,13 +140,14 @@ pub struct SplatRenderer {
     /// and the device able to. At zero, nothing about the volume exists in the
     /// frame and the output is plain splat, byte for byte.
     volume_active: bool,
-    /// Sigma of the moment blur in accumulation pixels; 0 skips the passes.
-    blur_px: f32,
+    /// The exact reference's pipelines, built the first time they are asked for.
+    dump_pipelines: Option<DumpPipelines>,
     /// What the tonemap reads as `volume_n`: the supersample factor, or 0 when
     /// volume is off.
     volume_n: f32,
-    /// The moment targets, at accumulation resolution, recreated with it.
-    moments: Option<MomentTargets>,
+    /// The absorbance slices and each pixel's depth span, at accumulation
+    /// resolution, recreated with it.
+    moments: Option<BinTargets>,
     /// Accumulation target + matching tonemap bind group, recreated when
     /// the render size changes (window resize, screenshots)
     accum: Option<AccumTarget>,
@@ -186,26 +187,24 @@ struct Resolved {
     height: u32,
 }
 
-/// Pass A's output: `(b0, b1, b2, b3)` and `b4`, fp32, and the group-1 bind
+/// Pass A's output: eight slices of absorbance per pixel in two fp32 targets,
+/// the per-pixel depth span they are measured against, and the group-1 bind
 /// group pass B reads them through.
-struct MomentTargets {
+struct BinTargets {
     texture0: wgpu::Texture,
+    texture1: wgpu::Texture,
     view0: wgpu::TextureView,
     view1: wgpu::TextureView,
+    /// Slices (0, 1) and the span buffer (2): what pass B and the dump read.
     bind_group: BindGroup,
-    /// The same again, the blur's intermediate: horizontal blur reads the
-    /// first set and writes this one, vertical reads this and writes back. Only
-    /// allocated when the blur is on.
-    scratch: Option<MomentSet>,
+    /// Just the span buffer, for the two passes that write it or read it while
+    /// drawing into the slices.
+    ranges: Buffer,
+    ranges_group: BindGroup,
+    /// Stands in as pass A0's colour target; nothing is written to it.
+    front_target: wgpu::TextureView,
     width: u32,
     height: u32,
-}
-
-struct MomentSet {
-    texture0: wgpu::Texture,
-    view0: wgpu::TextureView,
-    view1: wgpu::TextureView,
-    bind_group: BindGroup,
 }
 
 /// What volume mode adds to the compiled set: pass A (absorbance moments) and
@@ -218,13 +217,37 @@ struct VolumePipelines {
     quad: RenderPipeline,
     point: RenderPipeline,
     moments_layout: BindGroupLayout,
+    /// The span buffer alone (binding 2 of group 1), for passes that draw into
+    /// the slices and so cannot bind them.
+    front_layout: BindGroupLayout,
+    /// Pass A0: each pixel's nearest and farthest depth.
+    a0_quad: RenderPipeline,
+    a0_point: RenderPipeline,
     /// The tonemap that also dims the background by the absorbance field, and
     /// the layout of its three bindings (input density, params, moments).
     tonemap: RenderPipeline,
     tonemap_layout: BindGroupLayout,
-    /// Separable gaussian over the moment targets (no blending: they replace).
-    blur_h: RenderPipeline,
-    blur_v: RenderPipeline,
+    /// What the exact reference needs to build its own pipelines on demand
+    /// (`SplatRenderer::dump_fragments`): a device that cannot write storage
+    /// from a fragment stage must not lose volume mode over a diagnostic.
+    shader: wgpu::ShaderModule,
+    accum_layout: BindGroupLayout,
+}
+
+struct DumpPipelines {
+    quad: RenderPipeline,
+    point: RenderPipeline,
+    layout: BindGroupLayout,
+}
+
+/// Every fragment the volume passes would draw, as the exact reference reads
+/// them: see `fs_dump` in splat.wgsl for the record layout.
+pub struct FragmentDump {
+    /// 8 words a record, `min(count, capacity)` records.
+    pub words: Vec<u32>,
+    /// How many fragments the draw produced. More than `words.len() / 8` means
+    /// the buffer overflowed and the dump is a truncated sample.
+    pub count: u64,
 }
 
 struct AccumTarget {
@@ -289,9 +312,11 @@ impl SplatPipelines {
                     },
                     count: None,
                 },
+                // The camera is read by the fragment stage too in volume mode:
+                // the per-pixel span buffer is indexed by the frame's width.
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -410,10 +435,31 @@ impl SplatPipelines {
                     },
                     count: None,
                 };
+                let ranges_entry = wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                };
                 let moments_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("volume_moments_bind_group_layout"),
-                        entries: &[moment_texture(0), moment_texture(1)],
+                        label: Some("volume_bins_bind_group_layout"),
+                        entries: &[moment_texture(0), moment_texture(1), ranges_entry],
+                    });
+                let front_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("volume_ranges_bind_group_layout"),
+                        entries: &[ranges_entry],
+                    });
+                let front_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("volume_front_pipeline_layout"),
+                        bind_group_layouts: &[Some(&accum_layout), Some(&front_layout)],
+                        immediate_size: 0,
                     });
                 let resolve_layout =
                     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -465,18 +511,15 @@ impl SplatPipelines {
                         write_mask: wgpu::ColorWrites::ALL,
                     })
                 };
-                // b0..b3 in one fp32 target and b4 in a second: five numbers a
-                // pixel, and no format holds five.
+                // Eight slices in two fp32 targets: the 32 bytes a sample a
+                // device is guaranteed to render.
                 let abs_targets = [target(MOMENT_FORMAT_0), target(MOMENT_FORMAT_1)];
+                let front_targets = [Some(wgpu::ColorTargetState {
+                    format: TextureFormat::R8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                })];
                 let emit_targets = [target(accum_format)];
-                let replace = |format| {
-                    Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })
-                };
-                let replace_targets = [replace(MOMENT_FORMAT_0), replace(MOMENT_FORMAT_1)];
                 use wgpu::PrimitiveTopology::{PointList, TriangleList, TriangleStrip};
                 let tonemap_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -504,6 +547,16 @@ impl SplatPipelines {
                             },
                             wgpu::BindGroupLayoutEntry {
                                 binding: 2,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 3,
                                 visibility: wgpu::ShaderStages::FRAGMENT,
                                 ty: wgpu::BindingType::Texture {
                                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -554,15 +607,18 @@ impl SplatPipelines {
                     cache: None,
                 });
                 VolumePipelines {
-                    abs_quad: make("volume_abs_quad", &accum_pipeline_layout, "vs_splat", "fs_abs", TriangleStrip, &abs_targets),
-                    abs_point: make("volume_abs_point", &accum_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &abs_targets),
+                    abs_quad: make("volume_abs_quad", &front_pipeline_layout, "vs_splat", "fs_abs", TriangleStrip, &abs_targets),
+                    abs_point: make("volume_abs_point", &front_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &abs_targets),
+                    a0_quad: make("volume_a0_quad", &front_pipeline_layout, "vs_splat", "fs_front", TriangleStrip, &front_targets),
+                    a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_splat_point", "fs_front", PointList, &front_targets),
+                    front_layout,
                     quad: make("volume_quad", &resolve_layout, "vs_splat", "fs_splat_volume", TriangleStrip, &emit_targets),
                     point: make("volume_point", &resolve_layout, "vs_splat_point", "fs_splat_volume", PointList, &emit_targets),
-                    blur_h: make("volume_blur_h", &resolve_layout, "vs_tonemap", "fs_blur_h", TriangleList, &replace_targets),
-                    blur_v: make("volume_blur_v", &resolve_layout, "vs_tonemap", "fs_blur_v", TriangleList, &replace_targets),
                     moments_layout,
                     tonemap,
                     tonemap_layout,
+                    shader: shader.clone(),
+                    accum_layout: accum_layout.clone(),
                 }
             });
 
@@ -663,7 +719,7 @@ impl SplatPipelines {
 
 /// The two moment targets' formats. Five floats a pixel do not fit one format.
 const MOMENT_FORMAT_0: TextureFormat = TextureFormat::Rgba32Float;
-const MOMENT_FORMAT_1: TextureFormat = TextureFormat::R32Float;
+const MOMENT_FORMAT_1: TextureFormat = TextureFormat::Rgba32Float;
 
 impl SplatRenderer {
     pub fn new(
@@ -735,8 +791,8 @@ impl SplatRenderer {
             volume_params_buffer,
             volume_pipelines,
             volume_active: false,
-            blur_px: 0.0,
             volume_n: 0.0,
+            dump_pipelines: None,
             moments: None,
             accum_format,
             quad_pipeline,
@@ -936,15 +992,14 @@ impl SplatRenderer {
             );
         }
         if self.volume_active {
-            // Volume mode: absorbance moments first, then the same splat with
-            // each fragment's weight scaled by the transmittance they give.
-            // Both at accumulation resolution, so a supersampled render has
-            // its moments where its emission is.
+            // Volume mode: each pixel's depth span, then absorbance into slices
+            // of it, then the same splat with each fragment's weight scaled by
+            // the transmittance the slices give. All at accumulation
+            // resolution, so a supersampled render has them where its emission
+            // is.
             self.ensure_moments(device, width * n, height * n);
+            self.front_pass(encoder, 0..point_count, use_point_primitives);
             self.abs_pass(encoder, 0..point_count, use_point_primitives);
-            if self.blur_px > 0.0 {
-                self.blur_passes(encoder);
-            }
             self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
         } else {
             self.splat_pass(encoder, 0..point_count, use_point_primitives);
@@ -973,6 +1028,7 @@ impl SplatRenderer {
                     wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(input_view) },
                     wgpu::BindGroupEntry { binding: 1, resource: self.params_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&m.view0) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&m.view1) },
                 ],
             });
             Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
@@ -1085,8 +1141,224 @@ impl SplatRenderer {
     /// The (blurred) absorbance moments' first target, `(b0, b1, b2, b3)`, as the
     /// last volume render left it — what a measurement reads `b0` from. `None`
     /// before one has run.
-    pub fn moments_texture(&self) -> Option<&wgpu::Texture> {
-        self.moments.as_ref().map(|m| &m.texture0)
+    /// The volume tonemap over an arbitrary output-sized density texture and an
+    /// arbitrary absorbance field (`x` = optical depth `b0`) — what the exact
+    /// reference is drawn through, so it and the GPU path share one tonemap.
+    pub fn tonemap_volume_external(
+        &self,
+        device: &Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        input: &wgpu::TextureView,
+        moments0: &wgpu::TextureView,
+        moments1: &wgpu::TextureView,
+    ) {
+        let vp = self.volume_pipelines.as_ref().expect("volume is available");
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_external_tonemap_bind_group"),
+            layout: &vp.tonemap_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(input) },
+                wgpu::BindGroupEntry { binding: 1, resource: self.params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(moments0) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(moments1) },
+            ],
+        });
+        Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
+    }
+
+    /// Size of the moment targets (the accumulation's), once they exist.
+    pub fn moments_size(&self) -> Option<(u32, u32)> {
+        self.moments.as_ref().map(|m| (m.width, m.height))
+    }
+
+    pub fn moments_texture(&self) -> Option<(&wgpu::Texture, &wgpu::Texture)> {
+        self.moments.as_ref().map(|m| (&m.texture0, &m.texture1))
+    }
+
+    /// Draw every point through the volume vertex stage and write each fragment
+    /// it produces to a list instead of blending it: the input of the exact
+    /// reference (`volume_ref.rs`). Must follow a volume `render` with the same
+    /// camera, since it reads the moments that render left to evaluate the
+    /// GPU path's transmittance per fragment. `capacity` is in fragments.
+    pub fn dump_fragments(
+        &mut self,
+        device: &Device,
+        queue: &wgpu::Queue,
+        points: u32,
+        use_point_primitives: bool,
+        capacity: u64,
+    ) -> Result<FragmentDump, String> {
+        let vp = self.volume_pipelines.as_ref().ok_or("volume mode is not available")?;
+        let moments = self.moments.as_ref().ok_or("render a volume frame first")?;
+        if self.dump_pipelines.is_none() {
+            let storage = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            };
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("volume_dump_bind_group_layout"),
+                entries: &[storage(0), storage(1)],
+            });
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("volume_dump_pipeline_layout"),
+                bind_group_layouts: &[Some(&vp.accum_layout), Some(&vp.moments_layout), Some(&layout)],
+                immediate_size: 0,
+            });
+            let make = |vs: &str, topology| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("volume_dump_pipeline"),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: &vp.shader,
+                        entry_point: Some(vs),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &vp.shader,
+                        entry_point: Some("fs_dump"),
+                        // A target is required; nothing is written to it.
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: TextureFormat::R8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::empty(),
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        unclipped_depth: false,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+            self.dump_pipelines = Some(DumpPipelines {
+                quad: make("vs_splat", wgpu::PrimitiveTopology::TriangleStrip),
+                point: make("vs_splat_point", wgpu::PrimitiveTopology::PointList),
+                layout,
+            });
+        }
+        let dp = self.dump_pipelines.as_ref().unwrap();
+        let bytes = capacity * 32;
+        let list = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_dump"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let counter = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_dump_count"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&counter, 0, &[0u8; 4]);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_dump_bind_group"),
+            layout: &dp.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: list.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: counter.as_entire_binding() },
+            ],
+        });
+        let dummy = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("volume_dump_target"),
+                size: wgpu::Extent3d { width: moments.width, height: moments.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let count_read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_dump_count_read"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("volume_dump_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("volume_dump_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dummy,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Discard,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.accum_bind_group, &[]);
+            pass.set_bind_group(1, &moments.bind_group, &[]);
+            pass.set_bind_group(2, &bind, &[]);
+            if use_point_primitives {
+                pass.set_pipeline(&dp.point);
+                pass.draw(0..points, 0..1);
+            } else {
+                pass.set_pipeline(&dp.quad);
+                pass.draw(0..4, 0..points);
+            }
+        }
+        encoder.copy_buffer_to_buffer(&counter, 0, &count_read, 0, 4);
+        queue.submit(std::iter::once(encoder.finish()));
+        let map = |buf: &Buffer| {
+            buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        };
+        map(&count_read);
+        let count = {
+            let d = count_read.slice(..).get_mapped_range();
+            u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as u64
+        };
+        let kept = count.min(capacity);
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_dump_read"),
+            size: (kept * 32).max(4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("volume_dump_copy"),
+        });
+        if kept > 0 {
+            encoder.copy_buffer_to_buffer(&list, 0, &out, 0, kept * 32);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+        map(&out);
+        let words: Vec<u32> = if kept > 0 {
+            let d = out.slice(..).get_mapped_range();
+            d.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(FragmentDump { words, count })
     }
 
     /// Whether this device can run volume mode (see
@@ -1104,7 +1376,6 @@ impl SplatRenderer {
     /// it is asked.
     pub fn set_volume(&mut self, queue: &wgpu::Queue, params: VolumeParams) {
         self.volume_active = params.enabled > 0.5 && self.volume_pipelines.is_some();
-        self.blur_px = if self.volume_active { params.blur_px } else { 0.0 };
         self.volume_n = if self.volume_active { self.supersample() as f32 } else { 0.0 };
         queue.write_buffer(
             &self.params_buffer,
@@ -1115,17 +1386,14 @@ impl SplatRenderer {
         queue.write_buffer(&self.volume_params_buffer, 0, bytemuck::bytes_of(&written));
     }
 
-    /// (Re)create the moment targets at the accumulation's size.
+    /// (Re)create the slices and the span buffer at the accumulation's size.
     fn ensure_moments(&mut self, device: &Device, width: u32, height: u32) {
         if let Some(m) = &self.moments {
-            if m.width == width
-                && m.height == height
-                && m.scratch.is_some() == (self.blur_px > 0.0)
-            {
+            if m.width == width && m.height == height {
                 return;
             }
         }
-        let layout = &self.volume_pipelines.as_ref().expect("volume is active").moments_layout;
+        let vp = self.volume_pipelines.as_ref().expect("volume is active");
         let make = |label: &'static str, format| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -1140,73 +1408,98 @@ impl SplatRenderer {
                 view_formats: &[],
             })
         };
-        let blur = self.blur_px > 0.0;
-        let set = |label: &'static str| {
-            let texture0 = make(label, MOMENT_FORMAT_0);
-            let view0 = texture0.create_view(&wgpu::TextureViewDescriptor::default());
-            let view1 = make(label, MOMENT_FORMAT_1).create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view0) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view1) },
-                ],
-            });
-            MomentSet { texture0, view0, view1, bind_group }
-        };
-        let main = set("volume_moments");
-        let scratch = blur.then(|| set("volume_moments_scratch"));
-        self.moments = Some(MomentTargets {
-            texture0: main.texture0,
-            view0: main.view0,
-            view1: main.view1,
-            bind_group: main.bind_group,
-            scratch,
+        let texture0 = make("volume_slices_0", MOMENT_FORMAT_0);
+        let texture1 = make("volume_slices_1", MOMENT_FORMAT_1);
+        let view0 = texture0.create_view(&wgpu::TextureViewDescriptor::default());
+        let view1 = texture1.create_view(&wgpu::TextureViewDescriptor::default());
+        // Two words a pixel: the farthest depth, and the complement of the
+        // nearest. Cleared to zero each frame, which both read as "nothing yet".
+        let ranges = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_ranges"),
+            size: (width as u64) * (height as u64) * 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let front_target = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("volume_front_target"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_slices_bind_group"),
+            layout: &vp.moments_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view0) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view1) },
+                wgpu::BindGroupEntry { binding: 2, resource: ranges.as_entire_binding() },
+            ],
+        });
+        let ranges_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_ranges_bind_group"),
+            layout: &vp.front_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 2, resource: ranges.as_entire_binding() }],
+        });
+        self.moments = Some(BinTargets {
+            texture0,
+            texture1,
+            view0,
+            view1,
+            bind_group,
+            ranges,
+            ranges_group,
+            front_target,
             width,
             height,
         });
     }
 
-    /// Blur the moment targets with a separable gaussian, horizontal then
-    /// vertical, ending back in the main set. Moments are *linear* — sums of
-    /// deposits — so blurring them is the same as having splatted fatter
-    /// absorption kernels; emission stays sharp.
-    fn blur_passes(&self, encoder: &mut wgpu::CommandEncoder) {
+    /// Pass A0: every pixel's nearest and farthest fragment depth. A draw with
+    /// no colour output (a one-byte target stands in, because a pass needs
+    /// one), writing the span buffer with atomics.
+    fn front_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        points: std::ops::Range<u32>,
+        use_point_primitives: bool,
+    ) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
-        let m = self.moments.as_ref().expect("ensured");
-        let scratch = m.scratch.as_ref().expect("blur targets ensured");
-        let run = |encoder: &mut wgpu::CommandEncoder,
-                   pipeline: &RenderPipeline,
-                   read: &BindGroup,
-                   w0: &wgpu::TextureView,
-                   w1: &wgpu::TextureView| {
-            let att = |view| {
-                Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })
-            };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("volume_moment_blur"),
-                color_attachments: &[att(w0), att(w1)],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &self.accum_bind_group, &[]);
-            pass.set_bind_group(1, read, &[]);
-            pass.draw(0..3, 0..1);
-        };
-        run(encoder, &vp.blur_h, &m.bind_group, &scratch.view0, &scratch.view1);
-        run(encoder, &vp.blur_v, &scratch.bind_group, &m.view0, &m.view1);
+        let m = self.moments.as_ref().expect("ensured above");
+        encoder.clear_buffer(&m.ranges, 0, None);
+        if points.is_empty() {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("volume_front_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &m.front_target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Discard,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, &self.accum_bind_group, &[]);
+        pass.set_bind_group(1, &m.ranges_group, &[]);
+        if use_point_primitives {
+            pass.set_pipeline(&vp.a0_point);
+            pass.draw(points, 0..1);
+        } else {
+            pass.set_pipeline(&vp.a0_quad);
+            pass.draw(0..4, points);
+        }
     }
 
     /// Pass A: splat every point's absorbance into the moment targets.
@@ -1241,6 +1534,7 @@ impl SplatRenderer {
             return;
         }
         pass.set_bind_group(0, &self.accum_bind_group, &[]);
+        pass.set_bind_group(1, &moments.ranges_group, &[]);
         if use_point_primitives {
             pass.set_pipeline(&vp.abs_point);
             pass.draw(points, 0..1);

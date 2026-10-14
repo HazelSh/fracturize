@@ -22,7 +22,7 @@ use crate::glyphs;
 use crate::gpu::buffers::CameraUniforms;
 use crate::gpu::points::accumulate::Accumulator;
 use crate::gpu::points::splat::Grade;
-use crate::gpu::points::volume::{DepthRange, VolumeParams};
+use crate::gpu::points::volume::{Framing, VolumeParams};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source as FilterSource};
 use crate::gpu::{PointCompute, PointRenderer, SplatRenderer, DEPTH_FORMAT};
 use crate::path::CameraPath;
@@ -907,13 +907,13 @@ pub(crate) fn volume_range(
     scene: &Scene,
     camera: &OrbitCamera,
     zoom: Option<&crate::renorm::Renorm>,
-) -> DepthRange {
+) -> Framing {
     if let Some(z) = zoom {
-        return DepthRange::for_zoom(camera.eye(), camera.forward(), z.fixed_point, z.radius);
+        return Framing::for_zoom(camera.eye(), z.fixed_point);
     }
     match crate::gpu::points::volume::scene_bounds(scene) {
-        Some((centre, radius)) => DepthRange::around(camera.eye(), camera.forward(), centre, radius),
-        None => DepthRange::for_distance(camera.distance),
+        Some((_, radius)) => Framing::around(radius),
+        None => Framing::for_distance(camera.distance),
     }
 }
 
@@ -2034,9 +2034,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         // and the *accumulation* height.
         r.set_volume(
             &queue,
-            VolumeParams::new(
-                sigma, point_count as f64, sampling.target_height(), sampling.n, base_camera.fov, range,
-            ),
+            VolumeParams::new(sigma, point_count as f64, sampling.target_height(), base_camera.fov, range),
         );
     }
 
@@ -2099,6 +2097,29 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
             }
         }
     }
+    // `FRACTURIZE_VOLUME_REFERENCE=<prefix>`: the exact transport for the same
+    // points, the GPU path's error against it, and the reference drawn through
+    // the same tonemap. See `volume_ref.rs`.
+    if opacity.is_some() {
+        if let Some(prefix) = std::env::var_os("FRACTURIZE_VOLUME_REFERENCE") {
+            // The frame-wide depth warp the slice-1c estimator would have used
+            // (scene bounds padded 1.5x, log-warped), for the OLD line.
+            let old_warp = crate::gpu::points::volume::scene_bounds(&scene).filter(|_| zoom.is_none()).map(|(centre, radius)| {
+                let d = (centre - base_camera.eye()).dot(base_camera.forward());
+                let r = radius.max(1e-9) * 1.5;
+                let far = (d + r).max(1e-9);
+                let near = (d - r).max(far / 100.0);
+                let scale = 2.0 / (far.ln() - near.ln()).max(1e-6);
+                (scale, -1.0 - near.ln() * scale)
+            });
+            if let TileRenderer::Splat(r) = &mut renderer {
+                volume_reference(
+                    &device, &queue, r, point_count, use_point_primitives, sampling.n, width, height,
+                    &prefix, bit_depth, old_warp,
+                )?;
+            }
+        }
+    }
     let grade_save = |record: Option<&RenderRecord>| if let Some(p) = &grade_out {
         // One tile only: a contact sheet has a different linear buffer behind
         // every tile, and there is no honest single file to write. Said out
@@ -2128,9 +2149,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     // "optical depth does not depend on camera distance" was checked.
     if opacity.is_some() && std::env::var_os("FRACTURIZE_VOLUME_STATS").is_some() {
         if let TileRenderer::Splat(r) = &renderer {
-            if let Some(tex) = r.moments_texture() {
-                let (w, h) = (tex.width(), tex.height());
-                let px = read_float_texture(&device, &queue, tex, w, h);
+            if let Some((px, w, h)) = read_total_absorbance(&device, &queue, r) {
                 let mut b0: Vec<f32> = px.chunks_exact(4).map(|p| p[0]).filter(|&b| b > 1e-6).collect();
                 b0.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let q = |f: f32| b0.get(((b0.len() as f32 - 1.0) * f) as usize).copied().unwrap_or(0.0);
@@ -2197,6 +2216,189 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     );
     print_timing(t_start, t_setup, t_fill, t_render, t_done);
     Ok(outcome)
+}
+
+/// Total optical depth `b0` per pixel — the sum of the eight absorbance slices —
+/// as `[b0, 0, 0, 0]` texels, with the size they are at.
+fn read_total_absorbance(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    r: &SplatRenderer,
+) -> Option<(Vec<f32>, u32, u32)> {
+    let (t0, t1) = r.moments_texture()?;
+    let (w, h) = (t0.width(), t0.height());
+    let a = read_float_texture(device, queue, t0, w, h);
+    let b = read_float_texture(device, queue, t1, w, h);
+    let mut out = vec![0.0f32; (w * h * 4) as usize];
+    for p in 0..(w * h) as usize {
+        out[p * 4] = a[p * 4..p * 4 + 4].iter().sum::<f32>() + b[p * 4..p * 4 + 4].iter().sum::<f32>();
+    }
+    Some((out, w, h))
+}
+
+/// The exact reference for the frame `r` just drew, and the report of the GPU
+/// path's error against it. See `volume_ref.rs`.
+#[allow(clippy::too_many_arguments)]
+fn volume_reference(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    r: &mut SplatRenderer,
+    points: u32,
+    use_point_primitives: bool,
+    supersample: u32,
+    width: u32,
+    height: u32,
+    prefix: &std::ffi::OsStr,
+    depth: BitDepth,
+    old_warp: Option<(f32, f32)>,
+) -> Result<(), String> {
+    if supersample != 1 || depth.bits() != 8 {
+        return Err("the exact reference compares fields pixel for pixel: use --supersample 1 and 8-bit".into());
+    }
+    let capacity = std::env::var("FRACTURIZE_REF_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        * 1_000_000;
+    let dump = r.dump_fragments(device, queue, points, use_point_primitives, capacity)?;
+    if dump.count > capacity {
+        eprintln!(
+            "warning: {} fragments overflowed the {} the reference kept; it is a truncated sample. \
+             Raise FRACTURIZE_REF_CAPACITY (millions) or lower --points.",
+            dump.count, capacity
+        );
+    }
+    let reference = crate::volume_ref::composite(&dump, width, height);
+    let gpu_l = read_float_texture(device, queue, r.output_texture().ok_or("no accumulation")?, width, height);
+    let (gpu_b0, _, _) = read_total_absorbance(device, queue, r).ok_or("no slices")?;
+    let mut text = crate::volume_ref::report(&reference, &gpu_l, &gpu_b0);
+    if let Some(warp) = old_warp {
+        // What the slice-1c estimator, which this replaced, scored on the same
+        // fragments: four moments of one frame-wide depth, blurred 1 output
+        // pixel, overestimation 0.1.
+        let (lr, l1, tf, tt) = crate::volume_ref::emulate_moments_1c(&reference, warp, 1.0, 0.1);
+        text += &format!("OLD(1c moments) l_ratio={:.4} l_l1={:.4} t_frag={:.4} t_total_abs={:.4}\n", lr, l1, tf, tt);
+    }
+    println!("{}", text);
+    let base = std::path::PathBuf::from(prefix);
+    let _ = std::fs::write(base.with_extension("report.txt"), &text);
+    if std::env::var_os("FRACTURIZE_VOLUME_EMULATE").is_some() {
+        use crate::volume_ref::{emulate, Emulation, Range};
+        println!("opacity-shadow-map bins, per-pixel span (L ratio, L L1, per-fragment |dT|):");
+        for nb in [4usize, 8, 16, 32] {
+            for k in [0usize, 4] {
+                let (lr, l1, tf) =
+                    emulate(&reference, Emulation { range: Range::PerPixel, front_k: k, overestimation: 0.0, bins: Some(nb) });
+                println!("  bins {:<2} front {}: {:.3} {:.3} {:.4}", nb, k, lr, l1, tf);
+            }
+        }
+    }
+
+    // The reference through the same tonemap, as a picture.
+    let make = |label: &str, data: &[f32]| {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 16),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        tex.create_view(&wgpu::TextureViewDescriptor::default())
+    };
+    let l: Vec<f32> = reference.l.iter().flat_map(|p| *p).collect();
+    let b0: Vec<f32> = reference.tau.iter().flat_map(|&t| [t, 0.0, 0.0, 0.0]).collect();
+    let zero = vec![0.0f32; b0.len()];
+    let (l_view, b_view, z_view) = (make("reference_l", &l), make("reference_b0", &b0), make("reference_zero", &zero));
+    let color = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("reference_color"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: depth.format(),
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let depth_view = device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("reference_depth"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let padded = (width * 4).div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reference_readback"),
+        size: (padded * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("reference_encoder"),
+    });
+    r.tonemap_volume_external(
+        device,
+        &mut encoder,
+        &color.create_view(&wgpu::TextureViewDescriptor::default()),
+        &depth_view,
+        &l_view,
+        &b_view,
+        &z_view,
+    );
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &color,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+    readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    {
+        let d = readback.slice(..).get_mapped_range();
+        for y in 0..height as usize {
+            pixels.extend_from_slice(&d[y * padded as usize..y * padded as usize + width as usize * 4]);
+        }
+    }
+    let path = base.with_extension("ref.png");
+    image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8).map_err(|e| e.to_string())?;
+    println!("reference picture: {}", path.display());
+    Ok(())
 }
 
 /// `--spp` is a still's dial. Every other entry point says so rather than

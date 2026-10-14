@@ -37,6 +37,7 @@ mod render_job;
 mod rot;
 mod ui;
 mod version;
+mod volume_ref;
 mod video;
 mod view;
 mod xaos;

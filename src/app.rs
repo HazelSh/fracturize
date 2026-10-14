@@ -5891,16 +5891,14 @@ impl App {
         self.opacity = opacity.clamp(0.0, crate::gpu::points::volume::MAX_OPACITY);
     }
 
-    /// The depth interval volume mode warps into, for this frame's camera.
-    ///
-    /// The measured attractor's bounding sphere, so the moments spend their
-    /// range on where material is; under infinite zoom, which has nothing to
-    /// measure, relative to the eye.
-    fn volume_depth_range(&mut self) -> crate::gpu::points::volume::DepthRange {
-        use crate::gpu::points::volume::{self, DepthRange};
-        let (eye, forward) = (self.camera.eye(), self.camera.forward());
+    /// The reference length opacity is measured against, for this frame's
+    /// camera: the measured attractor's radius; under infinite zoom, which has
+    /// nothing to measure, the eye's distance from the fixed point.
+    fn volume_framing(&mut self) -> crate::gpu::points::volume::Framing {
+        use crate::gpu::points::volume::{self, Framing};
+        let eye = self.camera.eye();
         if let Some(z) = self.zoom() {
-            return DepthRange::for_zoom(eye, forward, z.fixed_point, z.radius);
+            return Framing::for_zoom(eye, z.fixed_point);
         }
         let sphere = if self.scene.is_composite() {
             // `self.attractor` walks every map as one IFS, which describes no
@@ -5915,8 +5913,8 @@ impl App {
             self.attractor.as_ref().map(volume::bounding_sphere)
         };
         match sphere {
-            Some((centre, radius)) => DepthRange::around(eye, forward, centre, radius),
-            None => DepthRange::for_distance(self.camera.distance),
+            Some((_, radius)) => Framing::around(radius),
+            None => Framing::for_distance(self.camera.distance),
         }
     }
 
@@ -5927,8 +5925,8 @@ impl App {
     fn sync_volume(&mut self, samples: f64, height: f32) {
         use crate::gpu::points::volume::VolumeParams;
         let params = if self.render_mode == RenderMode::Volume {
-            let range = self.volume_depth_range();
-            VolumeParams::new(self.opacity, samples, height, 1, self.camera.fov, range)
+            let framing = self.volume_framing();
+            VolumeParams::new(self.opacity, samples, height, self.camera.fov, framing)
         } else {
             VolumeParams::OFF
         };

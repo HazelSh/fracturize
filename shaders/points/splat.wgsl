@@ -106,18 +106,10 @@ struct VolumeParams {
     /// so optical depth is a property of the material and not of where the
     /// camera stands, nor of the point count.
     abs_scale: f32,
-    /// Depth warp: z = ln(view depth) * warp_scale + warp_bias, clamped to
-    /// [-1, 1]. Logarithmic, as the moment-OIT paper recommends, so equal
-    /// ratios of distance get equal room.
-    warp_scale: f32,
-    warp_bias: f32,
-    /// Sigma of the moment blur, in accumulation pixels. 0 is off.
-    blur_px: f32,
     /// Pixels per world unit at unit depth: a pixel's world area at depth z is
     /// (z / ppu)^2.
     ppu: f32,
-    _pad0: f32,
-    _pad1: f32,
+    _pad: f32,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -208,27 +200,10 @@ struct SplatOutput {
     // Per-fragment energy normalization (peak of the gaussian)
     @location(2) weight: f32,
     // Volume mode only (zero otherwise): the absorbance this point deposits,
-    // before the kernel's falloff, and its warped depth. Flat, because the
-    // depth is the point's and not the fragment's.
+    // before the kernel's falloff, and its view depth. Flat, because the depth
+    // is the point's and not the fragment's.
     @location(3) abs_weight: f32,
-    @location(4) @interpolate(flat) z: f32,
-    // Volume mode only: the share of this fragment's own deposit that is still
-    // in the pixel's (blurred) moments at the fragment, so pass B can take back
-    // the right amount. 1 with no blur.
-    @location(5) @interpolate(flat) own: f32,
-}
-
-/// What survives of a gaussian deposit's peak when the moments are blurred by
-/// `volume.blur_px`: variances add, and a normalised 2D gaussian's peak goes as
-/// 1/variance, so `v / (v + s²)`. `var` is the deposit's own (a point
-/// primitive is one texel wide, a box of variance 1/12).
-fn own_share(variance: f32) -> f32 {
-    let s2 = volume.blur_px * volume.blur_px;
-    if s2 <= 0.0 {
-        return 1.0;
-    }
-    let v = max(variance, 1.0 / 12.0);
-    return v / (v + s2);
+    @location(4) @interpolate(flat) depth: f32,
 }
 
 /// A point's whole absorbance deposit, in pixels' worth of optical depth: its
@@ -236,11 +211,6 @@ fn own_share(variance: f32) -> f32 {
 fn volume_deposit(depth: f32) -> f32 {
     let s = volume.ppu / depth;
     return volume.abs_scale * s * s;
-}
-
-/// Warped depth for the moment targets. See `VolumeParams`.
-fn volume_z(depth: f32) -> f32 {
-    return clamp(log(depth) * volume.warp_scale + volume.warp_bias, -1.0, 1.0);
 }
 
 // Gaussian sharpness: exp(-4 r^2) is ~0.02 at the quad edge (r = 1)
@@ -273,8 +243,7 @@ fn vs_splat(
         out.offset = vec2<f32>(0.0);
         out.weight = 0.0;
         out.abs_weight = 0.0;
-        out.z = 0.0;
-        out.own = 1.0;
+        out.depth = 0.0;
         return out;
     }
 
@@ -337,8 +306,7 @@ fn vs_splat(
     // Absorbance is a property of the material, so haze does not thin it; the
     // edge guard removes material, so it does.
     out.abs_weight = 0.0;
-    out.z = 0.0;
-    out.own = 1.0;
+    out.depth = 0.0;
     if volume.enabled > 0.5 {
         // A point's deposit is its world cross-section over a pixel's world
         // area, which grows as 1/z^2 as the point nears the eye, and so does the
@@ -350,8 +318,7 @@ fn vs_splat(
         let cap = camera.max_point_pixels;
         let cap_share = select(1.0, (cap * cap) / (base_radius * base_radius), base_radius > cap);
         out.abs_weight = volume_deposit(depth) * cap_share * guard * KERNEL_NORM / (radius_px * radius_px);
-        out.z = volume_z(depth);
-        out.own = own_share(radius_px * radius_px * 0.125);
+        out.depth = depth;
     }
     return out;
 }
@@ -371,8 +338,7 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
         out.offset = vec2<f32>(0.0);
         out.weight = 0.0;
         out.abs_weight = 0.0;
-        out.z = 0.0;
-        out.own = 1.0;
+        out.depth = 0.0;
         return out;
     }
 
@@ -391,12 +357,10 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     let guard = guard_weight(point.position);
     out.weight = haze_weight(depth) * guard;
     out.abs_weight = 0.0;
-    out.z = 0.0;
-    out.own = 1.0;
+    out.depth = 0.0;
     if volume.enabled > 0.5 {
         out.abs_weight = volume_deposit(depth) * guard;
-        out.z = volume_z(depth);
-        out.own = own_share(0.0);
+        out.depth = depth;
     }
     return out;
 }
@@ -408,163 +372,149 @@ fn fs_splat(in: SplatOutput) -> @location(0) vec4<f32> {
 }
 
 // === Volume mode ===
+//
+// Pass A0 (`fs_front`) finds, for every pixel, the nearest and farthest depth any
+// fragment lands at. Pass A (`fs_abs`) splats each fragment's absorbance into one
+// of BINS equal slices of *that pixel's own span* (log-spaced between those two
+// depths) in two fp32 targets. Pass B (`fs_splat_volume`) lights each fragment by
+// the transmittance read off those slices: the absorbance in the slices in front
+// of its own, plus the share of its own slice in front of it, own deposit
+// excluded. Total absorbance is the sum of the slices.
+//
+// The pixel's own span is what matters. The same estimator over one depth range
+// for the whole frame is 7x less accurate, because a pixel's material sits in a
+// sliver of the attractor's depth; and it replaces a moment reconstruction that,
+// scored against the exact transport (`volume_ref.rs`), was off by 0.07 in T at
+// best and biased by its overestimation constant. See VOLUME-RENDERER-PLAN.md.
 
-// How far the normalised moments are blended toward MOMENT_BIAS_VECTOR before
-// the Hankel matrix is factored, and how much of the mass at the queried depth
-// counts as in front of it. Mirrored in `gpu/points/moments.rs`, which is the
-// reference implementation and carries the reasoning; a test holds the two
-// together.
-const MOMENT_BIAS: f32 = 0.00003;
-const MOMENT_OVERESTIMATION: f32 = 0.1;
-// What is left of a pixel's absorbance after taking a point's own deposit out
-// is only believed above this fraction of the total: below it the difference is
-// rounding noise in the fp32 sums.
+const BINS: f32 = 8.0;
 // Share of its own mean colour an optically thick pixel is filled with by the
-// volume tonemap. Mirrored in `volume::OPAQUE_FILL`; see the comment at its use.
+// volume tonemap. Mirrored in `volume::OPAQUE_FILL`.
 const OPAQUE_FILL: f32 = 0.3;
-const MOMENT_NOISE_FLOOR: f32 = 0.00001;
-const MOMENT_BIAS_VECTOR: vec4<f32> = vec4<f32>(0.0, 0.375, 0.0, 0.375);
 
-// Pass A: absorbance moments. Two fp32 targets, additive.
+@group(1) @binding(0) var bins0: texture_2d<f32>;
+@group(1) @binding(1) var bins1: texture_2d<f32>;
+// Per pixel, two words: the farthest depth's bits, and the *complement* of the
+// nearest depth's bits, so that both are atomicMax and a cleared buffer means
+// "nothing yet". Depths are positive floats, whose bits order like they do.
+@group(1) @binding(2) var<storage, read_write> ranges: array<atomic<u32>>;
+
+fn range_base(px: vec2<i32>) -> u32 {
+    let w = u32(round(camera.screen_height * camera.aspect_ratio));
+    return (u32(px.y) * w + u32(px.x)) * 2u;
+}
+
+@fragment
+fn fs_front(in: SplatOutput) {
+    let base = range_base(vec2<i32>(in.clip_position.xy));
+    let bits = bitcast<u32>(in.depth);
+    // Read first: most fragments are neither the nearest nor the farthest, and
+    // a plain load does not serialise like an atomic does.
+    if bits > atomicLoad(&ranges[base + 1u]) {
+        atomicMax(&ranges[base + 1u], bits);
+    }
+    if ~bits > atomicLoad(&ranges[base]) {
+        atomicMax(&ranges[base], ~bits);
+    }
+}
+
+struct BinPos {
+    bin: u32,
+    frac: f32,
+}
+
+/// Which slice of its pixel's span a depth falls in, and how far through it.
+fn bin_of(depth: f32, base: u32) -> BinPos {
+    let zmin = bitcast<f32>(~atomicLoad(&ranges[base]));
+    let zmax = bitcast<f32>(atomicLoad(&ranges[base + 1u]));
+    let span = log(zmax) - log(zmin);
+    var u = 0.0;
+    if span > 1.0e-6 {
+        u = clamp((log(depth) - log(zmin)) / span * BINS, 0.0, BINS - 1.0e-4);
+    }
+    let bin = u32(u);
+    return BinPos(bin, u - f32(bin));
+}
+
+// Pass A: absorbance into slices. Two fp32 targets, additive.
 struct AbsOutput {
-    // (b0, b1, b2, b3) -- total absorbance, then the first three power moments
-    @location(0) m0: vec4<f32>,
-    // b4
-    @location(1) m1: f32,
+    // slices 0-3
+    @location(0) b03: vec4<f32>,
+    // slices 4-7
+    @location(1) b47: vec4<f32>,
 }
 
 @fragment
 fn fs_abs(in: SplatOutput) -> AbsOutput {
     let a = in.abs_weight * exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
-    let z = in.z;
-    let z2 = z * z;
+    let pos = bin_of(in.depth, range_base(vec2<i32>(in.clip_position.xy)));
     var out: AbsOutput;
-    out.m0 = vec4<f32>(a, a * z, a * z2, a * z2 * z);
-    out.m1 = a * z2 * z2;
+    out.b03 = vec4<f32>(0.0);
+    out.b47 = vec4<f32>(0.0);
+    if pos.bin < 4u {
+        out.b03[pos.bin] = a;
+    } else {
+        out.b47[pos.bin - 4u] = a;
+    }
     return out;
 }
 
-/// T(z0): the share of light that survives the absorbance in front of depth
-/// z0, from a pixel's total `b0` and raw power moments `sums` = (b1..b4).
-/// **A line-for-line copy of `moments::transmittance`**, which explains it.
-fn moment_transmittance(b0: f32, sums: vec4<f32>, z0: f32) -> f32 {
-    if b0 <= 1.0e-20 {
-        return 1.0;
+/// The transmittance of what is in front of a fragment at `depth`, whose own
+/// deposit `own` is in its slice and does not count.
+fn bins_transmittance(px: vec2<i32>, depth: f32, own: f32) -> f32 {
+    let s0 = textureLoad(bins0, px, 0);
+    let s1 = textureLoad(bins1, px, 0);
+    var slices = array<f32, 8>(s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w);
+    let pos = bin_of(depth, range_base(px));
+    var before = 0.0;
+    for (var i = 0u; i < pos.bin; i += 1u) {
+        before += slices[i];
     }
-    let n = sums / b0;
-    let b = n + (MOMENT_BIAS_VECTOR - n) * MOMENT_BIAS;
-
-    let l21_d11 = fma(-b.x, b.y, b.z);
-    let d11 = fma(-b.x, b.x, b.y);
-    let inv_d11 = 1.0 / d11;
-    let l21 = l21_d11 * inv_d11;
-    let squared_depth_variance = fma(-b.y, b.y, b.w);
-    let d22 = fma(-l21_d11, l21, squared_depth_variance);
-
-    var c = vec3<f32>(1.0, z0, z0 * z0);
-    c.y -= b.x;
-    c.z -= b.y + l21 * c.y;
-    c.y *= inv_d11;
-    c.z /= d22;
-    c.y -= l21 * c.z;
-    c.x -= c.y * b.x + c.z * b.y;
-
-    let inv_c2 = 1.0 / c.z;
-    let p = c.y * inv_c2;
-    let q = c.x * inv_c2;
-    let disc = max(p * p * 0.25 - q, 0.0);
-    let r = sqrt(disc);
-    let z1 = -p * 0.5 - r;
-    let z2 = -p * 0.5 + r;
-
-    let f0 = MOMENT_OVERESTIMATION;
-    let f1 = select(0.0, 1.0, z1 < z0);
-    let f2 = select(0.0, 1.0, z2 < z0);
-    let f01 = (f1 - f0) / (z1 - z0);
-    let f12 = (f2 - f1) / (z2 - z1);
-    let f012 = (f12 - f01) / (z2 - z0);
-    let poly2 = f012;
-    let poly1 = f01 - f012 * (z0 + z1);
-    let poly0 = f0 - f01 * z0 + f012 * z0 * z1;
-    let fraction = poly2 * b.y + poly1 * b.x + poly0;
-
-    let t = exp(-b0 * fraction);
-    // `!(t >= 0)` also catches NaN, which compares false. Fail toward no
-    // occlusion: today's splat, rather than a black hole.
-    if !(t >= 0.0) || t > 1.0e30 {
-        return 1.0;
-    }
-    return min(t, 1.0);
+    let inside = max(slices[pos.bin] - own, 0.0);
+    return exp(-(before + pos.frac * inside));
 }
 
-// Blur of the moment targets: one separable gaussian pass in each direction,
-// sigma `volume.blur_px` accumulation pixels, taps out to 3 sigma (capped).
-// Both read group 1 (see below) and write both targets.
-const BLUR_MAX_TAPS: i32 = 16;
-
-fn blur(px: vec2<i32>, dir: vec2<i32>) -> AbsOutput {
-    let s = volume.blur_px;
-    let radius = min(i32(ceil(3.0 * s)), BLUR_MAX_TAPS);
-    let dims = vec2<i32>(textureDimensions(moments0));
-    var acc = vec4<f32>(0.0);
-    var acc4 = 0.0;
-    var wsum = 0.0;
-    for (var i = -radius; i <= radius; i += 1) {
-        let q = clamp(px + dir * i, vec2<i32>(0), dims - vec2<i32>(1));
-        let w = exp(-0.5 * f32(i * i) / (s * s));
-        acc += w * textureLoad(moments0, q, 0);
-        acc4 += w * textureLoad(moments1, q, 0).x;
-        wsum += w;
-    }
-    var out: AbsOutput;
-    out.m0 = acc / wsum;
-    out.m1 = acc4 / wsum;
-    return out;
-}
+// === The exact reference ===
+//
+// `fs_dump` replaces pass A and pass B with a list: every fragment the volume
+// passes would have drawn, as one record in a storage buffer, so the CPU can sort
+// each pixel's records by depth and composite them front to back with no
+// estimation at all (`volume_ref.rs`). Same vertex stage, same kernel, same
+// world-space absorbance and emission weights as the real thing; the record also
+// carries the transmittance the GPU path *would* have given that fragment, so the
+// two can be compared fragment by fragment. Group 2, because group 1 is the
+// slices.
+//
+// 8 words a record: x | y << 16, depth, absorbance, emission weight, r, g, b, and
+// the GPU path's T.
+@group(2) @binding(0) var<storage, read_write> dump: array<u32>;
+@group(2) @binding(1) var<storage, read_write> dump_count: atomic<u32>;
 
 @fragment
-fn fs_blur_h(in: TonemapOutput) -> AbsOutput {
-    return blur(vec2<i32>(in.clip_position.xy), vec2<i32>(1, 0));
+fn fs_dump(in: SplatOutput) {
+    let falloff = exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
+    let px = vec2<i32>(in.clip_position.xy);
+    let t = bins_transmittance(px, in.depth, in.abs_weight * falloff);
+    let idx = atomicAdd(&dump_count, 1u);
+    let base = idx * 8u;
+    if base + 8u <= arrayLength(&dump) {
+        dump[base] = u32(px.x) | (u32(px.y) << 16u);
+        dump[base + 1u] = bitcast<u32>(in.depth);
+        dump[base + 2u] = bitcast<u32>(in.abs_weight * falloff);
+        dump[base + 3u] = bitcast<u32>(in.weight * falloff);
+        dump[base + 4u] = bitcast<u32>(in.color.r);
+        dump[base + 5u] = bitcast<u32>(in.color.g);
+        dump[base + 6u] = bitcast<u32>(in.color.b);
+        dump[base + 7u] = bitcast<u32>(t);
+    }
 }
 
-@fragment
-fn fs_blur_v(in: TonemapOutput) -> AbsOutput {
-    return blur(vec2<i32>(in.clip_position.xy), vec2<i32>(0, 1));
-}
-
-// Pass B's inputs. Group 1, so pass A's pipeline layout (group 0 only) never
-// names textures it is rendering into.
-@group(1) @binding(0) var moments0: texture_2d<f32>;
-@group(1) @binding(1) var moments1: texture_2d<f32>;
-
-/// The ordinary splat fragment, its weight multiplied by the transmittance at
-/// the point's own depth **from everything but the point itself**.
-///
-/// The point's own deposit is in the moments (pass A put it there), and
-/// leaving it in makes every point hide itself: the reconstruction counts a
-/// share of the mass at the queried depth as in front of it, which is right for
-/// a surface and wrong for emission. Measured on `nautilus` at opacity 30: a
-/// lone point on a sparse filament deposits an absorbance of ~11 by itself and
-/// came out at `exp(-0.25 * 11)` = 6% of its brightness, so the *thin* material
-/// went dark first -- the opposite of what an opacity control is for. Pass B
-/// knows exactly what pass A deposited for this fragment (same inputs, same
-/// expression), so it subtracts it. See `moments::transmittance_excluding`,
-/// which carries the reasoning and the noise floor.
+/// The ordinary splat fragment, its weight multiplied by the transmittance of
+/// everything in front of the point (its own deposit excluded).
 @fragment
 fn fs_splat_volume(in: SplatOutput) -> @location(0) vec4<f32> {
-    let px = vec2<i32>(in.clip_position.xy);
-    let m0 = textureLoad(moments0, px, 0);
-    let b4 = textureLoad(moments1, px, 0).x;
     let falloff = exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
-    let a = in.abs_weight * falloff * in.own;
-    let z = in.z;
-    let z2 = z * z;
-    let b0 = m0.x - a;
-    var t = 1.0;
-    if b0 > MOMENT_NOISE_FLOOR * m0.x {
-        let sums = vec4<f32>(m0.y - a * z, m0.z - a * z2, m0.w - a * z2 * z, b4 - a * z2 * z2);
-        t = moment_transmittance(b0, sums, z);
-    }
+    let t = bins_transmittance(vec2<i32>(in.clip_position.xy), in.depth, in.abs_weight * falloff);
     let w = in.weight * t * falloff;
     return vec4<f32>(in.color * w, w);
 }
@@ -742,7 +692,8 @@ fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
 
 // Volume mode's tonemap: the same pass, with the background dimmed by the
 // absorbance field. Keep in step with `fs_tonemap` above.
-@group(0) @binding(2) var tonemap_moments: texture_2d<f32>;
+@group(0) @binding(2) var tonemap_bins0: texture_2d<f32>;
+@group(0) @binding(3) var tonemap_bins1: texture_2d<f32>;
 
 @fragment
 fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
@@ -756,16 +707,22 @@ fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
     var t_total = 0.0;
     for (var dy = 0; dy < n; dy += 1) {
         for (var dx = 0; dx < n; dx += 1) {
-            let b0 = textureLoad(tonemap_moments, vec2<i32>(in.clip_position.xy) * n + vec2<i32>(dx, dy), 0).x;
+            let q = vec2<i32>(in.clip_position.xy) * n + vec2<i32>(dx, dy);
+            let s0 = textureLoad(tonemap_bins0, q, 0);
+            let s1 = textureLoad(tonemap_bins1, q, 0);
+            let b0 = s0.x + s0.y + s0.z + s0.w + s1.x + s1.y + s1.z + s1.w;
             t_total += exp(-b0);
         }
     }
     t_total = t_total / f32(n * n);
     if density <= 0.0 {
+        // Nothing emitted here, but something may still absorb: a pixel under
+        // material that lit nothing is not background. (This used to return the
+        // background whatever `t_total` was.)
         if transparent {
-            return vec4<f32>(0.0);
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0 - t_total);
         }
-        return vec4<f32>(params.background.rgb, 1.0);
+        return vec4<f32>(params.background.rgb * t_total, 1.0);
     }
     // Density-weighted mean color, brightness from log density
     let mean_color = acc.rgb / density;

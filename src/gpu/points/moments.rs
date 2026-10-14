@@ -95,6 +95,11 @@ pub const NOISE_FLOOR: f32 = 1.0e-5;
 /// front of it); above, the error is at most that fraction of `b0` in absolute
 /// absorbance, which is not visible.
 pub fn transmittance_excluding(b0: f32, sums: [f32; 4], z: f32, own: f32) -> f32 {
+    transmittance_excluding_with(OVERESTIMATION, b0, sums, z, own)
+}
+
+/// [`transmittance_excluding`] with the overestimation as an argument.
+pub fn transmittance_excluding_with(oe: f32, b0: f32, sums: [f32; 4], z: f32, own: f32) -> f32 {
     let rest = b0 - own;
     if rest <= NOISE_FLOOR * b0 {
         return 1.0;
@@ -105,7 +110,7 @@ pub fn transmittance_excluding(b0: f32, sums: [f32; 4], z: f32, own: f32) -> f32
         zk *= z;
         rest_sums[k] -= own * zk;
     }
-    transmittance(rest, rest_sums, z)
+    transmittance_with(BIAS, oe, rest, rest_sums, z)
 }
 
 /// `T(z0)`: the fraction of light that survives the absorbance in front of
@@ -125,6 +130,12 @@ pub fn transmittance(b0: f32, sums: [f32; 4], z0: f32) -> f32 {
 /// [`transmittance`] with the bias as an argument, so the test that chooses it
 /// runs the shipped arithmetic and not a copy of it.
 fn transmittance_with_bias(bias: f32, b0: f32, sums: [f32; 4], z0: f32) -> f32 {
+    transmittance_with(bias, OVERESTIMATION, b0, sums, z0)
+}
+
+/// [`transmittance`] with the bias and the overestimation both as arguments:
+/// the exact-reference experiments sweep them.
+pub fn transmittance_with(bias: f32, overestimation: f32, b0: f32, sums: [f32; 4], z0: f32) -> f32 {
     if b0 <= 1.0e-20 {
         return 1.0;
     }
@@ -168,7 +179,7 @@ fn transmittance_with_bias(bias: f32, b0: f32, sums: [f32; 4], z0: f32) -> f32 {
     // The weights are the indicator "this node is in front of z0", with the
     // node at z0 itself counted at `OVERESTIMATION`. Interpolate them by
     // divided differences and integrate the polynomial against the moments.
-    let f0 = OVERESTIMATION;
+    let f0 = overestimation;
     let f1 = if z1 < z0 { 1.0 } else { 0.0 };
     let f2 = if z2 < z0 { 1.0 } else { 0.0 };
     let f01 = (f1 - f0) / (z1 - z0);

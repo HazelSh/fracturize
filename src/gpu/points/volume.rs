@@ -54,7 +54,7 @@ pub const MAX_OPACITY: f32 = 100.0;
 /// (see the report: saturated pixels carry ~1/opacity of splat's light).
 pub const DEFAULT_OPACITY: f32 = 2.0;
 
-/// The uniform both volume passes read. 32 bytes, must match `VolumeParams` in
+/// The uniform both volume passes read. 16 bytes, must match `VolumeParams` in
 /// `shaders/points/splat.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -64,66 +64,31 @@ pub struct VolumeParams {
     /// `opacity · ABSORBANCE_K · L² / samples`: a point's cross-section, in
     /// world area. The vertex stage divides it by the pixel's world area.
     pub abs_scale: f32,
-    /// `z = ln(depth) · warp_scale + warp_bias`
-    pub warp_scale: f32,
-    pub warp_bias: f32,
-    /// Gaussian sigma, in accumulation pixels, of the blur applied to the
-    /// moments before pass B. 0 is off.
-    pub blur_px: f32,
     /// Pixels per world unit at unit depth, `H / (2·tan(fov/2))`: the pixel's
     /// world area at depth `z` is `(z / ppu)²`.
     pub ppu: f32,
-    /// Pads the uniform to 32 bytes.
-    pub _pad: [f32; 2],
+    pub _pad: f32,
 }
 
 impl VolumeParams {
     /// Everything off. What a plain splat leaves in the buffer, and what the
     /// vertex stage reads as "skip the volume work".
-    pub const OFF: VolumeParams = VolumeParams {
-        enabled: 0.0,
-        abs_scale: 0.0,
-        warp_scale: 0.0,
-        warp_bias: 0.0,
-        blur_px: 0.0,
-        ppu: 0.0,
-        _pad: [0.0; 2],
-    };
+    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, _pad: 0.0 };
 
-    /// `supersample` is the factor the target is supersampled by (1 live), since
-    /// the absorbance blur is a width in *output* pixels.
-    ///
     /// `samples` and `screen_height` are exactly the two numbers
     /// `SplatRenderer::upload_params` normalises exposure with. The height
     /// still appears squared, through `ppu`, so a point's *screen* deposit is
-    /// invariant to resolution and supersampling as before; what changed is
-    /// that the depth now enters, and the reference length with it.
-    pub fn new(
-        opacity: f32,
-        samples: f64,
-        screen_height: f32,
-        supersample: u32,
-        fov: Fov,
-        range: DepthRange,
-    ) -> Self {
+    /// invariant to resolution and supersampling; the depth and the reference
+    /// length enter as well, which is what keeps optical depth from depending
+    /// on where the camera stands.
+    pub fn new(opacity: f32, samples: f64, screen_height: f32, fov: Fov, framing: Framing) -> Self {
         if opacity <= 0.0 || samples <= 0.0 {
             return Self::OFF;
         }
         let ppu = screen_height / (2.0 * (fov.radians() * 0.5).tan());
-        let l = range.length as f64;
-        let abs_scale =
-            (opacity as f64 * ABSORBANCE_K as f64 * l * l / samples) as f32;
-        let (warp_scale, warp_bias) = range.warp();
-        let blur_px = BLUR_OUTPUT_PX * supersample.max(1) as f32;
-        Self {
-            enabled: 1.0,
-            abs_scale,
-            warp_scale,
-            warp_bias,
-            blur_px,
-            ppu,
-            _pad: [0.0; 2],
-        }
+        let l = framing.length as f64;
+        let abs_scale = (opacity as f64 * ABSORBANCE_K as f64 * l * l / samples) as f32;
+        Self { enabled: 1.0, abs_scale, ppu, _pad: 0.0 }
     }
 }
 
@@ -133,89 +98,39 @@ impl VolumeParams {
 /// copies together.
 pub const OPAQUE_FILL: f32 = 0.3;
 
-/// Gaussian sigma of the blur on the absorbance field, in *output* pixels.
+
+
+/// What opacity is measured against: the scene's reference length `L`.
 ///
-/// Per-point absorbance is `opacity · H²/N` of optical depth and stops being
-/// small at high opacity: one point alone can be several units thick, so
-/// occlusion becomes a per-sample coin toss — the points renderer's grain
-/// returning, and brightness that depends on `--points`. Moments are linear, so
-/// blurring them is the same as splatting fatter absorption kernels; emission
-/// stays sharp. 1 output pixel took the grit's seed-to-seed noise at opacity 30
-/// from 0.044 to 0.028 (splat's own is 0.016), and made the picture converge as
-/// points are added; more blur bought little and softened more.
-pub const BLUR_OUTPUT_PX: f32 = 1.0;
-
-
-/// The view-space depth interval the moment targets resolve. Points outside it
-/// clamp to its ends, which costs accuracy there and nothing else.
+/// Under the old moment reconstruction this was also the depth interval the
+/// estimator resolved, padded generously; per-pixel slicing needs no such
+/// interval, only the length.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DepthRange {
-    pub near: f32,
-    pub far: f32,
-    /// The scene's reference length `L`, in world units, that opacity is
-    /// measured against: the attractor's radius, or the eye's distance from the
-    /// fixed point under infinite zoom. See [`ABSORBANCE_K`].
+pub struct Framing {
+    /// `L`, in world units: the attractor's radius, or the eye's distance from
+    /// the fixed point under infinite zoom. See [`ABSORBANCE_K`].
     pub length: f32,
 }
 
-/// Never let `near` be closer than this fraction of `far`: the warp is
-/// logarithmic, and a near plane at 1e-6 of far would spend most of the
-/// moment-space range on empty space in front of the eye.
-const MAX_DEPTH_RATIO: f32 = 100.0;
-
-impl DepthRange {
-    /// The interval holding a sphere (`center`, `radius`) seen from `eye`
-    /// looking along `forward`, padded generously because the sphere is
-    /// estimated from a few thousand CPU steps and the real cloud has tails.
-    pub fn around(eye: Vec3, forward: Vec3, center: Vec3, radius: f32) -> Self {
-        let d = (center - eye).dot(forward);
-        let r = radius.max(1e-9) * PAD;
-        let far = (d + r).max(1e-9);
-        let near = (d - r).max(far / MAX_DEPTH_RATIO);
-        Self { near, far, length: radius.max(1e-9) }
+impl Framing {
+    /// A scene whose measured bounding sphere has this radius.
+    pub fn around(radius: f32) -> Self {
+        Self { length: radius.max(1e-9) }
     }
 
-    /// Under infinite zoom there are no bounds to measure — the set reaches
-    /// out forever and the edge guard fades it. The range is then relative to
-    /// the eye, which is the only scale-invariant thing available: from just in
-    /// front of the eye (a hundredth of its distance from the fixed point) out
-    /// to the band's far side, with the band's radius capped at a few eye
-    /// distances because material further out has been faded to nothing.
-    pub fn for_zoom(eye: Vec3, forward: Vec3, fixed_point: Vec3, band_radius: f32) -> Self {
-        let d_eye = (fixed_point - eye).length().max(1e-12);
-        let d = (fixed_point - eye).dot(forward).max(d_eye * 0.01);
-        let far = d + band_radius.min(8.0 * d_eye);
-        let near = (d_eye * 0.01).max(far / (MAX_DEPTH_RATIO * 10.0));
-        Self { near, far, length: d_eye }
+    /// Under infinite zoom there are no bounds to measure — the set reaches out
+    /// forever and the edge guard fades it — so the length is the eye's
+    /// distance from the fixed point, the only scale-invariant thing available
+    /// (a wrap scales it and the picture together).
+    pub fn for_zoom(eye: Vec3, fixed_point: Vec3) -> Self {
+        Self { length: (fixed_point - eye).length().max(1e-12) }
     }
 
-    /// With nothing measured: the span an orbit camera at `distance` would
-    /// frame, a few distances either side of the focus.
+    /// With nothing measured: a quarter of the orbit distance.
     pub fn for_distance(distance: f32) -> Self {
-        let d = distance.max(1e-9);
-        Self { near: d / 10.0, far: d * 4.0, length: d * 0.25 }
-    }
-
-    /// `(scale, bias)` with `z = ln(depth) · scale + bias` mapping
-    /// `[near, far]` onto `[-1, 1]`.
-    pub fn warp(&self) -> (f32, f32) {
-        let (ln_near, ln_far) = (self.near.max(1e-30).ln(), self.far.max(1e-30).ln());
-        let span = (ln_far - ln_near).max(1e-6);
-        let scale = 2.0 / span;
-        (scale, -1.0 - ln_near * scale)
-    }
-
-    /// The warp, in plain Rust. The reference for `volume_z` in the shader.
-    #[cfg(test)]
-    pub fn warped(&self, depth: f32) -> f32 {
-        let (s, b) = self.warp();
-        (depth.ln() * s + b).clamp(-1.0, 1.0)
+        Self { length: distance.max(1e-9) * 0.25 }
     }
 }
-
-/// Generous because the measure is a 4,000-step CPU walk and the 2.5–97.5
-/// percentile box leaves the tails outside it.
-const PAD: f32 = 1.5;
 
 /// `(centre, radius)` of the sphere that should hold the cloud, from the same
 /// CPU measure the drawn-points budget uses. The radius is the half-diagonal of
@@ -255,7 +170,7 @@ mod tests {
 
     #[test]
     fn the_uniform_matches_the_shader() {
-        assert_eq!(std::mem::size_of::<VolumeParams>(), 32);
+        assert_eq!(std::mem::size_of::<VolumeParams>(), 16);
         let wgsl = include_str!("../../../shaders/points/splat.wgsl");
         let at = wgsl.find("struct VolumeParams").expect("splat.wgsl must declare VolumeParams");
         let body = &wgsl[at..at + wgsl[at..].find('}').unwrap()];
@@ -266,39 +181,12 @@ mod tests {
             .collect();
         assert_eq!(
             fields,
-            ["enabled", "abs_scale", "warp_scale", "warp_bias", "blur_px", "ppu", "_pad0", "_pad1"]
+            ["enabled", "abs_scale", "ppu", "_pad"]
         );
     }
 
-    /// The blur is a width in output pixels, so it follows supersampling.
-    #[test]
-    fn the_blur_scales_with_the_supersample_factor() {
-        let range = DepthRange::for_distance(3.0);
-        let one = VolumeParams::new(1.0, 1.0e6, 720.0, 1, Fov::default(), range);
-        let two = VolumeParams::new(1.0, 1.0e6, 720.0, 2, Fov::default(), range);
-        assert_eq!(two.blur_px, 2.0 * one.blur_px);
-    }
 
-    #[test]
-    fn the_warp_maps_the_range_onto_minus_one_to_one() {
-        let r = DepthRange { near: 0.5, far: 8.0, length: 1.0 };
-        assert!((r.warped(0.5) + 1.0).abs() < 1e-5);
-        assert!((r.warped(8.0) - 1.0).abs() < 1e-5);
-        // Logarithmic: the geometric mean is the middle.
-        assert!(r.warped(2.0).abs() < 1e-5);
-        // Outside clamps.
-        assert_eq!(r.warped(0.01), -1.0);
-        assert_eq!(r.warped(100.0), 1.0);
-    }
 
-    #[test]
-    fn a_sphere_in_front_of_the_eye_is_framed_with_room() {
-        let r = DepthRange::around(Vec3::new(0.0, 0.0, 3.0), Vec3::NEG_Z, Vec3::ZERO, 1.0);
-        assert!(r.near < 2.0 && r.far > 4.0, "{r:?}");
-        // The camera inside the cloud: near is floored, not negative.
-        let inside = DepthRange::around(Vec3::ZERO, Vec3::NEG_Z, Vec3::ZERO, 1.0);
-        assert!(inside.near > 0.0 && inside.far / inside.near <= MAX_DEPTH_RATIO * 1.001);
-    }
 
     /// A point's deposit in a pixel is its world cross-section over the pixel's
     /// world area, so it falls as 1/samples and rises as H² (through `ppu`)
@@ -307,15 +195,15 @@ mod tests {
     #[test]
     fn absorbance_scales_like_exposure() {
         let fov = Fov::default();
-        let range = DepthRange::for_distance(3.0);
+        let range = Framing::for_distance(3.0);
         let deposit = |samples: f64, height: f32| {
-            let p = VolumeParams::new(1.0, samples, height, 1, fov, range);
+            let p = VolumeParams::new(1.0, samples, height, fov, range);
             // At unit depth: cross-section times (ppu / z)².
             p.abs_scale as f64 * (p.ppu as f64).powi(2)
         };
         assert!((deposit(1.0e6, 720.0) / deposit(4.0e6, 720.0) - 4.0).abs() < 1e-4);
         assert!((deposit(1.0e6, 1440.0) / deposit(1.0e6, 720.0) - 4.0).abs() < 1e-4);
-        assert_eq!(VolumeParams::new(0.0, 1.0e6, 720.0, 1, fov, range), VolumeParams::OFF);
+        assert_eq!(VolumeParams::new(0.0, 1.0e6, 720.0, fov, range), VolumeParams::OFF);
     }
 
     /// The point of the world-space normalisation: what a pixel holds does not
@@ -327,8 +215,8 @@ mod tests {
     #[test]
     fn a_rays_optical_depth_does_not_depend_on_camera_distance() {
         let fov = Fov::default();
-        let near = DepthRange { near: 1.0, far: 9.0, length: 1.0 };
-        let p = VolumeParams::new(2.0, 1.0e6, 1080.0, 1, fov, near);
+        let near = Framing { length: 1.0 };
+        let p = VolumeParams::new(2.0, 1.0e6, 1080.0, fov, near);
         let per_point = |z: f64| p.abs_scale as f64 * (p.ppu as f64 / z).powi(2);
         // Points per pixel at depth z: the attractor (area ~ L²) is spread
         // over N points, a pixel's world area is (z/ppu)².
