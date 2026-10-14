@@ -2181,7 +2181,15 @@ way to *use* the result; `tryout` (`~/code/tryout`, on PATH) is that way.
    branch can't damage `~/.config/fracturize`), and with `[branch]` in the
    window title.
 
-`tryout gc` drops builds of branches that are merged or gone; `tryout du` shows
+5. **Hazel's verdict comes back in `TRYOUT-FEEDBACK.md`** at the worktree root
+   (never committed; it's in `info/exclude`). When she closes a build she
+   picks accept / needs work / drop and writes what she saw. **A fresh agent
+   on a branch reads it first**, with `tryout notes fracturize/<branch>` for
+   what the build was meant to show. `tryout ls --verdict accept` lists
+   builds she has accepted, which means: merge to `main` and push (linear
+   history, per below). tryout itself never merges.
+
+`tryout gc` drops dropped builds and builds of branches that are merged or gone; `tryout du` shows
 what worktree build dirs really cost (plain `du` counts shared blocks once per
 file and wildly overstates it).
 
