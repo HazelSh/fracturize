@@ -236,8 +236,17 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     } else {
                         lock_rich.weak()
                     };
+                    // Under xaos the dimension is a spectral radius over the
+                    // transition graph, and no one factor on the other maps
+                    // holds it — so the lock stands down, and says so.
+                    let under_xaos = crate::xaos::layer_has_xaos(&app.measured_maps().0);
                     if ui
-                        .add(egui::Button::new(lock_rich).small().frame(false))
+                        .add_enabled(!under_xaos, egui::Button::new(lock_rich).small().frame(false))
+                        .on_disabled_hover_text(
+                            "Dimension lock is unavailable while this layer uses xaos: d then \
+                             depends on which transforms may follow which, and scaling the \
+                             others can't hold it.",
+                        )
                         .on_hover_text(if lock_on {
                             "Dimension lock is on: changing one transform's scale adjusts \
                              the others to keep d the same.\n\

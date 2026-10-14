@@ -35,6 +35,8 @@ src/
   random_list.rs # The Random flames list's model: rolls on worker threads
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
+  xaos.rs        # Xaos: per-map transition rows, the exact sampler (GPU twin),
+                 # walk shares, Mauldin–Williams dimension, presets
   derive.rs      # --derive: print a map turned about a world axis / spun about its own
   stats.rs       # --stats: image numbers, empty measured against the recorded background
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
@@ -47,6 +49,7 @@ src/
     confirm.rs     # Click-wait-click Arm, and the unsaved-changes modal
     transforms.rs  # Transform tab rail + selected-transform detail pane
     subscenes.rs   # Subscenes window: layers, eye, share, import, placement
+    xaos.rs        # Xaos: inspector block, matrix window, viewport edge overlay
     history.rs     # History window: every edit, click a row to jump to it
     mutate.rs      # Mutate window: strength + the button
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
@@ -324,6 +327,10 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | double-click a Transforms row | rename it inline |
 | drag a row's weight bar | change that transform's chaos weight |
 | alt+click a row's eye | solo it; alt+click again brings everything back |
+| click an xaos edge (overlay on) | open its popover: multiplier, probability, cut/restore, only exit |
+| alt+scroll over an xaos edge | scale its multiplier — the weight lever, one level down |
+| right-click an xaos edge | its menu: cut, restore, only exit, linked map |
+| ctrl+right-drag (overlay on) | knife: cut every edge the stroke crosses, as one edit |
 | right-click a Transforms row | duplicate / enable-disable / delete / rename |
 | click the corner axis cross | look down that axis (the six balls, bottom right) |
 | drag any panel DragValue | change the value; click it to type an exact one |
@@ -636,6 +643,7 @@ where "start a new document" lives in every program.
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
 | Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
+| Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -1355,6 +1363,17 @@ turn = 137.5              # degrees per copy; 137.5 is the golden angle
 shrink = 0.9              # size multiplier per copy, 0 < shrink <= 1
 applies_to = ["frond"]
 
+# Xaos: which map may follow which (see "Xaos"). Either per-transform rows —
+#   [[transform]] ... xaos = { petal = 0, spike = 2.5, "*" = 1 }
+# keyed by target name (or index as a string), "*" for every map not listed —
+# or ONE strict matrix per layer, never both:
+[xaos]
+maps = ["whorl", "petal"]       # every map of the layer, once: rows and columns
+matrix = [
+  [1.0, 0.0],                   # from whorl: whorl yes, petal never
+  [1.0, 2.0],                   # from petal
+]
+
 # Composition: another attractor beside this one (see "Subscenes"). Each keeps
 # its own walkers, so their maps never mix. Repeatable, up to 15.
 [[subscene]]
@@ -1654,6 +1673,104 @@ Deferred on purpose: nesting (a composite as a subscene); infinite zoom in a
 composite; editing a subscene's palette stops in the GUI (its colour *source* is
 editable; the gradient is edited in its file or `[subscene.palette]`); and
 per-axis placement, for the shear reason above.
+
+## Xaos
+
+**Which map may follow which.** Each map carries a row of multipliers, and the
+step after map `i` draws `j` with odds `wⱼ·xᵢⱼ` — 1 as usual, 0 never, 3 three
+times as likely. The walk becomes a Markov chain and the scene a
+**graph-directed IFS**. `XAOS-PLAN.md` is the design, `src/xaos.rs` the model,
+`scenes/parasol.toml` the worked example (two cuts keep a defect at the heart
+and arch the petals into domes).
+
+Four facts drive every view of it, and are worth teaching anyone who uses it:
+
+1. **Only zeros change the shape.** A cut removes every point whose address
+   has that pair in it; a positive multiplier only moves density, like a weight.
+   `parasol`'s sweep shows it: at 1, 0.3 and 0.1 the silhouette is identical.
+2. **Weights stop meaning "how often".** The chain's stationary distribution —
+   the **walk share** — does. A weight-1 map can be starved to nothing, and a
+   cut can make a class absorbing and drain everything else (cut `spine`'s two
+   other exits in `parasol` and the whole picture collapses onto the spine).
+   So walk share sits beside weight share in `--info`, the inspector, the
+   rail's weight bars (a tick) and the matrix window.
+3. **Dimension changes formula** to Mauldin–Williams — the `d` where the
+   spectral radius of `[i→j allowed]·Σ(sⱼe)ᵈ` is 1 — over the maps the walk
+   actually visits. `--info` prints it beside the dimension without the cuts.
+4. **Xaos stays inside a layer.** A subscene's walkers never draw another
+   layer's maps; a key naming one is a load error saying so.
+
+**The model.** A row is a `rest` (`"*"`, default 1) plus the exceptions that
+differ from it, keyed by the target's position *within its layer*
+(`TransformSpec::xaos: xaos::Xaos`). Never N², so "no self-loops" on a 40k-map
+L-system port is 40k one-entry rows. Structural edits go through
+`Scene::insert_transform` / `remove_transform`, the one place a map enters or
+leaves a scene, which keep every row pointing at the maps it pointed at
+(duplicate copies the row *and* the column: a second copy of the same map).
+
+**Sampling is exact, and an ordinary scene is byte-identical.** The GPU draws
+from a row in two binary searches over the layer's own cumulative weights
+(`select_xaos` in `chaos.wgsl`, transcribed line for line as `xaos::sample` for
+the CPU walkers — keep them in step), with the walker's last map in what was
+`WalkerState`'s padding and each map's row offset in `GpuTransform`'s. One
+builder (`xaos::build_rows`) feeds both. A layer with no row takes the old
+path. Proven two ways against a baseline binary: ordinary scenes in both
+renderers, and with `FRACTURIZE_XAOS_FORCE=1` — every map through the new
+sampler with all rows at 1 — also byte-identical. A cut is *never* drawn, not
+almost never: trailing zeros are pinned at 1.0 and a rounding guard steps out
+of squeezed intervals (`a_forced_default_row_draws_exactly_the_plain_map`,
+`the_sampler_draws_the_formula`).
+
+**Edges of the model.** The first step and the step after a re-seed draw from
+the plain weights. A **dead end** (a row with nowhere to go) restarts from the
+plain weights and is *reported*, never refused — random rolls and live edits
+reach one constantly. Symmetry is untouched: the group element is still drawn
+independently after the map. **Infinite zoom** needs every map that fires to
+allow the zoom map next, and a scene that breaks that is a load error naming
+the edge (live: `zoom_error`). The dimension lock stands down under xaos —
+no single factor balances a spectral radius — and its button says so.
+
+**CLI, for agents:**
+
+- `-S transform.a.xaos.b=0`, `xaos.*=0` (quote it), `xaos={}` (reset), and
+  `xaos_p.b=0.4`, which solves for the multiplier that gives that probability
+  with the rest of the row held (`=1` is "only this exit"). The same spellings
+  rewrite the cell in a matrix-form scene. `--sweep transform.a.xaos.b=1,0.1,0`
+  morphs between sub-attractors.
+- `--xaos no-self-loops|cycle|blocks:N|reset` expands into whole-row `-S`
+  edits *ahead of* your own, so a `-S` beside it edits the preset's rows. The
+  rows are printed to stderr, ready to paste.
+- `--info` gains an `xaos` section (only when a row is authored, so no golden
+  moved): per map weight share against walk share and edges in/out; dimension
+  with and without the cuts; for layers up to 12 maps a multiplier grid and a
+  probability grid. Notes, each with the flag that fixes it: dead ends, drained
+  maps, starved ones, a chain split into closed groups, slow mixing.
+- `--isolate 'from>to'` draws only the points `to` placed straight after
+  `from` — one edge's own material, the first thing a cut there removes.
+  `--edge-grid` is the n×n sheet of every edge (up to 6 maps), cut ones empty.
+
+**In the app.** Three views of one graph, every edit through the same `App`
+methods (`set_xaos_edge(s)`, `set_xaos_rest`, `set_xaos_probability`,
+`apply_xaos_preset`, `insert_linked_transform`), coalesced per edge:
+
+- the inspector's **Xaos block** under Behaviour: walk share beside weight
+  share, a goes-to/comes-from radio (Apophysis 7X's), a row per target with
+  multiplier, probability and cut/restore (past 12 maps: exceptions and a
+  filter), the rest of the row, and Reset / No self-loop / Only to… /
+  **Linked map** — a new identity map that runs straight after this one and
+  only there, Apophysis's pre-final-transform trick;
+- the **Xaos window**, the whole layer as a grid;
+- the **viewport overlay** (the toggle beside the emphasis bulb, edit mode
+  only): the selected map's exits as arrows, width by probability, cuts as
+  stubs with an ×; with nothing selected, every edge that isn't 1 in a layer of
+  up to 12. `ui::xaos::overlay_edges` is the one geometry the painting and the
+  picking both use. Viewport input reaches it through `app.rs`, like the gizmos.
+
+**Not done yet** (plan §6, §8): random-flame and mutation knobs for xaos;
+coupling between subscenes; "hold shares" (re-solve weights so a xaos edit
+leaves walk shares put). And a GUI trap worth knowing: **U+2192 `→` is in
+none of the app's text fonts** and renders as tofu; strings use Phosphor's
+arrow-right (`\u{E06C}`, `icons::ARROW`).
 
 ## Colour: two sources, one colormap
 
