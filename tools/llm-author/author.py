@@ -42,6 +42,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -141,6 +142,14 @@ def fill(name, **kw):
 
 def has_line(text, word):
     return re.search(rf"^\s*\**{word}\**\s*[.!]?\s*$", text, re.M) is not None
+
+
+def same_scene(a, b):
+    """Whether two scene files say the same thing, comments and layout aside."""
+    try:
+        return tomllib.loads(a.read_text()) == tomllib.loads(b.read_text())
+    except tomllib.TOMLDecodeError:
+        return a.read_text().split() == b.read_text().split()
 
 
 class Run:
@@ -385,7 +394,7 @@ def main():
         print(f"sparks: {', '.join(sparks)} (seed {args.spark_seed}, from {pool} words)")
     r.say(task)
 
-    ending, last_good, rnd, repairs = "ran out of rounds", None, 1, 0
+    ending, last_good, rnd, repairs, repeats = "ran out of rounds", None, 1, 0, 0
     unseen = None  # the last render, if the loop ends before it is shown
     while rnd <= args.rounds:
         print(f"round {rnd}: asking…", flush=True)
@@ -425,6 +434,26 @@ def main():
             continue
 
         repairs = 0
+        # The same scene again, comments and layout aside. Small models do
+        # this when they mean DONE but don't trust a reply without a scene,
+        # so say plainly that bare DONE is enough, rather than rendering it
+        # again. A second repeat in a row is taken as the DONE it means:
+        # asking a third time would be pressing.
+        if last_good and has_line(content, "DONE"):
+            pass  # DONE with the same scene: handled below as an ordinary finish
+        elif last_good and same_scene(path, last_good):
+            path.unlink()
+            if repeats:
+                ending = "the model sent the same scene again after the reminder; taken as DONE"
+                break
+            repeats += 1
+            print(f"round {rnd}: same scene as {last_good.name}", flush=True)
+            if rnd == args.rounds:
+                break
+            r.say(fill("same.md", prev=last_good.stem.split("-")[-1], left=args.rounds - rnd))
+            rnd += 1
+            continue
+        repeats = 0
         last_good = path
         png = out / f"round-{rnd}.png"
         stats, err = render(args.fracturize, path, png)

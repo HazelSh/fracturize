@@ -58,6 +58,11 @@ harness does instead:
   `--repairs` (2) failed fixes in one round, the run ends rather than pressing.
   A reply that uses its whole token budget without producing a scene ends the
   run, because that is usually a loop and asking again would feed it.
+- **A repeated scene is asked about, once.** A reply whose scene parses the
+  same as the last one (comments aside) isn't re-rendered; the model is told
+  that a bare `DONE` is enough, or to change something (`prompts/same.md`). A
+  second repeat in a row is taken as DONE. LFM2.5-2.6B's first run resent one
+  scene for three rounds while its reasoning said "I should DONE".
 - **One session at a time** (a lock in `renders/llm/.lock`), so each one can
   be read on its own.
 - **A closing debrief** (`prompts/interview.md`): intent, how the result
