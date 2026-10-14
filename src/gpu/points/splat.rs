@@ -12,6 +12,7 @@ use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFo
 
 use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source};
+use crate::gpu::points::bucket::{BucketPipelines, BucketSorter};
 use crate::gpu::points::volume::{VolumeParams, BINS};
 use crate::gpu::points::renderer::DEPTH_FORMAT;
 
@@ -147,6 +148,17 @@ pub struct SplatRenderer {
     /// Per-pass GPU timestamps for volume mode, when a measurement asks for them
     /// (`enable_profile`). `None` costs nothing.
     profile: Option<PassProfile>,
+    /// What the accumulation bind group was built from, kept so volume mode can
+    /// build another over its sorted copy of the points.
+    point_buffer: Buffer,
+    colormap_buffer: Buffer,
+    accum_layout: BindGroupLayout,
+    /// The ring sorted into screen buckets, built the first time a volume frame
+    /// is big enough to want it.
+    sorter: Option<BucketSorter>,
+    accum_bind_group_sorted: Option<BindGroup>,
+    /// Whether this frame's volume passes read the sorted copy.
+    use_sorted: bool,
     /// The absorbance slices and each pixel's depth span, at accumulation
     /// resolution, recreated with it.
     bins: Option<BinTargets>,
@@ -197,7 +209,8 @@ const PASS_SLICE: u32 = 2;
 const PASS_PREFIX: u32 = 3;
 const PASS_EMIT: u32 = 4;
 const PASS_TONEMAP: u32 = 5;
-const PASS_NAMES: [&str; 6] = ["span", "range", "slice", "prefix", "emission", "tonemap"];
+const PASS_SORT: u32 = 6;
+const PASS_NAMES: [&str; 7] = ["span", "range", "slice", "prefix", "emission", "tonemap", "sort"];
 
 /// GPU timestamps around each volume pass: a measurement instrument, absent
 /// unless `enable_profile` is called (and then only on a device that has
@@ -224,6 +237,8 @@ struct BinTargets {
     bind_group: BindGroup,
     /// The same two buffers read-only, as group 1 of the emission pass.
     bind_group_ro: BindGroup,
+    /// Slices writable, spans read-only: the slice pass.
+    bind_group_slice: BindGroup,
     /// Stands in as the colour target of the two passes that only write storage;
     /// nothing is written to it, but a pass needs one.
     front_target: wgpu::TextureView,
@@ -240,6 +255,9 @@ struct VolumePipelines {
     point: RenderPipeline,
     bins_layout: BindGroupLayout,
     bins_ro_layout: BindGroupLayout,
+    bins_slice_layout: BindGroupLayout,
+    /// The spatial sort of the point buffer the volume passes draw from.
+    bucket: BucketPipelines,
     /// Fullscreen passes: the spans to log form, and the slices to running
     /// totals.
     range_pipe: RenderPipeline,
@@ -462,12 +480,8 @@ impl SplatPipelines {
                 // The emission pass only reads the slices and spans, so it gets
                 // them read-only: plain loads, which the hardware may cache,
                 // where an atomic load goes to L2 every time.
-                let ro_entry = |binding| wgpu::BindGroupLayoutEntry {
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ..storage_entry(binding)
-                };
                 let ro_entry = |binding| {
-                    let mut e = ro_entry(binding);
+                    let mut e = storage_entry(binding);
                     e.ty = wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -475,6 +489,18 @@ impl SplatPipelines {
                     };
                     e
                 };
+                // The slice pass writes the slices and only reads the spans.
+                let bins_slice_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("volume_bins_slice_bind_group_layout"),
+                        entries: &[storage_entry(0), ro_entry(1)],
+                    });
+                let slice_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("volume_slice_pipeline_layout"),
+                        bind_group_layouts: &[Some(&accum_layout), Some(&bins_slice_layout)],
+                        immediate_size: 0,
+                    });
                 let bins_ro_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: Some("volume_bins_ro_bind_group_layout"),
@@ -620,13 +646,15 @@ impl SplatPipelines {
                     cache: None,
                 });
                 VolumePipelines {
-                    abs_point: make("volume_abs_point", &front_pipeline_layout, "vs_splat_point", "fs_abs", PointList, &front_targets),
-                    a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_splat_point", "fs_front", PointList, &front_targets),
-                    point: make("volume_point", resolve_layout, "vs_splat_point", "fs_splat_volume", PointList, &emit_targets),
+                    abs_point: make("volume_abs_point", &slice_pipeline_layout, "vs_abs", "fs_abs", PointList, &front_targets),
+                    a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_span", "fs_front", PointList, &front_targets),
+                    point: make("volume_point", resolve_layout, "vs_emit", "fs_splat_volume", PointList, &emit_targets),
                     bins_layout,
                     bins_ro_layout,
+                    bins_slice_layout,
+                    bucket: BucketPipelines::new(device),
                     range_pipe: make("volume_range", &front_pipeline_layout, "vs_tonemap", "fs_range", TriangleList, &front_targets),
-                    prefix_pipe: make("volume_prefix", &front_pipeline_layout, "vs_tonemap", "fs_prefix", TriangleList, &front_targets),
+                    prefix_pipe: make("volume_prefix", &slice_pipeline_layout, "vs_tonemap", "fs_prefix", TriangleList, &front_targets),
                     tonemap,
                     tonemap_layout,
                     shader: shader.clone(),
@@ -802,6 +830,12 @@ impl SplatRenderer {
             dump_pipelines: None,
             bins: None,
             profile: None,
+            point_buffer: point_buffer.clone(),
+            colormap_buffer: colormap_buffer.clone(),
+            accum_layout: accum_layout.clone(),
+            sorter: None,
+            accum_bind_group_sorted: None,
+            use_sorted: false,
             accum_format,
             quad_pipeline,
             point_pipeline,
@@ -1009,6 +1043,7 @@ impl SplatRenderer {
             let m = self.bins.as_ref().expect("just ensured");
             encoder.clear_buffer(&m.slices, 0, None);
             encoder.clear_buffer(&m.ranges, 0, None);
+            self.sort_points(device, encoder, point_count, width * n, height * n);
             self.storage_pass(encoder, 0..point_count, true);
             self.fullscreen_storage_pass(encoder, true);
             self.storage_pass(encoder, 0..point_count, false);
@@ -1130,7 +1165,7 @@ impl SplatRenderer {
             multiview_mask: None,
         });
         if !points.is_empty() {
-            pass.set_bind_group(0, &self.accum_bind_group, &[]);
+            pass.set_bind_group(0, if volume { self.volume_points_group() } else { &self.accum_bind_group }, &[]);
             let vp = if volume { self.volume_pipelines.as_ref() } else { None };
             if vp.is_some() {
                 let bins = self.bins.as_ref().expect("pass A ran first");
@@ -1246,7 +1281,7 @@ impl SplatRenderer {
                 })
             };
             self.dump_pipelines = Some(DumpPipelines {
-                point: make("vs_splat_point", wgpu::PrimitiveTopology::PointList),
+                point: make("vs_emit", wgpu::PrimitiveTopology::PointList),
                 layout,
             });
         }
@@ -1386,6 +1421,17 @@ impl SplatRenderer {
         true
     }
 
+    fn stamp_compute(&self, pass: u32) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        self.profile.as_ref().map(|p| {
+            p.written.set(p.written.get() | 1 << pass);
+            wgpu::ComputePassTimestampWrites {
+                query_set: &p.queries,
+                beginning_of_pass_write_index: Some(pass * 2),
+                end_of_pass_write_index: Some(pass * 2 + 1),
+            }
+        })
+    }
+
     fn stamp(&self, pass: u32) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         self.profile.as_ref().map(|p| {
             p.written.set(p.written.get() | 1 << pass);
@@ -1500,7 +1546,60 @@ impl SplatRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: ranges.as_entire_binding() },
             ],
         });
-        self.bins = Some(BinTargets { slices, ranges, bind_group, bind_group_ro, front_target, width, height });
+        let bind_group_slice = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume_bins_slice_bind_group"),
+            layout: &vp.bins_slice_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: slices.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: ranges.as_entire_binding() },
+            ],
+        });
+        self.bins = Some(BinTargets { slices, ranges, bind_group, bind_group_ro, bind_group_slice, front_target, width, height });
+    }
+
+    /// Sort this frame's points into screen buckets, when there are enough of
+    /// them for it to pay (see `bucket.rs`), and say whether the passes should
+    /// read the result. `FRACTURIZE_VOLUME_NOSORT=1` turns it off, for
+    /// measuring what it buys.
+    fn sort_points(
+        &mut self,
+        device: &Device,
+        encoder: &mut wgpu::CommandEncoder,
+        point_count: u32,
+        width: u32,
+        height: u32,
+    ) {
+        // Below this the ring fits in cache anyway and the sort is overhead.
+        const MIN_POINTS: u32 = 500_000;
+        self.use_sorted = point_count >= MIN_POINTS && std::env::var_os("FRACTURIZE_VOLUME_NOSORT").is_none();
+        if !self.use_sorted {
+            return;
+        }
+        let vp = self.volume_pipelines.as_ref().expect("volume is active");
+        if self.sorter.is_none() {
+            let sorter = BucketSorter::new(device, &self.point_buffer, &self.camera_buffer);
+            self.accum_bind_group_sorted = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("splat_accum_bind_group_sorted"),
+                layout: &self.accum_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: sorter.sorted.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.camera_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.colormap_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.volume_params_buffer.as_entire_binding() },
+                ],
+            }));
+            self.sorter = Some(sorter);
+        }
+        self.sorter.as_ref().unwrap().encode(device, &vp.bucket, encoder, point_count, width, height, self.stamp_compute(PASS_SORT));
+    }
+
+    /// The bind group (points, camera, colormap, volume uniform) the volume
+    /// passes draw with: over the sorted copy when this frame made one.
+    fn volume_points_group(&self) -> &BindGroup {
+        match (&self.accum_bind_group_sorted, self.use_sorted) {
+            (Some(g), true) => g,
+            _ => &self.accum_bind_group,
+        }
     }
 
     /// The two passes that only write storage: A0 (each pixel's depth span) and
@@ -1533,8 +1632,8 @@ impl SplatRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_bind_group(0, &self.accum_bind_group, &[]);
-        pass.set_bind_group(1, &m.bind_group, &[]);
+        pass.set_bind_group(0, self.volume_points_group(), &[]);
+        pass.set_bind_group(1, if spans { &m.bind_group } else { &m.bind_group_slice }, &[]);
         pass.set_pipeline(if spans { &vp.a0_point } else { &vp.abs_point });
         pass.draw(points, 0..1);
     }
@@ -1562,7 +1661,7 @@ impl SplatRenderer {
             multiview_mask: None,
         });
         pass.set_bind_group(0, &self.accum_bind_group, &[]);
-        pass.set_bind_group(1, &m.bind_group, &[]);
+        pass.set_bind_group(1, if range { &m.bind_group } else { &m.bind_group_slice }, &[]);
         pass.set_pipeline(if range { &vp.range_pipe } else { &vp.prefix_pipe });
         pass.draw(0..3, 0..1);
     }

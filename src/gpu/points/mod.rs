@@ -6,6 +6,7 @@
 //! 3. Use circular buffer updates for temporal stability
 
 pub mod accumulate;
+pub mod bucket;
 pub mod compute;
 pub mod density;
 pub mod downsample;

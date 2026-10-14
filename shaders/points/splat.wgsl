@@ -202,35 +202,8 @@ struct SplatOutput {
     @location(1) offset: vec2<f32>,
     // Per-fragment energy normalization (peak of the gaussian)
     @location(2) weight: f32,
-    // Volume mode only (zero otherwise): the absorbance this point deposits,
-    // before the kernel's falloff, and its view depth. Flat, because the depth
-    // is the point's and not the fragment's.
-    @location(3) abs_weight: f32,
-    @location(4) @interpolate(flat) depth: f32,
-    // Point primitives only (volume mode draws nothing else): where the point
-    // is, in pixels, so a fragment can tell the pixel it covers from the three
-    // helper invocations the hardware adds to fill out its 2x2 quad.
-    @location(5) @interpolate(flat) pixel_pos: vec2<f32>,
 }
 
-
-/// True for a helper invocation of a point primitive: a lane that exists only
-/// because the rasterizer shades 2x2 quads, whose results are thrown away. It
-/// still executes its loads, so on a 1px point three quarters of a shader's
-/// memory traffic is wasted unless it is skipped here. Wrongly keeping one is
-/// harmless (the hardware discards its writes and atomics); wrongly dropping a
-/// real fragment is not, hence the tolerance.
-fn is_helper(in: SplatOutput) -> bool {
-    let d = abs(floor(in.clip_position.xy) + vec2<f32>(0.5) - in.pixel_pos);
-    return max(d.x, d.y) > 0.52;
-}
-
-/// A point's whole absorbance deposit, in pixels' worth of optical depth: its
-/// world cross-section over the world area of a pixel at its depth.
-fn volume_deposit(depth: f32) -> f32 {
-    let s = volume.ppu / depth;
-    return volume.abs_scale * s * s;
-}
 
 // Gaussian sharpness: exp(-4 r^2) is ~0.02 at the quad edge (r = 1)
 const KERNEL_SHARPNESS: f32 = 4.0;
@@ -261,8 +234,6 @@ fn vs_splat(
         out.color = vec3<f32>(0.0);
         out.offset = vec2<f32>(0.0);
         out.weight = 0.0;
-        out.abs_weight = 0.0;
-        out.depth = 0.0;
         return out;
     }
 
@@ -322,7 +293,6 @@ fn vs_splat(
     let guard = guard_weight(point.position);
     out.weight = haze_weight(depth) * guard
         * KERNEL_NORM / (radius_px * radius_px);
-    // Volume mode draws points only (`vs_splat_point`), never these quads.
     return out;
 }
 
@@ -340,8 +310,6 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
         out.color = vec3<f32>(0.0);
         out.offset = vec2<f32>(0.0);
         out.weight = 0.0;
-        out.abs_weight = 0.0;
-        out.depth = 0.0;
         return out;
     }
 
@@ -359,32 +327,6 @@ fn vs_splat_point(@builtin(vertex_index) point_index: u32) -> SplatOutput {
     out.offset = vec2<f32>(0.0);
     let guard = guard_weight(point.position);
     out.weight = haze_weight(depth) * guard;
-    out.abs_weight = 0.0;
-    out.depth = 0.0;
-    let base_radius = 0.5 * camera.projected_point_size * camera.screen_height / depth;
-    {
-        // The pixel this point lands in, in framebuffer coordinates (y down).
-        let ndc_out = out.clip_position.xy;
-        out.pixel_pos = vec2<f32>(
-            (ndc_out.x * 0.5 + 0.5) * camera.screen_height * camera.aspect_ratio,
-            (0.5 - ndc_out.y * 0.5) * camera.screen_height,
-        );
-    }
-    if volume.enabled > 0.5 {
-        // Volume mode never draws a point larger than a pixel (the host does not
-        // use the quad path), so a point whose footprint would have been wider
-        // has to say what it is made of. Its cross-section is spread over the
-        // larger of one pixel and its own footprint, which is what the quad path
-        // did per pixel, so a big point is a dilute dot and not a solid one. Mass
-        // is not kept: the dot covers one pixel where the blob covered many, so
-        // material seen close up is more transparent than the same material
-        // far away, the price of the pixelated look. The alternative, all of the
-        // mass in one pixel, is an opaque black speck with a source function's
-        // worth of emission on it.
-        let footprint = max(1.0, base_radius * base_radius);
-        out.abs_weight = volume_deposit(depth) * guard / footprint;
-        out.depth = depth;
-    }
     return out;
 }
 
@@ -410,6 +352,135 @@ fn fs_splat(in: SplatOutput) -> @location(0) vec4<f32> {
 // scored against the exact transport (`volume_ref.rs`), was off by 0.2 in T and
 // biased by its overestimation constant. See VOLUME-RENDERER-PLAN.md.
 
+// Volume mode draws points only, one pixel each, and has a vertex stage per
+// pass: the span pass needs a depth, the slice pass a depth and a deposit, and
+// only the emission pass needs a colour. All of them are flat (a point
+// primitive is one fragment), and the first two do none of the colour work
+// splat's vertex stage does, which is most of it.
+
+/// A point's depth and the pixel it lands in, for a volume vertex stage. `depth`
+/// is not positive when the point is clipped: behind the eye, or dropped by
+/// `--isolate`.
+struct Projected {
+    clip: vec4<f32>,
+    depth: f32,
+    /// Where it lands, in framebuffer pixels (y down), so a fragment can tell the
+    /// pixel it covers from the three helper invocations the hardware adds to
+    /// fill out its 2x2 quad.
+    pixel_pos: vec2<f32>,
+}
+
+const CULLED: vec4<f32> = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+
+fn project_point(pos: vec3<f32>) -> Projected {
+    let clip = camera.view_proj * vec4<f32>(pos, 1.0);
+    let depth = select(clip.w, -1.0, isolate_dropped(pos));
+    if depth <= 0.0 {
+        return Projected(CULLED, depth, vec2<f32>(0.0));
+    }
+    // The same tile window as `vs_splat_point`.
+    let ndc = clip.xy / clip.w;
+    let x = ndc.x * camera.subfrustum.x + camera.subfrustum.z;
+    let y = ndc.y * camera.subfrustum.y + camera.subfrustum.w;
+    let px = vec2<f32>(
+        (x * 0.5 + 0.5) * camera.screen_height * camera.aspect_ratio,
+        (0.5 - y * 0.5) * camera.screen_height,
+    );
+    return Projected(vec4<f32>(x, y, 0.0, 1.0), depth, px);
+}
+
+/// True for a helper invocation of a point primitive: a lane that exists only
+/// because the rasterizer shades 2x2 quads, whose results are thrown away. It
+/// still executes its loads, so on a 1px point three quarters of a shader's
+/// memory traffic is wasted unless it is skipped here. Wrongly keeping one is
+/// harmless (the hardware discards its writes and atomics); wrongly dropping a
+/// real fragment is not, hence the tolerance.
+fn is_helper(clip_position: vec4<f32>, pixel_pos: vec2<f32>) -> bool {
+    let d = abs(floor(clip_position.xy) + vec2<f32>(0.5) - pixel_pos);
+    return max(d.x, d.y) > 0.52;
+}
+
+/// A point's whole absorbance deposit, in pixels' worth of optical depth: its
+/// world cross-section over the world area of a pixel at its depth.
+fn volume_deposit(depth: f32) -> f32 {
+    let s = volume.ppu / depth;
+    return volume.abs_scale * s * s;
+}
+
+/// What a point deposits in its pixel. Volume mode never draws a point larger
+/// than a pixel, so a point whose footprint would have been wider has to say
+/// what it is made of. Its cross-section is spread over the larger of one pixel
+/// and its own footprint, which is what the quad path did per pixel, so a big
+/// point is a dilute dot and not a solid one. Mass is not kept: the dot covers
+/// one pixel where the blob covered many, so material seen close up is more
+/// transparent than the same material far away, the price of the pixelated
+/// look. The alternative, all of the mass in one pixel, is an opaque black
+/// speck with a source function's worth of emission on it.
+///
+/// Absorbance is a property of the material, so haze does not thin it; the zoom
+/// edge guard removes material, so it does.
+fn point_deposit(pos: vec3<f32>, depth: f32) -> f32 {
+    let radius = 0.5 * camera.projected_point_size * camera.screen_height / depth;
+    return volume_deposit(depth) * guard_weight(pos) / max(1.0, radius * radius);
+}
+
+struct SpanOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) @interpolate(flat) depth: f32,
+    @location(1) @interpolate(flat) pixel_pos: vec2<f32>,
+}
+
+@vertex
+fn vs_span(@builtin(vertex_index) point_index: u32) -> SpanOutput {
+    let pr = project_point(points[point_index].position);
+    return SpanOutput(pr.clip, pr.depth, pr.pixel_pos);
+}
+
+struct AbsOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) @interpolate(flat) depth: f32,
+    @location(1) @interpolate(flat) pixel_pos: vec2<f32>,
+    @location(2) @interpolate(flat) abs_weight: f32,
+}
+
+@vertex
+fn vs_abs(@builtin(vertex_index) point_index: u32) -> AbsOutput {
+    let pos = points[point_index].position;
+    let pr = project_point(pos);
+    var a = 0.0;
+    if pr.depth > 0.0 {
+        a = point_deposit(pos, pr.depth);
+    }
+    return AbsOutput(pr.clip, pr.depth, pr.pixel_pos, a);
+}
+
+struct EmitOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec3<f32>,
+    /// Splat's emission for the point (haze and guard applied): one unit.
+    @location(1) @interpolate(flat) weight: f32,
+    @location(2) @interpolate(flat) depth: f32,
+    @location(3) @interpolate(flat) pixel_pos: vec2<f32>,
+    @location(4) @interpolate(flat) abs_weight: f32,
+}
+
+@vertex
+fn vs_emit(@builtin(vertex_index) point_index: u32) -> EmitOutput {
+    let point = points[point_index];
+    let pr = project_point(point.position);
+    var out: EmitOutput;
+    out.clip_position = pr.clip;
+    out.depth = pr.depth;
+    out.pixel_pos = pr.pixel_pos;
+    if pr.depth <= 0.0 {
+        return out;
+    }
+    out.color = haze_color(lookup_color(point.color_idx), pr.depth);
+    out.weight = haze_weight(pr.depth) * guard_weight(point.position);
+    out.abs_weight = point_deposit(point.position, pr.depth);
+    return out;
+}
+
 // Mirrored in `volume::BINS`; a test holds the two together.
 const BINS: u32 = 32u;
 // Absorbance is accumulated as u32 fixed point, 2^20 to the unit: a millionth
@@ -424,14 +495,20 @@ const FIXED: f32 = 1048576.0;
 // "nothing yet". Depths are positive floats, whose bits order like they do.
 @group(1) @binding(1) var<storage, read_write> ranges: array<atomic<u32>>;
 
+// The spans as the slice and emission passes read them: read-only, as floats
+// (the ln of the nearest depth and BINS over the log span), one load. Same
+// group and binding as `ranges` above, in layouts that bind it read-only; no
+// entry point uses both.
+@group(1) @binding(1) var<storage, read> ranges_ro: array<vec2<f32>>;
+
 fn pixel_index(px: vec2<i32>) -> u32 {
     let w = u32(round(camera.screen_height * camera.aspect_ratio));
     return u32(px.y) * w + u32(px.x);
 }
 
 @fragment
-fn fs_front(in: SplatOutput) {
-    if is_helper(in) { return; }
+fn fs_front(in: SpanOutput) {
+    if is_helper(in.clip_position, in.pixel_pos) { return; }
     let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 2u;
     let bits = bitcast<u32>(in.depth);
     // Read first: most fragments are neither the nearest nor the farthest, and
@@ -484,28 +561,43 @@ fn bin_of(depth: f32, pixel: u32) -> BinPos {
 // Pass A: absorbance into slices. No colour output: the host binds a one-byte
 // target nothing is written to, because a pass needs one.
 @fragment
-fn fs_abs(in: SplatOutput) {
-    if is_helper(in) { return; }
-    let a = in.abs_weight * exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
+fn fs_abs(in: AbsOutput) {
+    if is_helper(in.clip_position, in.pixel_pos) { return; }
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
-    let pos = bin_of(in.depth, pixel);
-    atomicAdd(&slices[pixel * BINS + pos.bin], u32(a * FIXED + 0.5));
+    // The spans are final by now, and read through the read-only declaration
+    // below (the slice pass binds them that way).
+    let r = ranges_ro[pixel];
+    let u = clamp((log(in.depth) - r.x) * r.y, 0.0, f32(BINS) - 1.0e-3);
+    atomicAdd(&slices[pixel * BINS + u32(u)], u32(in.abs_weight * FIXED + 0.5));
 }
 
 // After A, `fs_prefix` turns each pixel's slices into running totals, as floats
 // (the words change meaning here: from fixed-point masses to f32 cumulative
 // absorbance), so that pass B and the tonemap read one or two words instead of
 // walking the slices: a fragment used to pay half the slices in loads.
+// The same slices as 16-byte vectors for `fs_prefix`: it is the one pass that
+// touches all BINS words of a pixel, and as 32 atomic loads and 32 atomic stores
+// it was the slowest thing in a frame that covered the screen. Declared at the
+// same binding as `slices` (no entry point uses both), non-atomic, since no
+// pass overlaps it.
+@group(1) @binding(0) var<storage, read_write> slices_v: array<vec4<u32>>;
+
 @fragment
 fn fs_prefix(in: TonemapOutput) {
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
-    if atomicLoad(&ranges[pixel * 2u + 1u]) == 0u {
+    if ranges_ro[pixel].y == 0.0 {
         return;
     }
     var total = 0.0;
-    for (var i = 0u; i < BINS; i += 1u) {
-        total += f32(atomicLoad(&slices[pixel * BINS + i])) / FIXED;
-        atomicStore(&slices[pixel * BINS + i], bitcast<u32>(total));
+    let base = pixel * (BINS / 4u);
+    for (var i = 0u; i < BINS / 4u; i += 1u) {
+        let m = vec4<f32>(slices_v[base + i]) / FIXED;
+        let c1 = total + m.x;
+        let c2 = c1 + m.y;
+        let c3 = c2 + m.z;
+        let c4 = c3 + m.w;
+        slices_v[base + i] = bitcast<vec4<u32>>(vec4<f32>(c1, c2, c3, c4));
+        total = c4;
     }
 }
 
@@ -540,17 +632,16 @@ fn bins_transmittance(px: vec2<i32>, depth: f32, own: f32) -> f32 {
 @group(2) @binding(1) var<storage, read_write> dump_count: atomic<u32>;
 
 @fragment
-fn fs_dump(in: SplatOutput) {
-    let falloff = exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
+fn fs_dump(in: EmitOutput) {
     let px = vec2<i32>(in.clip_position.xy);
-    let t = bins_transmittance(px, in.depth, in.abs_weight * falloff);
+    let t = bins_transmittance(px, in.depth, in.abs_weight);
     let idx = atomicAdd(&dump_count, 1u);
     let base = idx * 8u;
     if base + 8u <= arrayLength(&dump) {
         dump[base] = u32(px.x) | (u32(px.y) << 16u);
         dump[base + 1u] = bitcast<u32>(in.depth);
-        dump[base + 2u] = bitcast<u32>(in.abs_weight * falloff);
-        dump[base + 3u] = bitcast<u32>(emission_weight(in, falloff));
+        dump[base + 2u] = bitcast<u32>(in.abs_weight);
+        dump[base + 3u] = bitcast<u32>(emission_weight(in));
         dump[base + 4u] = bitcast<u32>(in.color.r);
         dump[base + 5u] = bitcast<u32>(in.color.g);
         dump[base + 6u] = bitcast<u32>(in.color.b);
@@ -563,7 +654,6 @@ fn fs_dump(in: SplatOutput) {
 // words are floats. Same group and bindings as the atomic declarations above,
 // in a different bind group layout; no entry point uses both.
 @group(1) @binding(0) var<storage, read> slices_ro: array<f32>;
-@group(1) @binding(1) var<storage, read> ranges_ro: array<vec2<f32>>;
 
 /// `bins_transmittance` for the emission pass: read-only, one load of the span.
 fn bins_transmittance_ro(px: vec2<i32>, depth: f32, own: f32) -> f32 {
@@ -588,18 +678,17 @@ fn bins_transmittance_ro(px: vec2<i32>, depth: f32, own: f32) -> f32 {
 /// every earlier slice, and the reason a thick pixel was dim. The extra term
 /// is proportional to the absorbance, so it vanishes with it and opacity 0 is
 /// still splat.
-fn emission_weight(in: SplatOutput, falloff: f32) -> f32 {
-    return (in.weight + volume.source * in.abs_weight) * falloff;
+fn emission_weight(in: EmitOutput) -> f32 {
+    return in.weight + volume.source * in.abs_weight;
 }
 
 /// The ordinary splat fragment, its weight multiplied by the transmittance of
 /// everything in front of the point (its own deposit excluded).
 @fragment
-fn fs_splat_volume(in: SplatOutput) -> @location(0) vec4<f32> {
-    if is_helper(in) { return vec4<f32>(0.0); }
-    let falloff = exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
-    let t = bins_transmittance_ro(vec2<i32>(in.clip_position.xy), in.depth, in.abs_weight * falloff);
-    let w = emission_weight(in, falloff) * t;
+fn fs_splat_volume(in: EmitOutput) -> @location(0) vec4<f32> {
+    if is_helper(in.clip_position, in.pixel_pos) { return vec4<f32>(0.0); }
+    let t = bins_transmittance_ro(vec2<i32>(in.clip_position.xy), in.depth, in.abs_weight);
+    let w = emission_weight(in) * t;
     return vec4<f32>(in.color * w, w);
 }
 
