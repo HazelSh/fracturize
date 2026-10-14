@@ -69,6 +69,7 @@ src/
   pick.rs        # Gizmo hit-testing and drag geometry (pure math, unit-tested)
   mutate.rs      # Random scene mutation operators (U key, --mutations)
   trace.rs       # CPU chaos walkers (variation port) for the trace overlay
+  volume_ref.rs  # Exact emission-absorption transport for volume mode, to score it
   prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
   scene.rs       # TOML scene parsing AND saving, TransformSpec, variation names/slots
   scene_source.rs# A path's scene TOML: the file, or a render PNG's embedded chunk
@@ -82,9 +83,9 @@ src/
       compute.rs   # Chaos game dispatch, circular buffer bookkeeping
       renderer.rs  # Dual pipelines: billboard quads / native 1px points
       splat.rs     # Splat mode: additive log-density accumulation + tonemap;
-                   # also volume mode's two passes (moments, then weighted emission)
-      volume.rs    # Volume mode's uniform, depth warp/range, opacity limits
-      moments.rs   # Moment-based transmittance, Rust mirror of the WGSL (tested)
+                   # also volume mode's passes (spans, slices, weighted emission)
+      volume.rs    # Volume mode's uniform, reference length, slice constants
+      moments.rs   # The retired moment reconstruction, kept for the reference
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # In-world line renderer (traces, camera path, indicators)
@@ -144,115 +145,115 @@ All GPU, three passes per frame:
      Exposure is normalized by point capacity and resolution, so brightness is
      stable across effort levels and render sizes; `W`/`Shift+W` (or
      `--exposure`) scale it. ~75% of the point renderer's FPS.
-   - **volume** (`points/splat.wgsl`, `volume.rs`, `moments.rs`): splat with
+   - **volume** (`points/splat.wgsl`, `volume.rs`, `volume_ref.rs`): splat with
      absorption, so near material hides what is behind it. The fractal is a
      glowing fog: every point emits (as in splat) and also absorbs, and a point
-     reaches the eye attenuated by `T(z) = exp(−τ(z))`, τ the absorbance in front
-     of it. Plan and later slices are in `VOLUME-RENDERER-PLAN.md`; slice 1 is
-     live and the one-pass still. Two passes over the point buffer:
-     **A** splats each point's absorbance into fp32 targets holding the total
-     `b0` and four power moments `Σ a·zᵏ` of a log-warped depth `z ∈ [−1, 1]`
-     (`Rgba32Float` + `R32Float`, at *accumulation* resolution); **B** is the
-     ordinary splat accumulation with each fragment's weight multiplied by `T`
-     reconstructed from its pixel's moments (Münstermann et al. 2018,
-     `moment_transmittance` in the shader, mirrored and unit-tested in
-     `moments.rs`). The tonemap is unchanged.
+     reaches the eye attenuated by `T = exp(−τ)`, τ the absorbance in front of
+     it. Plan and history are in `VOLUME-RENDERER-PLAN.md`. Live and the one-pass
+     still; five passes over the point buffer and the pixels:
+     **A0** finds each pixel's nearest and farthest fragment depth (atomics);
+     a fullscreen pass rewrites those as a log origin and scale; **A** adds each
+     fragment's absorbance, as fixed point, into one of `BINS` = 32 equal slices
+     of *that pixel's own span* (a storage buffer, 4 bytes a slice a pixel);
+     a fullscreen pass turns the slices into running totals; **B** is the
+     ordinary splat accumulation with each fragment's weight multiplied by the
+     transmittance of what is in front of it, read as two words (the total
+     before its slice, plus its position through its own slice), own deposit
+     excluded. Total absorbance is the last running total.
+
+     **Judge changes to it against the exact reference, not by eye.** Slices one
+     to three were tuned by eye against symptoms (an overestimation constant, a
+     blur, an emission gain, a fill), and the reference showed afterwards how
+     wrong they had been: see "The exact reference" below.
 
      Things that are load-bearing, and easy to undo by accident:
 
      * **Opacity 0 is not "almost splat", it is splat.** The host draws the
-       plain splat pipelines and never runs pass A (`SplatRenderer::set_volume`
-       with `VolumeParams::OFF`), so `--volume --opacity 0` is pixel-identical to
-       `--splat` (checked on `blossom` and `censer`; the PNG *files* differ only
-       by their embedded record).
+       plain splat pipelines and never runs the volume passes
+       (`SplatRenderer::set_volume` with `VolumeParams::OFF`), so
+       `--volume --opacity 0` is pixel-identical to `--splat` (checked on
+       `blossom` and `censer`; the PNG *files* differ only by their embedded
+       record).
      * **Absorbance is a world quantity.** A point carries a cross-section
        `opacity · K · L² / N` in world area (`L` the scene's reference length:
        the attractor's radius, under infinite zoom the eye's distance to the
        fixed point, which is what keeps it wrap-invariant; `K` = 2, a
        calibration) and deposits that over the world area of a pixel at its
-       depth, `(H / (2·z·tan(fov/2)))²` (`VolumeParams`, `volume_deposit` in the
-       shader). So optical depth is a property of the material: it does not
-       change with point count, resolution, `--supersample` (H still appears
-       squared), or **camera distance**. The first two versions normalised in
-       screen space (`opacity · H² / N`, as exposure is), which is right for a
-       brightness and wrong for an absorbance: zoom out k times and the
-       attractor covers k² fewer pixels, so per-pixel optical depth grew ~k²
-       (median `b0` over lit pixels on nautilus, opacity 2, at 0.5/1/2/4x the
-       authored distance: 0.53 / 2.9 / 12.3 / 46.9; world-space: 1.89 / 2.04 /
-       2.03 / 1.90). That is what read as background bleeding through, and as
-       flicker once each point's deposit became several optical depths thick.
-       `FRACTURIZE_VOLUME_STATS=1` with `--volume --render` prints that median
-       (and p90, p99, lit share) from the absorbance field; it is how this was
-       checked. Near the eye a point's footprint is capped at
-       `max_point_pixels`, and past the cap its deposit is scaled by the area
-       it no longer covers, so a mote the camera brushes past does not turn
-       solid.
-     * **A point does not shadow itself.** Pass B subtracts the point's own
-       deposit from the pixel's moments before reconstructing
-       (`moments::transmittance_excluding`). The reconstruction counts a share
-       of the mass at the queried depth as in front of it, which suits a
-       surface and is wrong for emission: without the subtraction a lone point
-       carrying absorbance 11 rendered at 6% of its brightness, so *thin*
-       material went dark first. Below `NOISE_FLOOR` of the total the
-       difference is fp32 noise and the answer is 1.
-     * **Haze scales emission only; the zoom edge guard scales both** (haze sits
-       between eye and point, the guard removes material). `--isolate`d points
-       deposit no absorbance (the vertex stage already clips them).
-     * **It needs `FLOAT32_BLENDABLE`**, which the live device now requests
-       (`gpu/context.rs`; the offline device always did). Without it the radio's
-       volume segment is greyed with the reason, `R` skips it, and `--volume`
-       exits with an error — there is no fp16 fallback, the moments are noise
-       there. The live window keeps its *emission* accumulation at fp16 anyway
-       (`SplatPipelines::with_precision(.., false)`): requesting the feature
-       would otherwise have moved ordinary live splat to fp32, ~17% of its
-       frame rate at 8M points.
-     * **Depth range** is the measured attractor's bounding sphere padded 1.5x
-       (`DepthRange::around`), relative to the eye under infinite zoom
-       (`for_zoom`); points outside clamp. Composites measure per layer.
-     * **The tonemap dims the background by the absorbance** (`fs_tonemap_volume`):
-       `alpha = 1 − (1 − coverage)·T_total`, `T_total` the mean of `exp(−b0)`
-       over the output pixel's block of accumulation texels, which is today's
-       coverage exactly where nothing absorbs. On a pale background this is what
-       stops absorbing material reading as a ghost (a sponge at opacity 2 on
-       `[0.6, 0.6, 0.62]` was a faint grey print and is now solid); on a dark
-       one it changes little. What fills the extra alpha matters: only dimming
-       the background paints optically thick, dim-emitting pixels (a strand end
-       on, the centre of an infinite zoom) *black*; letting the colour take the
-       alpha makes every pixel with an optical depth over ~1 solid-bright at
-       opacity 0.5 and is the points renderer again. So a thick pixel is filled
-       with `OPAQUE_FILL` = 0.3 of its own mean colour, the smallest of
-       {0, 0.3, 0.6} with no black left, by eye.
-     * **There is no emission gain.** Slice 1b had one (`cσ/(1 − e^{−cσ})`) to
-       win back the ~1/opacity of splat's light a saturated pixel loses; once
-       the tonemap fills thick pixels it stops helping (the best c over seven
-       scenes, by RMS log deviation of mean luminance against opacity 0, is 0),
-       and it was removed rather than left as a knob that does nothing.
-     * **The absorbance field is blurred** (`BLUR_OUTPUT_PX` = 1 output pixel,
-       two separable gaussian passes over the moment targets before pass B;
-       moments are linear, so this equals splatting fatter absorption kernels,
-       and emission stays sharp). At high opacity one point's absorbance is
-       several optical depths, occlusion becomes a per-sample coin toss, and the
-       result is grit plus a brightness that depends on `--points`; blurring
-       takes the seed-to-seed noise at σ = 30 from 0.044 to 0.028 (splat 0.016)
-       and makes the picture converge as points are added. A point's own
-       deposit is still subtracted, scaled by what survives the blur
-       (`own_share`).
-     * **The overestimation is 0.1, not the paper's 0.25.** At 0.25 the
-       reconstruction darkens even the front-most material once a pixel is
-       optically deep, and past σ ≈ 5 no gain restores it; at 0 there is no front
-       fuzz but also barely any occlusion (σ = 3 and 30 look alike); 0.1 keeps
-       both. Measured in `VOLUME-RENDERER-PLAN.md`.
+       depth, `(H / (2·z·tan(fov/2)))²` (`VolumeParams`, `volume_deposit`). So
+       optical depth is a property of the material and does not change with
+       point count, resolution, `--supersample` (H still appears squared) or
+       **camera distance**. Slice 1b normalised in screen space (`opacity · H² /
+       N`, as exposure is), which is right for a brightness and wrong for an
+       absorbance: zoom out k times and per-pixel optical depth grew ~k². That
+       was the bleed and, once each point became several optical depths thick,
+       the flicker. Median `b0` over lit pixels on nautilus at opacity 2 and
+       0.5/1/2/4x the authored distance: 0.53 / 2.9 / 12.3 / 46.9 then, 1.89 /
+       2.04 / 2.03 / 1.90 now. Past the footprint cap (`max_point_pixels`) a
+       point's deposit is scaled by the area it no longer covers, so a mote the
+       camera brushes past does not turn solid.
+     * **A point does not shadow itself**: its own deposit is taken out of its
+       slice before it is read.
+     * **The per-pixel span is what makes slices work.** The same slices over one
+       depth range for the whole frame are ~7x less accurate: a pixel's material
+       sits in a sliver of the attractor's depth. The cost is two housekeeping
+       passes and the span jitter of a pixel whose extremes are a few fragments.
+     * **Emission has a source function** (`emission_weight`, `volume::SOURCE` =
+       1): a fragment emits its splat weight *plus* `SOURCE` times its absorbance,
+       in splat-density units scaled like exposure by N/H². The bare transport
+       is right and dim — emission per unit of absorbance falls as 1/opacity, so a
+       thick pixel carries 1/opacity of splat's light — and a medium that absorbs
+       also glows, so what a thick region glows *at* is the ratio, a constant
+       here. The extra term vanishes with the absorbance: opacity 0 is splat.
+       Chosen by eye, once, against splat and the exact reference's own
+       pictures on seven scenes; `0` gives the physical dim picture.
+     * **The tonemap** (`fs_tonemap_volume`): `density` is the *visible*
+       radiance, `Σ e·T`, so a thick pixel is as dim as the transport says, in its
+       own colour; the background survives twice over — past coverage as in
+       splat, and past absorbance: `bg · (1 − coverage) · T_total`, `T_total` the
+       mean of `exp(−b0)` over the output pixel's block. A pixel with absorbance
+       and no emission shows `bg · T_total`, not the background (that early
+       return used to ignore `T_total`). There is no fill: the constant
+       0.3-of-own-colour of slice 1c was compensating for a transport that did
+       not know how much light a thick pixel carries.
+     * **There is no blur, no overestimation constant and no emission gain.**
+       The blur spread absorbance into neighbours' emission (a halo of dimming
+       around bright points, front fragments 26% too dark on average) and added
+       0.1 of error to `T_total`; the moment reconstruction was biased by its
+       overestimation constant; the gain was a patch for the 1/opacity dimming.
+       `moments.rs` is kept only so the reference can still score it.
+     * **Haze scales emission only; the zoom edge guard scales both**;
+       `--isolate`d points deposit no absorbance (the vertex stage clips them).
+     * **It needs the fragment stage to write storage**, six buffers' worth. It
+       does not need fp32 blending any more (the absorbance is u32 words), so the
+       live device no longer requests `FLOAT32_BLENDABLE`.
      * **Opacity is session state** for now (the Render window's "Session"
        heading, `--opacity`, default 2): not a scene key, not undoable, not in
        views or prefs. A view saved in volume mode records the *mode* only.
      * **One-pass stills and the window only.** `--spp`, `--effort` tiers that
        accumulate, `--resume`, animations, grids and sheets refuse `--volume` by
        name (`offline::reject_volume`); a render job from the dialog renders
-       plain splat and says so. The shaders' vertex stage is shared with splat
-       (`vs_splat*` carry the extra `abs_weight`/`z` varyings, zero when volume
-       is off).
-     * Cost: ~2.6x splat's render stage offline (20M points, 1080p, ss2);
-       live, ~1.5x frame time at 8M points on the GTX 1080.
+       plain splat and says so. A render too large for the slice buffer (32
+       slices a accumulation pixel against the GPU's storage limit) says so too.
+     * **Cost**: ~5x splat's render stage offline (20M points, 1080p, ss2:
+       0.56 s against 0.09 s), and 14.7 FPS against splat's 36 live at 8M points
+       on the GTX 1080 (the 1c build was 24). The per-fragment work is O(1); the
+       cost is three passes over the point buffer and the pixels.
+
+     **The exact reference** (`volume_ref.rs`; `FRACTURIZE_VOLUME_REFERENCE=
+     <prefix>` on a `--volume --render --supersample 1` still, 8-bit). The same
+     points go through the same vertex stage, kernel, world-space absorbance and
+     emission weights into a *list* of fragments (`fs_dump`) instead of being
+     blended; the CPU sorts each pixel's by depth and composites front to back.
+     It writes the report (`<prefix>.report.txt`: error of the GPU's `L` and
+     `T_total`, and where the transmittance error sits by rank, optical depth,
+     deposit size and depth), the reference through the same tonemap
+     (`<prefix>.ref.png`), and `FRACTURIZE_VOLUME_EMULATE=1` scores candidate
+     estimators on the same fragments without a shader, which is how the slices
+     were chosen over moments, per-frame ranges over global ones, and 32 slices
+     over 8 or 16. At opacity 0.001 the GPU path agrees with it to 0.5%, which
+     is the check that the reference is the same transport. Use it before
+     retuning anything here. `FRACTURIZE_VOLUME_STATS=1` prints the absorbance
+     field's median, p90 and p99.
 3. **Gizmos, traces + indicators**: optional overlays (see keybinds). Traces
    (X) are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl —
    keep them in sync!) rendered as alpha-faded line segments; they regenerate

@@ -109,7 +109,10 @@ struct VolumeParams {
     /// Pixels per world unit at unit depth: a pixel's world area at depth z is
     /// (z / ppu)^2.
     ppu: f32,
-    _pad: f32,
+    /// The source function, in splat density units: how much emission a unit of
+    /// absorbance brings with it (`volume::SOURCE`, scaled like exposure is by
+    /// samples and height). See `fs_splat_volume`.
+    source: f32,
 }
 
 @group(0) @binding(0) var<storage, read> points: array<Point>;
@@ -374,39 +377,41 @@ fn fs_splat(in: SplatOutput) -> @location(0) vec4<f32> {
 // === Volume mode ===
 //
 // Pass A0 (`fs_front`) finds, for every pixel, the nearest and farthest depth any
-// fragment lands at. Pass A (`fs_abs`) splats each fragment's absorbance into one
-// of BINS equal slices of *that pixel's own span* (log-spaced between those two
-// depths) in two fp32 targets. Pass B (`fs_splat_volume`) lights each fragment by
-// the transmittance read off those slices: the absorbance in the slices in front
-// of its own, plus the share of its own slice in front of it, own deposit
-// excluded. Total absorbance is the sum of the slices.
+// fragment lands at. Pass A (`fs_abs`) adds each fragment's absorbance to one of
+// BINS equal slices of *that pixel's own span* (log-spaced between those two
+// depths), as fixed point in a storage buffer. Pass B (`fs_splat_volume`) lights
+// each fragment by the transmittance read off those slices: the absorbance in
+// the slices in front of its own, plus the share of its own slice in front of
+// it, own deposit excluded. Total absorbance is the sum of the slices.
 //
 // The pixel's own span is what matters. The same estimator over one depth range
 // for the whole frame is 7x less accurate, because a pixel's material sits in a
 // sliver of the attractor's depth; and it replaces a moment reconstruction that,
-// scored against the exact transport (`volume_ref.rs`), was off by 0.07 in T at
-// best and biased by its overestimation constant. See VOLUME-RENDERER-PLAN.md.
+// scored against the exact transport (`volume_ref.rs`), was off by 0.2 in T and
+// biased by its overestimation constant. See VOLUME-RENDERER-PLAN.md.
 
-const BINS: f32 = 8.0;
-// Share of its own mean colour an optically thick pixel is filled with by the
-// volume tonemap. Mirrored in `volume::OPAQUE_FILL`.
-const OPAQUE_FILL: f32 = 0.3;
+// Mirrored in `volume::BINS`; a test holds the two together.
+const BINS: u32 = 32u;
+// Absorbance is accumulated as u32 fixed point, 2^20 to the unit: a millionth
+// of resolution, 4096 units of headroom a slice. After `fs_prefix` the same
+// words hold f32 running totals instead.
+const FIXED: f32 = 1048576.0;
 
-@group(1) @binding(0) var bins0: texture_2d<f32>;
-@group(1) @binding(1) var bins1: texture_2d<f32>;
+// Per pixel, BINS words: the slices.
+@group(1) @binding(0) var<storage, read_write> slices: array<atomic<u32>>;
 // Per pixel, two words: the farthest depth's bits, and the *complement* of the
 // nearest depth's bits, so that both are atomicMax and a cleared buffer means
 // "nothing yet". Depths are positive floats, whose bits order like they do.
-@group(1) @binding(2) var<storage, read_write> ranges: array<atomic<u32>>;
+@group(1) @binding(1) var<storage, read_write> ranges: array<atomic<u32>>;
 
-fn range_base(px: vec2<i32>) -> u32 {
+fn pixel_index(px: vec2<i32>) -> u32 {
     let w = u32(round(camera.screen_height * camera.aspect_ratio));
-    return (u32(px.y) * w + u32(px.x)) * 2u;
+    return u32(px.y) * w + u32(px.x);
 }
 
 @fragment
 fn fs_front(in: SplatOutput) {
-    let base = range_base(vec2<i32>(in.clip_position.xy));
+    let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 2u;
     let bits = bitcast<u32>(in.depth);
     // Read first: most fragments are neither the nearest nor the farthest, and
     // a plain load does not serialise like an atomic does.
@@ -418,59 +423,81 @@ fn fs_front(in: SplatOutput) {
     }
 }
 
+// Between A0 and A, `fs_range` rewrites each pixel's span words as two floats:
+// the log of its nearest depth and BINS over the log span (0 when the span is
+// a single depth). Everything after reads those, so no fragment takes a log of
+// anything but its own depth.
+@fragment
+fn fs_range(in: TonemapOutput) {
+    let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 2u;
+    let far_bits = atomicLoad(&ranges[base + 1u]);
+    if far_bits == 0u {
+        return;
+    }
+    let ln_near = log(bitcast<f32>(~atomicLoad(&ranges[base])));
+    let span = log(bitcast<f32>(far_bits)) - ln_near;
+    // A pixel whose fragments all share one depth gets a vanishing scale, not
+    // zero: a zero word means "no fragment here" to `fs_prefix`.
+    var scale = 1.0e-30;
+    if span > 1.0e-6 {
+        scale = f32(BINS) / span;
+    }
+    atomicStore(&ranges[base], bitcast<u32>(ln_near));
+    atomicStore(&ranges[base + 1u], bitcast<u32>(scale));
+}
+
 struct BinPos {
     bin: u32,
     frac: f32,
 }
 
 /// Which slice of its pixel's span a depth falls in, and how far through it.
-fn bin_of(depth: f32, base: u32) -> BinPos {
-    let zmin = bitcast<f32>(~atomicLoad(&ranges[base]));
-    let zmax = bitcast<f32>(atomicLoad(&ranges[base + 1u]));
-    let span = log(zmax) - log(zmin);
-    var u = 0.0;
-    if span > 1.0e-6 {
-        u = clamp((log(depth) - log(zmin)) / span * BINS, 0.0, BINS - 1.0e-4);
-    }
+fn bin_of(depth: f32, pixel: u32) -> BinPos {
+    let ln_near = bitcast<f32>(atomicLoad(&ranges[pixel * 2u]));
+    let scale = bitcast<f32>(atomicLoad(&ranges[pixel * 2u + 1u]));
+    let u = clamp((log(depth) - ln_near) * scale, 0.0, f32(BINS) - 1.0e-3);
     let bin = u32(u);
     return BinPos(bin, u - f32(bin));
 }
 
-// Pass A: absorbance into slices. Two fp32 targets, additive.
-struct AbsOutput {
-    // slices 0-3
-    @location(0) b03: vec4<f32>,
-    // slices 4-7
-    @location(1) b47: vec4<f32>,
+// Pass A: absorbance into slices. No colour output: the host binds a one-byte
+// target nothing is written to, because a pass needs one.
+@fragment
+fn fs_abs(in: SplatOutput) {
+    let a = in.abs_weight * exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
+    let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
+    let pos = bin_of(in.depth, pixel);
+    atomicAdd(&slices[pixel * BINS + pos.bin], u32(a * FIXED + 0.5));
 }
 
+// After A, `fs_prefix` turns each pixel's slices into running totals, as floats
+// (the words change meaning here: from fixed-point masses to f32 cumulative
+// absorbance), so that pass B and the tonemap read one or two words instead of
+// walking the slices: a fragment used to pay half the slices in loads.
 @fragment
-fn fs_abs(in: SplatOutput) -> AbsOutput {
-    let a = in.abs_weight * exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
-    let pos = bin_of(in.depth, range_base(vec2<i32>(in.clip_position.xy)));
-    var out: AbsOutput;
-    out.b03 = vec4<f32>(0.0);
-    out.b47 = vec4<f32>(0.0);
-    if pos.bin < 4u {
-        out.b03[pos.bin] = a;
-    } else {
-        out.b47[pos.bin - 4u] = a;
+fn fs_prefix(in: TonemapOutput) {
+    let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
+    if atomicLoad(&ranges[pixel * 2u + 1u]) == 0u {
+        return;
     }
-    return out;
+    var total = 0.0;
+    for (var i = 0u; i < BINS; i += 1u) {
+        total += f32(atomicLoad(&slices[pixel * BINS + i])) / FIXED;
+        atomicStore(&slices[pixel * BINS + i], bitcast<u32>(total));
+    }
 }
 
 /// The transmittance of what is in front of a fragment at `depth`, whose own
-/// deposit `own` is in its slice and does not count.
+/// deposit `own` is in its slice and does not count. Reads the running totals
+/// `fs_prefix` left.
 fn bins_transmittance(px: vec2<i32>, depth: f32, own: f32) -> f32 {
-    let s0 = textureLoad(bins0, px, 0);
-    let s1 = textureLoad(bins1, px, 0);
-    var slices = array<f32, 8>(s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w);
-    let pos = bin_of(depth, range_base(px));
+    let pixel = pixel_index(px);
+    let pos = bin_of(depth, pixel);
     var before = 0.0;
-    for (var i = 0u; i < pos.bin; i += 1u) {
-        before += slices[i];
+    if pos.bin > 0u {
+        before = bitcast<f32>(atomicLoad(&slices[pixel * BINS + pos.bin - 1u]));
     }
-    let inside = max(slices[pos.bin] - own, 0.0);
+    let inside = max(bitcast<f32>(atomicLoad(&slices[pixel * BINS + pos.bin])) - before - own, 0.0);
     return exp(-(before + pos.frac * inside));
 }
 
@@ -501,12 +528,24 @@ fn fs_dump(in: SplatOutput) {
         dump[base] = u32(px.x) | (u32(px.y) << 16u);
         dump[base + 1u] = bitcast<u32>(in.depth);
         dump[base + 2u] = bitcast<u32>(in.abs_weight * falloff);
-        dump[base + 3u] = bitcast<u32>(in.weight * falloff);
+        dump[base + 3u] = bitcast<u32>(emission_weight(in, falloff));
         dump[base + 4u] = bitcast<u32>(in.color.r);
         dump[base + 5u] = bitcast<u32>(in.color.g);
         dump[base + 6u] = bitcast<u32>(in.color.b);
         dump[base + 7u] = bitcast<u32>(t);
     }
+}
+
+/// A fragment's emission weight: what splat gives it, plus the source function
+/// times its absorbance. A medium that absorbs also glows (Kirchhoff), and what
+/// a *thick* region glows at is then the ratio of the two, the same wherever the
+/// camera stands and whatever the opacity. Splat's weight alone makes that ratio
+/// `weight / absorbance`, which falls as opacity rises: the 1/opacity dimming of
+/// every earlier slice, and the reason a thick pixel was dim. The extra term
+/// is proportional to the absorbance, so it vanishes with it and opacity 0 is
+/// still splat.
+fn emission_weight(in: SplatOutput, falloff: f32) -> f32 {
+    return (in.weight + volume.source * in.abs_weight) * falloff;
 }
 
 /// The ordinary splat fragment, its weight multiplied by the transmittance of
@@ -515,7 +554,7 @@ fn fs_dump(in: SplatOutput) {
 fn fs_splat_volume(in: SplatOutput) -> @location(0) vec4<f32> {
     let falloff = exp(-KERNEL_SHARPNESS * dot(in.offset, in.offset));
     let t = bins_transmittance(vec2<i32>(in.clip_position.xy), in.depth, in.abs_weight * falloff);
-    let w = in.weight * t * falloff;
+    let w = emission_weight(in, falloff) * t;
     return vec4<f32>(in.color * w, w);
 }
 
@@ -692,8 +731,7 @@ fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
 
 // Volume mode's tonemap: the same pass, with the background dimmed by the
 // absorbance field. Keep in step with `fs_tonemap` above.
-@group(0) @binding(2) var tonemap_bins0: texture_2d<f32>;
-@group(0) @binding(3) var tonemap_bins1: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read> tonemap_slices: array<u32>;
 
 @fragment
 fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
@@ -708,10 +746,9 @@ fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
     for (var dy = 0; dy < n; dy += 1) {
         for (var dx = 0; dx < n; dx += 1) {
             let q = vec2<i32>(in.clip_position.xy) * n + vec2<i32>(dx, dy);
-            let s0 = textureLoad(tonemap_bins0, q, 0);
-            let s1 = textureLoad(tonemap_bins1, q, 0);
-            let b0 = s0.x + s0.y + s0.z + s0.w + s1.x + s1.y + s1.z + s1.w;
-            t_total += exp(-b0);
+            // The accumulation is `n` times as wide as the texture being toned.
+            let pixel = u32(q.y) * (textureDimensions(accum).x * u32(n)) + u32(q.x);
+            t_total += exp(-bitcast<f32>(tonemap_slices[pixel * BINS + BINS - 1u]));
         }
     }
     t_total = t_total / f32(n * n);
@@ -758,26 +795,21 @@ fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
     );
     // Premultiplied by coverage, which is what makes the two branches below
     // one compositing model rather than two.
-    var emitted = mix(desaturated, vibrant, params.vibrancy);
-    // Material blocks the background as well as hiding what is behind it:
-    // alpha = 1 - (1 - coverage) * T_total, which is `coverage` exactly where
-    // nothing absorbs, and 1 under enough material whatever the emission did.
+    let emitted = mix(desaturated, vibrant, params.vibrancy);
+    // The pixel is the material emits plus what the background lets
+    // through. `density` here is the *visible* radiance, `sum e*T`, so a pixel
+    // under a lot of material is as dim as the transport says it is, in its own
+    // colour; and the background gets through twice over -- past the material's
+    // coverage, as in splat, and past its absorbance, `t_total`. Where nothing
+    // absorbs `t_total` is 1 and this is the splat tonemap exactly.
     //
-    // What the extra alpha is *filled with* is the question, and the two easy
-    // answers are both wrong. Nothing (only the background dims) leaves a pixel
-    // that is optically thick but emits little -- a strand seen end-on, the
-    // centre of an infinite zoom -- darker than the ground it hides: black
-    // strands and black holes on a dark scene. Everything (the colour takes the
-    // alpha, so a thick pixel shows its mean colour at full strength) turns
-    // every pixel with an optical depth over about 1 solid at opacity 0.5, loses
-    // the dark lanes between sheets and is the points renderer again. So the
-    // thick pixel is filled with OPAQUE_FILL of its own mean colour: enough that
-    // absorbing material never goes black, little enough that what separates
-    // near from far survives. 0.3 was the smallest of {0, 0.3, 0.6} with no
-    // black left, by eye, on `volume-depth-range`, `volume-zoom-tetra` and
-    // `nautilus`.
+    // There is deliberately no fill. Dimming only the background used to leave
+    // a thick, dim pixel *darker than the ground it hid*, which was patched by
+    // filling it with a constant share of its own colour. That patch was
+    // compensating for a transport that did not know how much light a thick
+    // pixel carries; with the exact one (see `volume_ref.rs`) the dim pixel is
+    // correct, and a constant is just a constant.
     let alpha = 1.0 - (1.0 - coverage) * t_total;
-    emitted = emitted + mean_color * (alpha - coverage) * OPAQUE_FILL;
 
     // Dither the colour and never the alpha. Coverage is not a colour: it is
     // read as a mask, and noise in a mask is a ragged edge rather than a finer
@@ -787,7 +819,7 @@ fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
         // Straight (non-premultiplied) alpha, which is what PNG stores:
         // colour is the palette hue, coverage is the log density, so the
         // dusty edges stay dusty instead of turning into a cutout.
-        let straight = emitted / max(coverage, 1e-6);
+        let straight = emitted / max(alpha, 1e-6);
         return vec4<f32>(dither_srgb(straight, px, params.dither), alpha);
     }
     let composited = params.background.rgb * (1.0 - alpha) + emitted;

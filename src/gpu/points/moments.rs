@@ -1,11 +1,11 @@
-//! Moment-based transmittance: the reconstruction behind the volume renderer.
+//! Moment-based transmittance: the reconstruction behind volume mode's first three
+//! slices, kept so the exact reference can still score it (`volume_ref.rs`'s
+//! `emulate_moments_1c`). **No shader uses it any more**: it was replaced by
+//! per-pixel slices, which measured 3-10x closer to the exact transport (see
+//! VOLUME-RENDERER-PLAN.md, slice 1d).
 //!
-//! **The reference implementation of `moment_transmittance()` in
-//! `shaders/points/splat.wgsl`.** The shader is the copy that runs and this is
-//! the copy the tests can assert about, so the two must agree arithmetic for
-//! arithmetic — the same arrangement as `Renorm::guard_weight` and
-//! `trace.rs`. Keep them in sync; `the_shader_agrees_about_the_moment_constants`
-//! guards the numbers that are easiest to let drift.
+//! It was the Rust twin of `moment_transmittance()` in an earlier
+//! `splat.wgsl`; the tests below still pin the reconstruction itself.
 //!
 //! # What it solves
 //!
@@ -423,20 +423,5 @@ mod tests {
         assert!((with_self - without).abs() < 0.01, "{} vs {}", with_self, without);
     }
 
-    #[test]
-    fn the_shader_agrees_about_the_moment_constants() {
-        let wgsl = include_str!("../../../shaders/points/splat.wgsl");
-        let grab = |name: &str| -> f32 {
-            let key = format!("const {}: f32 =", name);
-            let at = wgsl.find(&key).unwrap_or_else(|| panic!("splat.wgsl must declare `{}`", name));
-            let rest = &wgsl[at + key.len()..];
-            let end = rest.find(';').unwrap();
-            rest[..end].trim().parse().unwrap_or_else(|_| panic!("`{}` must be a plain literal", name))
-        };
-        assert_eq!(grab("MOMENT_BIAS"), BIAS);
-        assert_eq!(grab("MOMENT_OVERESTIMATION"), OVERESTIMATION);
-        assert_eq!(grab("MOMENT_NOISE_FLOOR"), NOISE_FLOOR);
-        assert_eq!(BIAS_VECTOR, [0.0, 0.375, 0.0, 0.375]);
-    }
 }
 

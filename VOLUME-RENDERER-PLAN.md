@@ -279,6 +279,129 @@ especially on a zoom-out, and points can flicker really badly".
   and the infinite-zoom centre can show a few black holes at opacity 3-10
   (reduced, not removed, by the fill).
 
+## Slice 1d findings
+
+Slice 1d built the **exact reference** first (`src/volume_ref.rs`): the same
+points through the same vertex stage, kernel, world-space absorbance and emission
+weights, written to a list of fragments, sorted per pixel by depth and
+composited front to back. It reports the GPU path's error in `L` (what pass B
+accumulates) and `T_total`, and *where* the transmittance error sits. Sanity: at
+opacity 0.001 the GPU path agrees with it to 0.5%. Everything below is measured
+against it, 480x270, 2M points, supersample 1.
+
+**The 1c estimator was badly wrong, and we had been tuning it by eye.**
+Nautilus at opacity 2: GPU `L` summed to 2.42x the exact value, 1.50 of relative
+L1, per-fragment mean |dT| 0.21, `T_total` off by 0.10. Where it sat:
+
+- **Front fragments**: rank 0 (the nearest in a pixel, exact T = 1) had bias -0.26.
+  The four-moment reconstruction is soft in front, and the blur leaked
+  neighbours' absorbance into them. Together the front 8 ranks were 5% of
+  fragments and 20% of the error at the best moment settings.
+- **The transition region** (exact optical depth in front 0.1-3): 70% of the
+  error at the best settings; the reconstruction over-absorbs near 0.1-1 and
+  under-absorbs at 1-3.
+- **Up close** (near third of depths): 48-54% of the error.
+- **The blur** contributed `T_total` error of 0.10-0.125 at opacity 2 and made
+  every `L` metric worse (blur 0 / 1 / 2 px at overestimation 0.1: |dT| 0.156 /
+  0.208 / 0.264).
+- **The overestimation was fitted to the wrong thing.** 0.1 was picked in slice 1b
+  because it made mean luminance flat; against the truth, 0.25-0.5 is closer in
+  `L`, and the best a four-moment estimator did on this frame (global depth
+  range, oe 0.25, blur 0) was L ratio 1.10, L1 0.33, |dT| 0.073.
+
+**Experiments, scored on the CPU on the same fragments** (`FRACTURIZE_VOLUME_EMULATE`;
+the emulator reproduces the GPU's numbers to the printed digit):
+
+- a. *Blur off*: better on every number. Flicker was not the reason it existed
+  (slice 1c fixed that at the root); with it off, lag-1 flicker at 1x is
+  unchanged and at 4x zoom-out 0.064 -> 0.077 (splat 0.042), within the
+  measurement's noise.
+- b. *Exact front K*: helps modestly (nautilus op 2, global range, oe 0.25:
+  |dT| 0.073 -> 0.065 / 0.059 / 0.048 / 0.031 at K = 2 / 4 / 8 / 16), because most
+  of the error is not at the very front. Not built.
+- c. *Per-pixel depth range*: the biggest single lever. Same four moments, the
+  pixel's own [nearest, farthest] log span instead of the attractor's padded
+  sphere: |dT| 0.073 -> 0.041. A pixel's material sits in a sliver of the
+  attractor's depth.
+- d. *More moments*: not pursued. With a per-pixel span, plain depth **slices**
+  (absorbance accumulated into equal slices of the span, transmittance
+  interpolated within a slice) beat every moment configuration, with no
+  constants to tune: 8 slices |dT| 0.0145 (4 moments, per-pixel: 0.041), 16:
+  0.0085, 32: 0.0051; L ratio 0.97-1.0 unbiased. Global-range slices, by
+  contrast, are bad (32 slices: 0.096), which is what the per-pixel span buys.
+
+**What shipped**: 32 slices over a per-pixel span (two atomic passes over the
+points, two housekeeping passes over the pixels, an O(1) read per fragment),
+no blur, no overestimation constant. Error against the reference, 1c ->
+1d (L ratio, L L1, mean |dT|, `T_total` |dT|):
+
+```
+scene                       op | 1c: L-ratio L1  |dT| Ttot | 1d: L-ratio L1  |dT| Ttot
+volume-crossing-sheets       1 |   1.34  0.34 0.182 0.027 |   1.01  0.02 0.034 0
+volume-crossing-sheets       2 |   1.67  0.67 0.229 0.021 |   1.03  0.06 0.039 0
+volume-crossing-sheets      10 |   3.15  2.16 0.195 0.005 |   1.09  0.27 0.025 0
+volume-core-in-shell         1 |   1.59  0.62 0.214 0.038 |   0.96  0.07 0.034 0
+volume-core-in-shell         2 |   1.56  0.60 0.158 0.048 |   0.94  0.09 0.027 0
+volume-core-in-shell        10 |   1.33  0.40 0.048 0.047 |   0.97  0.05 0.007 0
+volume-depth-range           1 |   3.11  2.39 0.161 0.053 |   0.97  0.04 0.004 0
+volume-depth-range           2 |   2.53  1.97 0.083 0.031 |   0.98  0.08 0.004 0
+volume-depth-range          10 |   0.15  0.89 0.011 0.006 |   1.08  0.19 0.002 0
+volume-thin-before-bright    1 |   2.04  1.08 0.398 0.028 |   1.05  0.05 0.023 0
+volume-thin-before-bright    2 |   2.77  1.84 0.387 0.011 |   1.08  0.08 0.019 0
+volume-thin-before-bright   10 |   1.83  1.00 0.087 0.002 |   1.18  0.20 0.010 0
+volume-zoom-tetra            1 |           n/a (zoom)     |   1.02  0.04 0.008 0
+volume-zoom-tetra            2 |           n/a (zoom)     |   1.04  0.06 0.008 0
+volume-zoom-tetra           10 |           n/a (zoom)     |   1.06  0.06 0.006 0
+nautilus                     1 |   2.24  1.29 0.290 0.116 |   1.00  0.01 0.005 0
+nautilus                     2 |   2.41  1.49 0.216 0.100 |   0.99  0.02 0.005 0
+nautilus                    10 |   1.84  1.29 0.063 0.029 |   1.01  0.07 0.004 0
+censer                       1 |   1.49  0.50 0.199 0.054 |   1.00  0.01 0.007 0
+censer                       2 |   1.73  0.74 0.189 0.051 |   1.00  0.01 0.007 0
+censer                      10 |   2.24  1.30 0.096 0.028 |   1.00  0.06 0.006 0
+```
+
+(The full per-scene reports are `renders/volume-1d/ref/*.report.txt`.) The one
+scene where the slices are still visibly off is two dense *surfaces* crossing at
+opacity 10 (L ratio 1.09, L1 0.27): all of a sheet's absorbance falls in a
+sliver of one slice, which is then read as uniform. 8 and 16 slices do much
+worse there (L1 1.23 and 0.63).
+
+**The bugs.**
+
+- *`density <= 0` returned the background whatever `T_total` was.* Fixed: a
+  pixel with absorbance and no emission shows `bg * T_total`.
+- *The threshold halo.* The mechanism, by the numbers: the blur spread each
+  point's absorbance 2-3 pixels while its emission stayed one pixel, so a bright
+  point's neighbours (and, at sparse pixels, other points in them) were
+  attenuated by its leaked absorbance. That is the 26% mean dimming of the
+  *front* fragments in the 1c numbers above, and it is a dimming toward the
+  background colour around every bright point. The point-primitive / quad switch
+  changes how concentrated the deposit is and what share of it the self-exclusion
+  takes back (`own_share`'s variance 1/12 against `R^2/8`), so the leak jumps at
+  the switch. **I could not reproduce a visible halo at the switch** in
+  straddle renders of nautilus and galaxy (old or new build; aggregates smooth
+  to ~1% across it), so this is the mechanism the numbers support, not one
+  I watched happen. The blur is gone, which removes it either way.
+
+**The tonemap** (task 4). With the exact transport the 0.3 fill turned out to
+be a patch over a transport that did not know how much light a thick pixel
+carries. Without it, and with exact transport, a thick pixel is dim in its own
+colour -- correct, and too dim: emission per unit of absorbance is `weight /
+absorbance`, which falls as 1/opacity (mean luminance 0.4-0.65 of splat's at
+opacity 10 on seven scenes; `fern_3d` nearly black). A medium that absorbs also
+glows, so the fragment now emits its splat weight **plus a source function times
+its absorbance**: what a thick region glows at is then the ratio, constant, and
+opacity 0 is still splat. `SOURCE` = 1 (exposure-1 splat density), chosen by eye
+once against splat on seven scenes. The background survives twice over:
+`bg * (1 - coverage) * T_total`.
+
+**Cost** (the price of all this): live at 8M points on the GTX 1080, 14.7 FPS
+against 36 for splat and 24 for 1c; flicker (lag-1 frame difference) at 4x
+zoom-out on nautilus 2.1x splat (1c: 1.65x), at 1x 0.46x splat (1c: 0.83x),
+censer at 4x 1.4x (1c: 1.3x). The remaining flicker at far zoom is sampling
+noise of the *exact* transport of a pixel holding a few points, which no
+estimator removes; only spatial smoothing does, and it is what the blur was.
+
 ## Open questions, decided by looking
 
 - **Background compositing.** Splat composites `mix(bg, colour, coverage)`, with

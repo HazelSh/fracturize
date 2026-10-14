@@ -537,6 +537,19 @@ mod tests {
         assert!((r.frags[1].tau_front - 1.0).abs() < 1e-6);
     }
 
+    /// The slice estimator is exact when every fragment of a pixel has a slice
+    /// to itself: the second of two well-separated deposits is lit by exactly
+    /// what the first lets through.
+    #[test]
+    fn slices_are_exact_when_deposits_are_separated() {
+        let r = composite(&dump(&[(0, 0, 1.0, 1.0, 1.0), (0, 0, 100.0, 1.0, 1.0)]), 1, 1);
+        let (lr, l1, tf) = emulate(
+            &r,
+            Emulation { range: Range::PerPixel, front_k: 0, overestimation: 0.0, bins: Some(8) },
+        );
+        assert!((lr - 1.0).abs() < 1e-6 && l1 < 1e-6 && tf < 1e-6, "{} {} {}", lr, l1, tf);
+    }
+
     /// Pixels do not see each other, and the order the GPU appended in is
     /// irrelevant.
     #[test]

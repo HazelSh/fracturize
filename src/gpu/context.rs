@@ -69,21 +69,6 @@ impl GpuContext {
             required_features |= Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         }
 
-        // Volume mode accumulates absorbance moments (sums of depth powers)
-        // into fp32 textures with additive blending, which is optional in
-        // WebGPU. At fp16 they are useless, so without the feature volume mode
-        // is unavailable rather than degraded — the renderer radio greys it
-        // out, saying why, and `--volume` errors. The offline device asks for
-        // it too (`offline::create_device`).
-        if adapter_features.contains(Features::FLOAT32_BLENDABLE) {
-            required_features |= Features::FLOAT32_BLENDABLE;
-        }
-        log::info!(
-            "FLOAT32_BLENDABLE: {} (volume mode {})",
-            adapter_features.contains(Features::FLOAT32_BLENDABLE),
-            if adapter_features.contains(Features::FLOAT32_BLENDABLE) { "available" } else { "unavailable" }
-        );
-
         // Default limits cap storage buffer bindings at 128MiB, which caps the
         // point buffer at ~8M points. Request whatever the adapter supports.
         let adapter_limits = adapter.limits();

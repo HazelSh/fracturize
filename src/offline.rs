@@ -2002,6 +2002,24 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
 
     let (device, queue, adapter) = create_device()?;
     sampling.check_fits(&device, width, height)?;
+    if opacity.is_some() {
+        // The slices are `BINS` words a pixel of the *accumulation*, in one
+        // storage buffer.
+        let need = (width as u64 * sampling.n as u64) * (height as u64 * sampling.n as u64)
+            * (crate::gpu::points::volume::BINS as u64 * 4);
+        let have = device.limits().max_storage_buffer_binding_size as u64;
+        if need > have {
+            return Err(format!(
+                "--volume keeps {} slices of absorbance for every accumulation pixel: {:.2} GB at \
+                 this size and --supersample {}, past this GPU's {:.2} GB storage buffer limit. \
+                 Lower --supersample or the size.",
+                crate::gpu::points::volume::BINS,
+                need as f64 / 1e9,
+                sampling.n,
+                have as f64 / 1e9
+            ));
+        }
+    }
     let t_setup = Instant::now();
 
     let (compute, point_count, mut outcome) =
@@ -2218,22 +2236,13 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     Ok(outcome)
 }
 
-/// Total optical depth `b0` per pixel — the sum of the eight absorbance slices —
-/// as `[b0, 0, 0, 0]` texels, with the size they are at.
+/// Total optical depth `b0` per pixel, as `[b0, 0, 0, 0]` texels, with its size.
 fn read_total_absorbance(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     r: &SplatRenderer,
 ) -> Option<(Vec<f32>, u32, u32)> {
-    let (t0, t1) = r.moments_texture()?;
-    let (w, h) = (t0.width(), t0.height());
-    let a = read_float_texture(device, queue, t0, w, h);
-    let b = read_float_texture(device, queue, t1, w, h);
-    let mut out = vec![0.0f32; (w * h * 4) as usize];
-    for p in 0..(w * h) as usize {
-        out[p * 4] = a[p * 4..p * 4 + 4].iter().sum::<f32>() + b[p * 4..p * 4 + 4].iter().sum::<f32>();
-    }
-    Some((out, w, h))
+    r.read_total_absorbance(device, queue)
 }
 
 /// The exact reference for the frame `r` just drew, and the report of the GPU
@@ -2324,9 +2333,21 @@ fn volume_reference(
         tex.create_view(&wgpu::TextureViewDescriptor::default())
     };
     let l: Vec<f32> = reference.l.iter().flat_map(|p| *p).collect();
-    let b0: Vec<f32> = reference.tau.iter().flat_map(|&t| [t, 0.0, 0.0, 0.0]).collect();
-    let zero = vec![0.0f32; b0.len()];
-    let (l_view, b_view, z_view) = (make("reference_l", &l), make("reference_b0", &b0), make("reference_zero", &zero));
+    let l_view = make("reference_l", &l);
+    // The absorbance field as the tonemap reads it: the last running total of
+    // each pixel is the whole optical depth.
+    let bins = crate::gpu::points::volume::BINS as usize;
+    let mut slices = vec![0u32; reference.tau.len() * bins];
+    for (p, &t) in reference.tau.iter().enumerate() {
+        slices[p * bins + bins - 1] = t.to_bits();
+    }
+    let slices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reference_slices"),
+        size: (slices.len() * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&slices_buffer, 0, bytemuck::cast_slice(&slices));
     let color = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("reference_color"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -2365,8 +2386,7 @@ fn volume_reference(
         &color.create_view(&wgpu::TextureViewDescriptor::default()),
         &depth_view,
         &l_view,
-        &b_view,
-        &z_view,
+        &slices_buffer,
     );
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {

@@ -67,13 +67,14 @@ pub struct VolumeParams {
     /// Pixels per world unit at unit depth, `H / (2·tan(fov/2))`: the pixel's
     /// world area at depth `z` is `(z / ppu)²`.
     pub ppu: f32,
-    pub _pad: f32,
+    /// The source function in splat density units: `SOURCE · samples / (2·H²)`.
+    pub source: f32,
 }
 
 impl VolumeParams {
     /// Everything off. What a plain splat leaves in the buffer, and what the
     /// vertex stage reads as "skip the volume work".
-    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, _pad: 0.0 };
+    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, source: 0.0 };
 
     /// `samples` and `screen_height` are exactly the two numbers
     /// `SplatRenderer::upload_params` normalises exposure with. The height
@@ -88,17 +89,46 @@ impl VolumeParams {
         let ppu = screen_height / (2.0 * (fov.radians() * 0.5).tan());
         let l = framing.length as f64;
         let abs_scale = (opacity as f64 * ABSORBANCE_K as f64 * l * l / samples) as f32;
-        Self { enabled: 1.0, abs_scale, ppu, _pad: 0.0 }
+        // The same N/H² that exposure is normalised by, so the glow of a thick
+        // region does not change with point count or resolution either.
+        let source = (SOURCE as f64 * samples / (2.0 * screen_height as f64 * screen_height as f64)) as f32;
+        Self { enabled: 1.0, abs_scale, ppu, source }
     }
 }
 
-/// Share of its own mean colour that a pixel the absorbance has made optically
-/// thick is filled with, in the tonemap. See the comment at `OPAQUE_FILL` in
-/// `splat.wgsl` for the two failures either side of it; a test holds the two
-/// copies together.
-pub const OPAQUE_FILL: f32 = 0.3;
+/// Slices of absorbance per pixel. Mirrored in `splat.wgsl`; a test holds them
+/// together. 4 bytes a slice a pixel, one prefix pass over them, and an O(1)
+/// read per fragment, so the cost is memory (128 bytes a pixel at 32: 118 MB for
+/// a 720p window, 1.1 GB for 4K at supersample 2) and the housekeeping passes,
+/// not the per-fragment work.
+///
+/// Measured against the exact reference on nautilus at opacity 2 (L1 of L, mean
+/// |dT| per fragment) and the stress sheet crossing at opacity 10, with frame
+/// time at 8M points live and the offline render stage at 20M points 1080p ss2:
+///
+/// ```text
+///     slices   nautilus L1  dT      crossing L1   live FPS   offline
+///     8        0.078        0.0145  1.23          16.6       0.43 s
+///     16       0.038        0.0085  0.63          15.9       0.47 s
+///     32       0.018        0.0051  0.26          14.7       0.56 s
+/// ```
+pub const BINS: u32 = 32;
 
+/// What a thick region glows at, in units of exposure-1 splat density (`D' =
+/// density · exposure_scale`): see `emission_weight` in the shader.
+///
+/// One constant, by eye, against splat and the exact reference's own pictures on
+/// seven scenes (`renders/volume-1d/tm/sheet-source.png`): 0 is the bare
+/// transport, which is right and dim (mean luminance 0.4-0.65 of splat's at
+/// opacity 10, `fern_3d` nearly black); 1 keeps filament scenes at splat's
+/// brightness through opacity 10 (nautilus 0.85 / 0.80 / 0.89 / 1.13 at opacity
+/// 1 / 3 / 10 / 30) and lets thick regions of dim scenes glow rather than
+/// vanish; 2 and up flatten everything toward one brightness.
+pub const SOURCE: f32 = 1.0;
 
+/// Absorbance is stored as u32 fixed point, this many units to 1.0. Mirrored
+/// in `splat.wgsl`.
+pub const FIXED: f32 = 1_048_576.0;
 
 /// What opacity is measured against: the scene's reference length `L`.
 ///
@@ -159,13 +189,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tonemap_fill_matches_the_shader() {
+    fn the_slice_constants_match_the_shader() {
         let wgsl = include_str!("../../../shaders/points/splat.wgsl");
-        let key = "const OPAQUE_FILL: f32 =";
-        let at = wgsl.find(key).expect("splat.wgsl must declare OPAQUE_FILL");
-        let rest = &wgsl[at + key.len()..];
-        let value: f32 = rest[..rest.find(';').unwrap()].trim().parse().unwrap();
-        assert_eq!(value, OPAQUE_FILL);
+        let grab = |key: &str| -> String {
+            let at = wgsl.find(key).unwrap_or_else(|| panic!("splat.wgsl must declare {}", key));
+            let rest = &wgsl[at + key.len()..];
+            rest[..rest.find(';').unwrap()].trim().to_string()
+        };
+        assert_eq!(grab("const BINS: u32 ="), format!("{}u", BINS));
+        assert_eq!(grab("const FIXED: f32 =").parse::<f32>().unwrap(), FIXED);
     }
 
     #[test]
@@ -181,7 +213,7 @@ mod tests {
             .collect();
         assert_eq!(
             fields,
-            ["enabled", "abs_scale", "ppu", "_pad"]
+            ["enabled", "abs_scale", "ppu", "source"]
         );
     }
 
