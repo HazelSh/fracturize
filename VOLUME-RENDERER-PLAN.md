@@ -6,7 +6,11 @@ single opacity control between the two, and later the lighting that occlusion
 makes possible.
 
 Status: slice 1 built (live window, one-pass stills, session-only opacity); see
-"Slice 1 findings" below. Slices 2-7 are plan.
+"Slice 1 findings" below. Slices 2-7 are plan. **The transmittance estimator
+described in "How T(z) is computed" was replaced in slice 1d** by per-pixel depth
+slices (see "Slice 1d findings"), and slice 1e made it fast and removed its large-
+point failure: read the findings sections, newest last, as the current design.
+The moment-OIT sections are kept as the record of what was tried.
 
 ## The model
 
@@ -401,6 +405,126 @@ zoom-out on nautilus 2.1x splat (1c: 1.65x), at 1x 0.46x splat (1c: 0.83x),
 censer at 4x 1.4x (1c: 1.3x). The remaining flicker at far zoom is sampling
 noise of the *exact* transport of a pixel holding a few points, which no
 estimator removes; only spatial smoothing does, and it is what the blur was.
+
+## Slice 1e findings
+
+Hazel's verdict on 1d was "massively improved", with three complaints: black
+hard-edged squares around big points (zoomed hard into `cyber_nest`, or point size
+scaled up elsewhere) with a frame rate that collapsed alongside; flicker that
+depended heavily on the point count; and a volume mode noticeably slower than
+splat or points. All three have causes, and none was where it looked.
+
+**The black squares.** Reproduced offline (`cyber_nest`, `--distance 0.3`,
+`-S meta.point_size=0.02`), then run through the exact reference: the reference
+is smooth, the GPU path has the squares, so it is the estimator and not the
+model. `FRACTURIZE_REF_PIXEL` on a dark pixel showed two faint fragments at depth
+0.258 (absorbance 0.0014 and 0.0021) and the whole thick sheet, optical depth 18,
+at 1.117-1.13. Span pass A0 takes every fragment's depth into the pixel's
+[nearest, farthest], whatever its weight; a quad's fringe has a gaussian weight of
+1e-3 of the peak but still counts. Those two near fragments stretched the span
+from 1.2% to 4.4x the sheet's depth, the 32 slices (4.7% each) could no longer
+resolve it, the sheet's front landed in one slice with all its own mass, was read
+as uniform, and its front half-lit fragments came out at T ~ 0 instead of 1. The
+quad's edge is where that near fragment stops existing, so the hard edge. My first
+guess (flat absorbance footprint against a gaussian emission) was wrong: both are
+gaussian, and a flat footprint was not the problem; a footprint that included
+weightless fragments was.
+
+**The fix is Hazel's clamp**: volume mode draws 1px point primitives only. It
+removes the fringe fragments (one fragment a point), the 576x overdraw (the
+measured collapse: 6M points, point size 0.02, `d` 0.3, 1d: **1372 ms** a frame
+offline, 550 ms at point size 0.006; now **9 ms**, flat in point size), and the
+quad-path code (the volume branch of `vs_splat`, `abs_quad`, `a0_quad`, `quad`).
+It is a pixelated look, as agreed. The underlying mismatch is not fixed: a lone
+near mote over a thick sheet widens that one pixel's span the same way, and now
+darkens a pixel instead of a square (the darkest pixels in a close-up `cyber_nest`
+frame are at 5% of the exact value). Fixing it means a span that ignores fragments
+that carry nothing, which needs a threshold on absorbance and a guard for a pixel
+with no qualifying fragment; the aggregate error is already 0.99 / 0.03 / 0.02
+(L ratio, L1, |dT|) on that frame, so it was not worth doing once the clamp was in.
+A big point's cross-section is spread over the larger of a pixel and its own
+footprint (`point_deposit`), so close-up material is more transparent than the
+same material far away: mass is not conserved, on purpose, because all of it in one
+pixel is an opaque black speck with a source function's worth of emission on it.
+
+**Performance.** `FRACTURIZE_VOLUME_PROFILE=<n>` on a `--render` prints each
+pass's GPU-busy time (median of n frames), and for the points and splat renderers
+their pass. nautilus, 8M points, 1280x720, supersample 1, GTX 1080:
+
+```
+                 1d      helper   sorted   own vertex   (final)
+span             2.7     2.6      2.2      2.0
+slice           12.8    11.4      2.8      2.2
+prefix           0.5     0.5      0.5      0.2     (cyber_nest 4.6 -> 1.3)
+emission        21.2    11.5      4.2      3.6
+sort                              2.2      2.0
+total           37.5    26.1     11.8     10.3
+```
+
+splat is 3.2 ms there, points 1.7. What the profile said:
+
+- **The fragment shader's cost was loads, not arithmetic.** Replacing the emission
+  pass's lookup with `T = 1` took it from 21 ms to 3 ms. Read-only bindings and a
+  single load of the span changed it by 1 ms, so it was not the atomic loads.
+- **A 1px point is shaded as a 2x2 quad and the three helper lanes execute the
+  loads.** Skipping them (`is_helper`) took 37.5 to 26 ms.
+- **The rest was locality.** The ring is in chaos order, so every fragment was a
+  random line of a 118 MB buffer. Sorting the points on the CPU into screen tiles
+  before profiling took 26 ms to 13, so it was worth a GPU sort. The tile size
+  matters in an unexpected direction: 8x8 and 16x16 are 16.7 and 17.5 ms, 64x64,
+  128x128 and 1280x64 bands 9.9, 8.4 and 8.7. Fine tiles put one pixel's points in
+  one warp and their atomics serialise. A counting sort into ~60 buckets of 128px
+  (`bucket.rs`, `bucket.wgsl`, histogram / scan / scatter, one global atomic per
+  workgroup and bucket) costs 2 ms at 8M and changes no pixel (images are
+  bit-identical with and without it, and opacity 0 is still splat, byte for byte).
+- Halving the slices (16) bought 3 ms of the 26 and cost accuracy: not taken.
+- Separate vertex stages for the span and slice passes (no colour work: they never
+  used it) took another 1.5 ms; `fs_prefix` reading the slices as vec4s took
+  cyber_nest's prefix from 4.6 to 1.3.
+- Not tried: reusing the previous frame's span (saves the 2 ms span pass, and has
+  to survive camera motion and zoom wraps, and the error is only checkable against
+  the reference once the span is stale), a compute span pass folded into the sort.
+
+Wall-clock per frame (submit to read, offline, ms), 1d -> now: nautilus 2M 11.3 ->
+4.2, 8M 38.5 -> 12.2, 16M 73.9 -> 20.1; cyber_nest 13.2 -> 5.7, 39.4 -> 14.8,
+72.4 -> 27.1. Live in a nested X server (whose presentation puts a floor of ~22 ms
+on every mode, so these understate the difference), nautilus frame time at 2 / 8 /
+16M points: points 23.1 / 24.8 / 24.5, splat 23.4 / 24.4 / 26.5, volume 26.5 /
+31.3 / 39.1 ms (1d: 33.2 / 58.6 / 88.8).
+
+**Reference error is unchanged by all of it** (480x270, 2M points, L ratio, L L1,
+fragment |dT|): nautilus 0.995 / 0.018 / 0.005 at opacity 2 (1.010 / 0.071 / 0.004
+at 10); censer 0.995 / 0.011 / 0.007 (1.004 / 0.056 / 0.007).
+
+**Flicker, and why it depended on point count.** Measured live (nested X server,
+camera held by a view file, 100 frames at 30 fps over 240x200 px of nautilus at its
+authored distance, mean absolute difference of consecutive frames over lit pixels):
+
+```
+lag-1 difference      1M points            4M points            16M points
+                    points splat volume  points splat volume  points splat volume
+before                1.74  1.47  1.12     0.19  0.26  0.20     0.020 0.115 0.064
+after                 0.14  0.12  0.10     0.06  0.10  0.065    0.021 0.128 0.070
+```
+
+It is the ring, in all three renderers. Every walker writes at least one point a
+dispatch, and there are 16,384 of them, so the ring got at least 16,384 new points a
+frame whatever its size, where the design is `capacity / 800`. That turned the
+ring over every 61 frames at 1M points and every 244 at 4M, instead of 800 (it
+only reaches 800 above 13M). A pixel of a sparse sample is carried by a few
+points and each replacement moves it by 1/k, so flicker per frame follows the
+share of the ring replaced per frame. My hypothesis (fewer points, each heavier,
+re-rolled by the turnover) had the direction right and the cause wrong: weight per
+point is not what changed, the turnover rate was. The fix is
+`compute::interactive_workgroups`: the live window asks for fewer walkers at small
+sizes (1M: 5 workgroups of 256, 12M: 47, never above the 64 a render uses, and
+only the window asks, since the walker count is part of the image). Flicker is
+now flat in point count (volume 0.099 / 0.065 / 0.070), and volume is at or below
+splat's. It is not volume-specific, so it also quietens points and splat at small
+counts, which they did not ask for; revert `app.rs` to `DEFAULT_WORKGROUPS` if that
+is unwelcome. What remains in volume mode is the sampling noise of exact transport
+in a pixel holding a few points, as before: far from the scene (the 4x zoom-out
+view, 4M points) volume is 2.4x splat (0.112 against 0.047).
 
 ## Open questions, decided by looking
 

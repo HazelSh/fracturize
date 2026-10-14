@@ -76,6 +76,11 @@ pub fn composite(dump: &FragmentDump, width: u32, height: u32) -> Reference {
         .collect();
     order.sort_unstable_by_key(|&(k, _)| k);
 
+    // `FRACTURIZE_REF_PIXEL=x,y`: print every fragment of that pixel.
+    let watch = std::env::var("FRACTURIZE_REF_PIXEL").ok().and_then(|v| {
+        let (x, y) = v.split_once(',')?;
+        Some(y.trim().parse::<u32>().ok()? * width + x.trim().parse::<u32>().ok()?)
+    });
     let px = (width * height) as usize;
     let mut l = vec![[0.0f32; 4]; px];
     let mut tau = vec![0.0f32; px];
@@ -97,8 +102,11 @@ pub fn composite(dump: &FragmentDump, width: u32, height: u32) -> Reference {
             acc[1] += e * tr * f(i, 5) as f64;
             acc[2] += e * tr * f(i, 6) as f64;
             acc[3] += e * tr;
-            if std::env::var("DBGPIX").ok().and_then(|v| v.parse::<u32>().ok()) == Some(pixel) {
-                eprintln!("PIX {} rank {} depth {:.5} a {:.5} e {:.5} t_gpu {:.4} t_ref {:.4}", pixel, rank, f(i,1), a, e, f(i,7), tr);
+            if watch == Some(pixel) {
+                eprintln!(
+                    "pixel {} rank {} depth {:.5} a {:.5} e {:.5} T gpu {:.4} exact {:.4}",
+                    pixel, rank, f(i, 1), a, e, f(i, 7), tr
+                );
             }
             frags.push(Frag {
                 rank: rank as u32,

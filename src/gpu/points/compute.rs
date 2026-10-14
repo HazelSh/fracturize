@@ -469,6 +469,24 @@ impl GroupTable {
 /// The interactive walker count, in workgroups: 16,384 walkers.
 pub const DEFAULT_WORKGROUPS: u32 = 64;
 
+/// How many workgroups of walkers the *interactive* ring wants for `capacity`.
+///
+/// The ring is meant to turn over every 800 frames, `capacity / 800` points a
+/// frame, but every walker writes at least one point per dispatch, so 16,384
+/// walkers write at least 16,384 a frame: below 13M points the ring turned over
+/// faster than meant, 61 frames at 1M and 244 at 4M, and since each frame
+/// replaces that share of the picture, **flicker fell steeply with point count**
+/// (lag-1 frame difference of nautilus under splat, 1M / 4M / 16M points: 1.47 /
+/// 0.26 / 0.12). Fewer walkers write fewer points a frame, so the ring turns at
+/// the rate it was meant to at any size. Never more than the default: that
+/// would change the chaos pass's cost at large sizes, which is not what this is
+/// for. Only the live window asks; anything that must match a render uses
+/// [`DEFAULT_WORKGROUPS`], because the walker count is part of the image.
+pub fn interactive_workgroups(capacity: u32) -> u32 {
+    let per_frame = (capacity / 800).max(1000);
+    per_frame.div_ceil(WORKGROUP_SIZE).clamp(1, DEFAULT_WORKGROUPS)
+}
+
 /// The chaos game's compiled pipelines, which depend on nothing but the device.
 /// Build once per device and hand to [`PointCompute::with_pipelines`]; wgpu
 /// handles are reference counted, so every instance shares one compile.
@@ -1310,6 +1328,24 @@ mod seed_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The ring turns over once in 800 frames at any size the walkers allow, not
+    /// in `capacity / 16384` of them: the cause of flicker that fell steeply with
+    /// point count.
+    #[test]
+    fn the_interactive_ring_turns_over_at_the_intended_rate() {
+        use super::*;
+        for capacity in [1_000_000u32, 2_000_000, 4_000_000, 8_000_000, 12_000_000] {
+            let wg = interactive_workgroups(capacity);
+            assert!((1..=DEFAULT_WORKGROUPS).contains(&wg));
+            let walkers = wg * WORKGROUP_SIZE;
+            let per_frame = walkers * ((capacity / 800).max(1000)).div_ceil(walkers).max(1);
+            let frames = capacity as f32 / per_frame as f32;
+            assert!((600.0..=800.0).contains(&frames), "{} points turn over in {} frames", capacity, frames);
+        }
+        // Never more walkers than a render uses.
+        assert_eq!(interactive_workgroups(u32::MAX), DEFAULT_WORKGROUPS);
+    }
+
     use super::*;
 
     #[test]

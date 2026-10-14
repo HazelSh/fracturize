@@ -325,12 +325,11 @@ impl SplatPipelines {
     /// Volume mode no longer needs fp32 blending (its absorbance is fixed point in
     /// a storage buffer), so the window's device does not ask for
     /// `FLOAT32_BLENDABLE`. The risk this guards is still real wherever a device
-    /// has it: asking would move the window's ordinary splat from an 8-byte to a 16-byte accumulation
-    /// texel, which measured about 17% of the frame rate at 8M points
-    /// (28 -> 23 FPS on the GTX 1080). The fp16 stall at a density of 2048 is a
-    /// ring-buffer curiosity in the window, where the picture is redrawn every
-    /// frame; it is the accumulating renders that cannot have it. The moments
-    /// are fp32 regardless — they are a separate pair of targets.
+    /// has it: asking would move the window's ordinary splat from an 8-byte to a
+    /// 16-byte accumulation texel, which measured about 17% of the frame rate at
+    /// 8M points (28 -> 23 FPS on the GTX 1080). The fp16 stall at a density of
+    /// 2048 is a ring-buffer curiosity in the window, where the picture is
+    /// redrawn every frame; it is the accumulating renders that cannot have it.
     pub fn with_precision(device: &Device, format: TextureFormat, exact: bool) -> Self {
         let accum_format = accum_format(device, exact);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -375,9 +374,9 @@ impl SplatPipelines {
                     },
                     count: None,
                 },
-                // Volume mode's depth warp, absorbance scale and blur width.
-                // The vertex stage reads the first two, the blur's fragment
-                // stage the third.
+                // Volume mode's absorbance scale and source function. The
+                // vertex stage reads the first, the emission fragment stage
+                // the second.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,

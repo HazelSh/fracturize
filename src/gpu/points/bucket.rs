@@ -147,3 +147,24 @@ impl BucketSorter {
         pass.dispatch_workgroups(gx, gy, 1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shader's constants are the host's, in another language.
+    #[test]
+    fn the_shader_agrees_about_chunks_and_buckets() {
+        let wgsl = include_str!("../../../shaders/points/bucket.wgsl");
+        let grab = |key: &str| -> u32 {
+            let at = wgsl.find(key).unwrap_or_else(|| panic!("bucket.wgsl must declare {}", key));
+            let rest = &wgsl[at + key.len()..];
+            rest[..rest.find("u;").unwrap()].trim().parse().unwrap()
+        };
+        assert_eq!(grab("const CHUNK: u32 ="), CHUNK);
+        assert_eq!(grab("const MAX_BUCKETS: u32 ="), MAX_GRID * MAX_GRID + 1);
+        // The shared arrays are declared with the same length.
+        assert!(wgsl.contains(&format!("array<atomic<u32>, {}>", MAX_GRID * MAX_GRID + 1)));
+        assert!(wgsl.contains(&format!("array<u32, {}>", MAX_GRID * MAX_GRID + 1)));
+    }
+}

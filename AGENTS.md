@@ -88,7 +88,7 @@ src/
       splat.rs     # Splat mode: additive log-density accumulation + tonemap;
                    # also volume mode's passes (spans, slices, weighted emission)
       volume.rs    # Volume mode's uniform, reference length, slice constants
-      moments.rs   # The retired moment reconstruction, kept for the reference
+      bucket.rs    # Volume mode's spatial sort of the ring (counting sort into screen tiles)
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # In-world line renderer (traces, camera path, indicators)
@@ -153,14 +153,15 @@ All GPU, three passes per frame:
      glowing fog: every point emits (as in splat) and also absorbs, and a point
      reaches the eye attenuated by `T = exp(−τ)`, τ the absorbance in front of
      it. Plan and history are in `VOLUME-RENDERER-PLAN.md`. Live and the one-pass
-     still; five passes over the point buffer and the pixels:
-     **A0** finds each pixel's nearest and farthest fragment depth (atomics);
-     a fullscreen pass rewrites those as a log origin and scale; **A** adds each
-     fragment's absorbance, as fixed point, into one of `BINS` = 32 equal slices
-     of *that pixel's own span* (a storage buffer, 4 bytes a slice a pixel);
-     a fullscreen pass turns the slices into running totals; **B** is the
-     ordinary splat accumulation with each fragment's weight multiplied by the
-     transmittance of what is in front of it, read as two words (the total
+     still; per frame, over the point buffer and the pixels:
+     a **sort** of the ring into 128px screen buckets (compute, `bucket.rs`);
+     **span** finds each pixel's nearest and farthest fragment depth (atomics);
+     a fullscreen pass rewrites those as a log origin and scale; **slice** adds
+     each fragment's absorbance, as fixed point, into one of `BINS` = 32 equal
+     slices of *that pixel's own span* (a storage buffer, 4 bytes a slice a
+     pixel); a fullscreen pass turns the slices into running totals; **emission**
+     is the ordinary splat accumulation with each fragment's weight multiplied by
+     the transmittance of what is in front of it, read as two words (the total
      before its slice, plus its position through its own slice), own deposit
      excluded. Total absorbance is the last running total.
 
@@ -196,6 +197,38 @@ All GPU, three passes per frame:
        camera brushes past does not turn solid.
      * **A point does not shadow itself**: its own deposit is taken out of its
        slice before it is read.
+     * **Volume mode draws points one pixel across, never quads.** The host
+       forces the point-primitive path (`vs_span`, `vs_abs`, `vs_emit`; the quad
+       entry points are splat's alone), whatever `point_size` says. This is the
+       answer to a bug, not a style: with quads, the span pass counted every
+       fragment of a quad, including the gaussian's faint fringe (a weight of
+       1e-3 of the peak), so a big point near the eye widened the depth span of
+       every pixel under its footprint ~30x, a thick sheet behind it then fell
+       into one slice of a pixel's 32, and its front read as dark. The edge of
+       the quad is where the span changes, so it showed as a hard-edged black
+       square, and a frame of overlapping quads cost 576 fragments a point
+       (1.4 s a frame at 6M points, point size 0.02, close in on `cyber_nest`).
+       The price is a pixelated look when points are bigger than a pixel. To keep
+       that honest a point's cross-section is spread over the larger of a pixel
+       and its own footprint (`point_deposit`), so a big point is a dilute dot
+       and not a solid one; mass is not kept (see the comment there). Against the
+       exact reference, `cyber_nest` close in at point size 0.02 has L ratio 0.99,
+       L L1 0.03, per-fragment |dT| 0.02.
+     * **The ring is sorted before the passes, and the sort is coarse on
+       purpose.** In chaos order every fragment is a cache miss in a frame-sized
+       buffer; drawn in tile order the slice and emission passes take half as long
+       (8M points, 1280x720, nautilus: 26 ms of passes became 10, sort included).
+       Tiles of 128px beat 8px and 16px by 2x: fine tiles put neighbours of one
+       pixel in the same warp and their atomics serialise. The sorted copy is a
+       second ring-sized buffer (16 bytes a point) built on first use; below
+       500k points the sort is skipped, and `FRACTURIZE_VOLUME_NOSORT=1` turns it
+       off. It changes no pixel: images are bit-identical with and without.
+     * **A 1px point primitive is shaded as a 2x2 quad, and the three helper
+       lanes run the loads.** Each volume fragment shader returns early when its
+       lane's pixel is not the point's (`is_helper`), which cut the slice and
+       emission passes by about a third; the comparison carries a tolerance,
+       because dropping a real fragment is a bug and keeping a helper is only
+       wasted work (the hardware discards its writes and atomics).
      * **The per-pixel span is what makes slices work.** The same slices over one
        depth range for the whole frame are ~7x less accurate: a pixel's material
        sits in a sliver of the attractor's depth. The cost is two housekeeping
@@ -223,7 +256,8 @@ All GPU, three passes per frame:
        around bright points, front fragments 26% too dark on average) and added
        0.1 of error to `T_total`; the moment reconstruction was biased by its
        overestimation constant; the gain was a patch for the 1/opacity dimming.
-       `moments.rs` is kept only so the reference can still score it.
+       The moment code and its CPU emulators are deleted; the plan has their
+       numbers.
      * **Haze scales emission only; the zoom edge guard scales both**;
        `--isolate`d points deposit no absorbance (the vertex stage clips them).
      * **It needs the fragment stage to write storage**, six buffers' worth. It
@@ -237,10 +271,12 @@ All GPU, three passes per frame:
        name (`offline::reject_volume`); a render job from the dialog renders
        plain splat and says so. A render too large for the slice buffer (32
        slices a accumulation pixel against the GPU's storage limit) says so too.
-     * **Cost**: ~5x splat's render stage offline (20M points, 1080p, ss2:
-       0.56 s against 0.09 s), and 14.7 FPS against splat's 36 live at 8M points
-       on the GTX 1080 (the 1c build was 24). The per-fragment work is O(1); the
-       cost is three passes over the point buffer and the pixels.
+     * **Cost**: about 3x splat's GPU time (8M points, 1280x720, GTX 1080:
+       nautilus 10.9 ms against 3.2, `cyber_nest` 13.6 against 4.8; 1d was 38.5),
+       from `FRACTURIZE_VOLUME_PROFILE=<n>` on a `--render`, which prints each
+       pass's GPU time. nautilus, ms: sort 2.0, span 2.0, slice 2.2, prefix 0.2,
+       emission 3.6, tonemap 0.2. What is left is mostly one fragment's worth of
+       random access per pass.
 
      **The exact reference** (`volume_ref.rs`; `FRACTURIZE_VOLUME_REFERENCE=
      <prefix>` on a `--volume --render --supersample 1` still, 8-bit). The same
@@ -250,12 +286,12 @@ All GPU, three passes per frame:
      It writes the report (`<prefix>.report.txt`: error of the GPU's `L` and
      `T_total`, and where the transmittance error sits by rank, optical depth,
      deposit size and depth), the reference through the same tonemap
-     (`<prefix>.ref.png`), and `FRACTURIZE_VOLUME_EMULATE=1` scores candidate
-     estimators on the same fragments without a shader, which is how the slices
-     were chosen over moments, per-frame ranges over global ones, and 32 slices
-     over 8 or 16. At opacity 0.001 the GPU path agrees with it to 0.5%, which
-     is the check that the reference is the same transport. Use it before
-     retuning anything here. `FRACTURIZE_VOLUME_STATS=1` prints the absorbance
+     (`<prefix>.ref.png`), and on stderr the eight pixels where the GPU's `L` is
+     furthest below the reference; `FRACTURIZE_REF_PIXEL=x,y` also prints every
+     fragment of one pixel (depth, deposit, emission, the GPU's T and the exact
+     one), which is how the dark squares were found. At opacity 0.001 the GPU
+     path agrees with it to 0.5%, which is the check that the reference is the
+     same transport. Use it before retuning anything here. `FRACTURIZE_VOLUME_STATS=1` prints the absorbance
      field's median, p90 and p99.
 3. **Gizmos, traces + indicators**: optional overlays (see keybinds). Traces
    (X) are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl —
@@ -296,6 +332,15 @@ All GPU, three passes per frame:
    isn't retried: without mitre joins the ribbon wobbles along a polyline, and
    the feathered band still wrote depth, punching a hole through the gizmo
    faces behind it. The rasterizer knows how to do this.
+
+**The live ring asks for fewer walkers at small sizes**
+(`compute::interactive_workgroups`). A walker writes at least one point a frame,
+so 16,384 walkers turned a 1M-point ring over in 61 frames and a 4M one in 244
+(the design is 800), and flicker fell steeply with point count in every renderer
+(lag-1 difference of nautilus under splat: 1.47 / 0.26 / 0.12 at 1M / 4M / 16M).
+The window now sizes the walkers to `capacity / 800` (never more than 64
+workgroups); `--render` and thumbnails keep `DEFAULT_WORKGROUPS`, because the
+walker count is part of the image. Flicker is flat from 1M to 16M.
 
 The chaos churn rate is wall-clock normalized: `advance_frame` takes the
 frame dt and scales walker iterations so the buffer refreshes at the same

@@ -1174,7 +1174,7 @@ impl App {
             &crate::gpu::points::compute::LayerTable::build(&scene, &[], scene.color_contrast),
             buffer_capacity,
             crate::gpu::points::compute::DEFAULT_SEED,
-            crate::gpu::points::compute::DEFAULT_WORKGROUPS,
+            crate::gpu::points::compute::interactive_workgroups(buffer_capacity),
         );
 
         // Create point renderer
@@ -5757,7 +5757,7 @@ impl App {
             &self.layer_table(),
             self.buffer_capacity,
             crate::gpu::points::compute::DEFAULT_SEED,
-            crate::gpu::points::compute::DEFAULT_WORKGROUPS,
+            crate::gpu::points::compute::interactive_workgroups(self.buffer_capacity),
         );
         self.point_renderer = PointRenderer::new(
             &self.gpu.device,

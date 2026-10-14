@@ -1208,6 +1208,50 @@ impl TileTarget {
         self.read_into_sheet(device, sheet, sheet_w, col, row);
     }
 
+    /// The points renderer's one pass, timed the same way (median GPU ms).
+    fn profile_points(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &PointRenderer,
+        point_count: u32,
+        use_point_primitives: bool,
+        iterations: usize,
+    ) {
+        let Some(mut timer) = crate::gpu::GpuTimer::new(device, queue, iterations as u32 + 2) else {
+            eprintln!("this device has no timestamp queries");
+            return;
+        };
+        for _ in 0..iterations + 2 {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("profile") });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("offline_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(self.clear), store: wgpu::StoreOp::Store },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: timer.render_pass(),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                renderer.draw(&mut pass, point_count, use_point_primitives);
+            }
+            queue.submit(std::iter::once(encoder.finish()));
+        }
+        let mut ms = timer.read(device, queue);
+        ms.drain(..2);
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("points pass, GPU ms (median of {}), {} points: {:.3}", iterations, point_count, ms[ms.len() / 2]);
+    }
+
     /// Time the volume renderer's passes: `iterations` full renders, each pass's
     /// GPU-busy time read after every one, medians printed. A measurement for
     /// `FRACTURIZE_VOLUME_PROFILE=<iterations>`, not part of any render.
@@ -2167,8 +2211,9 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
     // `FRACTURIZE_VOLUME_PROFILE=<iterations>`: per-pass GPU time of volume mode.
     {
         if let Some(n) = std::env::var("FRACTURIZE_VOLUME_PROFILE").ok().and_then(|v| v.parse::<usize>().ok()) {
-            if let TileRenderer::Splat(r) = &mut renderer {
-                target.profile_volume(&device, &queue, r, point_count, use_point_primitives, n);
+            match &mut renderer {
+                TileRenderer::Splat(r) => target.profile_volume(&device, &queue, r, point_count, use_point_primitives, n),
+                TileRenderer::Points(r) => target.profile_points(&device, &queue, r, point_count, use_point_primitives, n),
             }
         }
     }
@@ -2332,7 +2377,7 @@ fn volume_reference(
             .collect();
         v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (ratio, p) in v.iter().take(8) {
-            eprintln!("WORST pixel {} ({},{}) gpu/ref L {:.3} ref L {:.3} tau ref {:.2} gpu {:.2}", p, p % width as usize, p / width as usize, ratio, reference.l[*p][3], reference.tau[*p], gpu_b0[p * 4]);
+            eprintln!("darkest vs exact: pixel {} ({},{}) gpu/exact L {:.3}, exact L {:.3}, tau exact {:.2} gpu {:.2}", p, p % width as usize, p / width as usize, ratio, reference.l[*p][3], reference.tau[*p], gpu_b0[p * 4]);
         }
     }
     let text = crate::volume_ref::report(&reference, &gpu_l, &gpu_b0);
