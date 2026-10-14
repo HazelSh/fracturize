@@ -188,6 +188,10 @@ shouldn't have, and it didn't.
   `fontTools.ttLib.TTFont('assets/fonts/Phosphor.ttf')['GSUB']` lists them — and
   check the icon doesn't already mean something else (`STACK` is the render
   job; subscenes use `UNITE`).
+  The same goes for any **symbol in a string**: `→` (U+2192) is in none of the
+  app's text fonts and rendered as tofu in xaos's first labels, which only
+  looking at the running app caught. Phosphor's `arrow-right` (`\u{E06C}`) is
+  what the strings use now.
 - **Test it in the running app, in Xephyr** (AGENTS.md, "Driving the running
   app"). Pre-open windows with an isolated `XDG_CONFIG_HOME` holding a
   `prefs.toml` (`[panels] subscenes_open = true`), pin the camera with `-v`,

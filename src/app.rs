@@ -710,7 +710,6 @@ enum Drag {
 
 /// One layer's xaos chain, for the panels: see [`App::xaos_summary`].
 pub struct XaosSummary {
-    pub layer: usize,
     /// The layer's maps as scene indices, in layer order — what the chain's
     /// positions mean.
     pub idx: Vec<usize>,
@@ -3185,6 +3184,17 @@ impl App {
             self.set_layer_share(k, share.max(0.01));
             return;
         }
+        // Alt+scroll over an xaos edge scales it: the weight lever, one level
+        // down. A gizmo under the pointer wins, as it does for clicks.
+        if self.alt_held && self.hovered.is_none() {
+            if let Some((a, b)) = self.xaos_edge_under_cursor() {
+                let pos = self.scene.layer_position(b);
+                let x = self.scene.transforms[a].xaos.get(pos);
+                let base = if x == 0.0 { 0.05 } else { x };
+                self.set_xaos_edge(a, b, (base * 1.1f32.powf(steps)).clamp(0.0, 100.0));
+                return;
+            }
+        }
         if let Some(hit) = self.hovered.filter(|_| self.alt_held) {
             self.selected_transform = Some(hit.transform);
             let before = self.edit_snapshot();
@@ -3395,6 +3405,9 @@ impl App {
     pub fn on_cursor_moved(&mut self, x: f32, y: f32, suppress_hover: bool) {
         let (dx, dy) = (x - self.cursor.0, y - self.cursor.1);
         self.cursor = (x, y);
+        if let Some(stroke) = self.ui_state.xaos_knife.as_mut() {
+            stroke.push((x, y));
+        }
         self.note_pointer_activity();
 
         // Travel from the press, tracked for every drag — but it *gates*
@@ -3601,6 +3614,14 @@ impl App {
                     self.window.set_cursor(winit::window::CursorIcon::Grabbing);
                     return;
                 }
+                // An xaos edge under the pointer opens its popover, and the
+                // press does nothing else — like selecting a gizmo.
+                if let Some(edge) = self.xaos_edge_under_cursor() {
+                    self.ui_state.xaos_edge = Some(edge);
+                    self.drag = Drag::Consumed;
+                    return;
+                }
+                self.ui_state.xaos_edge = None;
                 // Nothing under the pointer. If this turns out to be a click
                 // rather than a drag, `on_mouse_release` reads that as "I meant
                 // *nothing*" and drops the selection — the universal editor
@@ -3628,6 +3649,19 @@ impl App {
                     self.ui_state.transform_menu = Some((hit.transform, None));
                     return;
                 }
+                if crate::ui::xaos::overlay_active(self) {
+                    // Ctrl+right-drag is the knife: every edge the stroke
+                    // crosses is cut, as one edit, when the button comes up.
+                    if self.ctrl_held {
+                        self.ui_state.xaos_knife = Some(vec![self.cursor]);
+                        self.drag = Drag::Consumed;
+                        return;
+                    }
+                    if let Some(edge) = self.xaos_edge_under_cursor() {
+                        self.ui_state.xaos_edge_menu = Some((edge, None));
+                        return;
+                    }
+                }
                 self.drag = Drag::Roll;
                 self.path_t = None;
             }
@@ -3638,6 +3672,17 @@ impl App {
     pub fn on_mouse_release(&mut self, button: winit::event::MouseButton) {
         self.note_pointer_activity();
         use winit::event::MouseButton;
+        if matches!(button, MouseButton::Right) {
+            if let Some(stroke) = self.ui_state.xaos_knife.take() {
+                let (edges, _) = crate::ui::xaos::overlay_edges(self);
+                let cuts: Vec<(usize, usize, f32)> =
+                    crate::ui::xaos::knife_cuts(&edges, &stroke).into_iter().map(|(a, b)| (a, b, 0.0)).collect();
+                if !cuts.is_empty() {
+                    let label = format!("Xaos: knife, {} edge{}", cuts.len(), if cuts.len() == 1 { "" } else { "s" });
+                    self.set_xaos_edges(&cuts, Some(label));
+                }
+            }
+        }
         if matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right) {
             // A left-click on empty viewport space that never became a drag is
             // a deselect. Only the plain orbit grab: a shift-click is a
@@ -5193,10 +5238,10 @@ impl App {
         self.sync_transforms_to_gpu();
 
         let label = if maps_before == maps_after {
-            format!("Symmetry {} → {}", was, now)
+            format!("Symmetry {} \u{E06C} {}", was, now)
         } else {
             format!(
-                "Symmetry {} → {} ({} → {} transforms in total)",
+                "Symmetry {} \u{E06C} {} ({} \u{E06C} {} transforms in total)",
                 was, now, maps_before, maps_after
             )
         };
@@ -5366,7 +5411,6 @@ impl App {
         let chain = crate::xaos::Chain::build(&maps, &enabled)?;
         let shares = chain.shares();
         let summary = std::rc::Rc::new(XaosSummary {
-            layer,
             has_xaos: crate::xaos::layer_has_xaos(&maps),
             idx,
             chain,
@@ -5374,6 +5418,15 @@ impl App {
         });
         self.xaos_cache = Some((key, summary.clone()));
         Some(summary)
+    }
+
+    /// The overlay edge under the pointer, if the overlay is showing.
+    fn xaos_edge_under_cursor(&mut self) -> Option<(usize, usize)> {
+        if !crate::ui::xaos::overlay_active(self) {
+            return None;
+        }
+        let (edges, _) = crate::ui::xaos::overlay_edges(self);
+        crate::ui::xaos::pick_edge(&edges, self.cursor)
     }
 
     /// Run one xaos edit: snapshot, change the rows, re-upload, commit.
@@ -5408,7 +5461,7 @@ impl App {
         let (label, key) = match (label, edges.len()) {
             (Some(l), _) => (l, None),
             (None, _) => (
-                format!("Xaos {} → {} ×{}", self.short_name(f0), self.short_name(t0), crate::ui::num::fixed(v0, 2)),
+                format!("Xaos {} \u{E06C} {} ×{}", self.short_name(f0), self.short_name(t0), crate::ui::num::fixed(v0, 2)),
                 Some(format!("xaos:T{f0}>T{t0}")),
             ),
         };
@@ -5426,7 +5479,7 @@ impl App {
             return;
         }
         let c = if c.is_finite() { c.max(0.0) } else { 1.0 };
-        let label = format!("Xaos {} → every other ×{}", self.short_name(from), crate::ui::num::fixed(c, 2));
+        let label = format!("Xaos {} \u{E06C} every other ×{}", self.short_name(from), crate::ui::num::fixed(c, 2));
         self.xaos_edit(label, Some(format!("xaos:T{from}>*")), |scene| scene.transforms[from].xaos.set_rest(c));
     }
 
@@ -5452,7 +5505,7 @@ impl App {
         let maps: Vec<TransformSpec> = sum.idx.iter().map(|&k| self.scene.transforms[k].clone()).collect();
         match crate::xaos::multiplier_for(&maps, i, j, p as f64) {
             Some(x) if x.is_infinite() => {
-                let label = format!("Xaos {}: only → {}", self.short_name(from), self.short_name(to));
+                let label = format!("Xaos {}: only \u{E06C} {}", self.short_name(from), self.short_name(to));
                 self.xaos_edit(label, None, |scene| {
                     let mut row = crate::xaos::Xaos::default();
                     row.set_rest(0.0);

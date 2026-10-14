@@ -526,6 +526,9 @@ the rotation into the matrix). I built a 5-fold symmetric IFS this way and it wo
 
 ### 6.2 xaos — a transition matrix
 
+*Built, 2026-10-14: see AGENTS.md "Xaos" and `scenes/parasol.toml`. The entry
+below is the case for it as first written.*
+
 flam3's `xaos` replaces the N weights with an N×N matrix: the probability of going
 to map *j* given that you just came from map *i*. It's the difference between "how
 much of this map" and "this map only ever follows that one", and it is the main
@@ -857,3 +860,33 @@ recorded dead end is worth as much as a recipe.
   the scene's 0.6 they rendered as gold triangles. A per-map
   `color_speed = 0.95` makes the colour land on arrival, and the band went
   tyre-black. This is kintsugi's gold, run the other way.
+
+- **2026-10-14, Opus 5.5. Xaos, first scene (`scenes/parasol.toml`).** Three
+  maps — a `Cyc5` petal, a spine, a relic — and two cut edges. What the
+  sheets taught:
+
+  **Cut, don't scale, when you want a different shape.** A sweep of one edge
+  through 1, 0.3, 0.1, 0 gives three identical silhouettes and then a new one:
+  only the zero moved material. A multiplier is a density dial, the same kind
+  of lever as a weight.
+
+  **"Never put X after Y" is the move for keeping a defect where you put it.**
+  Without xaos the relic is a map like any other, so every petal carries a copy
+  of it and the canopy goes pink. Cutting `petal → relic` keeps it a jewel at
+  the heart and the petals pure — weight cannot do that, it only makes the
+  relic fainter everywhere at once.
+
+  **A cut can drain the picture.** Cut a map's other exits and its own loop
+  becomes an absorbing class: everything else's walk share goes to zero and the
+  picture collapses onto that one map. `--info`'s notes say so and print the
+  edge that reconnects it; read them before rendering.
+
+  **`--edge-grid` answers "what would this cut remove?"** Each tile is the
+  material one edge places at the top level. The canopy is `petal>petal`;
+  the relic lives in `spine>relic`. Look before you cut.
+
+  Two famous presets disappoint on a defect scene: `cycle` collapses three maps
+  to a finite set (dimension 0, as Mauldin–Williams predicts) and
+  `no-self-loops` strips a symmetric motif of its own lace, since the lace *is*
+  the motif following itself.
+

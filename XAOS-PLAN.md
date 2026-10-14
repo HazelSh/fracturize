@@ -1,6 +1,13 @@
 # Xaos — plan
 
-*Status: plan, 2026-09-26. Not started. Built from `XAOS-AND-BEYOND-BRAINSTORM.md`
+*Status, 2026-10-14: phases 1–5 built (Claude Opus 5.5) — format, engine,
+CLI, `--info`, inspector block, rail mark, linked map, matrix window, viewport
+overlay — plus `--isolate a>b` / `--edge-grid`, which this plan didn't have.
+The §9 decisions were taken as recommended, and Hazel confirmed them
+2026-10-14 (decisions 1–5; 6–8 untouched). Phases 6
+(random/mutation) and 7 (coupling) remain. AGENTS.md "Xaos" is the reference.*
+
+*Original status: plan, 2026-09-26. Not started. Built from `XAOS-AND-BEYOND-BRAINSTORM.md`
 §1–2 (cited as `BS §n`) and Hazel's brief: a graph view overlaid on the
 viewport, an N×N matrix view for larger scenes, per-transform editing in the
 Transforms window, agent CLI, and TOML that names maps and works in rows or a
