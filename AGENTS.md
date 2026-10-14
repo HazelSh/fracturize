@@ -3052,6 +3052,10 @@ way to *use* the result; `tryout` (`~/code/tryout`, on PATH) is that way.
    that will look wrong but isn't. Plain words, per the interface text style.
    Then name the build (`fracturize/<branch>`) in your final report; she
    launches it from `tryout` (the picker) whenever she likes.
+   **Always a release build.** `tryout stage` builds `--release` and refuses
+   an unoptimized profile; never hand her a `cargo run` (debug) build either,
+   even for a quick look. She judges smoothness at 120 FPS, and a debug build
+   runs at a fraction of that, so the feature gets judged on the wrong thing.
 4. A staged build runs with **its worktree as cwd** (so `scenes/` and `views/`
    are the branch's), against **a fresh copy of her prefs** each launch (so a
    branch can't damage `~/.config/fracturize`), and with `[branch]` in the
