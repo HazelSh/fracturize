@@ -69,6 +69,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                      preferences.",
                 );
                 draw_opacity(ui, app);
+                draw_smoothness(ui, app);
             }
 
             ui.add_space(6.0);
@@ -184,6 +185,33 @@ fn draw_opacity(ui: &mut egui::Ui, app: &mut App) {
     );
     if resp.changed() {
         app.set_opacity(opacity);
+    }
+}
+
+/// Volume mode's smoothness: how many points each footprint aims to cover.
+///
+/// With occlusion a pixel shows only its few front samples, so sampling noise
+/// reads as surface texture; a wider footprint averages it away. Noise falls
+/// roughly as 1/sqrt(k) and fill cost rises as k, so this is the grit-or-smooth
+/// dial with its price attached. Session state, like opacity.
+fn draw_smoothness(ui: &mut egui::Ui, app: &mut App) {
+    use crate::gpu::points::volume::{MAX_SMOOTHNESS, MIN_SMOOTHNESS};
+    let mut k = app.smoothness;
+    let resp = ui.add(
+        egui::Slider::new(&mut k, MIN_SMOOTHNESS..=MAX_SMOOTHNESS)
+            .logarithmic(true)
+            .text("smoothness"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "How many points each dot is spread to cover. Low is crisp and gritty; high \
+         is smoother surfaces, and costs frame rate roughly in proportion. 3 is the \
+         default.",
+        "drag: adjust smoothness",
+    );
+    if resp.changed() {
+        app.set_smoothness(k);
     }
 }
 

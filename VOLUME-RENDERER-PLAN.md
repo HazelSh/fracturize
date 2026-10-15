@@ -675,3 +675,31 @@ cost in proportion to it; I have not put it in the GUI.
 - **Normals from Lyapunov tangent frames** carried through the chaos game: under
   similarity maps every direction contracts alike and the frame carries no
   information, and that covers most scenes.
+
+## Hazel's decisions after slice 1f (2026-10-15)
+
+- **Speed: finish the design first, then an optimisation pass.** At about 1/5
+  of splat's speed volume is a touch slow; at about 1/2 Hazel would take it.
+  Don't optimise piecemeal before the design settles.
+- **Point size needs handling, and needs brainstorming.** Volume mode stopped
+  reading `point_size` in 1f, which leaves the Render window's control dead
+  there. Hazel thinks the renderer could still do something useful with it.
+  Undecided; see the open questions below.
+- **Smoothness is in the GUI now, as session state.** The footprint rule's `k`
+  (points per footprint, default 3) is a slider under the Render window's
+  Session heading, beside opacity. CLI support and saving it (scene, view or
+  prefs) wait until it proves usefully tweakable for authoring or as a
+  setting, rather than a one-off to eyeball. `FRACTURIZE_VOLUME_K` still
+  overrides it for measuring.
+
+### Point size: open questions for the brainstorm
+
+- A *minimum* footprint (the agent's suggestion): point size floors the
+  density-adaptive radius, capped by the same fragment budget.
+- The two act on different things: point size as the world-space size of
+  the *occluder* (absorbance footprint), with the density rule keeping
+  *emission* smooth.
+- Point size as a scale for haze or depth-of-field style effects, rather
+  than as a splat radius at all.
+- Retire it in volume mode and say so in the panel (disabled, with the
+  reason), if nothing earns it.

@@ -99,8 +99,15 @@ impl VolumeParams {
 
 /// Points per footprint the coverage rule aims for (`scan` in bucket.wgsl). A
 /// random sample leaves e^-k of the frame uncovered, so 3 is about 5% holes.
-/// `FRACTURIZE_VOLUME_K` overrides it, for measuring.
+/// It is the default for the live smoothness slider (`App::smoothness`);
+/// `FRACTURIZE_VOLUME_K` overrides both, for measuring.
 pub const COVERAGE_K: f32 = 3.0;
+
+/// The live smoothness slider's range, in points per footprint. Below 1 the
+/// frame is mostly holes; fill cost grows linearly with k, so 24 is already
+/// several times the default's.
+pub const MIN_SMOOTHNESS: f32 = 1.0;
+pub const MAX_SMOOTHNESS: f32 = 24.0;
 
 /// The largest footprint radius, in output pixels. A cap and not a target: it is
 /// only reached when almost none of the sample is on screen.
@@ -111,10 +118,10 @@ fn env_f32(name: &str) -> Option<f32> {
 }
 
 /// What the sort needs to size the footprint, for a render at `supersample`.
-pub fn footprint(supersample: u32) -> crate::gpu::points::bucket::Footprint {
+pub fn footprint(supersample: u32, k: f32) -> crate::gpu::points::bucket::Footprint {
     let n = supersample.max(1) as f32;
     crate::gpu::points::bucket::Footprint {
-        k_cov: env_f32("FRACTURIZE_VOLUME_K").unwrap_or(COVERAGE_K),
+        k_cov: env_f32("FRACTURIZE_VOLUME_K").unwrap_or(k),
         max_radius: MAX_RADIUS * n,
         // Output pixels, like everything the person sees.
         force_radius: env_f32("FRACTURIZE_VOLUME_RADIUS").map_or(0.0, |r| r * n),

@@ -140,6 +140,8 @@ pub struct SplatRenderer {
     /// and the device able to. At zero, nothing about the volume exists in the
     /// frame and the output is plain splat, byte for byte.
     volume_active: bool,
+    /// Points per footprint the volume sort aims for; see `volume::footprint`.
+    footprint_k: f32,
     /// The exact reference's pipelines, built the first time they are asked for.
     dump_pipelines: Option<DumpPipelines>,
     /// What the tonemap reads as `volume_n`: the supersample factor, or 0 when
@@ -862,6 +864,7 @@ impl SplatRenderer {
             volume_params_buffer,
             volume_pipelines,
             volume_active: false,
+            footprint_k: volume::COVERAGE_K,
             volume_n: 0.0,
             dump_pipelines: None,
             bins: None,
@@ -1533,6 +1536,12 @@ impl SplatRenderer {
     /// is what makes `--volume --opacity 0` byte-identical to `--splat` instead
     /// of merely close. On a device without fp32 blending it stays off whatever
     /// it is asked.
+    /// Points per footprint for volume mode's density-adaptive splats: higher is
+    /// smoother and costs more fill. Offline renders leave it at the default.
+    pub fn set_smoothness(&mut self, k: f32) {
+        self.footprint_k = k;
+    }
+
     pub fn set_volume(&mut self, queue: &wgpu::Queue, params: VolumeParams) {
         self.volume_active = params.enabled > 0.5 && self.volume_pipelines.is_some();
         self.volume_n = if self.volume_active { self.supersample() as f32 } else { 0.0 };
@@ -1641,7 +1650,7 @@ impl SplatRenderer {
         }
         self.sorter.as_ref().unwrap().encode(
             device, &vp.bucket, encoder, point_count, width, height,
-            volume::footprint(self.supersample()), self.stamp_compute(PASS_SORT),
+            volume::footprint(self.supersample(), self.footprint_k), self.stamp_compute(PASS_SORT),
         );
     }
 

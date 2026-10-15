@@ -967,6 +967,10 @@ pub struct App {
     /// to the scene, a view or the preferences yet (that is the next slice, and
     /// it will be scene data). 0 is plain splat.
     pub opacity: f32,
+    /// Volume-mode smoothness: how many points each footprint aims to cover
+    /// (`volume::COVERAGE_K`). Session state for now, like `opacity`; whether
+    /// it earns a place in scenes, prefs or the CLI is still open.
+    pub smoothness: f32,
     /// The bounding sphere volume mode frames, for a composite, whose
     /// attractor `refresh_attractor` does not describe. Keyed on
     /// `attractor_fingerprint`.
@@ -1400,6 +1404,7 @@ impl App {
             opacity: opacity
                 .unwrap_or(crate::gpu::points::volume::DEFAULT_OPACITY)
                 .clamp(0.0, crate::gpu::points::volume::MAX_OPACITY),
+            smoothness: crate::gpu::points::volume::COVERAGE_K,
             volume_bounds: None,
             volume_bounds_key: 0,
             grade: grade.clamped(),
@@ -5943,6 +5948,11 @@ impl App {
         self.opacity = opacity.clamp(0.0, crate::gpu::points::volume::MAX_OPACITY);
     }
 
+    pub fn set_smoothness(&mut self, k: f32) {
+        use crate::gpu::points::volume::{MAX_SMOOTHNESS, MIN_SMOOTHNESS};
+        self.smoothness = k.clamp(MIN_SMOOTHNESS, MAX_SMOOTHNESS);
+    }
+
     /// The reference length opacity is measured against, for this frame's
     /// camera: the measured attractor's radius; under infinite zoom, which has
     /// nothing to measure, the eye's distance from the fixed point.
@@ -5983,6 +5993,7 @@ impl App {
             VolumeParams::OFF
         };
         self.splat_renderer.set_volume(&self.gpu.queue, params);
+        self.splat_renderer.set_smoothness(self.smoothness);
     }
 
     pub fn set_point_size(&mut self, size: f32) {
