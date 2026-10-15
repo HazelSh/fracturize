@@ -2224,7 +2224,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         if let Some(prefix) = std::env::var_os("FRACTURIZE_VOLUME_REFERENCE") {
             if let TileRenderer::Splat(r) = &mut renderer {
                 volume_reference(
-                    &device, &queue, r, point_count, sampling.n, width, height,
+                    &device, &queue, r, point_count, use_point_primitives, sampling.n, width, height,
                     &prefix, bit_depth,
                 )?;
             }
@@ -2345,6 +2345,7 @@ fn volume_reference(
     queue: &wgpu::Queue,
     r: &mut SplatRenderer,
     points: u32,
+    use_point_primitives: bool,
     supersample: u32,
     width: u32,
     height: u32,
@@ -2359,7 +2360,7 @@ fn volume_reference(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30)
         * 1_000_000;
-    let dump = r.dump_fragments(device, queue, points, capacity)?;
+    let dump = r.dump_fragments(device, queue, points, use_point_primitives, capacity)?;
     if dump.count > capacity {
         eprintln!(
             "warning: {} fragments overflowed the {} the reference kept; it is a truncated sample. \
@@ -2376,6 +2377,8 @@ fn volume_reference(
             .map(|p| (gpu_l[p * 4 + 3] / reference.l[p][3], p))
             .collect();
         v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let under = v.iter().filter(|(r, _)| *r < 0.5).count();
+        eprintln!("pixels at under half the exact brightness: {} of {} lit ({:.3}%)", under, v.len(), 100.0 * under as f64 / v.len().max(1) as f64);
         for (ratio, p) in v.iter().take(8) {
             eprintln!("darkest vs exact: pixel {} ({},{}) gpu/exact L {:.3}, exact L {:.3}, tau exact {:.2} gpu {:.2}", p, p % width as usize, p / width as usize, ratio, reference.l[*p][3], reference.tau[*p], gpu_b0[p * 4]);
         }

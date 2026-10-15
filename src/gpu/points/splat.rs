@@ -252,7 +252,9 @@ struct BinTargets {
 #[derive(Clone)]
 struct VolumePipelines {
     abs_point: RenderPipeline,
+    abs_quad: RenderPipeline,
     point: RenderPipeline,
+    quad: RenderPipeline,
     bins_layout: BindGroupLayout,
     bins_ro_layout: BindGroupLayout,
     bins_slice_layout: BindGroupLayout,
@@ -264,6 +266,7 @@ struct VolumePipelines {
     prefix_pipe: RenderPipeline,
     /// Pass A0: each pixel's nearest and farthest depth.
     a0_point: RenderPipeline,
+    a0_quad: RenderPipeline,
     /// The tonemap that also dims the background by the absorbance field, and
     /// the layout of its three bindings (input density, params, slices).
     tonemap: RenderPipeline,
@@ -276,6 +279,7 @@ struct VolumePipelines {
 }
 
 struct DumpPipelines {
+    quad: RenderPipeline,
     point: RenderPipeline,
     layout: BindGroupLayout,
 }
@@ -568,7 +572,7 @@ impl SplatPipelines {
                     write_mask: wgpu::ColorWrites::empty(),
                 })];
                 let emit_targets = [target(accum_format)];
-                use wgpu::PrimitiveTopology::{PointList, TriangleList};
+                use wgpu::PrimitiveTopology::{PointList, TriangleList, TriangleStrip};
                 let tonemap_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: Some("volume_tonemap_bind_group_layout"),
@@ -646,7 +650,10 @@ impl SplatPipelines {
                 });
                 VolumePipelines {
                     abs_point: make("volume_abs_point", &slice_pipeline_layout, "vs_abs", "fs_abs", PointList, &front_targets),
-                    a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_span", "fs_front", PointList, &front_targets),
+                    abs_quad: make("volume_abs_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs", TriangleStrip, &front_targets),
+                    a0_quad: make("volume_a0_quad", &front_pipeline_layout, "vs_abs_quad", "fs_front", TriangleStrip, &front_targets),
+                    quad: make("volume_quad", resolve_layout, "vs_emit_quad", "fs_splat_volume", TriangleStrip, &emit_targets),
+                    a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_abs", "fs_front", PointList, &front_targets),
                     point: make("volume_point", resolve_layout, "vs_emit", "fs_splat_volume", PointList, &emit_targets),
                     bins_layout,
                     bins_ro_layout,
@@ -1043,11 +1050,11 @@ impl SplatRenderer {
             encoder.clear_buffer(&m.slices, 0, None);
             encoder.clear_buffer(&m.ranges, 0, None);
             self.sort_points(device, encoder, point_count, width * n, height * n);
-            self.storage_pass(encoder, 0..point_count, true);
+            self.storage_pass(encoder, 0..point_count, use_point_primitives, true);
             self.fullscreen_storage_pass(encoder, true);
-            self.storage_pass(encoder, 0..point_count, false);
+            self.storage_pass(encoder, 0..point_count, use_point_primitives, false);
             self.fullscreen_storage_pass(encoder, false);
-            self.draw_splats(encoder, 0..point_count, true, true, true);
+            self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
         } else {
             self.splat_pass(encoder, 0..point_count, use_point_primitives);
         }
@@ -1178,7 +1185,7 @@ impl SplatRenderer {
                 pass.set_pipeline(vp.map_or(&self.point_pipeline, |v| &v.point));
                 pass.draw(points, 0..1);
             } else {
-                pass.set_pipeline(&self.quad_pipeline);
+                pass.set_pipeline(vp.map_or(&self.quad_pipeline, |v| &v.quad));
                 pass.draw(0..4, points);
             }
         }
@@ -1219,6 +1226,7 @@ impl SplatRenderer {
         device: &Device,
         queue: &wgpu::Queue,
         points: u32,
+        use_point_primitives: bool,
         capacity: u64,
     ) -> Result<FragmentDump, String> {
         let vp = self.volume_pipelines.as_ref().ok_or("volume mode is not available")?;
@@ -1280,6 +1288,7 @@ impl SplatRenderer {
                 })
             };
             self.dump_pipelines = Some(DumpPipelines {
+                quad: make("vs_emit_quad", wgpu::PrimitiveTopology::TriangleStrip),
                 point: make("vs_emit", wgpu::PrimitiveTopology::PointList),
                 layout,
             });
@@ -1348,8 +1357,13 @@ impl SplatRenderer {
             pass.set_bind_group(0, &self.accum_bind_group, &[]);
             pass.set_bind_group(1, &bins.bind_group, &[]);
             pass.set_bind_group(2, &bind, &[]);
-            pass.set_pipeline(&dp.point);
-            pass.draw(0..points, 0..1);
+            if use_point_primitives {
+                pass.set_pipeline(&dp.point);
+                pass.draw(0..points, 0..1);
+            } else {
+                pass.set_pipeline(&dp.quad);
+                pass.draw(0..4, 0..points);
+            }
         }
         encoder.copy_buffer_to_buffer(&counter, 0, &count_read, 0, 4);
         queue.submit(std::iter::once(encoder.finish()));
@@ -1516,7 +1530,7 @@ impl SplatRenderer {
             })
         };
         let slices = buffer("volume_slices", pixels * BINS as u64 * 4);
-        let ranges = buffer("volume_ranges", pixels * 8);
+        let ranges = buffer("volume_ranges", pixels * 16);
         let front_target = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("volume_front_target"),
@@ -1608,6 +1622,7 @@ impl SplatRenderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         points: std::ops::Range<u32>,
+        use_point_primitives: bool,
         spans: bool,
     ) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
@@ -1633,8 +1648,13 @@ impl SplatRenderer {
         });
         pass.set_bind_group(0, self.volume_points_group(), &[]);
         pass.set_bind_group(1, if spans { &m.bind_group } else { &m.bind_group_slice }, &[]);
-        pass.set_pipeline(if spans { &vp.a0_point } else { &vp.abs_point });
-        pass.draw(points, 0..1);
+        if use_point_primitives {
+            pass.set_pipeline(if spans { &vp.a0_point } else { &vp.abs_point });
+            pass.draw(points, 0..1);
+        } else {
+            pass.set_pipeline(if spans { &vp.a0_quad } else { &vp.abs_quad });
+            pass.draw(0..4, points);
+        }
     }
 
     /// The two per-pixel housekeeping passes: `range` rewrites the depth spans

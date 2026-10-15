@@ -54,7 +54,7 @@ pub const MAX_OPACITY: f32 = 100.0;
 /// (see the report: saturated pixels carry ~1/opacity of splat's light).
 pub const DEFAULT_OPACITY: f32 = 2.0;
 
-/// The uniform both volume passes read. 16 bytes, must match `VolumeParams` in
+/// The uniform the volume passes read. 32 bytes, must match `VolumeParams` in
 /// `shaders/points/splat.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -69,12 +69,18 @@ pub struct VolumeParams {
     pub ppu: f32,
     /// The source function in splat density units: `SOURCE · samples / (2·H²)`.
     pub source: f32,
+    /// The least deposit (optical depth) that lets a fragment extend its pixel's
+    /// depth span: see [`SPAN_MIN_DEPOSIT`].
+    pub span_min: f32,
+    /// Footprint cap, as a share of the camera's `max_point_pixels`.
+    pub cap_scale: f32,
+    pub pad: [f32; 2],
 }
 
 impl VolumeParams {
     /// Everything off. What a plain splat leaves in the buffer, and what the
     /// vertex stage reads as "skip the volume work".
-    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, source: 0.0 };
+    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, source: 0.0, span_min: 0.0, cap_scale: 1.0, pad: [0.0; 2] };
 
     /// `samples` and `screen_height` are exactly the two numbers
     /// `SplatRenderer::upload_params` normalises exposure with. The height
@@ -92,8 +98,31 @@ impl VolumeParams {
         // The same N/H² that exposure is normalised by, so the glow of a thick
         // region does not change with point count or resolution either.
         let source = (SOURCE as f64 * samples / (2.0 * screen_height as f64 * screen_height as f64)) as f32;
-        Self { enabled: 1.0, abs_scale, ppu, source }
+        Self { enabled: 1.0, abs_scale, ppu, source, span_min: span_min_deposit(), cap_scale: max_point_pixels() / crate::gpu::buffers::MAX_POINT_PIXELS, pad: [0.0; 2] }
     }
+}
+
+/// A fragment whose deposit is below this does not extend its pixel's depth span.
+///
+/// Every fragment used to, and a big point's kernel fringe (weight 1e-3 of the
+/// peak) in front of a thick sheet stretched the span until 32 slices could not
+/// resolve the sheet, which is the black square. See "Slice 1e/1f findings" in the
+/// plan for the measurement behind the value.
+pub const SPAN_MIN_DEPOSIT: f32 = 0.01;
+
+/// [`SPAN_MIN_DEPOSIT`], or `FRACTURIZE_SPAN_MIN` when set: a measuring knob.
+pub fn span_min_deposit() -> f32 {
+    std::env::var("FRACTURIZE_SPAN_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(SPAN_MIN_DEPOSIT)
+}
+
+/// The footprint, in output pixels, past which a volume point stops growing.
+/// Splat's is 12 (`buffers::MAX_POINT_PIXELS`); volume's cost rises with the
+/// area of every quad, so it is lower. See the plan for the measured cost curve.
+pub const MAX_POINT_PIXELS: f32 = 12.0;
+
+/// [`MAX_POINT_PIXELS`], or `FRACTURIZE_MAXPX` when set: a measuring knob.
+pub fn max_point_pixels() -> f32 {
+    std::env::var("FRACTURIZE_MAXPX").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_POINT_PIXELS)
 }
 
 /// Slices of absorbance per pixel. Mirrored in `splat.wgsl`; a test holds them
@@ -202,7 +231,7 @@ mod tests {
 
     #[test]
     fn the_uniform_matches_the_shader() {
-        assert_eq!(std::mem::size_of::<VolumeParams>(), 16);
+        assert_eq!(std::mem::size_of::<VolumeParams>(), 32);
         let wgsl = include_str!("../../../shaders/points/splat.wgsl");
         let at = wgsl.find("struct VolumeParams").expect("splat.wgsl must declare VolumeParams");
         let body = &wgsl[at..at + wgsl[at..].find('}').unwrap()];
@@ -213,7 +242,7 @@ mod tests {
             .collect();
         assert_eq!(
             fields,
-            ["enabled", "abs_scale", "ppu", "source"]
+            ["enabled", "abs_scale", "ppu", "source", "span_min", "cap_scale", "pad1", "pad2"]
         );
     }
 
