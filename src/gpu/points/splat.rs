@@ -13,7 +13,7 @@ use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFo
 use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source};
 use crate::gpu::points::bucket::{BucketPipelines, BucketSorter};
-use crate::gpu::points::volume::{VolumeParams, BINS};
+use crate::gpu::points::volume::{self, VolumeParams, BINS};
 use crate::gpu::points::renderer::DEPTH_FORMAT;
 
 /// HDR accumulation format, chosen per device.
@@ -396,6 +396,18 @@ impl SplatPipelines {
                     },
                     count: None,
                 },
+                // Volume mode's footprint radius, written by its sort. Every
+                // other draw binds a placeholder and never reads it.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -577,7 +589,7 @@ impl SplatPipelines {
                     write_mask: wgpu::ColorWrites::empty(),
                 })];
                 let emit_targets = [target(accum_format)];
-                use wgpu::PrimitiveTopology::{PointList, TriangleList, TriangleStrip};
+                use wgpu::PrimitiveTopology::{PointList, TriangleList};
                 let tonemap_layout =
                     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                         label: Some("volume_tonemap_bind_group_layout"),
@@ -656,11 +668,11 @@ impl SplatPipelines {
                 VolumePipelines {
                     abs_point: make("volume_abs_point", &slice_pipeline_layout, "vs_abs", "fs_abs", PointList, &front_targets),
                     coarse_point: make("volume_coarse_point", &slice_pipeline_layout, "vs_abs", "fs_abs_coarse", PointList, &front_targets),
-                    coarse_quad: make("volume_coarse_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs_coarse", TriangleStrip, &front_targets),
+                    coarse_quad: make("volume_coarse_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs_coarse", TriangleList, &front_targets),
                     refine_pipe: make("volume_refine", &front_pipeline_layout, "vs_tonemap", "fs_refine", TriangleList, &front_targets),
-                    abs_quad: make("volume_abs_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs", TriangleStrip, &front_targets),
-                    a0_quad: make("volume_a0_quad", &front_pipeline_layout, "vs_abs_quad", "fs_front", TriangleStrip, &front_targets),
-                    quad: make("volume_quad", resolve_layout, "vs_emit_quad", "fs_splat_volume", TriangleStrip, &emit_targets),
+                    abs_quad: make("volume_abs_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs", TriangleList, &front_targets),
+                    a0_quad: make("volume_a0_quad", &front_pipeline_layout, "vs_abs_quad", "fs_front", TriangleList, &front_targets),
+                    quad: make("volume_quad", resolve_layout, "vs_emit_quad", "fs_splat_volume", TriangleList, &emit_targets),
                     a0_point: make("volume_a0_point", &front_pipeline_layout, "vs_abs", "fs_front", PointList, &front_targets),
                     point: make("volume_point", resolve_layout, "vs_emit", "fs_splat_volume", PointList, &emit_targets),
                     bins_layout,
@@ -813,6 +825,12 @@ impl SplatRenderer {
             mapped_at_creation: false,
         });
 
+        let info_placeholder = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume_info_placeholder"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let accum_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("splat_accum_bind_group"),
             layout: &accum_layout,
@@ -832,6 +850,10 @@ impl SplatRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: volume_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: info_placeholder.as_entire_binding(),
                 },
             ],
         });
@@ -1058,11 +1080,11 @@ impl SplatRenderer {
             encoder.clear_buffer(&m.slices, 0, None);
             encoder.clear_buffer(&m.ranges, 0, None);
             self.sort_points(device, encoder, point_count, width * n, height * n);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, PASS_SPAN);
+            self.storage_pass(encoder, 0..point_count, PASS_SPAN);
             self.fullscreen_storage_pass(encoder, PASS_RANGE);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, PASS_COARSE);
+            self.storage_pass(encoder, 0..point_count, PASS_COARSE);
             self.fullscreen_storage_pass(encoder, PASS_REFINE);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, PASS_SLICE);
+            self.storage_pass(encoder, 0..point_count, PASS_SLICE);
             self.fullscreen_storage_pass(encoder, PASS_PREFIX);
             self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
         } else {
@@ -1191,11 +1213,13 @@ impl SplatRenderer {
             // (`vertex_index` for points, `instance_index` for quads), and
             // WebGPU includes the draw's first index in both — so a range is a
             // range either way.
-            if use_point_primitives {
-                pass.set_pipeline(vp.map_or(&self.point_pipeline, |v| &v.point));
+            if let Some(v) = vp {
+                self.volume_draw(&mut pass, &v.point, &v.quad, points);
+            } else if use_point_primitives {
+                pass.set_pipeline(&self.point_pipeline);
                 pass.draw(points, 0..1);
             } else {
-                pass.set_pipeline(vp.map_or(&self.quad_pipeline, |v| &v.quad));
+                pass.set_pipeline(&self.quad_pipeline);
                 pass.draw(0..4, points);
             }
         }
@@ -1236,7 +1260,6 @@ impl SplatRenderer {
         device: &Device,
         queue: &wgpu::Queue,
         points: u32,
-        use_point_primitives: bool,
         capacity: u64,
     ) -> Result<FragmentDump, String> {
         let vp = self.volume_pipelines.as_ref().ok_or("volume mode is not available")?;
@@ -1298,7 +1321,7 @@ impl SplatRenderer {
                 })
             };
             self.dump_pipelines = Some(DumpPipelines {
-                quad: make("vs_emit_quad", wgpu::PrimitiveTopology::TriangleStrip),
+                quad: make("vs_emit_quad", wgpu::PrimitiveTopology::TriangleList),
                 point: make("vs_emit", wgpu::PrimitiveTopology::PointList),
                 layout,
             });
@@ -1364,16 +1387,10 @@ impl SplatRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.accum_bind_group, &[]);
+            pass.set_bind_group(0, self.volume_points_group(), &[]);
             pass.set_bind_group(1, &bins.bind_group, &[]);
             pass.set_bind_group(2, &bind, &[]);
-            if use_point_primitives {
-                pass.set_pipeline(&dp.point);
-                pass.draw(0..points, 0..1);
-            } else {
-                pass.set_pipeline(&dp.quad);
-                pass.draw(0..4, 0..points);
-            }
+            self.volume_draw(&mut pass, &dp.point, &dp.quad, 0..points);
         }
         encoder.copy_buffer_to_buffer(&counter, 0, &count_read, 0, 4);
         queue.submit(std::iter::once(encoder.finish()));
@@ -1408,6 +1425,12 @@ impl SplatRenderer {
             Vec::new()
         };
         Ok(FragmentDump { words, count })
+    }
+
+    /// What the last volume frame's sort decided: the footprint radius in
+    /// accumulation pixels, and the points drawn as primitives and as quads.
+    pub fn read_footprint(&self, device: &Device, queue: &wgpu::Queue) -> Option<(f32, u32, u32)> {
+        self.sorter.as_ref().map(|s| s.read_footprint(device, queue))
     }
 
     /// Time each volume pass on the GPU from now on. Returns whether the device
@@ -1592,9 +1615,11 @@ impl SplatRenderer {
         width: u32,
         height: u32,
     ) {
-        // Below this the ring fits in cache anyway and the sort is overhead.
-        const MIN_POINTS: u32 = 500_000;
-        self.use_sorted = point_count >= MIN_POINTS && std::env::var_os("FRACTURIZE_VOLUME_NOSORT").is_none();
+        // Always: the sort also counts the points on screen, which sizes them,
+        // and below a few hundred thousand it costs nothing.
+        // `FRACTURIZE_VOLUME_NOSORT=1` draws the ring as it is, every point one
+        // pixel, for measuring what the sort buys.
+        self.use_sorted = point_count > 0 && std::env::var_os("FRACTURIZE_VOLUME_NOSORT").is_none();
         if !self.use_sorted {
             return;
         }
@@ -1609,11 +1634,15 @@ impl SplatRenderer {
                     wgpu::BindGroupEntry { binding: 1, resource: self.camera_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: self.colormap_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: self.volume_params_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: sorter.info.as_entire_binding() },
                 ],
             }));
             self.sorter = Some(sorter);
         }
-        self.sorter.as_ref().unwrap().encode(device, &vp.bucket, encoder, point_count, width, height, self.stamp_compute(PASS_SORT));
+        self.sorter.as_ref().unwrap().encode(
+            device, &vp.bucket, encoder, point_count, width, height,
+            volume::footprint(self.supersample()), self.stamp_compute(PASS_SORT),
+        );
     }
 
     /// The bind group (points, camera, colormap, volume uniform) the volume
@@ -1633,7 +1662,6 @@ impl SplatRenderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         points: std::ops::Range<u32>,
-        use_point_primitives: bool,
         stage: u32,
     ) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
@@ -1669,12 +1697,26 @@ impl SplatRenderer {
             PASS_COARSE => (&vp.coarse_point, &vp.coarse_quad),
             _ => (&vp.abs_point, &vp.abs_quad),
         };
-        if use_point_primitives {
-            pass.set_pipeline(point);
-            pass.draw(points, 0..1);
-        } else {
-            pass.set_pipeline(quad);
-            pass.draw(0..4, points);
+        self.volume_draw(&mut pass, point, quad, points);
+    }
+
+    /// Draw the ring for a volume pass: the sort has decided, per frame, whether
+    /// the points go as 1px primitives or as quads (see `scan` in bucket.wgsl),
+    /// and left an indirect draw for each, one of them empty. Without the sort
+    /// every point is a primitive.
+    fn volume_draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        point: &RenderPipeline,
+        quad: &RenderPipeline,
+        points: std::ops::Range<u32>,
+    ) {
+        match (&self.sorter, self.use_sorted) {
+            (Some(sorter), true) => sorter.draw(pass, point, quad),
+            _ => {
+                pass.set_pipeline(point);
+                pass.draw(points, 0..1);
+            }
         }
     }
 

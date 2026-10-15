@@ -1292,6 +1292,9 @@ impl TileTarget {
             v[v.len() / 2]
         };
         let mut total = 0.0;
+        if let Some((r, prims, quads)) = renderer.read_footprint(device, queue) {
+            println!("footprint radius {:.2} px; {} points as primitives, {} as quads", r, prims, quads);
+        }
         println!("volume passes, GPU ms (median of {}), {} points:", iterations, point_count);
         for (name, v) in rows.iter_mut() {
             let m = median(v);
@@ -2224,7 +2227,7 @@ pub fn render(params: OfflineParams) -> Result<Outcome, String> {
         if let Some(prefix) = std::env::var_os("FRACTURIZE_VOLUME_REFERENCE") {
             if let TileRenderer::Splat(r) = &mut renderer {
                 volume_reference(
-                    &device, &queue, r, point_count, use_point_primitives, sampling.n, width, height,
+                    &device, &queue, r, point_count, sampling.n, width, height,
                     &prefix, bit_depth,
                 )?;
             }
@@ -2345,7 +2348,6 @@ fn volume_reference(
     queue: &wgpu::Queue,
     r: &mut SplatRenderer,
     points: u32,
-    use_point_primitives: bool,
     supersample: u32,
     width: u32,
     height: u32,
@@ -2360,7 +2362,7 @@ fn volume_reference(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30)
         * 1_000_000;
-    let dump = r.dump_fragments(device, queue, points, use_point_primitives, capacity)?;
+    let dump = r.dump_fragments(device, queue, points, capacity)?;
     if dump.count > capacity {
         eprintln!(
             "warning: {} fragments overflowed the {} the reference kept; it is a truncated sample. \

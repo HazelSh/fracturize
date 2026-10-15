@@ -69,15 +69,13 @@ pub struct VolumeParams {
     pub ppu: f32,
     /// The source function in splat density units: `SOURCE · samples / (2·H²)`.
     pub source: f32,
-    /// Footprint cap, as a share of the camera's `max_point_pixels`.
-    pub cap_scale: f32,
-    pub pad: [f32; 3],
+    pub pad: [f32; 4],
 }
 
 impl VolumeParams {
     /// Everything off. What a plain splat leaves in the buffer, and what the
     /// vertex stage reads as "skip the volume work".
-    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, source: 0.0, cap_scale: 1.0, pad: [0.0; 3] };
+    pub const OFF: VolumeParams = VolumeParams { enabled: 0.0, abs_scale: 0.0, ppu: 0.0, source: 0.0, pad: [0.0; 4] };
 
     /// `samples` and `screen_height` are exactly the two numbers
     /// `SplatRenderer::upload_params` normalises exposure with. The height
@@ -95,18 +93,32 @@ impl VolumeParams {
         // The same N/H² that exposure is normalised by, so the glow of a thick
         // region does not change with point count or resolution either.
         let source = (SOURCE as f64 * samples / (2.0 * screen_height as f64 * screen_height as f64)) as f32;
-        Self { enabled: 1.0, abs_scale, ppu, source, cap_scale: max_point_pixels() / crate::gpu::buffers::MAX_POINT_PIXELS, pad: [0.0; 3] }
+        Self { enabled: 1.0, abs_scale, ppu, source, pad: [0.0; 4] }
     }
 }
 
-/// The footprint, in output pixels, past which a volume point stops growing.
-/// Splat's is 12 (`buffers::MAX_POINT_PIXELS`); volume's cost rises with the
-/// area of every quad, so it is lower. See the plan for the measured cost curve.
-pub const MAX_POINT_PIXELS: f32 = 12.0;
+/// Points per footprint the coverage rule aims for (`scan` in bucket.wgsl). A
+/// random sample leaves e^-k of the frame uncovered, so 3 is about 5% holes.
+/// `FRACTURIZE_VOLUME_K` overrides it, for measuring.
+pub const COVERAGE_K: f32 = 3.0;
 
-/// [`MAX_POINT_PIXELS`], or `FRACTURIZE_MAXPX` when set: a measuring knob.
-pub fn max_point_pixels() -> f32 {
-    std::env::var("FRACTURIZE_MAXPX").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_POINT_PIXELS)
+/// The largest footprint radius, in output pixels. A cap and not a target: it is
+/// only reached when almost none of the sample is on screen.
+pub const MAX_RADIUS: f32 = 12.0;
+
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// What the sort needs to size the footprint, for a render at `supersample`.
+pub fn footprint(supersample: u32) -> crate::gpu::points::bucket::Footprint {
+    let n = supersample.max(1) as f32;
+    crate::gpu::points::bucket::Footprint {
+        k_cov: env_f32("FRACTURIZE_VOLUME_K").unwrap_or(COVERAGE_K),
+        max_radius: MAX_RADIUS * n,
+        // Output pixels, like everything the person sees.
+        force_radius: env_f32("FRACTURIZE_VOLUME_RADIUS").map_or(0.0, |r| r * n),
+    }
 }
 
 /// Slices of absorbance per pixel. Mirrored in `splat.wgsl`; a test holds them
@@ -226,7 +238,7 @@ mod tests {
             .collect();
         assert_eq!(
             fields,
-            ["enabled", "abs_scale", "ppu", "source", "cap_scale", "pad0", "pad1", "pad2"]
+            ["enabled", "abs_scale", "ppu", "source", "pad_a", "pad0", "pad1", "pad2"]
         );
     }
 

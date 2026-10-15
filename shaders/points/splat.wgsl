@@ -113,9 +113,7 @@ struct VolumeParams {
     /// absorbance brings with it (`volume::SOURCE`, scaled like exposure is by
     /// samples and height). See `fs_splat_volume`.
     source: f32,
-    /// Volume mode's footprint cap as a share of the camera's `max_point_pixels`
-    /// (`volume::MAX_POINT_PIXELS`).
-    cap_scale: f32,
+    pad_a: f32,
     pad0: f32,
     pad1: f32,
     pad2: f32,
@@ -125,6 +123,10 @@ struct VolumeParams {
 @group(0) @binding(1) var<uniform> camera: CameraUniforms;
 @group(0) @binding(2) var<storage, read> colormap: array<vec4<f32>, 256>;
 @group(0) @binding(3) var<uniform> volume: VolumeParams;
+// Volume mode's, written by its sort each frame: the bucket grid (words 0 and 1)
+// then each bucket's footprint radius in accumulation pixels (`scan` in
+// bucket.wgsl).
+@group(0) @binding(4) var<storage, read> volume_info: array<f32>;
 
 // Same cyclic contrast stretch as render.wgsl
 // The mixed-RGB path: 8/8/8 out of the top 24 bits, sqrt-companded (see
@@ -378,10 +380,8 @@ struct Placed {
     pixel_pos: vec2<f32>,
     /// Position within a quad's kernel, -1..1; zero for a point primitive.
     offset: vec2<f32>,
-    /// The footprint's radius in pixels as drawn, and as the point's own size
-    /// asks for before the floor and cap (quads only).
+    /// The footprint's radius in pixels as drawn (quads only).
     radius: f32,
-    base_radius: f32,
 }
 
 const CULLED: vec4<f32> = vec4<f32>(0.0, 0.0, -2.0, 1.0);
@@ -391,7 +391,7 @@ fn place_point(pos: vec3<f32>) -> Placed {
     let clip = camera.view_proj * vec4<f32>(pos, 1.0);
     let depth = select(clip.w, -1.0, isolate_dropped(pos));
     if depth <= 0.0 {
-        return Placed(CULLED, depth, vec2<f32>(0.0), vec2<f32>(0.0), 1.0, 1.0);
+        return Placed(CULLED, depth, vec2<f32>(0.0), vec2<f32>(0.0), 1.0);
     }
     // The same tile window as `vs_splat_point`.
     let ndc = clip.xy / clip.w;
@@ -401,28 +401,53 @@ fn place_point(pos: vec3<f32>) -> Placed {
         (x * 0.5 + 0.5) * camera.screen_height * camera.aspect_ratio,
         (0.5 - y * 0.5) * camera.screen_height,
     );
-    let base = 0.5 * camera.projected_point_size * camera.screen_height / depth;
-    return Placed(vec4<f32>(x, y, 0.0, 1.0), depth, px, vec2<f32>(0.0), 1.0, base);
+    return Placed(vec4<f32>(x, y, 0.0, 1.0), depth, px, vec2<f32>(0.0), 1.0);
 }
 
-/// A quad corner of the point, sized as `vs_splat` sizes it.
+/// The footprint radius at this NDC position, from the sort's buckets (see
+/// `bucket.wgsl`; the same grid as its `bucket_of`).
+fn footprint_at(x: f32, y: f32) -> f32 {
+    let nbx = u32(volume_info[0]);
+    let nby = u32(volume_info[1]);
+    // Bilinear between the four bucket centres around the point.
+    let gu = clamp(x * 0.5 + 0.5, 0.0, 1.0) * f32(nbx) - 0.5;
+    let gv = clamp(0.5 - y * 0.5, 0.0, 1.0) * f32(nby) - 0.5;
+    let i0 = clamp(i32(floor(gu)), 0, i32(nbx) - 2);
+    let j0 = clamp(i32(floor(gv)), 0, i32(nby) - 2);
+    if nbx < 2u || nby < 2u {
+        return max(volume_info[2u], 1.0);
+    }
+    let fu = clamp(gu - f32(i0), 0.0, 1.0);
+    let fv = clamp(gv - f32(j0), 0.0, 1.0);
+    let at = u32(j0) * nbx + u32(i0);
+    let top = mix(volume_info[2u + at], volume_info[2u + at + 1u], fu);
+    let bottom = mix(volume_info[2u + at + nbx], volume_info[2u + at + nbx + 1u], fu);
+    return max(mix(top, bottom, fv), 1.0);
+}
+
+/// The corner of the quad that vertex `vi` of six is (two triangles).
+fn quad_corner(vi: u32) -> u32 {
+    var corners = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
+    return corners[vi];
+}
+
+/// A quad corner of the point.
 fn place_quad(pos: vec3<f32>, corner_index: u32) -> Placed {
     let clip = camera.view_proj * vec4<f32>(pos, 1.0);
     let depth = select(clip.w, -1.0, isolate_dropped(pos));
     if depth <= 0.0 {
-        return Placed(CULLED, depth, vec2<f32>(NOT_A_POINT), vec2<f32>(0.0), 1.0, 1.0);
+        return Placed(CULLED, depth, vec2<f32>(NOT_A_POINT), vec2<f32>(0.0), 1.0);
     }
     let ndc = clip.xy / clip.w;
     let x = ndc.x * camera.subfrustum.x + camera.subfrustum.z;
     let y = ndc.y * camera.subfrustum.y + camera.subfrustum.w;
-    let base = 0.5 * camera.projected_point_size * camera.screen_height / depth;
-    let radius = clamp(base, 1.0, volume_cap());
+    let radius = footprint_at(x, y);
     let size_y = radius / camera.screen_height * 2.0 * camera.subfrustum.y;
     let size_x = (radius / camera.screen_height * 2.0 / camera.aspect_ratio) * camera.subfrustum.x;
     let offset = vec2<f32>(f32(corner_index & 1u) * 2.0 - 1.0, f32(corner_index >> 1u) * 2.0 - 1.0);
     return Placed(
         vec4<f32>(x + offset.x * size_x, y + offset.y * size_y, 0.0, 1.0),
-        depth, vec2<f32>(NOT_A_POINT), offset, radius, base,
+        depth, vec2<f32>(NOT_A_POINT), offset, radius,
     );
 }
 
@@ -440,11 +465,6 @@ fn is_helper(clip_position: vec4<f32>, pixel_pos: vec2<f32>) -> bool {
     return max(d.x, d.y) > 0.52;
 }
 
-/// The largest footprint, in accumulation pixels, a volume point is drawn at.
-fn volume_cap() -> f32 {
-    return camera.max_point_pixels * volume.cap_scale;
-}
-
 /// The kernel at a fragment: 1 for a point primitive, whose offset is zero.
 fn kernel_at(offset: vec2<f32>) -> f32 {
     return exp(-KERNEL_SHARPNESS * dot(offset, offset));
@@ -459,24 +479,17 @@ fn volume_deposit(depth: f32) -> f32 {
 
 /// The peak absorbance a placed point deposits (before the kernel's falloff).
 /// Absorbance is a property of the material, so haze does not thin it; the zoom
-/// edge guard removes material, so it does.
+/// edge guard removes material, so it does. A quad spreads the cross-section
+/// over its footprint (peak KERNEL_NORM / r^2), so the pixels it covers add up
+/// to what a single pixel would have received from a smaller one: the mass, and
+/// with it optical depth and brightness, does not depend on how big the points
+/// are drawn.
 fn point_deposit(pos: vec3<f32>, pl: Placed) -> f32 {
     let guard = guard_weight(pos);
     if pl.pixel_pos.x < -1.0e29 {
-        // A quad spreads the cross-section over its footprint (peak
-        // KERNEL_NORM / r^2). A deposit is a world cross-section over a world
-        // pixel area, which grows as 1/z^2 as the point nears the eye, and so
-        // does the area it is spread over, until the footprint is capped at
-        // `max_point_pixels`. Past the cap the peak would climb as 1/z^2: a mote
-        // the eye brushes past would turn optically solid. So beyond the cap the
-        // deposit is held at what it was at the cap, in proportion to the area
-        // it covers.
-        let cap = volume_cap();
-        let cap_share = select(1.0, (cap * cap) / (pl.base_radius * pl.base_radius), pl.base_radius > cap);
-        return volume_deposit(pl.depth) * cap_share * guard * KERNEL_NORM / (pl.radius * pl.radius);
+        return volume_deposit(pl.depth) * guard * KERNEL_NORM / (pl.radius * pl.radius);
     }
-    // A primitive is a pixel, drawn for points of a pixel or less.
-    return volume_deposit(pl.depth) * guard / max(1.0, pl.base_radius * pl.base_radius);
+    return volume_deposit(pl.depth) * guard;
 }
 
 struct AbsOutput {
@@ -500,12 +513,9 @@ fn vs_abs(@builtin(vertex_index) point_index: u32) -> AbsOutput {
 }
 
 @vertex
-fn vs_abs_quad(
-    @builtin(vertex_index) corner_index: u32,
-    @builtin(instance_index) point_index: u32,
-) -> AbsOutput {
-    let pos = points[point_index].position;
-    let pl = place_quad(pos, corner_index);
+fn vs_abs_quad(@builtin(vertex_index) vertex: u32) -> AbsOutput {
+    let pos = points[vertex / 6u].position;
+    let pl = place_quad(pos, quad_corner(vertex % 6u));
     var a = 0.0;
     if pl.depth > 0.0 {
         a = point_deposit(pos, pl);
@@ -550,12 +560,9 @@ fn vs_emit(@builtin(vertex_index) point_index: u32) -> EmitOutput {
 }
 
 @vertex
-fn vs_emit_quad(
-    @builtin(vertex_index) corner_index: u32,
-    @builtin(instance_index) point_index: u32,
-) -> EmitOutput {
-    let point = points[point_index];
-    return emit_vertex(point, place_quad(point.position, corner_index));
+fn vs_emit_quad(@builtin(vertex_index) vertex: u32) -> EmitOutput {
+    let point = points[vertex / 6u];
+    return emit_vertex(point, place_quad(point.position, quad_corner(vertex % 6u)));
 }
 
 // Mirrored in `volume::BINS`; a test holds the two together.
