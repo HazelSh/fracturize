@@ -205,12 +205,14 @@ struct Resolved {
 /// slots in a [`PassProfile`].
 const PASS_SPAN: u32 = 0;
 const PASS_RANGE: u32 = 1;
-const PASS_SLICE: u32 = 2;
-const PASS_PREFIX: u32 = 3;
-const PASS_EMIT: u32 = 4;
-const PASS_TONEMAP: u32 = 5;
-const PASS_SORT: u32 = 6;
-const PASS_NAMES: [&str; 7] = ["span", "range", "slice", "prefix", "emission", "tonemap", "sort"];
+const PASS_COARSE: u32 = 2;
+const PASS_REFINE: u32 = 3;
+const PASS_SLICE: u32 = 4;
+const PASS_PREFIX: u32 = 5;
+const PASS_EMIT: u32 = 6;
+const PASS_TONEMAP: u32 = 7;
+const PASS_SORT: u32 = 8;
+const PASS_NAMES: [&str; 9] = ["span", "range", "coarse", "refine", "slice", "prefix", "emission", "tonemap", "sort"];
 
 /// GPU timestamps around each volume pass: a measurement instrument, absent
 /// unless `enable_profile` is called (and then only on a device that has
@@ -253,6 +255,9 @@ struct BinTargets {
 struct VolumePipelines {
     abs_point: RenderPipeline,
     abs_quad: RenderPipeline,
+    coarse_point: RenderPipeline,
+    coarse_quad: RenderPipeline,
+    refine_pipe: RenderPipeline,
     point: RenderPipeline,
     quad: RenderPipeline,
     bins_layout: BindGroupLayout,
@@ -650,6 +655,9 @@ impl SplatPipelines {
                 });
                 VolumePipelines {
                     abs_point: make("volume_abs_point", &slice_pipeline_layout, "vs_abs", "fs_abs", PointList, &front_targets),
+                    coarse_point: make("volume_coarse_point", &slice_pipeline_layout, "vs_abs", "fs_abs_coarse", PointList, &front_targets),
+                    coarse_quad: make("volume_coarse_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs_coarse", TriangleStrip, &front_targets),
+                    refine_pipe: make("volume_refine", &front_pipeline_layout, "vs_tonemap", "fs_refine", TriangleList, &front_targets),
                     abs_quad: make("volume_abs_quad", &slice_pipeline_layout, "vs_abs_quad", "fs_abs", TriangleStrip, &front_targets),
                     a0_quad: make("volume_a0_quad", &front_pipeline_layout, "vs_abs_quad", "fs_front", TriangleStrip, &front_targets),
                     quad: make("volume_quad", resolve_layout, "vs_emit_quad", "fs_splat_volume", TriangleStrip, &emit_targets),
@@ -1050,10 +1058,12 @@ impl SplatRenderer {
             encoder.clear_buffer(&m.slices, 0, None);
             encoder.clear_buffer(&m.ranges, 0, None);
             self.sort_points(device, encoder, point_count, width * n, height * n);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, true);
-            self.fullscreen_storage_pass(encoder, true);
-            self.storage_pass(encoder, 0..point_count, use_point_primitives, false);
-            self.fullscreen_storage_pass(encoder, false);
+            self.storage_pass(encoder, 0..point_count, use_point_primitives, PASS_SPAN);
+            self.fullscreen_storage_pass(encoder, PASS_RANGE);
+            self.storage_pass(encoder, 0..point_count, use_point_primitives, PASS_COARSE);
+            self.fullscreen_storage_pass(encoder, PASS_REFINE);
+            self.storage_pass(encoder, 0..point_count, use_point_primitives, PASS_SLICE);
+            self.fullscreen_storage_pass(encoder, PASS_PREFIX);
             self.draw_splats(encoder, 0..point_count, use_point_primitives, true, true);
         } else {
             self.splat_pass(encoder, 0..point_count, use_point_primitives);
@@ -1530,7 +1540,7 @@ impl SplatRenderer {
             })
         };
         let slices = buffer("volume_slices", pixels * BINS as u64 * 4);
-        let ranges = buffer("volume_ranges", pixels * 16);
+        let ranges = buffer("volume_ranges", pixels * 8);
         let front_target = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("volume_front_target"),
@@ -1615,23 +1625,29 @@ impl SplatRenderer {
         }
     }
 
-    /// The two passes that only write storage: A0 (each pixel's depth span) and
-    /// A (absorbance into slices of it). The spans must be complete before the
-    /// slices are filled, which two separate passes guarantee.
+    /// The three passes over the points that only write storage: the depth span
+    /// of each pixel, then absorbance into 32 uniform slices of it (coarse), then
+    /// into slices of the refined span (fine). Each needs the one before it
+    /// complete, which separate passes guarantee.
     fn storage_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         points: std::ops::Range<u32>,
         use_point_primitives: bool,
-        spans: bool,
+        stage: u32,
     ) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
         let m = self.bins.as_ref().expect("ensured above");
         if points.is_empty() {
             return;
         }
+        let label = match stage {
+            PASS_SPAN => "volume_span_pass",
+            PASS_COARSE => "volume_coarse_pass",
+            _ => "volume_slice_pass",
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(if spans { "volume_span_pass" } else { "volume_slice_pass" }),
+            label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &m.front_target,
                 resolve_target: None,
@@ -1642,29 +1658,35 @@ impl SplatRenderer {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: self.stamp(if spans { PASS_SPAN } else { PASS_SLICE }),
+            timestamp_writes: self.stamp(stage),
             occlusion_query_set: None,
             multiview_mask: None,
         });
         pass.set_bind_group(0, self.volume_points_group(), &[]);
-        pass.set_bind_group(1, if spans { &m.bind_group } else { &m.bind_group_slice }, &[]);
+        pass.set_bind_group(1, if stage == PASS_SPAN { &m.bind_group } else { &m.bind_group_slice }, &[]);
+        let (point, quad) = match stage {
+            PASS_SPAN => (&vp.a0_point, &vp.a0_quad),
+            PASS_COARSE => (&vp.coarse_point, &vp.coarse_quad),
+            _ => (&vp.abs_point, &vp.abs_quad),
+        };
         if use_point_primitives {
-            pass.set_pipeline(if spans { &vp.a0_point } else { &vp.abs_point });
+            pass.set_pipeline(point);
             pass.draw(points, 0..1);
         } else {
-            pass.set_pipeline(if spans { &vp.a0_quad } else { &vp.abs_quad });
+            pass.set_pipeline(quad);
             pass.draw(0..4, points);
         }
     }
 
-    /// The two per-pixel housekeeping passes: `range` rewrites the depth spans
-    /// into the form the later passes read; `prefix` turns the slices into
-    /// running totals. A fullscreen triangle each, over the one-byte target.
-    fn fullscreen_storage_pass(&self, encoder: &mut wgpu::CommandEncoder, range: bool) {
+    /// The per-pixel housekeeping passes: `range` rewrites the depth spans into
+    /// the form the later passes read; `refine` narrows each to where its mass
+    /// is and clears the coarse slices; `prefix` turns the slices into running
+    /// totals. A fullscreen triangle each, over the one-byte target.
+    fn fullscreen_storage_pass(&self, encoder: &mut wgpu::CommandEncoder, stage: u32) {
         let vp = self.volume_pipelines.as_ref().expect("volume is active");
         let m = self.bins.as_ref().expect("ensured above");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(if range { "volume_range_pass" } else { "volume_prefix_pass" }),
+            label: Some("volume_housekeeping_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &m.front_target,
                 resolve_target: None,
@@ -1675,13 +1697,18 @@ impl SplatRenderer {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: self.stamp(if range { PASS_RANGE } else { PASS_PREFIX }),
+            timestamp_writes: self.stamp(stage),
             occlusion_query_set: None,
             multiview_mask: None,
         });
         pass.set_bind_group(0, &self.accum_bind_group, &[]);
-        pass.set_bind_group(1, if range { &m.bind_group } else { &m.bind_group_slice }, &[]);
-        pass.set_pipeline(if range { &vp.range_pipe } else { &vp.prefix_pipe });
+        let (pipeline, group) = match stage {
+            PASS_RANGE => (&vp.range_pipe, &m.bind_group),
+            PASS_REFINE => (&vp.refine_pipe, &m.bind_group),
+            _ => (&vp.prefix_pipe, &m.bind_group_slice),
+        };
+        pass.set_bind_group(1, group, &[]);
+        pass.set_pipeline(pipeline);
         pass.draw(0..3, 0..1);
     }
 

@@ -113,12 +113,10 @@ struct VolumeParams {
     /// absorbance brings with it (`volume::SOURCE`, scaled like exposure is by
     /// samples and height). See `fs_splat_volume`.
     source: f32,
-    /// The least deposit, in optical depth, a fragment needs to extend its pixel's
-    /// depth span (`fs_front`).
-    span_min: f32,
     /// Volume mode's footprint cap as a share of the camera's `max_point_pixels`
     /// (`volume::MAX_POINT_PIXELS`).
     cap_scale: f32,
+    pad0: f32,
     pad1: f32,
     pad2: f32,
 }
@@ -575,68 +573,46 @@ const FIXED: f32 = 1048576.0;
 @group(1) @binding(1) var<storage, read_write> ranges: array<atomic<u32>>;
 
 // The spans as the slice and emission passes read them: read-only, as floats
-// (the ln of the nearest depth and BINS over the log span in `.xy`), one load. Same
+// (the ln of the nearest depth and BINS over the log span), one load. Same
 // group and binding as `ranges` above, in layouts that bind it read-only; no
 // entry point uses both.
-@group(1) @binding(1) var<storage, read> ranges_ro: array<vec4<f32>>;
+@group(1) @binding(1) var<storage, read> ranges_ro: array<vec2<f32>>;
 
 fn pixel_index(px: vec2<i32>) -> u32 {
     let w = u32(round(camera.screen_height * camera.aspect_ratio));
     return u32(px.y) * w + u32(px.x);
 }
 
-// Four words a pixel: the farthest depth's bits and the complement of the
-// nearest's for the fragments that count (`span_min`), then the same two for every
-// fragment, which only matter to a pixel where none counts.
+// Two words a pixel: the farthest depth's bits, and the *complement* of the
+// nearest's, so that both are atomicMax and a cleared buffer means "nothing yet".
 @fragment
 fn fs_front(in: AbsOutput) {
     if is_helper(in.clip_position, in.pixel_pos) { return; }
-    let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 4u;
+    let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 2u;
     let bits = bitcast<u32>(in.depth);
     // Read first: most fragments are neither the nearest nor the farthest, and
     // a plain load does not serialise like an atomic does.
-    if in.abs_weight * kernel_at(in.offset) >= volume.span_min {
-        if bits > atomicLoad(&ranges[base + 1u]) {
-            atomicMax(&ranges[base + 1u], bits);
-        }
-        if ~bits > atomicLoad(&ranges[base]) {
-            atomicMax(&ranges[base], ~bits);
-        }
-    } else {
-        if bits > atomicLoad(&ranges[base + 3u]) {
-            atomicMax(&ranges[base + 3u], bits);
-        }
-        if ~bits > atomicLoad(&ranges[base + 2u]) {
-            atomicMax(&ranges[base + 2u], ~bits);
-        }
+    if bits > atomicLoad(&ranges[base + 1u]) {
+        atomicMax(&ranges[base + 1u], bits);
+    }
+    if ~bits > atomicLoad(&ranges[base]) {
+        atomicMax(&ranges[base], ~bits);
     }
 }
 
-// Between the span pass and the slice pass, `fs_range` rewrites each pixel's span
-// as two floats: the log of its nearest depth and BINS over the log span (a
+// Between the span pass and the slice passes, `fs_range` rewrites each pixel's
+// span as two floats: the log of its nearest depth and BINS over the log span (a
 // vanishing scale when the span is a single depth, so that a zero word can mean
-// "no fragment here" to `fs_prefix`). Everything after reads those, so no
-// fragment takes a log of anything but its own depth.
-//
-// A fragment with a negligible deposit does not extend the span, because a span
-// stretched by a weightless fragment (the fringe of a big point's kernel, in
-// front of a thick sheet) cannot resolve the sheet in its 32 slices and the
-// sheet's front goes dark. Such fragments are clamped into the span's end slices
-// instead, at an error of their own negligible deposit. A pixel where *no*
-// fragment counts takes the span of all of them.
+// "no fragment here" to the passes after it). Everything after reads those, so
+// no fragment takes a log of anything but its own depth.
 @fragment
 fn fs_range(in: TonemapOutput) {
-    let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 4u;
-    var far_bits = atomicLoad(&ranges[base + 1u]);
-    var near_bits = atomicLoad(&ranges[base]);
+    let base = pixel_index(vec2<i32>(in.clip_position.xy)) * 2u;
+    let far_bits = atomicLoad(&ranges[base + 1u]);
     if far_bits == 0u {
-        far_bits = atomicLoad(&ranges[base + 3u]);
-        near_bits = atomicLoad(&ranges[base + 2u]);
-        if far_bits == 0u {
-            return;
-        }
+        return;
     }
-    let ln_near = log(bitcast<f32>(~near_bits));
+    let ln_near = log(bitcast<f32>(~atomicLoad(&ranges[base])));
     let span = log(bitcast<f32>(far_bits)) - ln_near;
     var scale = 1.0e-30;
     if span > 1.0e-6 {
@@ -666,22 +642,100 @@ struct BinPos {
 
 /// Which slice of its pixel's span a depth falls in, and how far through it.
 fn bin_of(depth: f32, pixel: u32) -> BinPos {
-    let ln_near = bitcast<f32>(atomicLoad(&ranges[pixel * 4u]));
-    let scale = bitcast<f32>(atomicLoad(&ranges[pixel * 4u + 1u]));
+    let ln_near = bitcast<f32>(atomicLoad(&ranges[pixel * 2u]));
+    let scale = bitcast<f32>(atomicLoad(&ranges[pixel * 2u + 1u]));
     let u = slice_coord(depth, ln_near, scale);
     let bin = u32(u);
     return BinPos(bin, u - f32(bin));
 }
 
-// Pass A: absorbance into slices. No colour output: the host binds a one-byte
-// target nothing is written to, because a pass needs one.
+// The same slices as 16-byte vectors for `fs_prefix`: it is the one pass that
+// touches all BINS words of a pixel, and as 32 atomic loads and 32 atomic stores
+// it was the slowest thing in a frame that covered the screen. Declared at the
+// same binding as `slices` (no entry point uses both), non-atomic, since no
+// pass overlaps it.
+@group(1) @binding(0) var<storage, read_write> slices_v: array<vec4<u32>>;
+
+// The slice passes. No colour output: the host binds a one-byte target nothing is
+// written to, because a pass needs one.
+//
+// There are two, because a pixel's span is set by its nearest and farthest
+// fragments and those are rarely where its mass is. A thick sheet with a stray
+// fragment in front of it and another behind falls into one slice, is read as
+// uniform, and its front goes dark (this is what the black squares were).
+// `fs_abs_coarse` bins every fragment into 32 uniform slices of that span;
+// `fs_refine` reads where the mass is, replaces the span with the one that holds
+// the middle 98% of it, and clears the slices; `fs_abs` then bins everything
+// again into the refined span, strays clamped into the end slices at an error of
+// their own (small) mass.
+@fragment
+fn fs_abs_coarse(in: AbsOutput) {
+    if is_helper(in.clip_position, in.pixel_pos) { return; }
+    let a = in.abs_weight * kernel_at(in.offset);
+    let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
+    let r = ranges_ro[pixel];
+    let u = clamp((log(in.depth) - r.x) * r.y * f32(COARSE) / f32(BINS), 0.0, f32(COARSE) - 1.0e-3);
+    atomicAdd(&slices[pixel * BINS + u32(u)], u32(a * FIXED + 0.5));
+}
+
+// The share of a pixel's absorbance left out of each end of its refined span.
+// Slices of the coarse pass. 8 was no faster (the cost is the atomics, not the
+// sectors) and found the mass less well.
+const COARSE: u32 = 32u;
+
+const REFINE_TAIL: f32 = 0.01;
+
+// The coarse slices and the spans as vectors, non-atomic: nothing else touches
+// them during this pass.
+@group(1) @binding(1) var<storage, read_write> ranges_rw: array<vec2<f32>>;
+
+@fragment
+fn fs_refine(in: TonemapOutput) {
+    let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
+    let r = ranges_rw[pixel];
+    if r.y == 0.0 {
+        return;
+    }
+    let base = pixel * (BINS / 4u);
+    var total = 0.0;
+    for (var i = 0u; i < COARSE / 4u; i += 1u) {
+        let m = vec4<f32>(slices_v[base + i]);
+        total += m.x + m.y + m.z + m.w;
+    }
+    let lo_mass = total * REFINE_TAIL;
+    let hi_mass = total * (1.0 - REFINE_TAIL);
+    var lo = COARSE;
+    var hi = COARSE - 1u;
+    var cum = 0.0;
+    for (var i = 0u; i < COARSE / 4u; i += 1u) {
+        let m = vec4<f32>(slices_v[base + i]);
+        for (var k = 0u; k < 4u; k += 1u) {
+            cum += m[k];
+            let bin = i * 4u + k;
+            if lo == COARSE && cum >= lo_mass {
+                lo = bin;
+            }
+            if cum >= hi_mass && hi == COARSE - 1u && bin < COARSE - 1u && lo != COARSE {
+                hi = bin;
+            }
+        }
+        slices_v[base + i] = vec4<u32>(0u);
+    }
+    if total <= 0.0 || lo == COARSE {
+        return;
+    }
+    // The span now runs from the start of coarse slice `lo` to the end of `hi`.
+    let width = f32(BINS) / (r.y * f32(COARSE));
+    let near = r.x + f32(lo) * width;
+    let span = f32(hi + 1u - lo) * width;
+    ranges_rw[pixel] = vec2<f32>(near, f32(BINS) / span);
+}
+
 @fragment
 fn fs_abs(in: AbsOutput) {
     if is_helper(in.clip_position, in.pixel_pos) { return; }
     let a = in.abs_weight * kernel_at(in.offset);
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
-    // The spans are final by now, and read through the read-only declaration
-    // below (the slice pass binds them that way).
     let r = ranges_ro[pixel];
     let u = slice_coord(in.depth, r.x, r.y);
     atomicAdd(&slices[pixel * BINS + u32(u)], u32(a * FIXED + 0.5));
@@ -691,12 +745,6 @@ fn fs_abs(in: AbsOutput) {
 // (the words change meaning here: from fixed-point masses to f32 cumulative
 // absorbance), so that pass B and the tonemap read one or two words instead of
 // walking the slices: a fragment used to pay half the slices in loads.
-// The same slices as 16-byte vectors for `fs_prefix`: it is the one pass that
-// touches all BINS words of a pixel, and as 32 atomic loads and 32 atomic stores
-// it was the slowest thing in a frame that covered the screen. Declared at the
-// same binding as `slices` (no entry point uses both), non-atomic, since no
-// pass overlaps it.
-@group(1) @binding(0) var<storage, read_write> slices_v: array<vec4<u32>>;
 
 @fragment
 fn fs_prefix(in: TonemapOutput) {
