@@ -13,9 +13,12 @@ use wgpu::{BindGroup, BindGroupLayout, Buffer, ComputePipeline, Device};
 /// atomics serialise), 64x64 and 128x128 are within noise of each other and of
 /// the bands, and the coarser grid is the cheaper sort.
 const TILE_PX: f32 = 128.0;
-/// The shader's shared arrays hold this many buckets, the last being "off
-/// screen". Keep in step with `MAX_BUCKETS` in bucket.wgsl.
+/// The most buckets across or down. The shader's shared arrays hold two kinds of
+/// point for each bucket and one off-screen class: `MAX_CLASSES` in bucket.wgsl.
 const MAX_GRID: u32 = 32;
+const MAX_CLASSES: u32 = 2 * MAX_GRID * MAX_GRID + 1;
+/// Words of `counts` before the per-class ones: `CLASS0` in bucket.wgsl.
+const CLASS0: u32 = MAX_GRID * MAX_GRID + 1;
 /// Points a workgroup handles: `CHUNK` in bucket.wgsl.
 const CHUNK: u32 = 2048;
 
@@ -25,6 +28,8 @@ pub struct BucketPipelines {
     layout: BindGroupLayout,
     histogram: ComputePipeline,
     scan: ComputePipeline,
+    classify: ComputePipeline,
+    offsets: ComputePipeline,
     scatter: ComputePipeline,
 }
 
@@ -68,7 +73,14 @@ impl BucketPipelines {
                 cache: None,
             })
         };
-        Self { layout, histogram: make("histogram"), scan: make("scan"), scatter: make("scatter") }
+        Self {
+            layout,
+            histogram: make("histogram"),
+            scan: make("scan"),
+            classify: make("classify_histogram"),
+            offsets: make("offsets"),
+            scatter: make("scatter"),
+        }
     }
 }
 
@@ -112,7 +124,7 @@ impl BucketSorter {
         });
         let counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bucket_counts"),
-            size: (MAX_GRID * MAX_GRID + 1) as u64 * 4,
+            size: (CLASS0 + MAX_CLASSES) as u64 * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -237,6 +249,10 @@ impl BucketSorter {
         pass.dispatch_workgroups(gx, gy, 1);
         pass.set_pipeline(&pipelines.scan);
         pass.dispatch_workgroups(1, 1, 1);
+        pass.set_pipeline(&pipelines.classify);
+        pass.dispatch_workgroups(gx, gy, 1);
+        pass.set_pipeline(&pipelines.offsets);
+        pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(&pipelines.scatter);
         pass.dispatch_workgroups(gx, gy, 1);
     }
@@ -256,9 +272,11 @@ mod tests {
             rest[..rest.find("u;").unwrap()].trim().parse().unwrap()
         };
         assert_eq!(grab("const CHUNK: u32 ="), CHUNK);
-        assert_eq!(grab("const MAX_BUCKETS: u32 ="), MAX_GRID * MAX_GRID + 1);
+        assert_eq!(grab("const MAX_CLASSES: u32 ="), MAX_CLASSES);
+        assert_eq!(grab("const CLASS0: u32 ="), CLASS0);
         // The shared arrays are declared with the same length.
-        assert!(wgsl.contains(&format!("array<atomic<u32>, {}>", MAX_GRID * MAX_GRID + 1)));
-        assert!(wgsl.contains(&format!("array<u32, {}>", MAX_GRID * MAX_GRID + 1)));
+        assert!(wgsl.contains(&format!("array<atomic<u32>, {}>", MAX_CLASSES)));
+        assert!(wgsl.contains(&format!("array<u32, {}>", MAX_CLASSES)));
+        assert!(wgsl.contains(&format!("array<f32, {}>", MAX_GRID * MAX_GRID + 1)));
     }
 }

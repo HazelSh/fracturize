@@ -104,7 +104,7 @@ pub const COVERAGE_K: f32 = 3.0;
 
 /// The largest footprint radius, in output pixels. A cap and not a target: it is
 /// only reached when almost none of the sample is on screen.
-pub const MAX_RADIUS: f32 = 12.0;
+pub const MAX_RADIUS: f32 = 8.0;
 
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())

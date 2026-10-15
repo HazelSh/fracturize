@@ -526,6 +526,119 @@ is unwelcome. What remains in volume mode is the sampling noise of exact transpo
 in a pixel holding a few points, as before: far from the scene (the 4x zoom-out
 view, 4M points) volume is 2.4x splat (0.112 against 0.047).
 
+## Slice 1f findings
+
+Hazel tried 1e. Two complaints, both caused by the 1px clamp: the scene's point
+size had been doing something useful (it kept coverage when she zoomed in, and
+raising it recovered brightness), and the picture was very noisy. The frame she
+set for 1f: the exact reference and splat are not the truth, the attractor and its
+invariant measure are; our renderers are attempts to show it; a point has no size,
+and a footprint is a device for estimating a continuous measure from a finite
+sample. This slice follows that. Where it departs from earlier rules is said in
+each place.
+
+**1. The span, properly.** Three attempts, scored against the exact reference on a
+close-up `cyber_nest` (the 1e failure, quads back for the test), then on nautilus
+and censer. (a) *A threshold on the fragment's deposit* so that faint ones do not
+extend the span, with a fallback to the all-fragments span for a pixel where none
+counts: modest and brittle. On a 600k-point close-up, pixels at under half the
+exact brightness were 0.81% with no threshold, 0.66% at 0.01, 0.53% at 0.03; but
+0.03 took censer at opacity 2 from L1 0.011 to 0.233 (its typical deposit is
+0.03: the qualifying set was a handful of fragments and everything else was
+clamped into one end slice), and any absolute number has that edge. It also cannot
+help when the stray is not faint, only small beside a sheet of optical depth 20.
+(b) *Slices crowded toward both ends* (`slice_coord`: u = BINS·(½ + asin(2t−1)/π),
+end slices 13x narrower, middle 1.6x wider), no extra pass: censer opacity 10 L1
+0.056 → 0.036, nautilus 0.071 → 0.037, and the under-half count on the 100k
+close-up 946 → 400. It biases the total a few percent dark at high opacity
+(L ratio 0.977 at 10). (c) *Find where the mass is, then slice that.* A coarse
+pass bins every fragment into 32 uniform slices of the full span; `fs_refine`
+replaces the span with the one holding the middle 98% of the absorbance and clears
+the slices; the fine pass bins everything again, strays clamped into the end slices
+at an error of their own small mass. With (b) kept: under-half 0.81% → 0.25% on the
+600k close-up (100k points: 0.51% → 0.24%), nautilus opacity 2 L1 0.018 → 0.013,
+opacity 10 0.071 → 0.044, censer 0.011 → 0.010 and 0.056 → 0.034, L ratio 0.99-1.00.
+Tail 1% was chosen from 0.3% (finds less) and 3% (biases bright: 1.17 on nautilus
+opacity 10, 1.24 on the extreme close-up). Eight coarse slices instead of 32 were no
+faster (the cost is the atomics: 2.6 ms either way at 8M) and found the mass less
+well (under-half 287 → 495), so 32. Price: the coarse pass and the refine, +2.8 ms
+at 8M.
+
+**2. Footprints, and what they cost.** Quads are back, and the cost of footprint
+is a curve in r², not a cliff (volume ms, 8M points, 1280x720, with the sort and
+the lean vertex stages that did not exist when 1d measured 551 / 1372 ms):
+
+```
+forced radius (px, one for every point)     prim   1     1.5    2.5
+nautilus                                    15     42    60     127
+cyber_nest                                  20     49    79     165
+(4M points, 960x540)  radius 0.5 / 1 / 2 / 4:  nautilus 8 / 22 / 43 / 128,  cyber_nest 11 / 25 / 54 / 161
+```
+
+so the old 12px cap (and the scene's point size) is not affordable at 8M, and 1e's
+answer, 1px everywhere, was right about the cost and wrong about the picture.
+Reading the cost the other way: a quad costs by the fragments it shades, which is
+`N·πr²` per pass, so the budget that matters is fragments per *pixel*, and a
+footprint sized to the local sample density keeps that near a constant. That is the
+departure: **volume mode does not read the scene's `point_size`.** The sort counts
+the points in each 128px bucket and gives them radius `sqrt(k·area/(π·n))`, `k` = 3
+points per footprint (a random sample then leaves e^-k, 5%, of the frame
+uncovered); radii are smoothed over neighbouring buckets in the log (leaving empty
+buckets out, or a compact attractor in an empty frame is drawn in discs: that was
+the first version, nautilus at 8M went from 14 to 33 ms) and interpolated by
+position; each point is a 1px primitive or a quad by a hash of its index against the
+radius (below half a pixel always a primitive, above 0.8 always a quad), because a
+per-bucket choice drew a rectangle along every edge between the two (a primitive
+concentrates a point's absorbance in one pixel, a quad spreads it, and at moderate
+density that is a 15% difference in mean luminance, 114 against 132 on a `cyber_nest`
+close-up: not a bug, the transmittance of a lumpy field against a smooth one). Mass
+is conserved by construction (a quad's peak is `KERNEL_NORM / r²`): mean luminance
+over forced radii 0.7 / 1.5 / 3 was 132 / 136 / 135, so the brightness Hazel got
+back by raising the point size is now simply there. Cost: nautilus 8M 15.3 ms (sort
+3.7, span 2.0, coarse 2.6, refine 0.2, slice 2.6, prefix 0.2, emission 3.7, tonemap
+0.2), cyber_nest 22.5; splat is 2.8 and 4.1. 16M nautilus 28.8. The extreme close-up
+(`cyber_nest`, 6M points, point size 0.02, distance 0.3 / 0.1): 23 / 24 ms, against
+1372 in 1d and 9 in 1e. Hazel's point-size setting no longer does anything in volume
+mode, and I think that is right for the reason given, but it is hers to overrule: the
+one-line alternative is to read it as a minimum radius, capped by the same fragment
+budget.
+
+The reference still checks the transport on the sample, now with mixed footprints:
+nautilus opacity 1 / 2 / 10 L ratio 0.996 / 0.994 / 0.991, L1 0.007 / 0.013 / 0.044;
+censer 0.997 / 0.994 / 0.985, L1 0.006 / 0.010 / 0.034; a 600k-point close-up of
+`cyber_nest` (adaptive footprints) 0.985, L1 0.033, 1.6% of lit pixels under half the
+exact brightness; a 300k-point one closer in 0.998, L1 0.0035. (A reference frame has
+to keep every fragment, 60M at most, so it wants a few hundred thousand points
+where footprints are quads.)
+
+**3. Noise against footprint.** Seed-to-seed RMSE (two renders differing only in
+`--chaos-seed`, 16-bit, 960x540, 4M points, scenes at their authored distance), and
+mean luminance. Volume at a forced radius `r` output pixels, splat with the point
+size that gives the same radius at the focus (`2·r·d/H`):
+
+```
+                         radius:   1px (prim)   1      2      4     (volume: default, splat: authored)
+nautilus     volume noise          0.0115       0.0071 0.0033 0.0017   0.0115
+             volume luminance      0.410        0.412  0.415  0.419
+             splat noise           0.0091 (r=1) 0.0047 (2) 0.0024 (4)   0.0139
+censer       volume noise          0.0141       0.0106 0.0052 0.0026   0.0139
+             splat noise           0.0108 (r=1) 0.0057 (2) 0.0029 (4)   0.0145
+cyber_nest   volume noise          0.0418       0.0321 0.0172 0.0098   0.0362
+             splat noise           0.0278 (r=1) 0.0145 (2) 0.0072 (4)   0.0394
+```
+
+Volume at the default (single pixels in the dense parts) is about as noisy as splat
+at its authored size (0.0115 against 0.0139, 0.0139 against 0.0145, 0.036 against
+0.039), so the grit Hazel saw is not extra noise in the numbers; what is different is
+that occlusion makes a pixel show its few front samples, so the same noise reads as
+surface detail and contrast. Noise falls as 1/r while cost rises as r², so a
+footprint buys smoothness at a steep price: radius 2 is a third of the noise of
+radius 1 at 2x the cost (nautilus 4M: 8 / 22 / 43 / 128 ms for radius 0.5 / 1 / 2 /
+4), and per dollar the quads are worse than splat's (splat at radius 4 is 0.0024 for
+a few ms). At the same radius volume is about as noisy as splat (radius 1: nautilus 0.0071 against 0.0091, censer 0.0106 against 0.0108, cyber_nest 0.0321 against 0.0278). So the honest control is `k`
+(points per footprint: `FRACTURIZE_VOLUME_K`, 3 now), grit against smooth, with
+cost in proportion to it; I have not put it in the GUI.
+
 ## Open questions, decided by looking
 
 - **Background compositing.** Splat composites `mix(bg, colour, coverage)`, with
