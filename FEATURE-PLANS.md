@@ -1,14 +1,14 @@
 # Feature plans: exploration, multiview, render jobs, time
 
-Hazel's list of 2026-10-19, written up as plans. Thirteen and a half items, but
+Hazel's list of 2026-10-19, written up as plans. Fourteen and a half items (mute/solo added as 14), but
 they fall into four tracks, and inside each track the items share most of their
 machinery. Every plan below says what it reuses, what it needs that doesn't
 exist yet, and which questions are Hazel's to answer.
 
 | Track | Items | Shared machinery |
 |---|---|---|
-| A. The dice | 1, 3, 4, 5 | one generator spec that both rolling and mutating read, and one quality gate both pass through |
-| B. Many views | 2 (and 3's grid) | a pane layout; per-pane camera, picking and exposure |
+| A. One generator | 1, 3, 4, 5 | random batches and mutation unified: one settings profile, one generate-and-check loop, one list model |
+| B. Many views | 2, 14 (and 3's grid) | a pane layout whose panes are cameras on the scene or scenes of their own; a per-point "which map" view |
 | C. Render jobs | 6, 7 | a job spec that can be saved, read back out of a PNG, and queued |
 | D. Time | 8–13 | one track model (key, interpolate, extrapolate) aimed at `-S` paths |
 
@@ -16,190 +16,207 @@ The last section is the answer to "am I missing obvious combinations".
 
 ---
 
-## Track A — the dice
+## Track A — one generator: random batches and mutation, unified
 
-### 1. A standard randomize config, save/load, and mutation reads it too
+**The key idea (Hazel's):** mutation stops being a separate system. Random
+batches already have the richer half: a full settings profile
+(`RandomSettings`), a rejection loop with a try budget, rejections counted by
+reason, worker-thread rolling, a growing list with live thumbnails, and seeds
+that reproduce from the CLI. Mutation (`src/mutate.rs`) has 1–3 hardcoded
+operators, one strength, no settings, no check that the result renders, and
+nothing for symmetry, xaos or zoom. Unifying them means mutation inherits all
+of the first list and the second list goes away.
 
-**Where it stands.** `RandomSettings` (`src/randomize.rs`) is a preference,
-lives in `[random]` in prefs.toml, and is edited in the Random settings window.
-`--random-config FILE` already reads either a bare settings table or any file
-with a `[random]` table. Mutation (`src/mutate.rs`) knows nothing of it: it is
-1–3 hardcoded operators scaled by one strength, it never sees symmetry, xaos or
-zoom, and it runs **no quality gate** — a mutation that blows the attractor up
-or collapses it to a speck goes straight onto the screen. Undo makes that
-survivable for one `U` press. A 3×3 grid (item 3) would put four broken tiles
-in front of you every time, so this is a prerequisite rather than a nicety.
+### What exists, and gets reused rather than rewritten
 
-**Plan.**
+- `randomize::roll()` — `build_candidate` → `steer_dimension` →
+  `measure_candidate` (`trace::measure`) → lacunarity → `finish`, inside a
+  loop of `settings.attempts`, counting `Rejections` by reason and returning a
+  `RollFailure` with the last candidate when the budget runs out.
+- The part generators inside `build_candidate`: `random_transform`,
+  `roll_weight` (variation weights from the enabled list and its ranges),
+  `apply_symmetry`, the transform colour scheme, `palette::random`, the
+  background roll in `finish`.
+- `random_list.rs` — rolls on 2–3 worker threads, generations so results
+  rolled under old settings are dropped, "stops after eight empty rolls in a
+  row and offers Keep trying".
+- `gpu/thumbs.rs` / `ThumbCache` — live thumbnails keyed by `ThumbKey`, shared
+  by the scene browser and the Random flames list; converge once then a still;
+  only the hovered one flies its camera.
 
-1. **Named settings files.** `RandomSettings` serialises already. Add a folder
-   of named configs (`~/.config/fracturize/dice/<name>.toml`, plus anything
-   under `scenes/dice/` so configs can be shared in the repo). The Random
-   settings window gets a picker: load, save, save as, revert to defaults.
-   prefs.toml keeps the *current* settings and the name they came from, with a
-   `*` when they've been changed since loading, the same document convention
-   scenes use. `--random-config <name|file>`.
-2. **A `[mutate]` section in the same struct**, beside the roll settings, so
-   one file describes "what the dice may do": per-operator odds (translate,
-   rotate, scale, variation nudge, variation swap, colour, duplicate, delete,
-   and the new ones from 4 and 5), strength, and how many operators a
-   mutation applies. The variation list and its weight ranges are **shared**:
-   a mutation that adds a variation draws from the same enabled list and
-   ranges a roll would. That is the "reuse" — one list, not two that drift.
-3. **Mutation goes through the gate.** `roll()` already runs a candidate
-   through `trace::measure` and the dimension/lacunarity bounds and retries.
-   Pull that into `gate(&Scene, &RandomSettings) -> Result<Measured, Reject>`
-   and have `mutate` retry up to N times against it. Dimension *steering* is
-   probably wrong for mutation (it rescales every map, which is a bigger change
-   than the mutation itself), so mutation rejects instead of steering. That's a
-   decision below.
-4. **Seeded and reproducible**, like rolls: `mutate_seeded(scene, settings,
-   seed)`, and the operator log names the seed. `--mutations` gains
-   `--random-config`.
+### 1. One settings profile, save/load, read by both
 
-**Decisions for Hazel.**
-- Does mutation steer dimension back into bounds, or only reject? (Suggest:
-  reject. Steering hides what the mutation did.)
-- Should mutation strength stay its own preference (the Mutate window slider),
-  or move into the dice file? (Suggest: into the file, with the slider editing
-  it.)
-- Should a scene remember which dice config it was rolled from? It's
-  provenance, not scene data. Suggest the render record and the `random-<seed>`
-  name carry it, and the scene file doesn't.
+1. **`RandomSettings` grows a `[mutate]` half**, so one file says what the
+   dice may do, fresh or from a parent. Everything a roll can produce is a
+   *part* (maps, variations, symmetry, colour, palette, background, and from
+   4 and 5 xaos and zoom), and for each part the mutate half says how often a
+   mutation touches it and how: **nudge** (perturb what's there, scaled by
+   strength) or **re-roll** (replace that part using the very generator a
+   fresh roll uses, under the same ranges). Re-roll is where the sharing is
+   deepest: "give map 2 new variations" *is* `roll_weight` over the enabled
+   list, and "new palette" *is* `palette::random`. The existing `mutate.rs`
+   operators become the nudge half and move into `randomize.rs` (or a
+   `dice/` module holding both).
+2. **One loop.** `roll()` becomes `generate(settings, source, rng)` with
+   `source` either `Fresh` or `From(parent)`. Both run the same checks, count
+   the same `Rejections`, spend the same budget and fail with the same
+   `RollFailure`. `roll_seeded` / `mutate_seeded` are the two thin entries,
+   and both name their seed.
+3. **Named profiles.** `~/.config/fracturize/dice/<name>.toml` plus
+   `scenes/dice/` for shared ones; the Random settings window gets load / save /
+   save as / revert to defaults, with a `*` when changed since loading.
+   prefs.toml keeps the current profile and which one it came from.
+   `--random-config <name|file>` works for `--random` and `--mutations` alike.
+   Mutation strength moves into the profile; the Mutate window's slider edits
+   it.
 
-### 4. Xaos in mutation and random rolls
+**Rejecting without starving.** Reject, as Hazel says, so long as something is
+still found. What already does this for rolls: the try budget, the
+eight-empty-rolls stop with Keep trying, and the cheap dimension steer that
+removes the commonest rejection. Two things mutation needs on top:
 
-XAOS-PLAN.md §6 already sketches this. As settings:
+- **Judge a mutation against its parent, not against absolute bounds.** A
+  hand-authored scene can sit outside the profile's dimension or lacunarity
+  bounds, and every child of it would then fail forever. Rule: a bound the
+  parent meets, the child must meet; a bound the parent breaks, the child may
+  not break *further*. The shape check (bounded, real extent, fractal
+  occupancy) always applies.
+- **Back off strength when rejecting.** If a run of attempts is rejected, halve
+  the strength for the next ones (an adaptive step, like an MCMC proposal), and
+  report it ("strength backed off to 0.25 to find these"). A strong mutation of
+  a delicate scene then still returns something close, instead of nothing.
 
-- **Roll:** chance a flame has xaos at all; sparsity (fraction of edges cut);
-  no-self-loop chance; preset odds (cycle, blocks:N). **Strongly connected by
-  construction**: seed a random Hamiltonian cycle and only cut edges off it,
-  so no roll ever ships a closed class that drains everything.
-- **Gate:** reject if any map's *walk share* falls under a floor (a few %).
-  `xaos.rs` already computes walk shares. A map with no walk share is a map you
-  can see a gizmo for and nothing on screen.
-- **Mutate:** cut an edge, restore one, nudge a multiplier (in log space),
-  apply a preset, "linked map" (Apophysis's pre-final trick, which already
-  exists as `insert_linked_transform`).
-- Measure with Mauldin–Williams dimension when xaos is present, which `xaos.rs`
-  has. The dimension *steer* doesn't apply under xaos (no single factor
-  balances a spectral radius), so xaos rolls reject only, as the lock already
-  does.
+Dimension steering stays for fresh rolls. For mutations it's off by default —
+it rescales every map, which is a bigger change than the mutation — but it's a
+profile switch, since for a "keep d where it was" workflow it's exactly right.
 
-### 5. Infinite zoom in mutation and random rolls
+### 4. Xaos in the profile
 
-- **Roll:** chance of a zoom scene. If chosen, one map is rolled as the zoom
-  map: pure affine, contracting on all three axes, **zero translation** (CRAFT
-  and AGENTS both say so: the fixed point should be the origin), near-uniform
-  scale (an anisotropic zoom map shows a seam, `Renorm::defect` measures it)
-  and a rotation. Optionally emit a `path_loop = "zoom"` single-key path, so
-  the rolled flame opens already falling.
-- **Gate:** `Renorm::build` succeeds; the defect is under a threshold; with
-  xaos, every map that fires may be followed by the zoom map. That last one is
-  a load error today, so the generator must guarantee it rather than discover
-  it.
-- **Mutate:** operators that touch the zoom map must keep it eligible: no
-  variations, still contracting, still uniform within tolerance. Simplest rule:
-  the zoom map only gets rotation and uniform-scale nudges. Separate operators
-  for `radius`, `levels` and `edge_guard` aren't worth having — those are
-  framing, not form.
-- Thumbnails (item 3, the Random flames list) must frame a zoom scene inside
-  its band. Check that `offline::frame_setup` folds the distance the way
-  `--render` does before trusting a thumbnail.
+XAOS-PLAN.md §6, as profile settings:
 
-### 3. Clickable mutation grids, 3×3 and 5×5
+- **Fresh:** chance of xaos; sparsity; no-self-loop chance; preset odds.
+  **Strongly connected by construction**: seed a random Hamiltonian cycle,
+  cut only edges off it.
+- **From a parent:** nudge a multiplier (in log space), cut, restore, apply a
+  preset, linked map (`insert_linked_transform` exists).
+- **Check:** reject if any map's walk share is under a floor; dimension by
+  Mauldin–Williams (`xaos.rs` has both). No dimension steer under xaos.
 
-The Apophysis workflow, and the item AGENTS.md calls "the highest-value single
-addition left": mutate eight times, show them around the parent, click one, it
-becomes the parent, repeat.
+### 5. Infinite zoom in the profile
 
-**It's thumbnails, not multiview.** This looks like item 2 and isn't: item 2
-is one scene from several cameras (one chaos pass, N cheap render passes),
-while this is N *different* scenes, each with its own chaos game. The machinery
-already exists in `gpu/thumbs.rs`: a 256-walker ring, converge once and then
-it's a still, ~0.7 ms each on the GTX 1080. 24 tiles for 5×5 is ~17 ms to
-build, spread across frames by the existing 4 ms budget.
+- **Fresh:** chance of a zoom scene; one map rolled as the zoom map — pure
+  affine, contracting, zero translation, near-uniform, with a rotation; maybe a
+  one-key `path_loop = "zoom"` path so it opens falling.
+- **From a parent:** the zoom map only takes rotation and uniform-scale nudges,
+  never variations; other maps mutate freely.
+- **Check:** `Renorm::build` succeeds, `Renorm::defect` under a threshold, and
+  with xaos every map that fires may be followed by the zoom map (a load error
+  today, so generation must guarantee it).
+- Thumbnails must frame zoom scenes inside the band; check `frame_setup`.
 
-**Plan.**
+### 3. The mutation grid: 3×3 and 5×5, click to accept, recurse
 
-1. A **Mutate grid window** (or the Mutate window grows a grid). The centre
-   tile is the current scene; the ring around it holds 8 (3×3) or 24 (5×5)
-   gated mutations from item 1. Mutations are rolled on worker threads like
-   the Random flames list (`random_list.rs` is the model), so a tight gate
-   never costs a frame.
-2. **Click a tile → it becomes the scene**, as one history entry ("mutation
-   accepted: T2 rotate 21°, T1 +swirl 0.18"), and the ring re-rolls around it.
-   Ctrl+Z steps back to the previous parent *and* restores the grid it was
-   chosen from, so you can choose its sibling instead. That means the history
-   entry carries the seeds of the grid, which is cheap.
-3. **Hover flies the tile's camera**, as the browser does. Nothing else moves.
-4. **Strength per ring** in 5×5: inner ring at the set strength, outer ring at
-   double, so one grid shows near and far. Apophysis's "speed" slider is this.
-5. **Masks**: mutate only the selected transform; only colour; only
-   variations; only xaos. These are just dice settings with operators zeroed,
-   so they're presets of the item-1 config, not new code.
-6. **Lock framing**: every tile renders the *parent's* camera, so the
-   comparison is of form. A mutation that moves the attractor off-frame shows
-   as such. That's honest, and it's what the gate's framing check can catch.
-7. CLI twin already exists: `--mutations 8`. Add `--mutations 24`, layout 5×5,
-   centre tile = parent, matching the window. Agents and the GUI should see the
-   same sheet.
+The Random flames list *is* this feature with a different source: rows of
+gated generations with live thumbnails, rolled off-thread, click to open.
+So the grid is the same model (`random_list.rs`, generalised to take a
+`source`) shown in a different layout, and from item 2 that layout is the
+multiview pane grid.
 
-**Decisions for Hazel.** Separate window or inside Mutate? Does accepting a
-tile also adopt its colour, or keep the parent's? (Colour is an operator now,
-so mask settings answer it.)
+1. **Centre is the parent**, the ring is 8 (3×3) or 24 (5×5) generations
+   `From(parent)`. In 5×5 the inner ring uses the set strength and the outer
+   ring double, so one grid shows near and far.
+2. **Click a tile** → it becomes the scene, as one history entry naming its
+   operators and seed; the ring regenerates around it. Ctrl+Z restores the
+   previous parent *and its grid* (the entry carries the grid's seeds), so you
+   can pick a sibling instead.
+3. **Hover flies that tile's camera**; nothing else moves. Every tile uses the
+   parent's camera, so the comparison is of form.
+4. **Masks** are profiles: only the selected transform, only colour, only
+   variations, only xaos — the mutate half with other parts zeroed. With
+   mute/solo (item 14) a soloed set of maps is a natural mask.
+5. CLI twin: `--mutations 8|24` lays out 3×3 / 5×5 with the parent centred,
+   so an agent sees the sheet the window shows.
+6. **Where layers help.** A tile doesn't need to be a subscene (tiles have
+   their own cameras, which layers don't, and 5×5 is past `MAX_LAYERS` = 16).
+   But an *onion skin* does: the hovered child with the parent drawn as a dim
+   second layer behind it, in the main view, which is exactly a two-layer
+   composite. That shows *what moved* where side-by-side tiles only show
+   *what it looks like*.
 
 ---
 
 ## Track B — many views
 
-### 2. Multiview: +x, +y, −z beside the perspective view, while editing
+### 2. Multiview, and the pane grid it's built on
 
-Layouts: **2×2** (perspective + three axis views) and **1 + 3** (big
-perspective view, three axis views stacked on the right).
+Two jobs for one piece of machinery:
+- **better 3D perspectives while tweaking**: perspective + +x / +y / −z, as a
+  2×2 or one big view with three stacked on the right;
+- **the mutation grid**: 3×3 / 5×5 panes, each a different scene (item 3).
 
-**What makes it cheap.** The point buffer doesn't depend on the camera. N panes
-cost one chaos pass and N render passes. Fill cost scales with total pane
-area, not pane count, so four quarter-size panes cost about what one full view
-does (to be measured). The drawn-point budget, the overlay MSAA target and the
-gizmo pass all repeat per pane.
+**A pane has a rect and a source.** Two kinds of source:
 
-**What it needs.**
+- **a camera on the main scene.** The point buffer doesn't depend on the
+  camera, so these share one chaos pass and each costs a render pass;
+- **a scene of its own.** Its own small `PointCompute`, which is what
+  `ThumbCache` already builds (256 walkers, one-shot convergence, hover to
+  fly) — just at pane size rather than 96 px, so with a ring scaled to the
+  pane's area (`thumbnail_study` measured 8k points reading well at 96 px).
 
-1. **An orthographic camera.** `camera.rs` is perspective only
-   (`perspective_rh`). CAD axis views are orthographic for a reason: in a
-   perspective side view a translation along the view axis still moves things
-   on screen, and the whole point of the side view is that it doesn't. Add
-   `Projection::{Perspective(fov), Ortho(half_height)}` to `OrbitCamera`. Point
-   size and the `use_point_primitives` test then need an ortho branch
-   (projected size no longer depends on depth), and so does haze's auto band.
-2. **Panes as a layout** in `App`: a list of `{rect, camera, kind}`, rendering
-   each into a viewport rectangle of the same surface (`set_viewport` +
-   scissor). The axis panes take the main camera's focus, and an ortho height
-   that tracks the main camera's distance, so all four stay on the same part of
-   the attractor.
-3. **Per-pane picking.** `pick.rs` is pure screen-space projection, so it just
-   needs the pane's camera and rect. In an axis pane, translating the origin
-   dot moves it **in that plane exactly** — which is the editing win this
-   feature exists for. Rotation edges in an axis pane rotate about that axis.
-4. **Per-pane exposure.** Splat exposure is normalised by resolution; each
-   pane has its own. Volume mode is 5 passes, so offer volume in the main pane
-   only and splat in the others, or accept the cost.
-5. **Navigation**: orbit only in the perspective pane; axis panes pan and zoom
-   (scroll zooms the ortho height). Clicking an axis pane's title makes it the
-   big one in 1+3 — the corner axis cross already does "look down this axis".
+So multiview is the pane layout plus the first source, and the mutation grid is
+the same layout with the second. The browser and Random flames list keep their
+own rows; they and the grid share the thumbnail cache and its rules.
 
-**The trap: infinite zoom.** The wrap carries the point buffer with the *main*
-camera (`rewrap`). An axis pane at a fixed ortho height would see the attractor
-jump by one zoom period every wrap. Either axis panes follow the main camera's
-fold depth (scale their height by the same `A⁻¹`, which is exactly what keeps
-them stable), or multiview turns off under zoom. Suggest the first: it's one
-multiply.
+**What the camera-on-scene panes need.**
 
-**Decisions for Hazel.** Ortho for axis views (suggest yes)? Should axis panes
-be configurable (any axis, any sign) or fixed to +x / +y / −z? Does the layout
-persist per scene or as a preference? (Suggest: preference, like panel
-geometry.)
+1. **An orthographic camera** for the axis views — `camera.rs` is perspective
+   only. In an ortho side view, moving along the view axis doesn't move
+   anything on screen, which is the point. `Projection::{Perspective, Ortho}`,
+   with ortho branches in point sizing, `use_point_primitives` and haze's
+   auto band.
+2. **Per-pane picking**: `pick.rs` is screen-space projection, so it only needs
+   the pane's camera and rect. Dragging the origin dot in an axis pane moves it
+   in that plane exactly.
+3. **Per-pane exposure** (splat normalises by resolution). Volume mode is five
+   passes; probably the main pane only.
+4. **Navigation**: orbit in the perspective pane; pan and zoom in axis panes;
+   their focus and scale follow the main camera so all panes show the same
+   region.
+5. **Infinite zoom**: axis panes scale by the same `A⁻¹` as the main camera at
+   each wrap, or they'd jump a period every wrap.
+
+**Decisions for Hazel.** Axis panes fixed to +x / +y / −z, or each pickable?
+Layout as a preference (like panel geometry) or per scene?
+
+### 14. Transform mute/solo views
+
+**Not the same thing as enable/disable, and the UI has to say so.** The rail's
+eye (and alt+click solo) *enables and disables* a map: the map leaves the IFS
+and the attractor changes. Mute/solo is a *view*: the IFS is untouched and
+you see only the points certain maps placed — `--isolate`'s partition (a point
+belongs to the map that moved it last; the parts add up to the picture),
+generalised from one map to any set, and live.
+
+- **Mixer semantics**, which also match the audio mixer of 12.5: per map a
+  mute (M) and solo (S); any solo → show only soloed; else show all but muted.
+  Edge mode (`from>to`) carries over from `--isolate`.
+- **Mechanism.** `--isolate` drops points at write time, so a live change
+  would take the ring's ~13 s to show. Instead keep each point's last map in a
+  side buffer while mute/solo is in use (the way emphasis keeps its side
+  buffer), and let the vertex stage clip against a per-frame mask: changing the
+  mask is then instant. Point is 16 bytes with no room left in mix mode
+  (colour uses the spare 24 bits), hence the side buffer; allocate it only
+  while a mute or solo is set and let it fill in at the fill rate, as emphasis
+  does.
+- **Exposure stays normalised to every point**, as `--isolate` does, so a
+  soloed part is at the brightness it has in the full picture.
+- Builds on emphasis too: emphasis *brightens* the selected map's material;
+  solo *hides everything else*. Same sensitivity to "which map placed this".
+- Session state, not scene data, and not undoable — like orbiting. Possibly a
+  view-file key so a render can be made of a part (`--isolate` already is that
+  for one map).
+- Works with multiview (soloing applies to all panes) and as a mutation mask
+  (item 3).
 
 ---
 
@@ -295,10 +312,29 @@ routes exist precisely because angles don't interpolate. So the camera is a
 its cyclic form is the new default; extrapolation is shared with every other
 track.
 
-- **Default camera**: cyclic, sin/cos on the eye's x/y around a fixed look-at.
-  Note that's a different shot from today's turntable (a full yaw orbit at 0.18
-  rad/s): a sin/cos on x/y with a fixed focus sways and tilts rather than
-  circling. Decision below.
+- **Default camera**: cyclic, and **behaviourally identical to today's
+  turntable**. Today's default is `CameraPath::full_orbit`: the base framing
+  turned about world Y through the focus, one turn per `TAU / ORBIT_RATE`
+  (~35 s). Written as a cycle with `θ = ORBIT_RATE · t` and `d = eye₀ − focus`:
+
+  ```
+  eye.x = focus.x + d.x·cos θ + d.z·sin θ
+  eye.z = focus.z − d.x·sin θ + d.z·cos θ
+  eye.y = eye₀.y                       (constant)
+  orientation = R_y(θ) · orientation₀
+  ```
+
+  So yes: a sin/cos pair, plus the look direction. Two details. The plane is
+  **x/z**, because Y is up here, so a sin/cos on x/y would be a vertical loop.
+  And the look direction should come from **turning the base framing**
+  (`orientation₀.then_world(Turn::about(Y, θ))`, which is what `full_orbit`'s
+  keys already are) rather than from a look-at with world-up. The two agree
+  everywhere except straight up or down, where a look-at has no defined roll and
+  the turned framing is still exact; it also carries the framing's roll through
+  unchanged. Against the current four-key spline it's mathematically
+  identical (Catmull-Rom through evenly spaced yaw is exactly linear), so
+  renders may differ in the last bit of float, not visibly. The port's test is
+  `full_orbit` sampled against the cycle at many `t`, to a tolerance.
 - **Adding a view (Y, or V) switches the camera to keyframed**, the first key
   being where the cycle was at that moment, so nothing jumps.
 - **Porting**: the loader keeps reading `[[camera.path]]`, `path_loop`,
@@ -310,9 +346,8 @@ track.
   `toml_edit`), with a before/after `--info` diff and a render of every scene
   with a path, not a side effect of some other change.
 
-**Decisions for Hazel.** Default camera: keep the turntable (a yaw cycle) as
-the default cyclic shot, or the sin/cos sway? Do saved views (`views/*.toml`)
-become keys, or does only Y add keys?
+**Decision for Hazel.** Do saved views (`views/*.toml`) become keys, or does
+only Y add keys?
 
 ### 8. A timeline window, wide and low
 
@@ -380,12 +415,19 @@ interval — each walker's iterations spread over sub-frame times — the points
 are written by the attractor as it moves through the frame. That's flam3's
 temporal samples, for close to free.
 
-**Not animatable, by design**: anything discrete that changes the map set —
-adding or removing a transform, changing a symmetry group, the variation
-list's shape. To fade a part in or out, animate its **weight or an xaos
-multiplier** towards 0. That's smooth, because a multiplier only thins density
-until it reaches exactly zero. The colour-ring defect (adding a transform moves
-every colour) is another reason the map set stays fixed over an animation.
+**The map set is fixed over an animation; enable/disable is the track
+instead.** No adding or removing transforms on the timeline. A map that should
+appear or vanish exists throughout and has an `enabled` track (a step: on or
+off at a time). Enable is discontinuous in shape: the attractor of an IFS is
+the same set for any positive weights, so the shape changes only at the
+instant a map turns on or off. For a smooth entrance, pair the step with a
+**weight or xaos-multiplier** ramp: weight up from near zero after enabling,
+down to near zero before disabling. Density fades, and the step lands where
+there is almost nothing left to see. The track editor can offer that pair as
+one "fade in / fade out" action. Changing a symmetry group or the variation
+list's shape is likewise a step, never interpolated. Keeping the map set fixed
+also sidesteps the colour-ring defect (adding a transform moves every
+colour).
 
 **CLI, for agents** (who can't watch video):
 - `--t <seconds>` (generalising `--path-t`): any instant as a still.
@@ -402,8 +444,10 @@ Editing a keyed parameter while playing raises the question of auto-key
 
 ### 11. A timeline reference audio track
 
-- Decode with `symphonia` (pure Rust: wav, flac, mp3, ogg, aac-in-mp4), play
-  with `cpal`. Two new dependencies, neither with a C toolchain behind it.
+- **Input is `.wav`.** `hound` reads it, pure Rust and tiny. Other formats
+  can come later through `symphonia` or by converting with ffmpeg on import;
+  nothing downstream cares, since everything after the decoder is PCM. Play with
+  `cpal`.
 - **The audio clock is the master clock while it plays**: the frame time
   follows the audio position, never the other way round, or the picture
   drifts against the sound.
@@ -437,13 +481,18 @@ track maps that onto a target: range, curve, smoothing.
 - **Realtime reactive** (mic or loopback via `cpal`): not reproducible as it
   stands, so offer **record**, which writes the live envelopes as data tracks.
   The performance becomes keyframes, and a render can reproduce it.
-- **Muxing audio into video.** `video.rs` is a hand-rolled ISOBMFF muxer with
-  one video `trak`; audio is a second `trak`. Codec choice: **AAC** is what
-  every upload pipeline takes, and there's no good pure-Rust AAC encoder.
-  **Opus in MP4** is standard, small, and has a solid library (`libopus`
-  bindings), and YouTube and browsers take it, but some social platforms
-  don't. AVIF can't carry audio at all, so audio means `.mp4` (or a `.webm`
-  muxer). Decision below.
+- **Output is AAC in the `.mp4`.** There's no good pure-Rust AAC encoder, so
+  encode outside: **ffmpeg's built-in `aac` encoder as a subprocess** (it's
+  installed on the desktop; check the T490), fed the mixdown as PCM on stdin,
+  writing a raw ADTS stream that our muxer reads frame by frame. `video.rs`
+  gains a second `trak` (`mp4a` with an `esds` box) and keeps control of the
+  layout — `moov` first, which the upload pipelines care about. The ADTS
+  headers give frame boundaries and the AudioSpecificConfig, so the muxer needs
+  no AAC knowledge beyond that. FFI to `fdk-aac` is the alternative if a
+  subprocess turns out to be a problem, at the cost of a C dependency and its
+  licence. No ffmpeg on the machine means a render with audio refuses by name
+  rather than silently writing a silent video. AVIF can't carry audio, so an
+  audio render is `.mp4`.
 
 ### 12.5. Multi-track audio
 
@@ -499,7 +548,7 @@ track maps that onto a target: range, curve, smoothing.
 3. **Audio → infinite zoom rate.** A zoom descent whose *speed* follows the
    music (a rate modulator). The zoom is periodic and wraps, so it can surge
    forever without leaving f32. That's a combination few other tools can do.
-4. **Random rolls of animations.** The dice (1) gain a "roll tracks" section:
+4. **Random rolls of animations.** The generator profile (1) gains a "roll tracks" part:
    a cyclic track on one map's rotation, a palette rate, a camera cycle. Random
    flames that move.
 5. **Multiview while animating.** Axis panes show the structure track's effect
@@ -563,11 +612,14 @@ track maps that onto a target: range, curve, smoothing.
 
 ## Suggested order
 
-1. **Item 1 with the gate on mutation**, then **3**. Smallest step with the
-   most immediate payoff, and it fixes the existing `U` key on the way. 4 and 5
-   slot in afterwards as settings plus operators.
-2. **6 → 7.** Self-contained, and most of the plumbing (records, job params)
+1. **Item 1: unify mutation into the random generator** (one profile, one
+   generate-and-check loop, judged against the parent, strength backs off),
+   then **3** on the Random flames list's model. It fixes the existing `U` key
+   on the way. 4 and 5 slot in afterwards as parts of the profile.
+2. **14 (mute/solo)** is small and independent, and wanted by both 2 and 3.
+3. **6 → 7.** Self-contained, and most of the plumbing (records, job params)
    is there.
-3. **2**, after an orthographic camera.
-4. **9 → 8 → 10**, then audio (11 → 12 → 12.5), then 13. The track model
+4. **2**, after an orthographic camera; the mutation grid moves into its panes once
+   they exist.
+5. **9 → 8 → 10**, then audio (11 → 12 → 12.5), then 13. The track model
    should be settled before any timeline UI is drawn.
