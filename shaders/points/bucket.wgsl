@@ -101,19 +101,21 @@ struct Where {
     fu: f32,
     fv: f32,
     on: bool,
+    /// Distance along the view axis (clip.w), for the point's own size.
+    depth: f32,
 }
 
 fn where_is(pos: vec3<f32>) -> Where {
     let clip = camera.view_proj * vec4<f32>(pos, 1.0);
     if clip.w <= 0.0 || abs(pos.x) > 1.0e36 {
-        return Where(0.0, 0.0, false);
+        return Where(0.0, 0.0, false, 0.0);
     }
     let ndc = clip.xy / clip.w;
     let x = ndc.x * camera.subfrustum.x + camera.subfrustum.z;
     let y = ndc.y * camera.subfrustum.y + camera.subfrustum.w;
     let fu = x * 0.5 + 0.5;
     let fv = 0.5 - y * 0.5;
-    return Where(fu, fv, !(fu < -0.03 || fu > 1.03 || fv < -0.03 || fv > 1.03));
+    return Where(fu, fv, !(fu < -0.03 || fu > 1.03 || fv < -0.03 || fv > 1.03), clip.w);
 }
 
 fn bucket_at(w: Where) -> u32 {
@@ -163,7 +165,13 @@ fn class_of(i: u32, w: Where) -> u32 {
     if !w.on {
         return 2u * last;
     }
-    let r = radius_at(w.fu, w.fv);
+    // The point's own world size floors its radius, as in `point_radius` in
+    // splat.wgsl (keep them in step): near the camera it is the larger.
+    let natural = min(
+        0.5 * camera.projected_point_size * camera.screen_height / w.depth,
+        camera.max_point_pixels,
+    );
+    let r = max(radius_at(w.fu, w.fv), natural);
     let quad = hash01(i) < clamp((r - 0.5) / 0.3, 0.0, 1.0);
     return 2u * bucket_at(w) + select(0u, 1u, quad);
 }

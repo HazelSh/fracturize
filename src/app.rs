@@ -6486,7 +6486,7 @@ impl App {
     /// render-target pixels and before any clamp. One place, so the fast path
     /// above and the readout below cannot drift apart from each other or from
     /// `CameraUniforms::projected_point_size`.
-    fn projected_point_pixels(&self, screen_height: f32) -> f32 {
+    pub fn projected_point_pixels(&self, screen_height: f32) -> f32 {
         OrbitCamera::point_pixels(
             self.rendered_point_size(),
             self.camera.distance,

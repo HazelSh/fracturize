@@ -219,7 +219,17 @@ All GPU, three passes per frame:
        The fragments a pass shades come to about `k` a pixel whatever the zoom,
        which bounds the cost: close in on `cyber_nest` with the point size at 0.02
        is 23 ms offscreen where 1d took 1372 and 1e's 1px clamp took 9. The scene's
-       `point_size` is **not read** in volume mode. `FRACTURIZE_VOLUME_K` changes
+       `point_size` is the *smallest world size* a point is drawn at (slice 1g): a
+       point's radius is the larger of the density rule's and its own
+       (`0.5 · projected_point_size · H / depth`, capped at `max_point_pixels`),
+       so near points grow as 1/depth, as in splat, and a point's optical depth is
+       bounded by its own world thickness instead of piling `(ppu/depth)²` into
+       one pixel (the black specks). `class_of` in `bucket.wgsl` and
+       `point_radius` in `splat.wgsl` compute that radius and must agree; past the
+       cap the absorbance deposit is scaled by `(cap/size)²` so a mote stays
+       translucent; a fragment adds at most 32 optical depths to a slice
+       (`MAX_FRAGMENT_ABSORBANCE`) so the u32 slices cannot wrap.
+       `FRACTURIZE_VOLUME_K` changes
        `k` and `FRACTURIZE_VOLUME_RADIUS` forces one radius (in output pixels),
        for measuring; see the plan for what a bigger footprint costs and buys
        (noise falls as 1/r, brightness does not move, cost goes as r²).

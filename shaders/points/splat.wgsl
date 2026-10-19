@@ -425,6 +425,24 @@ fn footprint_at(x: f32, y: f32) -> f32 {
     return max(mix(top, bottom, fv), 1.0);
 }
 
+/// The radius, in render-target pixels, a point of the world's own size comes to
+/// at this depth, capped like the other renderers' (`max_point_pixels`). The
+/// same expression as `vs_splat`'s: near points grow as 1/depth.
+fn natural_radius(depth: f32) -> f32 {
+    return min(0.5 * camera.projected_point_size * camera.screen_height / depth, camera.max_point_pixels);
+}
+
+/// A point's footprint radius: what the bucket's density asks for (`footprint_at`,
+/// so that points are never fewer than `k` to a footprint), but never less than
+/// the point's own world size, which near the camera is the larger. Without that
+/// floor a point at a hundredth of the scene's size deposited its whole
+/// cross-section, `(ppu / depth)^2` of absorbance, into one or two pixels:
+/// thousands of optical depths, a fully opaque speck darker than what it hid.
+/// `class_of` in `bucket.wgsl` computes the same thing: keep them in step.
+fn point_radius(density_radius: f32, depth: f32) -> f32 {
+    return max(density_radius, natural_radius(depth));
+}
+
 /// The corner of the quad that vertex `vi` of six is (two triangles).
 fn quad_corner(vi: u32) -> u32 {
     var corners = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
@@ -441,7 +459,7 @@ fn place_quad(pos: vec3<f32>, corner_index: u32) -> Placed {
     let ndc = clip.xy / clip.w;
     let x = ndc.x * camera.subfrustum.x + camera.subfrustum.z;
     let y = ndc.y * camera.subfrustum.y + camera.subfrustum.w;
-    let radius = footprint_at(x, y);
+    let radius = point_radius(footprint_at(x, y), depth);
     let size_y = radius / camera.screen_height * 2.0 * camera.subfrustum.y;
     let size_x = (radius / camera.screen_height * 2.0 / camera.aspect_ratio) * camera.subfrustum.x;
     let offset = vec2<f32>(f32(corner_index & 1u) * 2.0 - 1.0, f32(corner_index >> 1u) * 2.0 - 1.0);
@@ -484,12 +502,34 @@ fn volume_deposit(depth: f32) -> f32 {
 /// to what a single pixel would have received from a smaller one: the mass, and
 /// with it optical depth and brightness, does not depend on how big the points
 /// are drawn.
+///
+/// Where the point's own size would be past the cap, the cross-section it no
+/// longer covers is not deposited (scaled by (cap / size)^2): a mote the camera
+/// brushes past stays translucent instead of going solid, as in splat's size
+/// cap. Emission's own weight is not thinned by this.
 fn point_deposit(pos: vec3<f32>, pl: Placed) -> f32 {
     let guard = guard_weight(pos);
+    let uncapped = 0.5 * camera.projected_point_size * camera.screen_height / pl.depth;
+    let over = camera.max_point_pixels / max(uncapped, camera.max_point_pixels);
+    let a = volume_deposit(pl.depth) * guard * over * over;
     if pl.pixel_pos.x < -1.0e29 {
-        return volume_deposit(pl.depth) * guard * KERNEL_NORM / (pl.radius * pl.radius);
+        return a * KERNEL_NORM / (pl.radius * pl.radius);
     }
-    return volume_deposit(pl.depth) * guard;
+    return a;
+}
+
+/// The most absorbance one fragment may add to a slice: 32 optical depths, whose
+/// transmittance (1e-14) is already nothing, so clamping loses no picture. What
+/// it buys is that the u32 slices cannot wrap: they hold 4096 units, and a
+/// point deposits `(ppu / depth)^2` of them, which for a point close to the eye
+/// was in the thousands (cyber_nest at a hundredth of its distance: the slices
+/// wrapped and the field's p99 read 18614 where it is 69230).
+const MAX_FRAGMENT_ABSORBANCE: f32 = 32.0;
+
+/// A fragment's absorbance as the slices see it. Every pass reads it through
+/// here so that what a fragment deposits and what it subtracts as its own agree.
+fn fragment_absorbance(abs_weight: f32, kernel: f32) -> f32 {
+    return min(abs_weight * kernel, MAX_FRAGMENT_ABSORBANCE);
 }
 
 struct AbsOutput {
@@ -678,7 +718,7 @@ fn bin_of(depth: f32, pixel: u32) -> BinPos {
 @fragment
 fn fs_abs_coarse(in: AbsOutput) {
     if is_helper(in.clip_position, in.pixel_pos) { return; }
-    let a = in.abs_weight * kernel_at(in.offset);
+    let a = fragment_absorbance(in.abs_weight, kernel_at(in.offset));
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
     let r = ranges_ro[pixel];
     let u = clamp((log(in.depth) - r.x) * r.y * f32(COARSE) / f32(BINS), 0.0, f32(COARSE) - 1.0e-3);
@@ -741,7 +781,7 @@ fn fs_refine(in: TonemapOutput) {
 @fragment
 fn fs_abs(in: AbsOutput) {
     if is_helper(in.clip_position, in.pixel_pos) { return; }
-    let a = in.abs_weight * kernel_at(in.offset);
+    let a = fragment_absorbance(in.abs_weight, kernel_at(in.offset));
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
     let r = ranges_ro[pixel];
     let u = slice_coord(in.depth, r.x, r.y);
@@ -860,7 +900,7 @@ fn emission_weight(in: EmitOutput, falloff: f32) -> f32 {
 fn fs_splat_volume(in: EmitOutput) -> @location(0) vec4<f32> {
     if is_helper(in.clip_position, in.pixel_pos) { return vec4<f32>(0.0); }
     let falloff = kernel_at(in.offset);
-    let t = bins_transmittance_ro(vec2<i32>(in.clip_position.xy), in.depth, in.abs_weight * falloff);
+    let t = bins_transmittance_ro(vec2<i32>(in.clip_position.xy), in.depth, fragment_absorbance(in.abs_weight, falloff));
     let w = emission_weight(in, falloff) * t;
     return vec4<f32>(in.color * w, w);
 }

@@ -383,22 +383,51 @@ fn draw_point_size(ui: &mut egui::Ui, app: &mut App) {
             .logarithmic(true)
             .text("point size"),
     );
-    let (px, saturated) = app.point_pixels_at_focus(app.viewport_height());
+    let volume = app.render_mode == RenderMode::Volume;
+    let (px, saturated) = if volume {
+        // The volume renderer has no 1px fast path to report: a point is drawn
+        // at its own size or at the size its neighbourhood needs, whichever is
+        // larger, so the readout is the plain projected size, capped.
+        let raw = app.projected_point_pixels(app.viewport_height());
+        let max = crate::gpu::buffers::MAX_POINT_PIXELS;
+        (raw.min(max), raw > max)
+    } else {
+        app.point_pixels_at_focus(app.viewport_height())
+    };
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        format!(
-            "Size of each point. Smaller is finer and dustier ([ / ]).\n\n\
-             The number beside it is roughly how many pixels that comes to at the \
-             current framing.{}",
-            if saturated {
-                "\n\nAt this size the slider has no visible effect: points are always \
-                 drawn at least 1 pixel and at most 12 pixels wide. Try changing the \
-                 point count instead."
-            } else {
-                ""
-            }
-        ),
+        if volume {
+            format!(
+                "The smallest size a point is drawn at. Bigger is softer, and \
+                 points close to the camera grow to it, as in the other renderers \
+                 ([ / ]).\n\n\
+                 In this renderer a point is also drawn larger wherever the picture \
+                 is thin, so that no point is less than a few to a footprint (see \
+                 smoothness); this sets the floor under that.\n\n\
+                 The number beside it is roughly how many pixels that comes to at the \
+                 current framing.{}",
+                if saturated {
+                    "\n\nAt this size points are drawn at the 12 pixel limit; a bigger \
+                     size changes nothing more."
+                } else {
+                    ""
+                }
+            )
+        } else {
+            format!(
+                "Size of each point. Smaller is finer and dustier ([ / ]).\n\n\
+                 The number beside it is roughly how many pixels that comes to at the \
+                 current framing.{}",
+                if saturated {
+                    "\n\nAt this size the slider has no visible effect: points are always \
+                     drawn at least 1 pixel and at most 12 pixels wide. Try changing the \
+                     point count instead."
+                } else {
+                    ""
+                }
+            )
+        },
         "drag: adjust point size",
     );
     if resp.changed() {

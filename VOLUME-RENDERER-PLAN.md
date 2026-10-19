@@ -639,6 +639,64 @@ a few ms). At the same radius volume is about as noisy as splat (radius 1: nauti
 (points per footprint: `FRACTURIZE_VOLUME_K`, 3 now), grit against smooth, with
 cost in proportion to it; I have not put it in the GUI.
 
+## Slice 1g findings
+
+Hazel's report on 1f: truly black specks in dense scenes zoomed in close
+(`cyber_nest`), persisting at high smoothness; the point-size slider dead in volume
+mode; and square 1px points mixed with round quads near the camera.
+
+**Cause (confirmed).** A point's absorbance is a world cross-section, deposited as
+`(ppu / depth)^2`, but its footprint came only from the bucket's screen density,
+never from depth. A point near the eye put thousands of optical depths into a pixel
+or two. `FRACTURIZE_VOLUME_STATS=1`, `cyber_nest`, 8M points, 1280x720, `b0` of lit
+pixels at three distances: 3.162 (authored) median 0.44 / p99 23.7; 0.1 median 15.5
+/ p99 1787; 0.01 median 575 / p90 4097 / p99 18614. The u32 slices hold 4096 units,
+and they do wrap: with `FIXED` temporarily 2^10 (4M of headroom, same code
+otherwise) the 0.01 figures became p90 4575 / p99 69230, so the shipped field lost
+mass there (at 0.1 the p99 moved 1787 -> 1794, so only the extreme close-up wraps).
+
+**Change.** (1) A point's radius is `max(density radius, own size)`, own size being
+`0.5 · projected_point_size · H / depth` capped at `max_point_pixels` (splat's
+expression), so near points grow as 1/depth. `point_radius` in `splat.wgsl` and
+`class_of` in `bucket.wgsl` (which gained `Where::depth`) compute it and must agree;
+the primitive-to-quad hash blend now runs on that per-point radius. The cap bounds
+only the own-size term: the density rule's radius is not capped, as before. (2) Past
+the cap the absorbance deposit is scaled by `(cap / size)^2`. 1f had lost this (1c
+had it); emission is not scaled by it. (3) A fragment adds at most 32 optical depths
+to a slice (e^-32 is nothing), through `fragment_absorbance`, used by both slice
+passes and by the emission pass's own-deposit subtraction so they agree. (4) The
+Render window's point size means "smallest size a point is drawn at; bigger is
+softer" in volume mode, and its pixel readout no longer claims a 1px floor.
+
+**Numbers** (`cyber_nest`, 8M points, 1280x720, ss1; "specks" are pixels darker than
+the background by 0.02 in sRGB luminance and under half their 5x5 median):
+
+| distance | specks before | specks after | black px (L<0.08) before / after |
+|---|---|---|---|
+| 3.162 | 6 | 6 | 1 / 1 |
+| 1.0 | 72 | 101 | 27 / 32 |
+| 0.3 | 328 | 339 | 109 / 105 |
+| 0.1 | 234 | 262 | 79 / 143 |
+| 0.03 | 991 | 165 | 799 / 60 |
+| 0.01 | 1079 | 165 | 979 / 97 |
+
+The black pixels in the two closest renders fall by 8-10x. At 0.1 to 1.0 they do
+not fall: those few were never the overflow, and at 0.1 the blobs now are larger and
+rounder (14 blobs of 4+ px against 0 before: single dark pixels have become small
+dark patches with a hard edge). They scale with opacity (0.01: 0, 0.5: 34, 2: 143, 8:
+288 black px), do not move with `k` (1/3/8: 135/143/131), and vanish with a larger
+point size (0.0005 / 0.0015 / 0.004 / 0.01 at d = 0.1: see
+`renders/volume-1g-pointsize-sheet.png`; 0.01 has none). Not explained: it is
+absorption without emission, but not the cap scaling (removing it: 175) and the exact
+reference cannot judge it, because at this framing it keeps 30M of 155M fragments.
+
+**Reference and cost** (nautilus, authored framing, 8M, 1280x720): reference L1
+0.0191 -> 0.0210, L ratio 0.9911 -> 0.9901, mean |dT| 0.0000 -> 0.0000, weighted
+fragment |dT| 0.0050 -> 0.0054; the pictures differ by 0.14 of 255 on average. Render
+stage at 1080p, ss1: 0.06 s -> 0.08 s at the scene's point size (0.003, whose own
+size is now about half a pixel and turns some points into quads), and 0.06 s -> 0.17
+s at 0.01, where before it was ignored.
+
 ## Open questions, decided by looking
 
 - **Background compositing.** Splat composites `mix(bg, colour, coverage)`, with
