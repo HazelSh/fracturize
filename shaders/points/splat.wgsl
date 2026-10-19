@@ -625,6 +625,20 @@ const FIXED: f32 = 1048576.0;
 // entry point uses both.
 @group(1) @binding(1) var<storage, read> ranges_ro: array<vec2<f32>>;
 
+/// `atomicAdd` that sticks at the top instead of wrapping. A slice holds 4096
+/// optical depths, and a pixel of the dense middle of `cyber_nest` seen from
+/// close by holds thousands of fragments at the per-fragment clamp: a wrapped
+/// slice reads as nearly empty and its fragments as nearly unshadowed. Once
+/// the sum has wrapped (the old value plus the addend is smaller than it was)
+/// the word is pushed back to the maximum; every later add wraps again and
+/// pushes it back again, so it ends there. Costs a compare a fragment.
+fn add_saturating(at: u32, v: u32) {
+    let old = atomicAdd(&slices[at], v);
+    if old + v < old {
+        atomicMax(&slices[at], 0xffffffffu);
+    }
+}
+
 fn pixel_index(px: vec2<i32>) -> u32 {
     let w = u32(round(camera.screen_height * camera.aspect_ratio));
     return u32(px.y) * w + u32(px.x);
@@ -722,7 +736,7 @@ fn fs_abs_coarse(in: AbsOutput) {
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
     let r = ranges_ro[pixel];
     let u = clamp((log(in.depth) - r.x) * r.y * f32(COARSE) / f32(BINS), 0.0, f32(COARSE) - 1.0e-3);
-    atomicAdd(&slices[pixel * BINS + u32(u)], u32(a * FIXED + 0.5));
+    add_saturating(pixel * BINS + u32(u), u32(a * FIXED + 0.5));
 }
 
 // The share of a pixel's absorbance left out of each end of its refined span.
@@ -731,6 +745,18 @@ fn fs_abs_coarse(in: AbsOutput) {
 const COARSE: u32 = 32u;
 
 const REFINE_TAIL: f32 = 0.01;
+// ...but no more than this much absorbance is left out at the front, and the
+// span ends no later than where this much has built up. A pixel holding
+// thousands of optical depths (the dense middle of `cyber_nest` from close by)
+// shows only its first few: the share of the *mass* is the wrong measure there,
+// since 1% of it is dozens of optical depths and was all clamped into the first
+// slice, where the fragments in front of an opaque pile could not be told from
+// it. Against the exact reference on that framing (640x360, 8M points), pixels
+// at under half or over twice the exact brightness went 7554 -> 575 with these
+// two numbers and nothing else changed (plan, slice 1h). They do nothing to a
+// pixel under 5 optical depths in all.
+const REFINE_LO_CAP: f32 = 0.5;
+const REFINE_HI_CAP: f32 = 5.0;
 
 // The coarse slices and the spans as vectors, non-atomic: nothing else touches
 // them during this pass.
@@ -749,8 +775,9 @@ fn fs_refine(in: TonemapOutput) {
         let m = vec4<f32>(slices_v[base + i]);
         total += m.x + m.y + m.z + m.w;
     }
-    let lo_mass = total * REFINE_TAIL;
-    let hi_mass = total * (1.0 - REFINE_TAIL);
+    // `total` is in fixed point here, like the slices it sums.
+    let lo_mass = min(total * REFINE_TAIL, REFINE_LO_CAP * FIXED);
+    let hi_mass = min(total * (1.0 - REFINE_TAIL), REFINE_HI_CAP * FIXED);
     var lo = COARSE;
     var hi = COARSE - 1u;
     var cum = 0.0;
@@ -785,7 +812,7 @@ fn fs_abs(in: AbsOutput) {
     let pixel = pixel_index(vec2<i32>(in.clip_position.xy));
     let r = ranges_ro[pixel];
     let u = slice_coord(in.depth, r.x, r.y);
-    atomicAdd(&slices[pixel * BINS + u32(u)], u32(a * FIXED + 0.5));
+    add_saturating(pixel * BINS + u32(u), u32(a * FIXED + 0.5));
 }
 
 // After A, `fs_prefix` turns each pixel's slices into running totals, as floats
@@ -846,13 +873,13 @@ fn bins_transmittance(px: vec2<i32>, depth: f32, own: f32) -> f32 {
 fn fs_dump(in: EmitOutput) {
     let falloff = kernel_at(in.offset);
     let px = vec2<i32>(in.clip_position.xy);
-    let t = bins_transmittance(px, in.depth, in.abs_weight * falloff);
+    let t = bins_transmittance(px, in.depth, fragment_absorbance(in.abs_weight, falloff));
     let idx = atomicAdd(&dump_count, 1u);
     let base = idx * 8u;
     if base + 8u <= arrayLength(&dump) {
         dump[base] = u32(px.x) | (u32(px.y) << 16u);
         dump[base + 1u] = bitcast<u32>(in.depth);
-        dump[base + 2u] = bitcast<u32>(in.abs_weight * falloff);
+        dump[base + 2u] = bitcast<u32>(fragment_absorbance(in.abs_weight, falloff));
         dump[base + 3u] = bitcast<u32>(emission_weight(in, falloff));
         dump[base + 4u] = bitcast<u32>(in.color.r);
         dump[base + 5u] = bitcast<u32>(in.color.g);

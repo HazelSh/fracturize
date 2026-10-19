@@ -2371,6 +2371,9 @@ fn volume_reference(
         );
     }
     let reference = crate::volume_ref::composite(&dump, width, height);
+    if std::env::var_os("FRACTURIZE_VOLUME_EMULATE").is_some() {
+        println!("{}", crate::volume_ref::emulate(&dump, width, height, &crate::volume_ref::default_candidates()));
+    }
     let gpu_l = read_float_texture(device, queue, r.output_texture().ok_or("no accumulation")?, width, height);
     let (gpu_b0, _, _) = read_total_absorbance(device, queue, r).ok_or("no slices")?;
     {

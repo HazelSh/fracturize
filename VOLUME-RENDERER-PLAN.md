@@ -697,6 +697,97 @@ stage at 1080p, ss1: 0.06 s -> 0.08 s at the scene's point size (0.003, whose ow
 size is now about half a pixel and turns some points into quads), and 0.06 s -> 0.17
 s at 0.01, where before it was ignored.
 
+## Slice 1h findings
+
+The dark patches that 1g left (cyber_nest, d = 0.1 to 1.0: opacity-dependent, not
+helped by k, gone at large point sizes).
+
+**The coordinator's hypothesis, and what it came to.** The hypothesis was an
+intra-slice ordering error: a thick point sharing a slice with the fragment in
+front of it, which reads `prefix + f · slice` and so gets half the disc's
+absorbance. The exact reference confirms the GPU is wrong there and the patches are
+not true transport, but the first cause is elsewhere. Reference at 640x360, 8M
+points, d = 0.1 (41.5M fragments, all kept; the 1280x720 framing keeps 30M of 155M,
+and the dump buffer cannot exceed 2 GB, so this is the largest that fits): relative
+L1 of L 0.180, 2309 pixels under half the exact L and 5245 over twice it. On the
+worst pixels (FRACTURIZE_REF_PIXEL) every fragment of a pixel with 4000+ fragments
+and about 4500 optical depths got T = 0.0000 from the GPU, the front one (a = 0.04,
+exact T 1.0) included.
+
+**Cause: the refine pass's span.** `fs_refine` keeps the middle 98% of a pixel's
+absorbance. In a pixel of thousands of optical depths, 1% of the mass is dozens of
+optical depths, so every fragment in front of it (the only ones that are seen) was
+clamped into the first slice, at position 0, together with the opaque pile that
+starts there. Nothing within a slice can order them. The same holds at the far end
+(beyond a few optical depths nothing is seen). With the ends capped, the span
+starts where at most 0.5 optical depths lie in front and ends where 5 have built
+up (`REFINE_LO_CAP`, `REFINE_HI_CAP`, in the shader's fixed point; 1% and 99% still
+apply when they are smaller). No new memory, no new atomics.
+
+**Estimators, scored on the CPU over the same fragments**
+(`volume_ref::emulate`, `FRACTURIZE_VOLUME_EMULATE=1` with a reference run; the
+emulator reproduces the shipped GPU's L1 to four places, 0.0210 on nautilus). Cyber
+nest 640x360 d = 0.1 (shipped: L1 0.210, |dT| 0.0044, 2309 pixels under half, 5245
+over 2x). "words" is per pixel; "wrong" is pixels under half or over twice:
+
+```
+estimator                         L1 of L   |dT|    wrong   words
+32 linear, caps 0.5/5 (shipped)   0.0238    0.0007    576     32
+32 linear, caps 0.5/10            0.0328    0.0010    956     32
+16 linear, caps 0.2/5             0.0455    0.0014   1750     16
+32 moments, caps 0.5/5            0.0166    0.0005     19     96
+32 centroid ramp .08, caps .2/5   0.0144    0.0004    182     64
+32 moments, no caps               0.0540    0.0015   4881     96
+32 front ramp, no caps            0.2092    0.0040   5963     64
+32 centroid ramp .15, no caps     0.0511    0.0013   5177     64
+```
+
+Within-slice information without the span fix only moves the error from too bright
+to too dark (the disc went black). With the caps, a linear slice is already
+most of the win, and a slice's mean and variance (a uniform of the same mean and
+variance, `Within::Moments`) takes the wrong-pixel count from 576 to 19.
+
+**Moments, built and not shipped.** One extra word of sum a·f and one of sum a·f²
+a slice (three times the slices buffer: 354 MB at 720p, 796 MB at 1080p against 118
+and 265), read as a uniform of that mean and variance. Measured on the GPU it matched
+the emulator. Nautilus authored framing: relative L1 0.0210 -> 0.0029, weighted |dT|
+0.0054 -> 0.0029; cyber_nest specks 0 at every distance. Cost: render stage at
+1080p 0.08 s -> 0.13 s at the scene's point size, 0.17 s -> 0.48 s at point size
+0.01, and the offline slice limit falls to a third (about 5.5M accumulation pixels
+at the 2 GB binding limit). A clear improvement in accuracy and not one in the
+pictures that still shows anything: it is the next step if L1 on dense scenes ever
+matters; the patch is in this slice's history only as numbers.
+
+**Shipped:** the caps, a saturating slice add (below), and the dump pass using the
+clamped absorbance like the real passes. Specks (the 1g definition), black pixels,
+before 1g / after 1g / after 1h; cyber_nest, 8M, 1280x720:
+
+```
+distance   specks              black px (L < 0.08)
+3.162      6 / 6 / 2           1 / 1 / 0
+1.0        72 / 101 / 31       27 / 32 / 5
+0.3        328 / 339 / 25      109 / 105 / 7
+0.1        234 / 262 / 6       79 / 143 / 4
+0.03       991 / 165 / 7       799 / 60 / 0
+0.01       1079 / 165 / 8      979 / 97 / 0
+```
+
+Reference, nautilus authored framing, 1280x720, 8M: relative L1 0.0210 (1g) ->
+0.0159, weighted |dT| 0.0054 -> 0.0045, mean |dT| of T_total 0.0000. Cyber_nest
+640x360 d = 0.1: L1 0.180 -> 0.0237, pixels under half the exact L 2309 -> 575,
+weighted fragment |dT| 0.0038 -> 0.0007. Render stage at 1080p, ss1: 0.08 s at the
+scene's point size and 0.17 s at 0.01, unchanged.
+
+**The saturating add** (`add_saturating`): `atomicAdd` whose wrapped result is
+pushed back to the maximum, so a slice holding more than 4096 optical depths stays
+full instead of wrapping to nearly empty. cyber_nest at d = 0.01, 1280x720: the
+absorbance field's p99 3129 -> 3483 with it (so the wrap was happening), render
+stage unchanged to the printed 10 ms.
+
+**Left over.** About 25 specks at d = 0.3 and 1.0 and one 4-pixel blob at 0.1 remain;
+I did not chase them. The 1280x720 close-up cannot be checked against the
+reference (fragment budget).
+
 ## Open questions, decided by looking
 
 - **Background compositing.** Splat composites `mix(bg, colour, coverage)`, with

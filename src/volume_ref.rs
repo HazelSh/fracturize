@@ -302,6 +302,250 @@ pub fn report(r: &Reference, gpu_l: &[f32], gpu_b0: &[f32]) -> String {
     s
 }
 
+
+// ---- Emulating estimators on the CPU, over the same fragments ----
+
+/// How a fragment's share of its own slice is read.
+#[derive(Clone, Copy, Debug)]
+pub enum Within {
+    /// The shipped rule: the slice's mass is spread uniformly.
+    Linear,
+    /// Each slice remembers where its nearest fragment is: nothing is seen
+    /// before it, a linear ramp after.
+    FrontRamp,
+    /// Each slice remembers its absorbance-weighted centroid: a step there.
+    CentroidStep,
+    /// ...and a smooth step of half-width 0.15 around it.
+    CentroidRamp,
+    /// A smooth step of this half-width (in hundredths of a slice) around the centroid.
+    CentroidRampW(u32),
+    /// A uniform of the slice's own mean and variance (one more word a slice).
+    Moments,
+}
+
+/// One estimator: `bins` slices of the span, read `within` a slice.
+#[derive(Clone, Copy, Debug)]
+pub struct Estimator {
+    pub bins: usize,
+    pub within: Within,
+    /// The refined span starts where this much absorbance (at most) lies in
+    /// front, and ends where this much (at most) lies behind its end... in the
+    /// emulator: caps on the 1% and 99% masses. `f64::INFINITY` for none.
+    pub lo_cap: f64,
+    pub hi_cap: f64,
+}
+
+/// The transmittance each fragment of one pixel would get (`frags` nearest
+/// first: depth and clamped absorbance), mirroring `fs_abs_coarse`, `fs_refine`,
+/// `fs_abs` and `bins_transmittance_ro` step by step.
+pub fn estimate(frags: &[(f32, f32)], est: Estimator) -> Vec<f32> {
+    let nb = est.bins;
+    let nbf = nb as f64;
+    let ln: Vec<f64> = frags.iter().map(|f| (f.0 as f64).ln()).collect();
+    let near = ln[0];
+    let span = ln[ln.len() - 1] - near;
+    let scale = if span > 1e-6 { nbf / span } else { 1e-30 };
+    // Coarse pass: uniform slices of the span.
+    let mut coarse = vec![0.0f64; nb];
+    for (i, f) in frags.iter().enumerate() {
+        let u = ((ln[i] - near) * scale).clamp(0.0, nbf - 1e-3);
+        coarse[u as usize] += f.1 as f64;
+    }
+    // Refine: the span that holds the middle 98% of the mass.
+    let total: f64 = coarse.iter().sum();
+    let (mut near2, mut scale2) = (near, scale);
+    if total > 0.0 {
+        let (lo_mass, hi_mass) = ((total * 0.01).min(est.lo_cap), (total * 0.99).min(est.hi_cap));
+        let (mut lo, mut hi, mut cum) = (nb, nb - 1, 0.0);
+        for (bin, m) in coarse.iter().enumerate() {
+            cum += m;
+            if lo == nb && cum >= lo_mass {
+                lo = bin;
+            }
+            if cum >= hi_mass && hi == nb - 1 && bin < nb - 1 && lo != nb {
+                hi = bin;
+            }
+        }
+        if lo != nb {
+            let width = 1.0 / scale;
+            near2 = near + lo as f64 * width;
+            scale2 = nbf / ((hi + 1 - lo) as f64 * width);
+        }
+    }
+    // Final slices.
+    let place = |l: f64| -> (usize, f64) {
+        let t = ((l - near2) * scale2 / nbf).clamp(0.0, 1.0);
+        let w = 0.5 + (2.0 * t - 1.0).asin() * std::f64::consts::FRAC_1_PI;
+        let u = (w * nbf).clamp(0.0, nbf - 1e-3);
+        (u as usize, u - u.floor())
+    };
+    let pos: Vec<(usize, f64)> = ln.iter().map(|&l| place(l)).collect();
+    let mut mass = vec![0.0f64; nb];
+    let mut first = vec![1.0f64; nb];
+    let mut moment = vec![0.0f64; nb];
+    let mut moment2 = vec![0.0f64; nb];
+    for (i, f) in frags.iter().enumerate() {
+        let (b, fr) = pos[i];
+        mass[b] += f.1 as f64;
+        moment[b] += f.1 as f64 * fr;
+        moment2[b] += f.1 as f64 * fr * fr;
+        first[b] = first[b].min(fr);
+    }
+    let mut cum = vec![0.0f64; nb];
+    let mut run = 0.0;
+    for b in 0..nb {
+        run += mass[b];
+        cum[b] = run;
+    }
+    frags
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let (b, fr) = pos[i];
+            let before = if b > 0 { cum[b - 1] } else { 0.0 };
+            let inside = (mass[b] - f.1 as f64).max(0.0);
+            let share = match est.within {
+                Within::Linear => fr,
+                Within::FrontRamp => ((fr - first[b]) / (1.0 - first[b] + 1e-9)).clamp(0.0, 1.0),
+                Within::CentroidStep => {
+                    let c = moment[b] / mass[b].max(1e-30);
+                    if fr > c { 1.0 } else { 0.0 }
+                }
+                Within::CentroidRamp | Within::CentroidRampW(_) => {
+                    let w = match est.within { Within::CentroidRampW(w) => w as f64 * 0.01, _ => 0.15 };
+                    let c = moment[b] / mass[b].max(1e-30);
+                    let t = ((fr - (c - w)) / (2.0 * w)).clamp(0.0, 1.0);
+                    t * t * (3.0 - 2.0 * t)
+                }
+                Within::Moments => {
+                    let m = mass[b].max(1e-30);
+                    let c = moment[b] / m;
+                    let var = (moment2[b] / m - c * c).max(0.0);
+                    let h = (3.0 * var).sqrt().max(1e-4);
+                    ((fr - (c - h)) / (2.0 * h)).clamp(0.0, 1.0)
+                }
+            };
+            (-(before + share * inside)).exp() as f32
+        })
+        .collect()
+}
+
+/// Score candidate estimators on a dump: for each, the relative L1 of L, the
+/// emission-weighted mean |dT| per fragment, and, on the pixels where the
+/// shipped rule gives under half the exact L (the dark patches), the share of
+/// them still under half and the median ln(L/L_exact).
+pub fn emulate(dump: &FragmentDump, width: u32, height: u32, candidates: &[(&str, Estimator)]) -> String {
+    let n = dump.words.len() / 8;
+    let f = |i: usize, k: usize| f32::from_bits(dump.words[i * 8 + k]);
+    let pix = |i: usize| -> u32 {
+        let w = dump.words[i * 8];
+        (w >> 16) * width + (w & 0xffff)
+    };
+    let mut order: Vec<(u64, u32)> = (0..n)
+        .map(|i| (((pix(i) as u64) << 32) | f(i, 1).to_bits() as u64, i as u32))
+        .collect();
+    order.sort_unstable_by_key(|&(k, _)| k);
+    let px = (width * height) as usize;
+    let nc = candidates.len();
+    // Per candidate: L per pixel, and per pixel the exact L.
+    let mut l_est = vec![vec![0.0f64; px]; nc];
+    let mut l_ref = vec![0.0f64; px];
+    let mut l_gpu = vec![0.0f64; px];
+    let mut dt_num = vec![0.0f64; nc];
+    let mut dt_gpu_agree = 0.0f64;
+    let mut e_sum = 0.0f64;
+    let mut start = 0;
+    while start < order.len() {
+        let pixel = (order[start].0 >> 32) as usize;
+        let mut end = start;
+        while end < order.len() && (order[end].0 >> 32) as usize == pixel {
+            end += 1;
+        }
+        let rows: Vec<usize> = order[start..end].iter().map(|o| o.1 as usize).collect();
+        let fr: Vec<(f32, f32)> = rows.iter().map(|&i| (f(i, 1), f(i, 2))).collect();
+        let mut tau = 0.0f64;
+        let exact: Vec<f64> = fr
+            .iter()
+            .map(|x| {
+                let t = (-tau).exp();
+                tau += x.1 as f64;
+                t
+            })
+            .collect();
+        for (k, (_, est)) in candidates.iter().enumerate() {
+            let t = estimate(&fr, *est);
+            for (j, &i) in rows.iter().enumerate() {
+                let e = f(i, 3) as f64;
+                if !(e * t[j] as f64).is_finite() { continue; }
+                l_est[k][pixel] += e * t[j] as f64;
+                dt_num[k] += e * (t[j] as f64 - exact[j]).abs();
+            }
+        }
+        for (j, &i) in rows.iter().enumerate() {
+            let e = f(i, 3) as f64;
+            l_ref[pixel] += e * exact[j];
+            l_gpu[pixel] += e * f(i, 7) as f64;
+            dt_gpu_agree += e * (f(i, 7) as f64 - exact[j]).abs();
+            e_sum += e;
+        }
+        start = end;
+    }
+    let base = candidates.iter().position(|c| c.0.contains("shipped")).unwrap_or(0);
+    let sum_ref: f64 = l_ref.iter().sum();
+    let dark: Vec<usize> = (0..px).filter(|&p| l_ref[p] > 1e-9 && l_est[base][p] < 0.5 * l_ref[p]).collect();
+    let mut s = String::new();
+    let _ = writeln!(s, "emulated estimators over {} fragments; dark = pixels under half the exact L for `{}` ({} of {})", n, candidates[base].0, dark.len(), px);
+    let _ = writeln!(s, "GPU as shipped (from the dump's own T): weighted |dT| {:.4}, relative L1 {:.4}, dark-pixel median ln(L/Lex) {:.3}",
+        dt_gpu_agree / e_sum, (0..px).map(|p| (l_gpu[p] - l_ref[p]).abs()).sum::<f64>() / sum_ref,
+        { let mut v: Vec<f64> = dark.iter().map(|&p| (l_gpu[p].max(1e-12) / l_ref[p]).ln()).collect(); v.sort_by(|a, b| a.partial_cmp(b).unwrap()); if v.is_empty() { 0.0 } else { v[v.len() / 2] } });
+    let _ = writeln!(s, "{:<22} {:>9} {:>9} {:>12} {:>12} {:>9} {:>9} {:>9}", "estimator", "L1 of L", "|dT| w", "dark <half", "dark med ln", "words/px", "all <half", "all >2x");
+    for (k, (name, est)) in candidates.iter().enumerate() {
+        let l1 = (0..px).map(|p| (l_est[k][p] - l_ref[p]).abs()).sum::<f64>() / sum_ref;
+        let still = dark.iter().filter(|&&p| l_est[k][p] < 0.5 * l_ref[p]).count();
+        let mut v: Vec<f64> = dark.iter().map(|&p| (l_est[k][p].max(1e-12) / l_ref[p]).ln()).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = if v.is_empty() { 0.0 } else { v[v.len() / 2] };
+        let words = est.bins * match est.within { Within::Linear => 1, Within::Moments => 3, _ => 2 };
+        let lit: Vec<usize> = (0..px).filter(|&p| l_ref[p] > 1e-9).collect();
+        let under = lit.iter().filter(|&&p| l_est[k][p] < 0.5 * l_ref[p]).count();
+        let over = lit.iter().filter(|&&p| l_est[k][p] > 2.0 * l_ref[p]).count();
+        let _ = writeln!(s, "{:<22} {:>9.4} {:>9.4} {:>12} {:>12.3} {:>9} {:>9} {:>9}", name, l1, dt_num[k] / e_sum, still, med, words, under, over);
+    }
+    s
+}
+
+pub fn default_candidates() -> Vec<(&'static str, Estimator)> {
+    let e = |bins, within| Estimator { bins, within, lo_cap: f64::INFINITY, hi_cap: f64::INFINITY };
+    let c = |bins, within, lo_cap, hi_cap| Estimator { bins, within, lo_cap, hi_cap };
+    vec![
+        ("32 lin cap .5/10", c(32, Within::Linear, 0.5, 10.0)),
+        ("32 lin cap .5/5", c(32, Within::Linear, 0.5, 5.0)),
+        ("32 lin cap .2/5", c(32, Within::Linear, 0.2, 5.0)),
+        ("32 lin cap .2/3", c(32, Within::Linear, 0.2, 3.0)),
+        ("32 lin cap .1/3", c(32, Within::Linear, 0.1, 3.0)),
+        ("32 mom cap .5/10", c(32, Within::Moments, 0.5, 10.0)),
+        ("32 mom cap .5/5", c(32, Within::Moments, 0.5, 5.0)),
+        ("32 mom cap .2/5", c(32, Within::Moments, 0.2, 5.0)),
+        ("32 mom cap .2/3", c(32, Within::Moments, 0.2, 3.0)),
+        ("16 lin cap .2/5", c(16, Within::Linear, 0.2, 5.0)),
+        ("16 mom cap .2/5", c(16, Within::Moments, 0.2, 5.0)),
+        ("32 ramp.08 cap .2/5", c(32, Within::CentroidRampW(8), 0.2, 5.0)),
+        ("32 linear (shipped)", e(32, Within::Linear)),
+        ("32 front ramp", e(32, Within::FrontRamp)),
+        ("32 centroid step", e(32, Within::CentroidStep)),
+        ("32 centroid ramp", e(32, Within::CentroidRamp)),
+        ("32 ramp w0.08", e(32, Within::CentroidRampW(8))),
+        ("32 ramp w0.25", e(32, Within::CentroidRampW(25))),
+        ("32 ramp w0.35", e(32, Within::CentroidRampW(35))),
+        ("32 moments", e(32, Within::Moments)),
+        ("16 moments", e(16, Within::Moments)),
+        ("16 linear", e(16, Within::Linear)),
+        ("16 front ramp", e(16, Within::FrontRamp)),
+        ("16 centroid step", e(16, Within::CentroidStep)),
+        ("16 centroid ramp", e(16, Within::CentroidRamp)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

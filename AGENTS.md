@@ -159,13 +159,21 @@ All GPU, three passes per frame:
      nearest and farthest fragment depth (atomics); a fullscreen pass rewrites
      those as a log origin and scale; **coarse** adds each fragment's absorbance
      into 32 slices of that span; **refine** narrows the span to the slices that
-     hold the middle 98% of the pixel's absorbance and clears them; **slice** adds
+     hold the middle 98% of the pixel's absorbance (but never leaving out more than
+     0.5 optical depths at the front, nor extending past where 5 have built up:
+     a pixel of thousands of optical depths shows only its first few, and the
+     98% rule clamped them all into one slice, which read as the black patches;
+     slice 1h) and clears them; **slice** adds
      every fragment again, as fixed point, into 32 slices of the refined span (a
      storage buffer, 4 bytes a slice a pixel); a fullscreen pass turns them into
      running totals; **emission** is the ordinary splat accumulation with each
      fragment's weight multiplied by the transmittance of what is in front of it,
      read as two words (the total before its slice, plus its position through its
      own slice), own deposit excluded. Total absorbance is the last running total.
+     A slice add saturates instead of wrapping (`add_saturating`). A slice holds
+     one mass word, so within a slice the mass is assumed uniform; keeping its
+     mean and variance too (three words a slice) measured 7x better L1 on
+     nautilus and cost 1.6-2.8x the render stage, and is not shipped (plan, 1h).
 
      **Judge changes to it against the exact reference, not by eye.** Slices one
      to three were tuned by eye against symptoms (an overestimation constant, a
