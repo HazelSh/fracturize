@@ -42,11 +42,17 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     let mut want = LOOKAHEAD;
     let mut reroll = false;
     let mut persist = false;
+    let mut picked = None;
 
     super::window(ctx, app, super::WindowKey::Random, "Random flames")
         .open(&mut open)
         .show(ctx, |ui| {
             egui::Panel::top("fracturize_random_bar").show(ui, |ui| {
+                // The profile first: it decides what every row below is.
+                ui.horizontal(|ui| {
+                    ui.label("Profile");
+                    picked = super::random_settings::profile_picker(ui, app, 150.0);
+                });
                 ui.horizontal(|ui| {
                     let resp = ui.button((icons::REFRESH, "New rolls"));
                     let resp = hinted(
@@ -64,9 +70,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     hinted(
                         resp,
                         &mut app.ui_state,
-                        "What the dice may roll: variations and their weights, how many maps, \
-                         and bounds on dimension and lacunarity. The list starts over when \
-                         they change.",
+                        "Which parts of a flame the dice may change, and the ranges they're drawn \
+                         from. The list starts over when they change.",
                         "toggle the Random settings window",
                     );
                 });
@@ -81,6 +86,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         });
     super::remember(ctx, app, super::WindowKey::Random);
 
+    if let Some(entry) = picked {
+        app.load_dice_profile(entry);
+    }
     if reroll {
         app.reroll_random_list();
     }
@@ -271,7 +279,7 @@ fn row(
     let n = entry.scene.transforms.len();
     let kinds = if entry.kinds.is_empty() { "affine".to_string() } else { entry.kinds.join(" + ") };
     let title = format!(
-        "{}{n} maps · {}{kinds}",
+        "{}{n} transforms · {}{kinds}",
         if is_open { "(open) " } else { "" },
         entry.symmetry.as_ref().map_or(String::new(), |g| format!("{g} · ")),
     );

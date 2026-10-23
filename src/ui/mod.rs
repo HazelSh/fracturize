@@ -174,8 +174,7 @@ pub struct UiState {
     pub renaming_subscene: Option<(usize, String)>,
     /// Why the last import failed, shown in the window until the next attempt.
     pub import_error: Option<String>,
-    /// The Random settings window's "Defaults" button (see `confirm::Arm`).
-    pub random_reset_arm: confirm::Arm,
+
     /// The Random settings window's "Save as…" field while it is open.
     pub dice_save_as: Option<String>,
     /// Why the last profile save failed, shown until the next attempt.
@@ -217,7 +216,6 @@ impl UiState {
             subscene_euler: None,
             renaming_subscene: None,
             import_error: None,
-            random_reset_arm: confirm::Arm::default(),
             dice_save_as: None,
             dice_profile_error: None,
         }
@@ -339,7 +337,9 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
     match key {
         WindowKey::Render => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
         WindowKey::History => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 260.0)),
-        WindowKey::Mutate => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 90.0)),
+        // Beside Random settings, so the three dice windows — the list, the
+        // profile, the mutation — sit left to right and none hides another.
+        WindowKey::Mutate => (egui::pos2(690.0, top), egui::vec2(300.0, 110.0)),
         // Asked for down the left side of the screen: the full height, one
         // thumbnail wide. Over Render's default spot, which is fine — this is
         // only where windows land before anyone has moved them.
@@ -347,7 +347,10 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
             egui::pos2(8.0, top),
             egui::vec2(284.0, (screen.height() - top - 40.0).max(300.0)),
         ),
-        WindowKey::RandomSettings => (egui::pos2(300.0, top), egui::vec2(360.0, 560.0)),
+        WindowKey::RandomSettings => (
+            egui::pos2(300.0, top),
+            egui::vec2(380.0, (screen.height() - top - 40.0).clamp(300.0, 780.0)),
+        ),
         WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(720.0, 520.0)),
         WindowKey::Keybinds => (egui::pos2(620.0, top), egui::vec2(360.0, 420.0)),
         WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),

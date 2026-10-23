@@ -1,0 +1,56 @@
+# Anything's range — every variation, up to eight transforms — and no
+# symmetry. The symmetry part stays on with no chance of a group, so a roll
+# always draws "no group" (off would keep the scene's own), and a mutation
+# never picks it, so a scene that has a group keeps it when mutated.
+#
+# Xaos isn't something the dice make yet, so there's none here either. When
+# it becomes a part, this profile turns it off by name.
+#
+#   fracturize --random-sheet 9 --random-config no-symmetry -r renders/asym.png \
+#     --effort tiny --width 320 --height 180
+
+[meta]
+name = "no-symmetry"
+description = "Every variation, but no symmetry and no xaos"
+author = "Claude Opus 5.5"
+
+[parts]
+symmetry = { on = true, odds = 0.0 }
+background = { odds = 0.05 }
+
+[ranges]
+transforms = [2, 8]
+scale = [0.4, 0.85]
+squash = 0.3
+affine = 0.08
+kinds = [1, 4]
+per_map = [0, 3]
+negative = 0.3
+attempts = 150
+
+[ranges.variations]
+sinusoidal = { enabled = true }
+spherical = { enabled = true }
+swirl = { enabled = true }
+horseshoe = { enabled = true }
+polar = { enabled = true }
+disc = { enabled = true }
+spiral = { enabled = true }
+hyperbolic = { enabled = true }
+diamond = { enabled = true }
+julia = { enabled = true }
+bent = { enabled = true }
+fisheye = { enabled = true }
+bubble = { enabled = true }
+cylinder = { enabled = true }
+tangent = { enabled = true }
+absfold = { enabled = true }
+boxfold = { enabled = true }
+spherefold = { enabled = true }
+bulb = { enabled = true }
+
+[ranges.symmetry]
+chance = 0.0
+
+[mutation]
+changes = [1, 4]

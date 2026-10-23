@@ -7,34 +7,42 @@
 //! ```toml
 //! [meta]
 //! name = "spiky"
-//! description = "Few maps, sharp folds, never smooth"
+//! description = "Few transforms, sharp folds, never smooth"
 //!
-//! [roll]                     # what a fresh flame may be made of
+//! [parts]                    # what the dice may make: one line per part
+//! color = { on = false }     # off: kept as it was, by a roll or a mutation
+//! variations = { odds = 0.4, reroll = 0.25 }
+//!
+//! [ranges]                   # how each part is drawn
 //! transforms = [2, 4]
 //! lacunarity = { on = true, range = [12.0, 60.0] }
 //!
-//! [roll.variations]          # one line per variation
+//! [ranges.variations]        # one line per variation
 //! julia = { enabled = true, weight = [0.2, 0.6] }
 //!
-//! [roll.symmetry]
+//! [ranges.symmetry]
 //! chance = 0.3
 //!
-//! [mutate]                   # what a mutation may change, and how hard
+//! [mutation]                 # how big a step a mutation takes
 //! strength = 0.7
-//!
-//! [mutate.parts]             # one line per part: relative odds, re-roll chance
-//! variations = { odds = 0.4, reroll = 0.25 }
 //! ```
+//!
+//! There is no roll section and mutate section: a part that's on may be made
+//! by either, and one that's off is left alone by both.
 //!
 //! Every key is optional and takes its default when left out, and a key this
 //! version doesn't know is reported, not silently dropped. Two older shapes
 //! still read: a bare settings table (what `--random-config` always took), and
 //! any file with a `[random]` table in it — prefs.toml.
 //!
-//! Profiles live by name in two places: the person's own
-//! (`~/.config/fracturize/dice/<name>.toml`) and the repository's shared ones
-//! (`scenes/dice/<name>.toml`), the person's winning on a clash. `default` is
-//! built in, and is always the shipped defaults.
+//! Profiles live by name in three places. The built-in ones are compiled in
+//! ([`BUILTINS`], from `src/dice/profiles/`), so they are there wherever the
+//! app is started from: `default` is always the shipped settings, and the rest
+//! are presets — `anything`, `no-symmetry`, the two colour masks. Then the
+//! person's own (`~/.config/fracturize/dice/<name>.toml`), and the
+//! repository's shared ones (`scenes/dice/<name>.toml`, relative to where the
+//! app runs). A built-in's name can't be taken by a saved profile; between the
+//! other two, the person's win a clash.
 //!
 //! Saving over an existing file merges into it with `toml_edit`, as
 //! `Scene::save` does, so comments written into a profile by hand survive the
@@ -47,6 +55,25 @@ use super::settings::RandomSettings;
 /// The built-in profile: the shipped defaults, under a name that always
 /// resolves and can't be saved over.
 pub const BUILTIN: &str = "default";
+
+/// The other built-in profiles, in the order the picker lists them: name and
+/// file text. Each is an ordinary profile file, read the way any other is.
+pub const BUILTINS: &[(&str, &str)] = &[
+    ("anything", include_str!("profiles/anything.toml")),
+    ("no-symmetry", include_str!("profiles/no-symmetry.toml")),
+    ("colour-only", include_str!("profiles/colour-only.toml")),
+    ("no-colour", include_str!("profiles/no-colour.toml")),
+    ("symmetric", include_str!("profiles/symmetric.toml")),
+];
+
+fn builtin_text(name: &str) -> Option<&'static str> {
+    BUILTINS.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
+}
+
+/// Whether `name` is one of the built-in profiles, `default` included.
+pub fn is_builtin(name: &str) -> bool {
+    name == BUILTIN || builtin_text(name).is_some()
+}
 
 /// What a profile says about itself.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -66,24 +93,35 @@ pub struct Loaded {
     pub warnings: Vec<String>,
 }
 
+/// The tables a profile file is made of, in the order they're written.
+const SECTIONS: [&str; 4] = ["meta", "parts", "ranges", "mutation"];
+
 /// Read a profile from TOML text: a profile, a prefs file, or a bare table.
 pub fn parse(text: &str) -> Result<Loaded, String> {
     let top: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
     let mut warnings = Vec::new();
     let mut meta = Meta::default();
+    let is_profile = top.get("random").is_none() && SECTIONS.iter().any(|k| top.get(*k).is_some_and(toml::Value::is_table));
     let (table, prefix) = if let Some(t) = top.get("random") {
         // prefs.toml: everything else in it is other preferences.
         let toml::Value::Table(t) = t else { return Err("[random] is not a table".into()) };
         (t.clone(), "random.")
-    } else if ["meta", "roll", "mutate"].iter().any(|k| top.get(*k).is_some_and(toml::Value::is_table)) {
-        let mut table = match top.get("roll") {
-            Some(toml::Value::Table(t)) => t.clone(),
-            Some(_) => return Err("[roll] is not a table".into()),
-            None => toml::Table::new(),
+    } else if SECTIONS.iter().any(|k| top.get(*k).is_some_and(toml::Value::is_table)) {
+        // A profile file: [ranges] holds the settings' plain fields, and
+        // [parts] and [mutation] are the struct's own tables.
+        let section = |k: &str| match top.get(k) {
+            Some(toml::Value::Table(t)) => Ok(t.clone()),
+            Some(_) => Err(format!("[{k}] is not a table")),
+            None => Ok(toml::Table::new()),
         };
-        if let Some(m) = top.get("mutate") {
-            table.insert("mutate".into(), m.clone());
+        let mut table = section("ranges")?;
+        for k in ["parts", "mutation"] {
+            if table.remove(k).is_some() {
+                warnings.push(format!("ranges.{k} belongs in its own [{k}] table, ignored"));
+            }
         }
+        table.insert("parts".into(), toml::Value::Table(section("parts")?));
+        table.insert("mutation".into(), toml::Value::Table(section("mutation")?));
         if let Some(toml::Value::Table(m)) = top.get("meta") {
             let text = |k: &str| m.get(k).and_then(toml::Value::as_str).unwrap_or_default().to_string();
             meta = Meta { name: text("name"), description: text("description"), author: text("author") };
@@ -91,11 +129,10 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
                 warnings.push(format!("unknown key meta.{k}, ignored"));
             }
         }
-        for k in top.keys().filter(|k| !["meta", "roll", "mutate"].contains(&k.as_str())) {
-            warnings.push(format!("unknown key {k}, ignored (settings go under [roll] or [mutate])"));
+        for k in top.keys().filter(|k| !SECTIONS.contains(&k.as_str())) {
+            warnings.push(format!("unknown key {k}, ignored (a profile has [meta], [parts], [ranges] and [mutation])"));
         }
-        // Report the mutate half under its own name, not as `roll.mutate`.
-        (table, "roll.")
+        (table, "")
     } else {
         (top, "")
     };
@@ -112,7 +149,17 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
     let settings = settings.normalized();
     // Anything in the file that didn't land in the settings was not understood.
     if let Ok(toml::Value::Table(understood)) = toml::Value::try_from(&settings) {
-        unknown_keys(&table, &understood, prefix, &mut warnings);
+        let mut found = Vec::new();
+        unknown_keys(&table, &understood, prefix, &mut found);
+        if is_profile {
+            // Said the way the file spells it: a plain field lives in [ranges].
+            for w in &mut found {
+                if !w.starts_with("unknown key parts.") && !w.starts_with("unknown key mutation.") {
+                    *w = w.replacen("unknown key ", "unknown key ranges.", 1);
+                }
+            }
+        }
+        warnings.extend(found);
     }
     Ok(Loaded { settings, meta, warnings })
 }
@@ -131,8 +178,7 @@ fn overlay(base: &mut toml::Table, given: &toml::Table) {
 
 fn unknown_keys(given: &toml::Table, understood: &toml::Table, prefix: &str, out: &mut Vec<String>) {
     for (k, v) in given {
-        // The mutate half lives at the top of a profile, whatever the prefix.
-        let path = if k == "mutate" && prefix == "roll." { "mutate".to_string() } else { format!("{prefix}{k}") };
+        let path = format!("{prefix}{k}");
         match (v, understood.get(k)) {
             (_, None) => out.push(format!("unknown key {path}, ignored")),
             (toml::Value::Table(g), Some(toml::Value::Table(u))) => unknown_keys(g, u, &format!("{path}."), out),
@@ -152,7 +198,7 @@ pub fn to_toml_string(settings: &RandomSettings, meta: &Meta) -> String {
 pub fn save(path: &Path, settings: &RandomSettings, meta: &Meta) -> Result<(), String> {
     let fresh = fresh_document(settings, meta);
     let content = match std::fs::read_to_string(path).ok().and_then(|s| s.parse::<toml_edit::DocumentMut>().ok()) {
-        Some(mut doc) if doc.contains_key("roll") || doc.contains_key("meta") => {
+        Some(mut doc) if SECTIONS.iter().any(|k| doc.contains_key(k)) => {
             merge(doc.as_table_mut(), fresh.as_table());
             doc.to_string()
         }
@@ -165,41 +211,45 @@ pub fn save(path: &Path, settings: &RandomSettings, meta: &Meta) -> Result<(), S
 }
 
 const HEADER: &str = "\
-# A Fracturize dice profile: what a random roll may make, and what a mutation
-# may change. Any key left out takes its default; ranges are [min, max].
+# A Fracturize dice profile: the parts of a flame the dice may make, and the
+# ranges each is drawn from. A roll draws every part that's on; a mutation
+# changes a few of them; a part that's off is kept as it was by both. Any key
+# left out takes its default; ranges are [min, max].
 #
 #   fracturize --random --random-config <name or file>
+#   fracturize -s scene.toml --random --random-config <name or file>
 #   fracturize -s scene.toml -r sheet.png --mutations 8 --random-config <name or file>
 #
-# Or load it in the app's Random settings window. AGENTS.md, \"Dice profiles\",
+# Or load it in the app's Random settings window. AGENTS.md, \"The dice\",
 # says what every key does.
 ";
 
 /// One-line explanations written above keys in a fresh file, by dotted path.
 const NOTES: &[(&str, &str)] = &[
-    ("roll", "What a fresh flame may be made of."),
-    ("roll.transforms", "maps per flame"),
-    ("roll.scale", "each map's size, drawn log-uniformly"),
-    ("roll.squash", "chance a map has one axis squashed"),
-    ("roll.affine", "chance a flame has no variations at all"),
-    ("roll.kinds", "different variations one flame draws from"),
-    ("roll.per_map", "variations on each map, from the flame's kinds"),
-    ("roll.negative", "chance a variation weight is negative"),
-    ("roll.dimension", "similarity dimension bound; met by rescaling"),
-    ("roll.lacunarity", "lacunarity bound; met by rolling again"),
-    ("roll.attempts", "candidates tried before giving up (mutations too)"),
-    ("roll.variations", "Which variations may be rolled, and their weight ranges (magnitudes)."),
-    ("roll.symmetry", "Symmetry groups, and how often."),
-    ("mutate", "What a mutation may change, and how hard."),
-    ("mutate.strength", "scales every nudge; 1 is a noticeable step"),
-    ("mutate.operators", "parts changed per mutation"),
-    ("mutate.backoff", "halve the strength after this many rejections in a row; 0 = never"),
-    ("mutate.steer_dimension", "rescale children onto the dimension bound, as fresh rolls are"),
     (
-        "mutate.parts",
-        "Per part: relative odds of being changed (0 = never), and the chance a change\n\
-         re-rolls the part the way a fresh roll would, rather than nudging it.",
+        "parts",
+        "What the dice may make. on: whether they may (off = keep the scene's own,\n\
+         by a roll or a mutation). odds: how often a mutation picks it against the\n\
+         others. reroll: chance a mutation replaces it rather than nudging it.",
     ),
+    ("ranges", "How each part is drawn."),
+    ("ranges.transforms", "transforms per flame"),
+    ("ranges.scale", "each transform's size, drawn log-uniformly"),
+    ("ranges.squash", "chance a transform has one axis squashed"),
+    ("ranges.affine", "chance a flame has no variations at all"),
+    ("ranges.kinds", "different variations one flame draws from"),
+    ("ranges.per_map", "variations on each transform, from the flame's kinds"),
+    ("ranges.negative", "chance a variation weight is negative"),
+    ("ranges.dimension", "similarity dimension bound; met by resizing"),
+    ("ranges.lacunarity", "lacunarity bound; met by drawing again"),
+    ("ranges.attempts", "candidates tried before giving up"),
+    ("ranges.variations", "Which variations may be drawn, and their weight ranges (magnitudes)."),
+    ("ranges.symmetry", "Which symmetry groups, and the chance a roll takes one."),
+    ("mutation", "How big a step a mutation takes. A roll draws every part that's on,\nso none of this applies to it."),
+    ("mutation.strength", "scales every nudge; 1 is a noticeable step"),
+    ("mutation.changes", "parts changed per mutation"),
+    ("mutation.backoff", "halve the strength after this many rejections in a row; 0 = never"),
+    ("mutation.steer_dimension", "resize mutations onto the dimension bound, as rolls are"),
 ];
 
 fn note(path: &str) -> Option<&'static str> {
@@ -220,7 +270,8 @@ fn fresh_document(settings: &RandomSettings, meta: &Meta) -> toml_edit::Document
         Ok(toml::Value::Table(t)) => t,
         _ => toml::Table::new(),
     };
-    let mutate = all.remove("mutate");
+    let parts = all.remove("parts");
+    let mutation = all.remove("mutation");
     let variations = all.remove("variations");
     let symmetry = all.remove("symmetry");
 
@@ -234,6 +285,7 @@ fn fresh_document(settings: &RandomSettings, meta: &Meta) -> toml_edit::Document
         m["author"] = toml_edit::value(meta.author.as_str());
     }
     m.decor_mut().set_prefix("\n");
+    m.set_position(0);
     doc["meta"] = Item::Table(m);
 
     // Plain values in the order the struct declares them, each with its note
@@ -251,57 +303,53 @@ fn fresh_document(settings: &RandomSettings, meta: &Meta) -> toml_edit::Document
         t
     };
     // One inline table per line: the long lists stay one line per entry.
-    let lines = |path: &str, values: Option<toml::Value>| {
+    let lines = |path: &str, values: Option<toml::Value>, order: &[&str]| {
         let mut t = Table::new();
         table_decor(&mut t, path);
         if let Some(toml::Value::Table(values)) = values {
-            for (k, v) in &values {
-                t[k.as_str()] = Item::Value(edit_value(v));
+            for k in order {
+                if let Some(v) = values.get(*k) {
+                    t[*k] = Item::Value(edit_value(v));
+                }
             }
         }
         t
     };
 
-    let roll_order = [
+    // The parts first: they are what a profile is.
+    let mut parts = lines("parts", parts, &super::settings::Parts::NAMES);
+    parts.set_position(1);
+    doc["parts"] = Item::Table(parts);
+
+    let ranges_order = [
         "transforms", "scale", "squash", "affine", "kinds", "per_map", "negative", "dimension", "lacunarity",
         "attempts",
     ];
-    let mut roll = section("roll", &all, &roll_order);
-    roll.set_position(1);
-    let mut vars = lines("roll.variations", variations);
-    vars.set_position(2);
-    roll["variations"] = Item::Table(vars);
+    let mut ranges = section("ranges", &all, &ranges_order);
+    ranges.set_position(2);
+    let names: Vec<String> = match &variations {
+        Some(toml::Value::Table(v)) => v.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut vars = lines("ranges.variations", variations, &names);
+    vars.set_position(3);
+    ranges["variations"] = Item::Table(vars);
     let mut sym = match symmetry {
         Some(toml::Value::Table(t)) => {
             let order: Vec<&str> = t.keys().map(String::as_str).collect();
-            section("roll.symmetry", &t, &order)
+            section("ranges.symmetry", &t, &order)
         }
         _ => Table::new(),
     };
-    sym.set_position(3);
-    roll["symmetry"] = Item::Table(sym);
-    doc["roll"] = Item::Table(roll);
+    sym.set_position(4);
+    ranges["symmetry"] = Item::Table(sym);
+    doc["ranges"] = Item::Table(ranges);
 
-    if let Some(toml::Value::Table(mut mt)) = mutate {
-        let parts = mt.remove("parts");
-        let mut mutate = section("mutate", &mt, &["strength", "operators", "backoff", "steer_dimension"]);
-        mutate.set_position(4);
-        let mut parts = {
-            // In the order they're shown, not alphabetical.
-            let mut t = Table::new();
-            table_decor(&mut t, "mutate.parts");
-            if let Some(toml::Value::Table(p)) = parts {
-                for name in super::settings::Parts::NAMES {
-                    if let Some(v) = p.get(name) {
-                        t[name] = Item::Value(edit_value(v));
-                    }
-                }
-            }
-            t
-        };
-        parts.set_position(5);
-        mutate["parts"] = Item::Table(parts);
-        doc["mutate"] = Item::Table(mutate);
+    if let Some(toml::Value::Table(mt)) = mutation {
+        let mut mutation = section("mutation", &mt, &["strength", "changes", "backoff", "steer_dimension"]);
+        mutation.set_position(5);
+        doc["mutation"] = Item::Table(mutation);
     }
     doc
 }
@@ -319,9 +367,15 @@ fn edit_value(v: &toml::Value) -> toml_edit::Value {
         toml::Value::Datetime(d) => Value::from(d.to_string()),
         toml::Value::Array(a) => Value::Array(a.iter().map(edit_value).collect()),
         toml::Value::Table(t) => {
+            // The switch first, then the numbers: `{ on = true, odds = 0.18 }`
+            // reads as the sentence it is, where alphabetical order wouldn't.
+            const FIRST: [&str; 4] = ["on", "enabled", "odds", "weight"];
+            let rank = |k: &str| FIRST.iter().position(|f| *f == k).unwrap_or(FIRST.len());
+            let mut keys: Vec<&String> = t.keys().collect();
+            keys.sort_by_key(|k| (rank(k), k.as_str()));
             let mut it = toml_edit::InlineTable::new();
-            for (k, v) in t {
-                it.insert(k, edit_value(v));
+            for k in keys {
+                it.insert(k, edit_value(&t[k]));
             }
             Value::InlineTable(it)
         }
@@ -371,16 +425,29 @@ pub fn shared_dir() -> PathBuf {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub name: String,
-    /// `None` for the built-in.
+    /// `None` for a built-in.
     pub path: Option<PathBuf>,
     /// From `scenes/dice/` rather than the person's own folder.
     pub shared: bool,
 }
 
-/// Every profile by name: the built-in first, then the person's, then the
-/// shared ones not shadowed by a profile of the person's, each sorted.
+impl Entry {
+    /// The built-in profile called `name`.
+    pub fn builtin(name: &str) -> Self {
+        Self { name: name.into(), path: None, shared: false }
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        self.path.is_none()
+    }
+}
+
+/// Every profile by name: the built-ins first, in their own order, then the
+/// person's, then the shared ones not shadowed by a profile of the person's,
+/// each sorted.
 pub fn list() -> Vec<Entry> {
-    let mut out = vec![Entry { name: BUILTIN.into(), path: None, shared: false }];
+    let mut out: Vec<Entry> =
+        std::iter::once(BUILTIN).chain(BUILTINS.iter().map(|(n, _)| *n)).map(Entry::builtin).collect();
     let dirs = user_dir().map(|d| (d, false)).into_iter().chain([(shared_dir(), true)]);
     for (dir, shared) in dirs {
         let Ok(read) = std::fs::read_dir(&dir) else { continue };
@@ -419,13 +486,22 @@ pub fn resolve(arg: &str) -> Result<Entry, String> {
     })
 }
 
-/// Read an entry: the file, or the defaults for the built-in. A file's
-/// `[meta] name` is overridden by its file name, which is what it's known by.
+/// Read an entry: the file, or a built-in. A file's `[meta] name` is
+/// overridden by its file name, which is what it's known by.
 pub fn load(entry: &Entry) -> Result<Loaded, String> {
     let Some(path) = &entry.path else {
+        if let Some(text) = builtin_text(&entry.name) {
+            let mut loaded = parse(text).map_err(|e| format!("built-in {}: {}", entry.name, e))?;
+            loaded.meta.name = entry.name.clone();
+            return Ok(loaded);
+        }
         return Ok(Loaded {
             settings: RandomSettings::default(),
-            meta: Meta { name: BUILTIN.into(), description: "The shipped defaults".into(), author: String::new() },
+            meta: Meta {
+                name: BUILTIN.into(),
+                description: "The shipped settings: bounded variations, no symmetry".into(),
+                author: String::new(),
+            },
             warnings: Vec::new(),
         });
     };
@@ -449,8 +525,8 @@ pub fn check_name(name: &str) -> Result<String, String> {
     if name.is_empty() {
         return Err("a profile needs a name".into());
     }
-    if name == BUILTIN {
-        return Err(format!("'{BUILTIN}' is the built-in profile; pick another name"));
+    if is_builtin(&name) {
+        return Err(format!("'{name}' is a built-in profile; pick another name"));
     }
     if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') || name.starts_with('.') {
         return Err("letters, digits, '-', '_' and '.' only".into());
@@ -476,6 +552,8 @@ pub fn entry_for(path: &Path) -> Entry {
 #[derive(Clone, Debug)]
 pub struct Selected {
     pub entry: Entry,
+    /// What the profile says it is, from its `[meta] description`.
+    pub description: String,
     /// The profile as loaded or last saved. `None` when its file has gone or
     /// no longer reads, so the settings can't be anything but changed.
     pub baseline: Option<RandomSettings>,
@@ -483,15 +561,21 @@ pub struct Selected {
 
 impl Selected {
     pub fn builtin() -> Self {
-        Self { entry: Entry { name: BUILTIN.into(), path: None, shared: false }, baseline: Some(RandomSettings::default()) }
+        let description = load(&Entry::builtin(BUILTIN)).map(|l| l.meta.description).unwrap_or_default();
+        Self { entry: Entry::builtin(BUILTIN), description, baseline: Some(RandomSettings::default()) }
     }
 
-    /// The profile prefs remember the settings came from, read again.
-    pub fn remembered(path: Option<&Path>) -> Self {
-        let Some(path) = path else { return Self::builtin() };
-        let entry = entry_for(path);
-        let baseline = load(&entry).ok().map(|l| l.settings);
-        Self { entry, baseline }
+    /// The profile prefs remember the settings came from, read again: a file
+    /// by its path, a built-in by its name, else `default`.
+    pub fn remembered(path: Option<&Path>, builtin: Option<&str>) -> Self {
+        let entry = match (path, builtin) {
+            (Some(path), _) => entry_for(path),
+            (None, Some(name)) if is_builtin(name) => Entry::builtin(name),
+            _ => return Self::builtin(),
+        };
+        let loaded = load(&entry).ok();
+        let description = loaded.as_ref().map(|l| l.meta.description.clone()).unwrap_or_default();
+        Self { entry, description, baseline: loaded.map(|l| l.settings) }
     }
 
     /// Whether `current` differs from what the profile says.
@@ -538,8 +622,9 @@ mod tests {
         s.lacunarity.on = true;
         s.variations.get_mut("julia").unwrap().weight = [0.2, 0.6];
         s.symmetry.chance = 0.3;
-        s.mutate.strength = 0.7;
-        s.mutate.parts.background.odds = 0.05;
+        s.mutation.strength = 0.7;
+        s.parts.background.odds = 0.05;
+        s.parts.color.on = false;
         let meta = Meta { name: "spiky".into(), description: "few maps, sharp".into(), author: "Hazel".into() };
         let text = to_toml_string(&s, &meta);
         let back = parse(&text).unwrap();
@@ -547,33 +632,38 @@ mod tests {
         assert_eq!(back.meta, meta);
         assert!(back.warnings.is_empty(), "{:?}", back.warnings);
         // And reads like it's meant to: meta first, tidy floats, one line each.
-        assert!(text.find("[meta]").unwrap() < text.find("[roll]").unwrap(), "{text}");
+        let at = |k: &str| text.find(k).unwrap_or_else(|| panic!("no {k}:\n{text}"));
+        assert!(at("[meta]") < at("[parts]") && at("[parts]") < at("[ranges]") && at("[ranges]") < at("[mutation]"), "{text}");
         assert!(text.contains("strength = 0.7"), "{text}");
         assert!(text.contains("julia = { enabled = true, weight = [0.2, 0.6] }"), "{text}");
-        assert!(text.contains("background = { odds = 0.05, reroll = 0.5 }"), "{text}");
+        assert!(text.contains("background = { on = true, odds = 0.05, reroll = 0.5 }"), "{text}");
+        assert!(text.contains("color = { on = false,"), "{text}");
+        assert!(at("translate =") < at("background ="), "parts in their own order:\n{text}");
     }
 
     /// A profile written by hand states only what it cares about.
     #[test]
     fn a_partial_profile_takes_defaults_and_reports_typos() {
-        let text = "[meta]\nname = \"x\"\ncolour = 1\n[roll]\ntransforms = [4, 4]\ntransfroms = [1, 1]\n\
-                    [roll.variations]\njulia = { enabled = false }\nnot_a_variation = { enabled = true }\n\
-                    [mutate]\nstrength = 2.0\n[mutate.parts]\nrotate = { odds = 0.0 }\nwobble = { odds = 1.0 }\n\
-                    add = { odds = 0.1 }\n";
+        let text = "[meta]\nname = \"x\"\ncolour = 1\n[parts]\nrotate = { on = false }\nwobble = { odds = 1.0 }\n\
+                    count = { odds = 0.1 }\n[ranges]\ntransforms = [4, 4]\ntransfroms = [1, 1]\n\
+                    [ranges.variations]\njulia = { enabled = false }\nnot_a_variation = { enabled = true }\n\
+                    [mutation]\nstrength = 2.0\n";
         let l = parse(text).unwrap();
         let d = RandomSettings::default();
         assert_eq!(l.settings.transforms, [4, 4]);
         assert_eq!(l.settings.scale, d.scale);
         assert!(!l.settings.variations["julia"].enabled);
         assert_eq!(l.settings.variations["julia"].weight, d.variations["julia"].weight);
-        assert_eq!(l.settings.mutate.strength, 2.0);
-        assert_eq!(l.settings.mutate.parts.rotate.odds, 0.0);
-        assert_eq!(l.settings.mutate.parts.translate, d.mutate.parts.translate);
-        // A part given only its odds keeps its shipped re-roll chance.
-        assert_eq!(l.settings.mutate.parts.add.odds, 0.1);
-        assert_eq!(l.settings.mutate.parts.add.reroll, d.mutate.parts.add.reroll);
+        assert_eq!(l.settings.mutation.strength, 2.0);
+        assert!(!l.settings.parts.rotate.on);
+        assert_eq!(l.settings.parts.rotate.odds, d.parts.rotate.odds);
+        assert_eq!(l.settings.parts.translate, d.parts.translate);
+        // A part given only its odds keeps the rest as shipped.
+        assert_eq!(l.settings.parts.count.odds, 0.1);
+        assert_eq!(l.settings.parts.count.reroll, d.parts.count.reroll);
+        assert!(l.settings.parts.count.on);
         let w = l.warnings.join("\n");
-        for typo in ["meta.colour", "roll.transfroms", "roll.variations.not_a_variation", "mutate.parts.wobble"] {
+        for typo in ["meta.colour", "ranges.transfroms", "ranges.variations.not_a_variation", "parts.wobble"] {
             assert!(w.contains(typo), "{typo} not reported:\n{w}");
         }
         assert_eq!(l.warnings.len(), 4, "{w}");
@@ -587,7 +677,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             &path,
-            "# my favourite\n[meta]\nname = \"mine\"\n\n[roll]\n# fewer is better\ntransforms = [2, 3] # keep it small\n",
+            "# my favourite\n[meta]\nname = \"mine\"\n\n[ranges]\n# fewer is better\ntransforms = [2, 3] # keep it small\n",
         )
         .unwrap();
         let mut s = RandomSettings::default();
@@ -601,26 +691,67 @@ mod tests {
         assert_eq!(parse(&text).unwrap().settings, s, "{text}");
     }
 
-    /// The profiles shipped in `scenes/dice` are examples people copy, so
-    /// they had better read cleanly.
+    /// The built-in profiles are examples people copy, so they had better
+    /// read cleanly, say what they are, and each be a different profile.
     #[test]
-    fn the_shared_profiles_read_without_warnings() {
-        let mut n = 0;
-        for e in std::fs::read_dir(shared_dir()).unwrap().flatten() {
-            let path = e.path();
-            if path.extension().is_some_and(|x| x == "toml") {
-                let l = load(&entry_for(&path)).unwrap_or_else(|e| panic!("{e}"));
-                assert!(l.warnings.is_empty(), "{}: {:?}", path.display(), l.warnings);
-                n += 1;
-            }
+    fn the_builtin_profiles_read_without_warnings() {
+        let mut seen: Vec<RandomSettings> = vec![RandomSettings::default()];
+        for (name, _) in BUILTINS {
+            let l = load(&Entry::builtin(name)).unwrap_or_else(|e| panic!("{e}"));
+            assert!(l.warnings.is_empty(), "{name}: {:?}", l.warnings);
+            assert_eq!(l.meta.name, *name);
+            assert!(!l.meta.description.is_empty(), "{name} has no description");
+            assert!(!seen.contains(&l.settings), "{name} is the same as another built-in");
+            assert_eq!(l.settings.clone().normalized(), l.settings, "{name} isn't normalized as written");
+            seen.push(l.settings);
         }
-        assert!(n >= 2, "only {n} shared profiles");
+        let names: Vec<_> = list().into_iter().take(BUILTINS.len() + 1).map(|e| e.name).collect();
+        assert_eq!(names[0], BUILTIN);
+        assert!(BUILTINS.iter().all(|(n, _)| names.iter().any(|m| m == n)));
+    }
+
+    /// What the presets promise, checked against what they say.
+    #[test]
+    fn the_presets_do_what_they_are_called() {
+        use super::super::Parts;
+        let get = |n: &str| load(&Entry::builtin(n)).unwrap().settings;
+        let on = |s: &RandomSettings| -> Vec<&str> {
+            Parts::NAMES.iter().zip(s.parts.all()).filter(|(_, p)| p.on).map(|(n, _)| *n).collect()
+        };
+        assert_eq!(on(&RandomSettings::default()), Parts::NAMES, "the default has every part on");
+
+        let any = get("anything");
+        assert!(any.variations.values().all(|v| v.enabled));
+        assert!(any.symmetry.chance > 0.0 && any.symmetry.repeat);
+        assert!(any.parts.all().iter().all(|p| p.on && p.odds > 0.0), "anything leaves a part alone");
+
+        // On, with no chance of a group: a roll draws "no group", where off
+        // would keep the base scene's.
+        let plain = get("no-symmetry");
+        assert!(plain.parts.symmetry.on);
+        assert_eq!(plain.symmetry.chance, 0.0);
+        assert_eq!(plain.parts.symmetry.odds, 0.0);
+        assert_eq!(plain.variations, any.variations, "no-symmetry should be anything's range");
+
+        assert_eq!(on(&get("colour-only")), ["color", "color_value", "background"]);
+        assert_eq!(on(&get("no-colour")), ["translate", "rotate", "scale", "weight", "variations", "symmetry"]);
+    }
+
+    /// A built-in is remembered by name, so prefs bring it back after a restart.
+    #[test]
+    fn a_builtin_is_remembered_by_name() {
+        let s = Selected::remembered(None, Some("anything"));
+        assert_eq!(s.entry, Entry::builtin("anything"));
+        assert!(!s.writable());
+        assert!(!s.modified(&load(&Entry::builtin("anything")).unwrap().settings));
+        assert_eq!(Selected::remembered(None, Some("gone")).entry.name, BUILTIN);
     }
 
     #[test]
     fn names_are_checked() {
         assert_eq!(check_name(" big sparse ").unwrap(), "big-sparse");
         assert!(check_name("default").is_err());
+        assert!(check_name("colour-only").is_err());
         assert!(check_name("../etc").is_err());
         assert!(check_name("").is_err());
     }
@@ -630,9 +761,10 @@ mod tests {
     #[test]
     fn profiles_resolve_by_name_or_path() {
         assert_eq!(resolve(BUILTIN).unwrap().path, None);
+        assert_eq!(resolve("anything").unwrap(), Entry::builtin("anything"));
         assert!(resolve("surely-nobody-has-this-one").unwrap_err().contains("default"));
         let file = std::env::temp_dir().join(format!("fracturize-resolve-{}.toml", std::process::id()));
-        std::fs::write(&file, "[roll]\ntransforms = [3, 3]\n").unwrap();
+        std::fs::write(&file, "[ranges]\ntransforms = [3, 3]\n").unwrap();
         let (entry, loaded) = open(file.to_str().unwrap()).unwrap();
         std::fs::remove_file(&file).ok();
         assert_eq!(entry.path.as_deref(), Some(file.as_path()));

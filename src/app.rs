@@ -1312,7 +1312,10 @@ impl App {
 
         let prefs = crate::prefs::Prefs::load();
         let random_list = crate::random_list::RandomList::new(prefs.random.clone());
-        let dice_profile = crate::dice::profile::Selected::remembered(prefs.random_profile.as_deref());
+        let dice_profile = crate::dice::profile::Selected::remembered(
+            prefs.random_profile.as_deref(),
+            prefs.random_profile_builtin.as_deref(),
+        );
         let ui_state = UiState::from_prefs(&prefs);
         // Read before `prefs` is moved into the struct below.
         let (help_open, browser_open) = (prefs.panels.help_open, prefs.panels.browser_open);
@@ -3129,12 +3132,12 @@ impl App {
     /// Strength multiplier for U's random mutation (Mutate window slider).
     /// Part of the dice profile, so it is saved with it.
     pub fn mutate_strength(&self) -> f32 {
-        self.prefs.random.mutate.strength
+        self.prefs.random.mutation.strength
     }
 
     pub fn set_mutate_strength(&mut self, strength: f32) {
         let mut s = self.prefs.random.clone();
-        s.mutate.strength = strength;
+        s.mutation.strength = strength;
         self.set_random_settings(s);
     }
 
@@ -4818,8 +4821,8 @@ impl App {
     pub fn dice_config_flag(&self) -> String {
         let p = &self.dice_profile;
         match (&p.entry.path, p.modified(&self.prefs.random)) {
-            (None, false) => String::new(),
-            (Some(_), false) => format!(" --random-config {}", p.entry.name),
+            (None, false) if p.entry.name == crate::dice::profile::BUILTIN => String::new(),
+            (_, false) => format!(" --random-config {}", p.entry.name),
             (_, true) => " --random-config ~/.config/fracturize/prefs.toml".to_string(),
         }
     }
@@ -4835,7 +4838,7 @@ impl App {
     /// to see.
     pub fn random_flame(&mut self) {
         let seed = crate::random_list::fresh_seed();
-        match crate::dice::roll_seeded(&self.prefs.random, seed) {
+        match crate::dice::roll_seeded(&self.prefs.random, &self.scene, seed) {
             Ok(r) => {
                 log::info!(
                     "Random flame seed {seed}: {} transforms, {} tries (reproduce with --random --seed {seed}{})",
@@ -4884,8 +4887,12 @@ impl App {
                     self.set_notice(format!("Profile {}: {}", entry.name, loaded.warnings.join("; ")), true);
                 }
                 self.prefs.random_profile = entry.path.clone();
-                self.dice_profile =
-                    crate::dice::profile::Selected { entry, baseline: Some(loaded.settings.clone()) };
+                self.prefs.random_profile_builtin = entry.is_builtin().then(|| entry.name.clone());
+                self.dice_profile = crate::dice::profile::Selected {
+                    entry,
+                    description: loaded.meta.description.clone(),
+                    baseline: Some(loaded.settings.clone()),
+                };
                 self.set_random_settings(loaded.settings);
                 self.prefs_dirty_since = Some(std::time::Instant::now());
             }
@@ -4934,8 +4941,10 @@ impl App {
         };
         crate::dice::profile::save(&path, &self.prefs.random, &meta)?;
         self.prefs.random_profile = Some(path.clone());
+        self.prefs.random_profile_builtin = None;
         self.dice_profile = crate::dice::profile::Selected {
             entry: crate::dice::profile::entry_for(&path),
+            description: String::new(),
             baseline: Some(self.prefs.random.clone()),
         };
         self.prefs_dirty_since = Some(std::time::Instant::now());
@@ -4945,12 +4954,12 @@ impl App {
 
     /// Throw the list away and roll a fresh one.
     pub fn reroll_random_list(&mut self) {
-        self.random_list.reroll(&self.prefs.random);
+        self.random_list.reroll(&self.prefs.random, &self.scene);
     }
 
     /// Collect finished rolls and keep `want` rows rolled or on their way.
     pub fn poll_random_list(&mut self, want: usize) {
-        self.random_list.poll(&self.prefs.random, want);
+        self.random_list.poll(&self.prefs.random, &self.scene, want);
     }
 
     /// Open row `index` of the Random flames list: an edit, like the dice.
@@ -5036,7 +5045,7 @@ impl App {
             "Mutation seed {seed}: {} ({} tries{}; reproduce with --mutations 1 --seed {}{})",
             log.join("; "),
             r.attempts,
-            r.strength.filter(|&s| s < self.prefs.random.mutate.strength).map_or(String::new(), |s| format!(
+            r.strength.filter(|&s| s < self.prefs.random.mutation.strength).map_or(String::new(), |s| format!(
                 ", strength backed off to {s:.2}"
             )),
             seed.wrapping_sub(1),

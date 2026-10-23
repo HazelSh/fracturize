@@ -1,0 +1,28 @@
+# Change the colour and nothing else: every part of the form is off, so the
+# dice keep it exactly as it is. A roll recolours the scene from scratch —
+# new colours, colour source, gradient and background; a mutation shifts a
+# hue, a place on the gradient, or now and then the background.
+#
+#   fracturize -s scenes/koru.toml --random --random-config colour-only -r renders/koru-new.png
+#   fracturize -s scenes/koru.toml -r renders/koru-colours.png \
+#     --mutations 8 --random-config colour-only --effort tiny
+
+[meta]
+name = "colour-only"
+description = "Recolour; the form is never touched"
+author = "Claude Opus 5.5"
+
+[parts]
+translate = { on = false }
+rotate = { on = false }
+scale = { on = false }
+weight = { on = false }
+variations = { on = false }
+count = { on = false }
+symmetry = { on = false }
+color = { odds = 0.5, reroll = 0.2 }
+color_value = { odds = 0.3, reroll = 0.1 }
+background = { odds = 0.2, reroll = 0.4 }
+
+[mutation]
+changes = [1, 2]

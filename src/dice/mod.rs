@@ -1,18 +1,30 @@
 //! The dice: one generator for random flames and mutations alike.
 //!
-//! A fresh roll and a mutation are the same search with a different source of
-//! candidates ([`Source`]). Both draw candidates under one profile
-//! ([`RandomSettings`]), put each through the same gate, spend the same try
-//! budget, count the same [`Rejections`], and fail the same way
-//! ([`RollFailure`]). What differs is only where a candidate comes from and
-//! what it is judged against:
+//! **One profile, one list of parts.** A profile ([`RandomSettings`]) says
+//! which parts of a flame the dice may make — each transform's position, turn,
+//! size, weight and variations, how many transforms, the symmetry group, the
+//! colours, where each sits on the gradient, the background — and the ranges
+//! each is drawn from. Both actions read the same list the same way:
 //!
-//! - **Fresh** (`roll.rs`): built part by part from nothing, and held to the
-//!   profile's bounds absolutely.
-//! - **From a parent** (`mutate.rs`): the parent with a few parts nudged or
-//!   re-rolled, and held to *the parent's* standing on each check — no worse
-//!   than it was (`gate.rs` says why). After a run of rejections the strength
-//!   halves, so a delicate scene still yields something close.
+//! - **Roll** draws every part that's on, and keeps the base scene's own for
+//!   every part that's off (`roll.rs`). With every part on — the default — the
+//!   base is never read, and a seed rolls what it always has.
+//! - **Mutate** changes a few of the parts that are on: nudged, or re-rolled
+//!   with the very draw a roll makes (`mutate.rs`).
+//!
+//! So a part that's off means one thing whichever is pressed: *the dice leave
+//! this alone*. `colour-only` recolours what's there, by a roll or a mutation;
+//! `no-colour` changes the form and keeps the colours, either way.
+//!
+//! Both go through one search ([`generate`]): draw a candidate, steer its
+//! dimension if size is the dice's to change, judge it at the gate, and go
+//! again until one passes or the budget is spent. What a candidate is judged
+//! against depends only on what it owes the base: a roll with the whole form
+//! on is held to the profile's bounds absolutely; anything that keeps some of
+//! the base's form — every mutation, and a roll with a form part off — is held
+//! to *the base's* standing on each check, no worse than it was (`gate.rs`
+//! says why). A mutation's strength halves after a run of rejections, so a
+//! delicate scene still yields something close.
 //!
 //! Randomising an IFS is easy; randomising one that *renders* is not. Most
 //! random parameter sets either collapse to a point or diverge to a haze, so
@@ -20,21 +32,21 @@
 //! walkers the GPU shader mirrors). The two bounds a profile can set are met
 //! in different ways, because they cost different amounts:
 //!
-//! - **Dimension is steered, not rejected** (for fresh rolls; a mutation can
-//!   opt in). It is analytic (`Σ sᵢᵈ = 1` over the maps' contractions), and
-//!   scaling every map by one factor `k` moves it predictably: `k = (Σ
-//!   sᵢᵗ)^(-1/t)` puts it exactly on a target `t`. So a flame outside the bound
-//!   is rescaled onto a target drawn inside it, which keeps the maps' relative
-//!   sizes and costs nothing. Only a rescale that would stop a map contracting
-//!   is a rejection.
+//! - **Dimension is steered, not rejected.** It is analytic (`Σ sᵢᵈ = 1` over
+//!   the maps' contractions), and scaling every map by one factor `k` moves it
+//!   predictably: `k = (Σ sᵢᵗ)^(-1/t)` puts it exactly on a target `t`. So a
+//!   flame outside the bound is rescaled onto a target drawn inside it, which
+//!   keeps the maps' relative sizes and costs nothing. Only a rescale that
+//!   would stop a map contracting is a rejection. A mutation steers only when
+//!   its profile asks (`mutation.steer_dimension`): it resizes every map.
 //! - **Lacunarity is rejected.** It is measured by a chaos walk, and nothing
 //!   predicts it from the parameters, so a candidate outside the bound is
 //!   thrown away and another drawn.
 //!
 //! Every roll and every mutation is reproducible from its seed
-//! ([`roll_seeded`], [`mutate_seeded`]) given the same profile, and profiles
-//! are files (`profile.rs`), so `--random --seed N --random-config NAME` gets
-//! back exactly what the window rolled.
+//! ([`roll_seeded`], [`mutate_seeded`]) given the same profile and base, and
+//! profiles are files (`profile.rs`), so `--random --seed N --random-config
+//! NAME` gets back exactly what the window rolled.
 
 mod gate;
 mod mutate;
@@ -51,13 +63,13 @@ use crate::scene::{Scene, TransformSpec};
 use gate::{Gate, Measured, Reject};
 pub use settings::*;
 
-/// Where a generated flame comes from.
-#[derive(Clone, Copy)]
-pub enum Source<'a> {
-    /// Nothing: a whole new flame.
-    Fresh,
-    /// A mutation of this scene.
-    From(&'a Scene),
+/// What the dice do to the base scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Draw every part that's on; keep the base's for the rest.
+    Roll,
+    /// Change a few of the parts that are on.
+    Mutate,
 }
 
 /// Why candidates were thrown away, counted.
@@ -112,11 +124,11 @@ pub struct Roll {
     /// Candidates it took, this one included.
     pub attempts: u32,
     pub rejected: Rejections,
-    /// What a mutation changed, one line per operator, for people and
-    /// agents to read. Empty for a fresh roll.
+    /// What a mutation changed, one line per change, for people and agents
+    /// to read. Empty for a roll.
     pub log: Vec<String>,
     /// The strength a mutation was made at — less than the profile's when it
-    /// backed off to find one. `None` for a fresh roll.
+    /// backed off to find one. `None` for a roll.
     pub strength: Option<f32>,
 }
 
@@ -124,7 +136,7 @@ impl Roll {
     /// "strength backed off to 0.25 to find this", when it did.
     pub fn backoff_note(&self, settings: &RandomSettings) -> Option<String> {
         let s = self.strength?;
-        (s < settings.mutate.strength).then(|| format!("strength backed off to {s:.2} to find this"))
+        (s < settings.mutation.strength).then(|| format!("strength backed off to {s:.2} to find this"))
     }
 }
 
@@ -132,10 +144,10 @@ impl Roll {
 pub struct RollFailure {
     pub attempts: u32,
     pub rejected: Rejections,
-    /// The last candidate — framed neutrally, for a fresh roll — for a caller
-    /// that must return *something*.
+    /// The last candidate — framed neutrally, for a roll — for a caller that
+    /// must return *something*.
     pub last: Scene,
-    /// A mutation came up empty, rather than a fresh roll.
+    /// A mutation came up empty, rather than a roll.
     pub mutation: bool,
 }
 
@@ -144,7 +156,7 @@ impl RollFailure {
         let (what, fix) = if self.mutation {
             ("mutation of this scene", "lower the strength, loosen a bound or allow more tries")
         } else {
-            ("flame", "loosen a bound or allow more tries")
+            ("flame", "loosen a bound, switch on more parts or allow more tries")
         };
         format!(
             "no {what} met the random settings in {} tries (rejected for {}) — {fix}",
@@ -172,11 +184,13 @@ pub fn random_flame(rng: &mut impl Rng) -> Scene {
 
 /// One roll from a seed: what `--random --seed N` does, and what the dice
 /// and the Random flames list do with a seed of their own, so any of them can
-/// be had again from the command line. The scene is named after its seed.
-pub fn roll_seeded(settings: &RandomSettings, seed: u64) -> Result<Roll, RollFailure> {
+/// be had again from the command line. `base` is the scene whose parts are
+/// kept where the profile has them off; with every part on it isn't read. The
+/// scene is named after its seed.
+pub fn roll_seeded(settings: &RandomSettings, base: &Scene, seed: u64) -> Result<Roll, RollFailure> {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut rolled = roll(settings, &mut rng);
+    let mut rolled = generate(settings, base, Action::Roll, &mut rng);
     let name = format!("random-{seed}");
     match &mut rolled {
         Ok(r) => r.scene.name = name,
@@ -190,25 +204,36 @@ pub fn roll_seeded(settings: &RandomSettings, seed: u64) -> Result<Roll, RollFai
 /// The child keeps its parent's name.
 pub fn mutate_seeded(settings: &RandomSettings, parent: &Scene, seed: u64) -> Result<Roll, RollFailure> {
     use rand::SeedableRng;
-    generate(settings, Source::From(parent), &mut rand::rngs::StdRng::seed_from_u64(seed))
+    generate(settings, parent, Action::Mutate, &mut rand::rngs::StdRng::seed_from_u64(seed))
 }
 
-/// Build a random flame that meets `settings`.
+/// A roll from nothing — the blank scene as base, which only matters for a
+/// profile with parts off. What the tests and `random_flame` call.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn roll(settings: &RandomSettings, rng: &mut impl Rng) -> Result<Roll, RollFailure> {
-    generate(settings, Source::Fresh, rng)
+    generate(settings, &Scene::blank(), Action::Roll, rng)
 }
 
-/// Generate a flame that meets `settings`, fresh or from a parent.
-pub fn generate<R: Rng>(settings: &RandomSettings, source: Source, rng: &mut R) -> Result<Roll, RollFailure> {
-    match source {
-        Source::Fresh => {
-            let gate = Gate::absolute(settings);
-            match search(settings, &gate, true, rng, |rng, _| roll::build_candidate(settings, rng)) {
+/// Roll or mutate `base` under `settings`: the one search both go through.
+pub fn generate<R: Rng>(settings: &RandomSettings, base: &Scene, action: Action, rng: &mut R) -> Result<Roll, RollFailure> {
+    let parts = &settings.parts;
+    // A roll with the whole form on owes the base nothing, so the bounds
+    // alone judge it; anything that keeps some of the base's form is judged
+    // against the base, or a base outside the bounds could never yield one.
+    let gate = if action == Action::Roll && parts.whole_form() {
+        Gate::absolute(settings)
+    } else {
+        Gate::relative_to(settings, base)
+    };
+    let steer = parts.scale.on && (action == Action::Roll || settings.mutation.steer_dimension);
+    match action {
+        Action::Roll => {
+            match search(settings, &gate, steer, rng, |rng, _| roll::build_candidate(settings, base, rng)) {
                 Ok(found) => {
                     let (center, radius) =
                         found.measured.stats.as_ref().map(|s| (s.center, s.radius)).unwrap_or((Vec3::ZERO, 1.0));
                     Ok(Roll {
-                        scene: roll::finish(found.candidate, center, radius, rng),
+                        scene: roll::finish(found.candidate, center, radius, settings, base, rng),
                         dimension: found.measured.dimension,
                         lacunarity: found.measured.lacunarity,
                         attempts: found.attempts,
@@ -218,26 +243,25 @@ pub fn generate<R: Rng>(settings: &RandomSettings, source: Source, rng: &mut R) 
                     })
                 }
                 Err(lost) => {
-                    let last = lost.last.unwrap_or_else(|| roll::build_candidate(settings, rng));
+                    let last = lost.last.unwrap_or_else(|| roll::build_candidate(settings, base, rng));
                     Err(RollFailure {
                         attempts: lost.attempts,
                         rejected: lost.rejected,
-                        last: roll::finish(last, Vec3::ZERO, 1.0, rng),
+                        last: roll::finish(last, Vec3::ZERO, 1.0, settings, base, rng),
                         mutation: false,
                     })
                 }
             }
         }
-        Source::From(parent) => {
-            let gate = Gate::relative_to(settings, parent);
-            let m = &settings.mutate;
+        Action::Mutate => {
+            let m = &settings.mutation;
             let propose = |rng: &mut R, rejected_so_far: u32| {
                 let strength = backed_off(m.strength, rejected_so_far, m.backoff);
-                let mut scene = parent.clone();
+                let mut scene = base.clone();
                 let log = mutate::mutate(&mut scene, settings, strength, rng);
                 Child { scene, log, strength }
             };
-            match search(settings, &gate, m.steer_dimension, rng, propose) {
+            match search(settings, &gate, steer, rng, propose) {
                 Ok(found) => Ok(Roll {
                     scene: found.candidate.scene,
                     dimension: found.measured.dimension,
@@ -250,7 +274,7 @@ pub fn generate<R: Rng>(settings: &RandomSettings, source: Source, rng: &mut R) 
                 Err(lost) => Err(RollFailure {
                     attempts: lost.attempts,
                     rejected: lost.rejected,
-                    last: lost.last.map(|c| c.scene).unwrap_or_else(|| parent.clone()),
+                    last: lost.last.map(|c| c.scene).unwrap_or_else(|| base.clone()),
                     mutation: true,
                 }),
             }
@@ -374,5 +398,72 @@ mod tests {
         assert_eq!(backed_off(1.0, 9, 4), 0.25);
         assert_eq!(backed_off(1.0, 1000, 4), 1.0 / 16.0);
         assert_eq!(backed_off(2.0, 1000, 0), 2.0, "0 never backs off");
+    }
+
+    /// Every built-in profile rolls and mutates, and a part that's off is
+    /// left alone the same way by both: `colour-only` never moves the form,
+    /// `no-colour` never changes a colour, whether rolled or mutated.
+    #[test]
+    fn every_builtin_profile_rolls_and_mutates() {
+        use profile::{load, Entry, BUILTINS};
+        let Ok(parent) = roll_seeded(&RandomSettings::default(), &Scene::blank(), 7).map(|r| r.scene) else {
+            panic!("no parent")
+        };
+        let same_form = |c: &Scene| {
+            c.transforms.len() == parent.transforms.len()
+                && c.transforms.iter().zip(&parent.transforms).all(|(a, b)| {
+                    a.matrix == b.matrix && a.variations == b.variations && a.weight == b.weight && a.symmetry == b.symmetry
+                })
+        };
+        let same_colour = |c: &Scene| {
+            c.colors == parent.colors
+                && c.background == parent.background
+                && c.color_mode == parent.color_mode
+                && c.colormap == parent.colormap
+                && c.transforms.iter().zip(&parent.transforms).all(|(a, b)| a.color_value == b.color_value)
+        };
+        for name in std::iter::once(profile::BUILTIN).chain(BUILTINS.iter().map(|(n, _)| *n)) {
+            let settings = load(&Entry::builtin(name)).unwrap().settings;
+            let mut made = Vec::new();
+            for seed in 0..10 {
+                if let Ok(r) = roll_seeded(&settings, &parent, seed) {
+                    made.push(("roll", r));
+                }
+                if let Ok(r) = mutate_seeded(&settings, &parent, seed) {
+                    made.push(("mutation", r));
+                }
+            }
+            let rolls = made.iter().filter(|(k, _)| *k == "roll").count();
+            assert!(rolls >= 8, "{name}: only {rolls}/10 rolls passed the gate");
+            assert!(made.len() - rolls >= 7, "{name}: only {}/10 mutations passed", made.len() - rolls);
+            for (kind, r) in &made {
+                match name {
+                    "colour-only" => assert!(same_form(&r.scene), "colour-only {kind} changed the form: {:?}", r.log),
+                    "no-colour" => assert!(same_colour(&r.scene), "no-colour {kind} changed a colour: {:?}", r.log),
+                    _ => {}
+                }
+            }
+            if name == "colour-only" {
+                assert!(made.iter().any(|(k, r)| *k == "roll" && !same_colour(&r.scene)), "colour-only rolls never recoloured");
+            }
+            if name == "no-colour" {
+                assert!(made.iter().any(|(k, r)| *k == "roll" && !same_form(&r.scene)), "no-colour rolls never changed the form");
+            }
+        }
+    }
+
+    /// With every part on, a roll owes the base nothing: the same seed rolls
+    /// the same flame on any base, which is what keeps every recorded
+    /// `--random --seed N` rolling what it always rolled.
+    #[test]
+    fn with_every_part_on_the_base_is_never_read() {
+        let s = RandomSettings::default();
+        let other = roll_seeded(&s, &Scene::blank(), 99).map(|r| r.scene).ok().expect("a base");
+        for seed in [1, 2, 3, 40, 500] {
+            let a = roll_seeded(&s, &Scene::blank(), seed).ok().map(|r| r.scene);
+            let b = roll_seeded(&s, &other, seed).ok().map(|r| r.scene);
+            let key = |s: &Option<Scene>| s.as_ref().map(|s| (s.transforms.iter().map(|t| t.matrix).collect::<Vec<_>>(), s.colors.clone(), s.background));
+            assert_eq!(key(&a), key(&b), "seed {seed} depends on the base");
+        }
     }
 }

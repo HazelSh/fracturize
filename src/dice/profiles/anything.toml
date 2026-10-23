@@ -1,0 +1,58 @@
+# The widest net: every part of a flame on, every variation, any symmetry now
+# and then — and a mutation that may change any part, the background and the
+# group included.
+#
+# More rolls fail the quality gate under it (spherical, hyperbolic and tangent
+# spray outliers), so it gets a bigger try budget. The gate still holds:
+# anything here means anything that renders.
+#
+#   fracturize --random-sheet 9 --random-config anything -r renders/any.png \
+#     --effort tiny --width 320 --height 180
+
+[meta]
+name = "anything"
+description = "Every variation, any symmetry, any part may change"
+author = "Claude Opus 5.5"
+
+[parts]
+symmetry = { odds = 0.05 }
+background = { odds = 0.05 }
+
+[ranges]
+transforms = [2, 8]
+scale = [0.4, 0.85]
+squash = 0.3
+affine = 0.08
+kinds = [1, 4]
+per_map = [0, 3]
+negative = 0.3
+attempts = 150
+
+[ranges.variations]
+sinusoidal = { enabled = true }
+spherical = { enabled = true }
+swirl = { enabled = true }
+horseshoe = { enabled = true }
+polar = { enabled = true }
+disc = { enabled = true }
+spiral = { enabled = true }
+hyperbolic = { enabled = true }
+diamond = { enabled = true }
+julia = { enabled = true }
+bent = { enabled = true }
+fisheye = { enabled = true }
+bubble = { enabled = true }
+cylinder = { enabled = true }
+tangent = { enabled = true }
+absfold = { enabled = true }
+boxfold = { enabled = true }
+spherefold = { enabled = true }
+bulb = { enabled = true }
+
+[ranges.symmetry]
+chance = 0.3
+repeat = true
+free = [1, 3]
+
+[mutation]
+changes = [1, 4]

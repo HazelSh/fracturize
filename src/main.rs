@@ -170,24 +170,29 @@ struct Args {
     #[arg(long, value_name = "PRESET", requires = "scene", help_heading = "Scene")]
     xaos: Option<String>,
 
-    /// Start from a randomly generated flame instead of a scene file
+    /// Start from a random flame [with -s: rolled on that scene]
     ///
     /// Each roll is checked on the CPU before it's used, so it always renders
     /// something. The seed is always printed; pass it back with --seed to
-    /// reproduce a roll. Combine with --render to explore offline.
-    #[arg(long, conflicts_with = "scene", help_heading = "Scene")]
+    /// reproduce a roll. Combine with --render to explore offline. With a
+    /// --scene, the roll keeps that scene's parts wherever the dice profile
+    /// has them off: `-s koru.toml --random --random-config colour-only` is
+    /// koru, recoloured. With every part on, as in the default profile, the
+    /// scene makes no difference.
+    #[arg(long, help_heading = "Scene")]
     random: bool,
 
     /// Dice profile for --random, --mutations, --random-sheet [default]
     ///
-    /// A profile's name (`~/.config/fracturize/dice/<name>.toml`, then
-    /// `scenes/dice/<name>.toml`; `default` is built in) or a file. A profile
-    /// says what a fresh roll may be made of — variations and their weight
-    /// ranges, maps per flame, symmetry, bounds on dimension and lacunarity —
-    /// and what a mutation may change and how hard: the app's Random settings
-    /// window, saved. Also takes a bare settings table, or any file with a
-    /// [random] table in it — prefs.toml — to roll exactly what the window
-    /// would. Keys it doesn't know are reported on stderr.
+    /// A profile's name or a file. Built in: default, anything, no-symmetry,
+    /// colour-only, no-colour, symmetric; then `~/.config/fracturize/dice/
+    /// <name>.toml`, then `scenes/dice/<name>.toml`. A profile is one list of
+    /// the parts of a flame the dice may make, with the ranges each is drawn
+    /// from: a roll draws every part that's on, a mutation changes a few, and
+    /// a part that's off is kept as it was by both. It is the app's Random
+    /// settings window, saved. Also takes a bare settings table, or any file
+    /// with a [random] table in it — prefs.toml — to roll exactly what the
+    /// window would. Keys it doesn't know are reported on stderr.
     #[arg(long, value_name = "NAME|FILE", help_heading = "Scene")]
     random_config: Option<String>,
 
@@ -914,8 +919,10 @@ struct Args {
     /// Sheet of N random flames under --random-config [no sheet]
     ///
     /// Tile N is `--random --seed <seed+N>`, framed by its own camera on its
-    /// own background, and saved as <out>.rollN.toml. Needs no --scene.
-    #[arg(long, value_name = "1-25", conflicts_with_all = ["scene", "mutations"], help_heading = "Contact sheets")]
+    /// own background, and saved as <out>.rollN.toml. Needs no --scene; with
+    /// one, every roll keeps that scene's parts wherever the profile has them
+    /// off, as --random does.
+    #[arg(long, value_name = "1-25", conflicts_with = "mutations", help_heading = "Contact sheets")]
     random_sheet: Option<u32>,
 
     /// Sheet varying a scene value; twice makes a 2D grid [no sheet]
@@ -1636,11 +1643,17 @@ fn load_scene_reporting(args: &Args) -> (Scene, Vec<set::Applied>, Option<u64>) 
                     std::process::exit(1);
                 }
             }
+            if args.random {
+                // The scene is the roll's base: what it keeps of the parts the
+                // profile has off.
+                let (rolled, seed) = random_scene(args.seed, args.random_config.as_deref(), &scene);
+                return (rolled, applied, Some(seed));
+            }
             (scene, applied, None)
         }
         None if args.blank => (Scene::blank(), warn_set_cannot_apply(args), None),
         None if args.random => {
-            let (scene, seed) = random_scene(args.seed, args.random_config.as_deref());
+            let (scene, seed) = random_scene(args.seed, args.random_config.as_deref(), &Scene::blank());
             (scene, warn_set_cannot_apply(args), Some(seed))
         }
         None => (default_scene(), warn_set_cannot_apply(args), None),
@@ -1730,7 +1743,7 @@ fn dice_profile(config: Option<&str>) -> dice::RandomSettings {
 /// nothing meets them — the bounds were asked for. Without it, the defaults
 /// nearly always pass, and the rare roll that doesn't comes back anyway, as
 /// it always has.
-fn random_scene(seed: Option<u64>, config: Option<&str>) -> (Scene, u64) {
+fn random_scene(seed: Option<u64>, config: Option<&str>, base: &Scene) -> (Scene, u64) {
     let seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1738,7 +1751,7 @@ fn random_scene(seed: Option<u64>, config: Option<&str>) -> (Scene, u64) {
             .unwrap_or(0)
     });
     let settings = dice_profile(config);
-    let scene = match dice::roll_seeded(&settings, seed) {
+    let scene = match dice::roll_seeded(&settings, base, seed) {
         Ok(r) => r.scene,
         Err(f) if config.is_none() => {
             log::warn!("Random flame: {}", f.message());
@@ -1963,12 +1976,21 @@ impl ApplicationHandler for AppWrapper {
 
         // Load scene - panic if provided path fails, use default if no path given
         let mut scene = match &self.args.scene {
-            Some(path) => Scene::load_with(path, &self.args.set).unwrap_or_else(|e| {
-                panic!("Failed to load scene '{}': {}", path, e);
-            }),
+            Some(path) => {
+                let scene = Scene::load_with(path, &self.args.set).unwrap_or_else(|e| {
+                    panic!("Failed to load scene '{}': {}", path, e);
+                });
+                if self.args.random {
+                    let (rolled, seed) = random_scene(self.args.seed, self.args.random_config.as_deref(), &scene);
+                    println!("Random flame seed: {}", seed);
+                    rolled
+                } else {
+                    scene
+                }
+            }
             None if self.args.blank => Scene::blank(),
             None if self.args.random => {
-                let (scene, seed) = random_scene(self.args.seed, self.args.random_config.as_deref());
+                let (scene, seed) = random_scene(self.args.seed, self.args.random_config.as_deref(), &Scene::blank());
                 println!("Random flame seed: {}", seed);
                 scene
             }
@@ -3068,7 +3090,7 @@ fn main() {
                     }
                     let mut settings = dice_profile(args.random_config.as_deref());
                     if let Some(s) = args.mutation_strength {
-                        settings.mutate.strength = s;
+                        settings.mutation.strength = s;
                         settings = settings.normalized();
                     }
                     offline::render_mutations(params, n, &settings, args.seed)

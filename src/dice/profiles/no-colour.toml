@@ -1,0 +1,22 @@
+# The other half of colour-only: change the form and keep the colours. A
+# roll makes a new form, with as many transforms as the scene has, in its
+# colours and on its background; a mutation moves, turns, resizes and
+# reshapes.
+#
+# The transform count is off too. In transforms colour mode each transform's
+# colour sits at its place in the count, so adding one shifts the colour of
+# every other — a recolour by the back door.
+#
+#   fracturize -s scenes/koru.toml -r renders/koru-forms.png \
+#     --mutations 8 --random-config no-colour --effort tiny
+
+[meta]
+name = "no-colour"
+description = "Change the form; the colours are never touched"
+author = "Claude Opus 5.5"
+
+[parts]
+count = { on = false }
+color = { on = false }
+color_value = { on = false }
+background = { on = false }

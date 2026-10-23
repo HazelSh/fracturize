@@ -1,12 +1,14 @@
-//! What the dice may do: [`RandomSettings`], one profile read by a fresh roll
-//! and by a mutation alike.
+//! What the dice may do: [`RandomSettings`], one profile read by a roll and by
+//! a mutation alike.
 //!
-//! The roll half says what a flame may be made of — maps, variations and their
-//! weight ranges, symmetry, bounds on the attractor. The [`MutateSettings`]
-//! half says what a mutation may change, and how hard. They are one struct
-//! because a mutation that *re-rolls* a part draws it from the roll half: "give
-//! map 2 new variations" is the same draw over the same enabled list and
-//! ranges a fresh roll makes, so the two can't drift apart.
+//! It is a list of [`Parts`] — the things a flame is made of — each switched
+//! on or off, and the ranges each is drawn from. A roll draws every part
+//! that's on; a mutation changes a few of them. A part that's off is never
+//! touched by either: the base scene's own is kept. There is no roll half and
+//! mutate half, because there is nothing either could say that the other
+//! should not mean the same way. The only settings one action reads and the
+//! other doesn't are [`MutationSettings`] — how big a step — and the parts'
+//! odds, which say which of them a mutation picks, since a roll takes all.
 //!
 //! How a profile is written to and read from a file is `super::profile`'s job.
 
@@ -153,24 +155,35 @@ impl Default for Bound {
     }
 }
 
-/// How often a mutation touches one part of a flame, and how.
+/// One part of a flame the dice can make: whether they may, and — for a
+/// mutation, which changes only a few parts at a time — how often it is the
+/// one changed and how.
 ///
-/// A touched part is **nudged** — what is there perturbed, scaled by the
-/// strength — or, at the `reroll` chance, **re-rolled**: replaced by the very
-/// draw a fresh roll makes, under the same ranges.
+/// **`on` is the whole of what the dice may do, for a roll and a mutation
+/// alike.** A roll draws every part that is on and keeps the base scene's own
+/// for every part that is off; a mutation picks among the parts that are on.
+/// So a mask is a profile with some parts off, and it means the same thing
+/// whichever button is pressed.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
 pub struct Part {
-    /// Relative odds of touching this part, against the other parts' odds.
-    /// 0 leaves it alone — a profile with every part but one at 0 is a mask.
+    pub on: bool,
+    /// How often a mutation picks this part, against the other parts' odds.
+    /// A roll draws every part that's on, so this is a mutation's business.
     pub odds: f32,
-    /// Chance a touch re-rolls the part rather than nudging it.
+    /// Chance a mutation replaces the part outright — the very draw a roll
+    /// makes, under the same ranges — rather than nudging what's there.
     pub reroll: f32,
 }
 
 impl Part {
     const fn new(odds: f32, reroll: f32) -> Self {
-        Self { odds, reroll }
+        Self { on: true, odds, reroll }
+    }
+
+    /// Odds a mutation picks it with: its odds while on, else none.
+    pub fn live_odds(&self) -> f32 {
+        if self.on { self.odds } else { 0.0 }
     }
 }
 
@@ -180,94 +193,102 @@ impl Default for Part {
     }
 }
 
-/// Every part a mutation can touch. The odds are relative, so they needn't
-/// add up to anything.
+/// Every part of a flame the dice can make.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
 pub struct Parts {
-    /// A map's position.
+    /// Each transform's position.
     pub translate: Part,
-    /// A map's turn, about its own origin.
+    /// Each transform's turn, about its own origin.
     pub rotate: Part,
-    /// A map's size. Re-rolled, it takes a size from the roll's scale range.
+    /// Each transform's size, from the scale range.
     pub scale: Part,
-    /// A map's chaos-game weight.
+    /// Each transform's chaos-game weight.
     pub weight: Part,
-    /// A map's variation blend. A nudge adjusts one weight or brings in one
-    /// variation from the enabled list; a re-roll replaces the map's blend
-    /// the way a fresh roll makes one.
+    /// Each transform's variation blend, from the enabled list.
     pub variations: Part,
-    /// A map's colour, or — in palette mode — the gradient.
-    pub color: Part,
-    /// Where a map sits on the gradient.
-    pub color_value: Part,
-    /// A new map: a nudged copy of one, or (re-rolled) a fresh one. Never past
-    /// the roll's most maps.
-    pub add: Part,
-    /// A map deleted. Never below the roll's fewest maps.
-    pub remove: Part,
-    /// The background. Re-rolled, it is drawn from the flame's colours the way
-    /// a fresh roll's is.
-    pub background: Part,
-    /// The symmetry group: a nudge tilts its axis, a re-roll draws another
-    /// group from the roll's symmetry settings (or gives the flame one).
+    /// How many transforms: a roll draws it from the range, a mutation adds
+    /// one (a changed copy, or re-rolled a new one) or removes one, within it.
+    pub count: Part,
+    /// The symmetry group, from the symmetry settings.
     pub symmetry: Part,
+    /// The colours: each transform's, the colour source and the gradient.
+    pub color: Part,
+    /// Where each transform sits on the gradient.
+    pub color_value: Part,
+    /// The background, drawn from the flame's colours.
+    pub background: Part,
 }
 
 impl Parts {
     /// The parts by name, in the order they're written and shown.
-    pub const NAMES: [&'static str; 11] = [
+    pub const NAMES: [&'static str; 10] = [
         "translate",
         "rotate",
         "scale",
         "weight",
         "variations",
+        "count",
+        "symmetry",
         "color",
         "color_value",
-        "add",
-        "remove",
         "background",
-        "symmetry",
     ];
 
-    pub fn all(&self) -> [Part; 11] {
+    /// The parts that make the form — what the gate measures and the camera
+    /// frames. Indices into [`Self::NAMES`]; the rest are colour.
+    pub const FORM: [usize; 7] = [0, 1, 2, 3, 4, 5, 6];
+
+    pub fn all(&self) -> [Part; 10] {
         [
             self.translate,
             self.rotate,
             self.scale,
             self.weight,
             self.variations,
+            self.count,
+            self.symmetry,
             self.color,
             self.color_value,
-            self.add,
-            self.remove,
             self.background,
-            self.symmetry,
         ]
     }
 
-    pub fn all_mut(&mut self) -> [&mut Part; 11] {
+    pub fn all_mut(&mut self) -> [&mut Part; 10] {
         [
             &mut self.translate,
             &mut self.rotate,
             &mut self.scale,
             &mut self.weight,
             &mut self.variations,
+            &mut self.count,
+            &mut self.symmetry,
             &mut self.color,
             &mut self.color_value,
-            &mut self.add,
-            &mut self.remove,
             &mut self.background,
-            &mut self.symmetry,
         ]
+    }
+
+    /// Every part of the form is on: a roll owes nothing to its base scene's
+    /// form, and is judged by the bounds alone.
+    pub fn whole_form(&self) -> bool {
+        let all = self.all();
+        Self::FORM.iter().all(|&i| all[i].on)
+    }
+
+    /// No part of the form is on: the form is the base scene's, untouched.
+    pub fn no_form(&self) -> bool {
+        let all = self.all();
+        Self::FORM.iter().all(|&i| !all[i].on)
     }
 }
 
 impl Default for Parts {
-    /// The odds `U` always had, with re-rolls added where a fresh draw is a
-    /// useful kind of change. Background and symmetry are off: a mutation
-    /// changing the ground or the group is a bigger step than the rest, and
-    /// one to ask for.
+    /// Every part on, so a roll owes nothing to the scene it was rolled from.
+    /// The odds are the ones `U` always had, with re-rolls where a fresh draw
+    /// is a useful kind of change. A mutation never picks the background or
+    /// the symmetry (odds 0): changing the ground or the group is a bigger
+    /// step than the rest, and one to ask for.
     fn default() -> Self {
         Self {
             translate: Part::new(0.18, 0.0),
@@ -275,49 +296,42 @@ impl Default for Parts {
             scale: Part::new(0.15, 0.0),
             weight: Part::new(0.12, 0.0),
             variations: Part::new(0.18, 0.15),
+            count: Part::new(0.08, 0.3),
+            symmetry: Part::new(0.0, 0.5),
             color: Part::new(0.09, 0.1),
             color_value: Part::new(0.05, 0.0),
-            add: Part::new(0.05, 0.3),
-            remove: Part::new(0.03, 0.0),
             background: Part::new(0.0, 0.5),
-            symmetry: Part::new(0.0, 0.5),
         }
     }
 }
 
-/// What a mutation may change, and how hard. The half of a profile `U`, the
-/// Mutate window and `--mutations` read.
+/// How big a step a mutation takes. A roll draws every part that's on, so
+/// none of this applies to it.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
-pub struct MutateSettings {
+pub struct MutationSettings {
     /// Scales every nudge: 1 is a noticeable but usually non-destructive step.
     pub strength: f32,
-    /// Operators one mutation applies, each to a part drawn by the odds.
-    pub operators: [u32; 2],
+    /// Parts one mutation changes, each picked by the parts' odds.
+    pub changes: [u32; 2],
     /// Halve the strength after this many rejected tries in a row (0 = never),
     /// down to a sixteenth — so a strong setting on a delicate scene still
     /// finds something close instead of nothing.
     pub backoff: u32,
-    /// Rescale the child onto the dimension bound, as a fresh roll is. Off by
-    /// default: it rescales every map, a bigger change than the mutation.
+    /// Rescale a mutation onto the dimension bound, as a roll is. Off by
+    /// default: it resizes every transform, a bigger change than the mutation.
     pub steer_dimension: bool,
-    pub parts: Parts,
 }
 
-impl Default for MutateSettings {
+impl Default for MutationSettings {
     fn default() -> Self {
-        Self {
-            strength: 1.0,
-            operators: [1, 3],
-            backoff: 4,
-            steer_dimension: false,
-            parts: Parts::default(),
-        }
+        Self { strength: 1.0, changes: [1, 3], backoff: 4, steer_dimension: false }
     }
 }
 
-/// A profile: what the dice may roll, and what a mutation may change.
-/// Persisted to prefs as `[random]`, edited in the Random settings window,
+/// A profile: the parts of a flame the dice may make, how each is drawn, and
+/// how big a step a mutation takes. One profile for a roll and a mutation
+/// alike. Persisted to prefs as `[random]`, edited in the Random settings window,
 /// saved and loaded as named profiles (`super::profile`), and readable by
 /// `--random-config`.
 ///
@@ -327,7 +341,9 @@ impl Default for MutateSettings {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct RandomSettings {
-    /// Maps per flame.
+    /// What the dice may make, part by part.
+    pub parts: Parts,
+    /// Transforms per flame.
     pub transforms: [u32; 2],
     /// Each map's base scale, drawn log-uniformly — before any dimension
     /// rescale, which keeps the maps' ratios but not this range.
@@ -350,7 +366,7 @@ pub struct RandomSettings {
     /// if it is one of the bounded variations, at `[0.12, 0.75]`. `linear` is
     /// never listed — it is what's left: `1 − Σ|w|`, floored at 0.
     pub variations: BTreeMap<String, VariationRange>,
-    /// Symmetry groups, and how often.
+    /// Which symmetry groups, and how often a roll takes one.
     pub symmetry: SymmetrySettings,
     /// Bound on the similarity dimension of the maps' affine parts. Steered:
     /// see the module docs.
@@ -360,8 +376,8 @@ pub struct RandomSettings {
     pub lacunarity: Bound,
     /// Candidates tried per flame (or per mutation) before giving up.
     pub attempts: u32,
-    /// What a mutation may change.
-    pub mutate: MutateSettings,
+    /// How big a step a mutation takes.
+    pub mutation: MutationSettings,
 }
 
 impl Default for RandomSettings {
@@ -375,6 +391,7 @@ impl Default for RandomSettings {
             })
             .collect();
         Self {
+            parts: Parts::default(),
             transforms: [2, 5],
             scale: [0.35, 0.75],
             squash: 0.3,
@@ -389,7 +406,7 @@ impl Default for RandomSettings {
             // most of what the dice make and trims the smooth and the sparse.
             lacunarity: Bound::off([8.0, 30.0]),
             attempts: 60,
-            mutate: MutateSettings::default(),
+            mutation: MutationSettings::default(),
         }
     }
 }
@@ -402,7 +419,7 @@ pub const DIMENSION_LIMITS: [f32; 2] = [0.1, 6.0];
 pub const LACUNARITY_LIMITS: [f32; 2] = [0.1, 1000.0];
 pub const MAX_ATTEMPTS: u32 = 1000;
 pub const STRENGTH_LIMITS: [f32; 2] = [0.1, 3.0];
-pub const MAX_OPERATORS: u32 = 8;
+pub const MAX_CHANGES: u32 = 8;
 /// Past this a part's odds stop meaning anything the others can answer.
 pub const ODDS_LIMIT: f32 = 10.0;
 
@@ -440,11 +457,11 @@ impl RandomSettings {
         self.lacunarity.range =
             ordered(self.lacunarity.range, LACUNARITY_LIMITS[0], LACUNARITY_LIMITS[1]);
         self.attempts = self.attempts.clamp(1, MAX_ATTEMPTS);
-        let m = &mut self.mutate;
+        let m = &mut self.mutation;
         m.strength = if m.strength.is_finite() { m.strength.clamp(STRENGTH_LIMITS[0], STRENGTH_LIMITS[1]) } else { 1.0 };
-        m.operators = ordered(m.operators, 1, MAX_OPERATORS);
+        m.changes = ordered(m.changes, 1, MAX_CHANGES);
         m.backoff = m.backoff.min(MAX_ATTEMPTS);
-        for p in m.parts.all_mut() {
+        for p in self.parts.all_mut() {
             p.odds = if p.odds.is_finite() { p.odds.clamp(0.0, ODDS_LIMIT) } else { 0.0 };
             p.reroll = if p.reroll.is_finite() { p.reroll.clamp(0.0, 1.0) } else { 0.0 };
         }
@@ -466,10 +483,19 @@ impl RandomSettings {
         (1..NUM_VARIATIONS).filter(|&s| self.variation(s).enabled).collect()
     }
 
-    /// Whether `other` makes the same fresh rolls: everything but the mutate
-    /// half. The Random flames list starts over only when this changes.
+    /// Whether `other` makes the same rolls: everything but what only a
+    /// mutation reads (its step, and the parts' odds and re-roll chances).
+    /// The Random flames list starts over only when this changes.
     pub fn same_roll(&self, other: &Self) -> bool {
-        Self { mutate: other.mutate, ..self.clone() } == *other
+        let rolled = |s: &Self| {
+            let mut s = s.clone();
+            s.mutation = MutationSettings::default();
+            for p in s.parts.all_mut() {
+                *p = Part { on: p.on, odds: 0.0, reroll: 0.0 };
+            }
+            s
+        };
+        rolled(self) == rolled(other)
     }
 }
 
@@ -488,34 +514,40 @@ mod tests {
     }
 
     #[test]
-    fn the_mutate_half_is_normalized_too() {
+    fn the_mutation_step_and_parts_are_normalized_too() {
         let mut s = RandomSettings::default();
-        s.mutate.strength = 40.0;
-        s.mutate.operators = [5, 2];
-        s.mutate.parts.rotate.odds = -1.0;
-        s.mutate.parts.color.reroll = f32::NAN;
+        s.mutation.strength = 40.0;
+        s.mutation.changes = [5, 2];
+        s.parts.rotate.odds = -1.0;
+        s.parts.color.reroll = f32::NAN;
         let s = s.normalized();
-        assert_eq!(s.mutate.strength, STRENGTH_LIMITS[1]);
-        assert_eq!(s.mutate.operators, [2, 5]);
-        assert_eq!(s.mutate.parts.rotate.odds, 0.0);
-        assert_eq!(s.mutate.parts.color.reroll, 0.0);
+        assert_eq!(s.mutation.strength, STRENGTH_LIMITS[1]);
+        assert_eq!(s.mutation.changes, [2, 5]);
+        assert_eq!(s.parts.rotate.odds, 0.0);
+        assert_eq!(s.parts.color.reroll, 0.0);
     }
 
+    /// A roll reads which parts are on and the ranges; only a mutation reads
+    /// the step and the odds.
     #[test]
-    fn the_roll_ignores_the_mutate_half() {
+    fn the_roll_reads_the_switches_not_the_odds() {
         let a = RandomSettings::default();
         let mut b = a.clone();
-        b.mutate.strength = 2.0;
+        b.mutation.strength = 2.0;
+        b.parts.rotate.odds = 3.0;
         assert!(a.same_roll(&b));
-        b.transforms = [3, 3];
+        b.parts.color.on = false;
         assert!(!a.same_roll(&b));
+        let mut c = a.clone();
+        c.transforms = [3, 3];
+        assert!(!a.same_roll(&c));
     }
 
     #[test]
     fn parts_are_named_in_field_order() {
         let mut p = Parts::default();
-        *p.all_mut()[4] = Part { odds: 9.0, reroll: 0.5 };
-        assert_eq!(p.variations, Part { odds: 9.0, reroll: 0.5 });
+        *p.all_mut()[4] = Part { on: false, odds: 9.0, reroll: 0.5 };
+        assert_eq!(p.variations, Part { on: false, odds: 9.0, reroll: 0.5 });
         assert_eq!(Parts::NAMES[4], "variations");
         // And the names are the serialized keys, which the file format uses.
         let t = toml::Value::try_from(p).unwrap();

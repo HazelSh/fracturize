@@ -91,7 +91,7 @@ pub struct Prefs {
     #[serde(default)]
     pub panels: PanelPrefs,
     /// Where mutation strength lived before it moved into the dice profile
-    /// (`random.mutate.strength`). Read once, to carry an old setting over,
+    /// (`random.mutation.strength`). Read once, to carry an old setting over,
     /// and never written again.
     #[serde(default, skip_serializing)]
     pub mutate_strength: Option<f32>,
@@ -109,10 +109,14 @@ pub struct Prefs {
     #[serde(default)]
     pub random: crate::dice::RandomSettings,
     /// The dice profile file `random` was loaded from or last saved to, which
-    /// the window compares against to mark it changed. `None` = the built-in
-    /// defaults.
+    /// the window compares against to mark it changed. `None` = a built-in
+    /// profile, named by `random_profile_builtin`.
     #[serde(default)]
     pub random_profile: Option<PathBuf>,
+    /// The built-in profile `random` came from, when `random_profile` is
+    /// `None`. `None` here too = `default`.
+    #[serde(default)]
+    pub random_profile_builtin: Option<String>,
     /// Who to credit on scenes made in-app. Scene files carry their own
     /// author; this is only the default for one that doesn't have one yet (a
     /// blank canvas, a random flame), so a person doesn't have to type their
@@ -175,6 +179,7 @@ impl Default for Prefs {
             ui_scale: default_ui_scale(),
             random: Default::default(),
             random_profile: None,
+            random_profile_builtin: None,
             author: None,
             point_count: None,
             threads: None,
@@ -208,8 +213,8 @@ impl Prefs {
     /// carried into the profile — unless the profile already says otherwise.
     fn migrated(mut self) -> Self {
         if let Some(s) = self.mutate_strength.take() {
-            if self.random.mutate.strength == crate::dice::MutateSettings::default().strength {
-                self.random.mutate.strength = s;
+            if self.random.mutation.strength == crate::dice::MutationSettings::default().strength {
+                self.random.mutation.strength = s;
             }
         }
         self.random = self.random.normalized();
@@ -294,12 +299,12 @@ mod tests {
     fn an_old_mutation_strength_moves_into_the_profile() {
         let old = "invert_pitch = true\nmutate_strength = 2.5\n";
         let p = toml::from_str::<Prefs>(old).unwrap().migrated();
-        assert_eq!(p.random.mutate.strength, 2.5);
+        assert_eq!(p.random.mutation.strength, 2.5);
         let s = toml::to_string(&p).unwrap();
         assert!(!s.contains("\nmutate_strength"), "the old key must not be written: {s}");
         // A profile that already states a strength keeps it.
-        let both = "mutate_strength = 2.5\n[random.mutate]\nstrength = 0.5\n";
-        assert_eq!(toml::from_str::<Prefs>(both).unwrap().migrated().random.mutate.strength, 0.5);
+        let both = "mutate_strength = 2.5\n[random.mutation]\nstrength = 0.5\n";
+        assert_eq!(toml::from_str::<Prefs>(both).unwrap().migrated().random.mutation.strength, 0.5);
     }
 
 }

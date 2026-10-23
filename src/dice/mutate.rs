@@ -1,10 +1,11 @@
 //! Mutation operators: a few parts of a scene nudged or re-rolled.
 //!
-//! One call to [`mutate`] applies a handful of operators (the profile's
-//! `mutate.operators`), each to a part drawn by the profile's odds — a map's
-//! place, turn, size, weight, variation blend or colour, a map added or
-//! removed, the background, the symmetry group — and returns human- and
-//! LLM-readable descriptions of what changed.
+//! One call to [`mutate`] makes a handful of changes (the profile's
+//! `mutation.changes`), each to a part the profile has on, picked by the
+//! parts' odds — a map's place, turn, size, weight, variation blend or colour,
+//! a map added or removed, the background, the symmetry group — and returns
+//! human- and LLM-readable descriptions of what changed. A part that's off is
+//! never touched, which is exactly what it means to a roll too.
 //!
 //! Each touched part is **nudged** (what is there perturbed, scaled by the
 //! strength) or **re-rolled** (replaced using the very draw a fresh roll uses,
@@ -31,7 +32,7 @@ const NUDGE_SHARE: f32 = 0.45;
 /// but usually non-destructive step). Derived state (colour speeds, colormap)
 /// is refreshed before returning.
 pub fn mutate(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &mut impl Rng) -> Vec<String> {
-    let n_ops = roll::rng_range_u32(rng, settings.mutate.operators);
+    let n_ops = roll::rng_range_u32(rng, settings.mutation.changes);
     let mut log = Vec::new();
     // Maps an earlier operator changed, so a later one doesn't delete them
     // and throw that operator away. New maps are appended, and count.
@@ -41,7 +42,7 @@ pub fn mutate(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: 
         touched.resize(scene.transforms.len(), true);
     }
     if log.is_empty() {
-        log.push("nothing changed: no part this scene has is given any odds".to_string());
+        log.push("nothing changed: no part the profile has on can change on this scene".to_string());
     }
 
     let falloff = scene.color_falloff;
@@ -72,12 +73,11 @@ mod part {
     pub const SCALE: usize = 2;
     pub const WEIGHT: usize = 3;
     pub const VARIATIONS: usize = 4;
-    pub const COLOR: usize = 5;
-    pub const COLOR_VALUE: usize = 6;
-    pub const ADD: usize = 7;
-    pub const REMOVE: usize = 8;
+    pub const COUNT: usize = 5;
+    pub const SYMMETRY: usize = 6;
+    pub const COLOR: usize = 7;
+    pub const COLOR_VALUE: usize = 8;
     pub const BACKGROUND: usize = 9;
-    pub const SYMMETRY: usize = 10;
 }
 
 /// Maps in map `i`'s layer.
@@ -89,17 +89,23 @@ fn layer_len(scene: &Scene, i: usize) -> usize {
 /// Whether part `k` can be changed on map `i` of this scene at all.
 ///
 /// Adding and removing follow the same rule the gate does for bounds: the
-/// roll's map count is the profile's say on how many maps a flame has, so a
+/// profile's transform range is its say on how many maps a flame has, so a
 /// mutation may not take a layer past it — but a scene already past it isn't
 /// stuck, it just can't go further.
+fn can_add(scene: &Scene, i: usize, settings: &RandomSettings) -> bool {
+    layer_len(scene, i) < settings.transforms[1] as usize
+}
+
+fn can_remove(scene: &Scene, i: usize, settings: &RandomSettings, touched: &[bool]) -> bool {
+    !touched[i] && layer_len(scene, i) > (settings.transforms[0] as usize).max(1)
+}
+
 fn applicable(k: usize, scene: &Scene, i: usize, settings: &RandomSettings, touched: &[bool]) -> bool {
-    let n = layer_len(scene, i);
     match k {
         part::VARIATIONS => {
             !settings.enabled_slots().is_empty() || scene.transforms[i].variations.iter().any(|&w| w != 0.0)
         }
-        part::ADD => n < settings.transforms[1] as usize,
-        part::REMOVE => !touched[i] && n > (settings.transforms[0] as usize).max(1),
+        part::COUNT => can_add(scene, i, settings) || can_remove(scene, i, settings, touched),
         part::SYMMETRY => {
             settings.symmetry.any_kind() || scene.transforms.iter().any(|t| t.symmetry.is_some())
         }
@@ -120,11 +126,11 @@ fn apply_one(
         return;
     }
     let i = rng.gen_range(0..n);
-    let parts = settings.mutate.parts.all();
+    let parts = settings.parts.all();
     let odds: Vec<f32> = parts
         .iter()
         .enumerate()
-        .map(|(k, p)| if applicable(k, scene, i, settings, touched) { p.odds } else { 0.0 })
+        .map(|(k, p)| if applicable(k, scene, i, settings, touched) { p.live_odds() } else { 0.0 })
         .collect();
     let total: f32 = odds.iter().sum();
     if total <= 0.0 {
@@ -147,12 +153,16 @@ fn apply_one(
         part::VARIATIONS => variations(scene, i, reroll, settings, strength, rng, log),
         part::COLOR => color(scene, i, reroll, strength, rng, log),
         part::COLOR_VALUE => color_value(scene, i, reroll, strength, rng, log),
-        part::ADD => add(scene, i, reroll, settings, strength, rng, log),
-        part::REMOVE => {
-            scene.remove_transform(i);
-            touched.remove(i);
-            log.push(format!("delete T{}", i));
-            return;
+        part::COUNT => {
+            // Add or remove, whichever the range allows; both, a coin.
+            let (add_ok, remove_ok) = (can_add(scene, i, settings), can_remove(scene, i, settings, touched));
+            if remove_ok && !(add_ok && rng.r#gen::<bool>()) {
+                scene.remove_transform(i);
+                touched.remove(i);
+                log.push(format!("delete T{}", i));
+                return;
+            }
+            add(scene, i, reroll, settings, strength, rng, log);
         }
         part::BACKGROUND => background(scene, reroll, strength, rng, log),
         part::SYMMETRY => symmetry(scene, i, reroll, settings, strength, rng, log),
@@ -552,8 +562,8 @@ color = [0.2, 0.2, 1.0]
     fn mutations_stay_consistent_and_saveable() {
         let mut settings = RandomSettings::default();
         // Every part on, half re-rolls, so every operator runs.
-        for p in settings.mutate.parts.all_mut() {
-            *p = crate::dice::Part { odds: 1.0, reroll: 0.5 };
+        for p in settings.parts.all_mut() {
+            *p = crate::dice::Part { on: true, odds: 1.0, reroll: 0.5 };
         }
         settings.symmetry.chance = 1.0;
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
@@ -581,22 +591,21 @@ color = [0.2, 0.2, 1.0]
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Every part at odds 0 but part `k`. (`Parts::default()` is the shipped
-    /// odds, not zeros.)
+    /// Every part off but part `k`.
     fn only(k: usize, reroll: f32) -> crate::dice::Parts {
         let mut parts = crate::dice::Parts::default();
         for (i, p) in parts.all_mut().into_iter().enumerate() {
-            *p = crate::dice::Part { odds: if i == k { 1.0 } else { 0.0 }, reroll };
+            *p = crate::dice::Part { on: i == k, odds: 1.0, reroll };
         }
         parts
     }
 
-    /// A part with no odds is never touched: a profile can mask everything
-    /// but colour.
+    /// A part that's off is never touched: a profile can mask everything but
+    /// colour.
     #[test]
     fn zeroed_parts_are_left_alone() {
         let mut settings = RandomSettings::default();
-        settings.mutate.parts = only(part::COLOR, 0.3);
+        settings.parts = only(part::COLOR, 0.3);
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(5);
         let base = test_scene("fracturize_mutate_mask");
         for _ in 0..30 {
@@ -614,12 +623,13 @@ color = [0.2, 0.2, 1.0]
     #[test]
     fn a_changed_map_is_not_deleted() {
         let mut settings = RandomSettings::default();
-        settings.mutate.parts = only(part::TRANSLATE, 0.0);
-        settings.mutate.parts.remove.odds = 1.0;
-        settings.mutate.operators = [4, 4];
-        settings.transforms = [1, 6];
+        settings.parts = only(part::TRANSLATE, 0.0);
+        settings.parts.count.on = true;
+        settings.mutation.changes = [4, 4];
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
         let base = test_scene("fracturize_mutate_touched");
+        // At its most transforms already, so a count change can only remove.
+        settings.transforms = [1, base.transforms.len() as u32];
         let mut deletions = 0;
         for _ in 0..60 {
             let mut scene = base.clone();
@@ -632,6 +642,9 @@ color = [0.2, 0.2, 1.0]
                     assert!(!touched[i], "deleted a map it had changed: {log:?}");
                     touched.remove(i);
                     deletions += 1;
+                } else if line.starts_with("duplicate") || line.starts_with("new map") {
+                    // A count change adds once a removal has made room.
+                    touched.push(true);
                 } else {
                     touched[i] = true;
                 }
@@ -650,7 +663,7 @@ color = [0.2, 0.2, 1.0]
             v.enabled = false;
         }
         settings.variations.get_mut("julia").unwrap().enabled = true;
-        settings.mutate.parts = only(part::VARIATIONS, 0.5);
+        settings.parts = only(part::VARIATIONS, 0.5);
         let julia = VARIATION_NAMES.iter().position(|&v| v == "julia").unwrap();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
         for _ in 0..40 {

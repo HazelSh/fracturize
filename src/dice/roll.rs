@@ -1,4 +1,5 @@
-//! Fresh rolls: a whole new flame from nothing, part by part.
+//! Rolls: a flame drawn part by part — every part the profile has on, the
+//! rest kept from a base scene.
 //!
 //! Randomising an IFS is easy; randomising one that *renders* is not. This
 //! module only draws candidates — the maps, their variations, a symmetry, the
@@ -29,26 +30,94 @@ pub(super) struct Candidate {
     pub colors: Vec<Vec3>,
 }
 
-pub(super) fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
-    let n = rng.gen_range(settings.transforms[0]..=settings.transforms[1]).max(1) as usize;
+/// The base scene's own transforms — its first layer — as a roll keeps them:
+/// what each part that's off is taken from.
+struct Base<'a> {
+    transforms: Vec<&'a TransformSpec>,
+    names: Vec<Option<String>>,
+    colors: Vec<Vec3>,
+}
+
+impl<'a> Base<'a> {
+    fn of(scene: &'a Scene) -> Self {
+        let own: Vec<usize> = (0..scene.transforms.len()).filter(|&i| scene.transforms[i].layer == 0).collect();
+        Self {
+            transforms: own.iter().map(|&i| &scene.transforms[i]).collect(),
+            names: own.iter().map(|&i| scene.transform_names.get(i).cloned().flatten()).collect(),
+            colors: own.iter().map(|&i| scene.colors.get(i).copied().unwrap_or(Vec3::ONE)).collect(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.transforms.len()
+    }
+}
+
+/// Draw every part of a flame that the profile has on, and take the rest from
+/// `base` — the one way a roll is made, whichever parts are on.
+///
+/// Every draw is made in the same order whatever is on, and only then is a
+/// part that's off replaced by the base's; so with every part on (the
+/// default), `base` is never read and a seed rolls what it always rolled. The
+/// one exception is the transform count, which has to be known before the
+/// transforms are drawn: off, it is the base's, and nothing is drawn for it.
+pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut impl Rng) -> Candidate {
+    let p = &settings.parts;
+    let base = Base::of(base);
+    let n = if p.count.on || base.len() == 0 {
+        rng.gen_range(settings.transforms[0]..=settings.transforms[1]).max(1) as usize
+    } else {
+        base.len()
+    };
+    let kept = n.min(base.len());
 
     let mut transforms = Vec::with_capacity(n);
     for _ in 0..n {
         transforms.push(random_transform(settings, rng));
     }
+    for (t, b) in transforms.iter_mut().zip(&base.transforms) {
+        let (p_on, r_on, s_on) = (p.translate.on, p.rotate.on, p.scale.on);
+        if !(p_on || r_on || s_on) {
+            // The whole affine kept, shear and post-affine included.
+            t.matrix = b.matrix;
+            t.post_affine = b.post_affine;
+        } else if !(p_on && r_on && s_on) {
+            let (s, r, pos) = t.matrix.to_scale_rotation_translation();
+            let (bs, br, bp) = b.matrix.to_scale_rotation_translation();
+            t.matrix = Mat4::from_scale_rotation_translation(
+                if s_on { s } else { bs },
+                if r_on { r } else { br },
+                if p_on { pos } else { bp },
+            );
+        }
+        if !p.weight.on {
+            t.weight = b.weight;
+        }
+        if !p.count.on {
+            // The same transforms, so the same transitions between them.
+            t.xaos = b.xaos.clone();
+        }
+    }
 
     // An IFS only converges if it contracts on average. Rescale everything if
-    // the mean linear contraction is too close to 1.
+    // the mean linear contraction is too close to 1 — a size change, so only
+    // when sizes are the dice's to change.
     let mean: f32 = transforms
         .iter()
         .map(|t| mean_singular_value(t.matrix))
         .sum::<f32>()
         / n as f32;
-    if mean > 0.85 {
+    if mean > 0.85 && p.scale.on {
         rescale(&mut transforms, 0.75 / mean);
     }
 
-    apply_symmetry(&mut transforms, &settings.symmetry, rng);
+    if p.symmetry.on {
+        apply_symmetry(&mut transforms, &settings.symmetry, p.scale.on, p.translate.on, rng);
+    } else {
+        for (t, b) in transforms.iter_mut().zip(&base.transforms) {
+            t.symmetry = b.symmetry.clone();
+        }
+    }
 
     // Variations. Purely affine IFS are a real and worthwhile family, but a
     // *random* one is almost always a dull Sierpinski variant — the good ones
@@ -61,7 +130,11 @@ pub(super) fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> 
     // of unrelated distortions; varying which maps carry them, and at what
     // strength, is what keeps it from looking uniform.
     let pool = settings.enabled_slots();
-    if !pool.is_empty() && rng.r#gen::<f32>() >= settings.affine {
+    if !p.variations.on {
+        for (t, b) in transforms.iter_mut().zip(&base.transforms) {
+            t.variations = b.variations;
+        }
+    } else if !pool.is_empty() && rng.r#gen::<f32>() >= settings.affine {
         let k = (rng.gen_range(settings.kinds[0]..=settings.kinds[1]) as usize).clamp(1, pool.len());
         let kinds = choose(rng, &pool, k);
 
@@ -92,7 +165,7 @@ pub(super) fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> 
     // clash. color_value spreads the transforms around the gradient.
     let base_hue: f32 = rng.gen_range(0.0..360.0);
     let scheme = rng.gen_range(0..3);
-    let colors: Vec<Vec3> = (0..n)
+    let mut colors: Vec<Vec3> = (0..n)
         .map(|i| {
             let offset = match scheme {
                 0 => rng.gen_range(-25.0..25.0),                  // analogous
@@ -106,16 +179,28 @@ pub(super) fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> 
             )
         })
         .collect();
+    if !p.color.on && base.len() > 0 {
+        // The base's colours, and a new transform takes one of them, so the
+        // set stays the base's.
+        for (i, c) in colors.iter_mut().enumerate() {
+            *c = base.colors[i % base.len()];
+        }
+    }
 
     for (i, t) in transforms.iter_mut().enumerate() {
         t.color_value = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
     }
-
-    Candidate {
-        transforms,
-        names: (0..n).map(|i| Some(format!("t{}", i))).collect(),
-        colors,
+    if !p.color_value.on {
+        for (t, b) in transforms.iter_mut().zip(&base.transforms) {
+            t.color_value = b.color_value;
+        }
     }
+
+    let mut names: Vec<Option<String>> = (0..n).map(|i| Some(format!("t{}", i))).collect();
+    if !p.count.on {
+        names[..kept].clone_from_slice(&base.names[..kept]);
+    }
+    Candidate { transforms, names, colors }
 }
 
 /// Roll a symmetry onto some of the maps, if the settings ask for one.
@@ -125,8 +210,16 @@ pub(super) fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> 
 /// keeps the effective map set's dimension near where the maps alone had it,
 /// instead of sixty full-size copies filling space into a lump the shape gate
 /// throws away. Reliquary's hand-sized icosahedral facet is about this size.
-/// A dimension bound, if on, then steers from there as usual.
-fn apply_symmetry(transforms: &mut [TransformSpec], s: &SymmetrySettings, rng: &mut impl Rng) {
+/// A dimension bound, if on, then steers from there as usual. The shrink and
+/// the push off the centre are size and position changes, so each is made
+/// only when that part is the dice's to change.
+fn apply_symmetry(
+    transforms: &mut [TransformSpec],
+    s: &SymmetrySettings,
+    resize: bool,
+    move_off_centre: bool,
+    rng: &mut impl Rng,
+) {
     if !s.any_kind() || rng.r#gen::<f32>() >= s.chance {
         return;
     }
@@ -135,7 +228,7 @@ fn apply_symmetry(transforms: &mut [TransformSpec], s: &SymmetrySettings, rng: &
     let n = transforms.len();
     let free = (rng_range_u32(rng, s.free) as usize).min(n - 1);
     let order = choose(rng, &(0..n).collect::<Vec<_>>(), n - free);
-    let k = motif_shrink(&sym);
+    let k = if resize { motif_shrink(&sym) } else { 1.0 };
     for i in order {
         let t = &mut transforms[i];
         let (scale, rot, mut p) = t.matrix.to_scale_rotation_translation();
@@ -144,7 +237,10 @@ fn apply_symmetry(transforms: &mut [TransformSpec], s: &SymmetrySettings, rng: &
         if p.length() < 0.4 {
             p = if p.length() > 1e-3 { p.normalize() } else { random_quat(rng) * Vec3::X } * 0.4;
         }
-        t.matrix = Mat4::from_scale_rotation_translation(scale * k, rot, p);
+        if resize || move_off_centre {
+            let (scale, keep_p) = (scale * k, t.matrix.w_axis.truncate());
+            t.matrix = Mat4::from_scale_rotation_translation(scale, rot, if move_off_centre { p } else { keep_p });
+        }
         t.symmetry = Some(sym.clone());
     }
 }
@@ -288,7 +384,20 @@ fn mean_singular_value(m: Mat4) -> f32 {
 }
 
 /// Wrap an accepted candidate up as a full `Scene`, framed for its size.
-pub(super) fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Scene {
+///
+/// Like [`build_candidate`], every draw is made and then a part that's off is
+/// taken from `base`: the colour source and gradient, the background. A roll
+/// with no part of the form on has the base's form, so it keeps the base's
+/// camera and look as well — it's the same flame, recoloured.
+pub(super) fn finish(
+    mut c: Candidate,
+    center: Vec3,
+    radius: f32,
+    settings: &RandomSettings,
+    base: &Scene,
+    rng: &mut impl Rng,
+) -> Scene {
+    let p = &settings.parts;
     let color_speed = 0.5;
     let color_falloff = if rng.r#gen::<f32>() < 0.4 { rng.gen_range(0.6..1.2) } else { 0.0 };
     resolve_color_speeds(&mut c.transforms, color_speed, color_falloff);
@@ -359,6 +468,31 @@ pub(super) fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl
     }
     let tint = tint(&scene, rng);
     scene.background = random_background(rng, tint);
+
+    if !p.color.on {
+        scene.color_falloff = base.color_falloff;
+        scene.color_speed = base.color_speed;
+        scene.color_contrast = base.color_contrast;
+        scene.palette = base.palette.clone();
+        scene.set_color_mode(base.color_mode);
+        let falloff = scene.color_falloff;
+        scene.resolve_all_color_speeds(falloff);
+    }
+    if !p.background.on {
+        scene.background = base.background;
+    }
+    if p.no_form() {
+        scene.camera_focus = base.camera_focus;
+        scene.camera_distance = base.camera_distance;
+        scene.camera_orientation = base.camera_orientation;
+        scene.camera_fov = base.camera_fov;
+        scene.camera_fov_authored = base.camera_fov_authored;
+        scene.point_size = base.point_size;
+        scene.point_count = base.point_count;
+        scene.point_count_defaulted = base.point_count_defaulted;
+        scene.haze = base.haze;
+        scene.exposure = base.exposure;
+    }
     scene
 }
 

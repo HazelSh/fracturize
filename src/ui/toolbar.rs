@@ -200,12 +200,13 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
             &format!("{} Random flames list…", icons::DICE),
             "A scrolling list of rolls down the left of the screen, each a live thumbnail. Click one to open it.",
         );
+        draw_profile_menu(ui, app);
         menu_toggle(
             ui,
             app,
             |p| &mut p.random_settings_open,
             &format!("{} Random settings…", icons::SLIDERS),
-            "What the dice may roll: variations and their weights, how many maps, and bounds on dimension and lacunarity.",
+            "Edit the dice profile: what a roll may make and what a mutation may change. Save your own there.",
         );
 
         ui.separator();
@@ -218,7 +219,7 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
             app,
             |p| &mut p.mutate_open,
             &format!("{} Mutate…", icons::SHUFFLE),
-            "The mutation strength, and a button to mutate with it.",
+            "The dice profile, the mutation strength, and a button to mutate with them.",
         );
 
         ui.separator();
@@ -247,6 +248,39 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
             "Every edit, newest first. Click one to go back — or forward — to it.",
         );
     });
+}
+
+/// The dice profile as a submenu, between the commands it governs: Random
+/// flame and the list above it, Mutate below. One click switches it, without
+/// opening the settings window. The current one is lit; `*` says it's edited.
+fn draw_profile_menu(ui: &mut egui::Ui, app: &mut App) {
+    let selected = app.dice_profile().clone();
+    let modified = selected.modified(app.random_settings());
+    let label = format!("{} Dice profile: {}{}", icons::DICE, selected.entry.name, if modified { " *" } else { "" });
+    let mut picked = None;
+    let resp = ui.menu_button(label, |ui| {
+        for entry in crate::dice::profile::list() {
+            let resp = ui.add(egui::Button::selectable(entry == selected.entry, &entry.name));
+            let tip = if resp.hovered() {
+                crate::dice::profile::load(&entry).map(|l| l.meta.description).unwrap_or_else(|e| e)
+            } else {
+                String::new()
+            };
+            if hinted(resp, &mut app.ui_state, &tip, "click: load this dice profile").clicked() {
+                picked = Some(entry);
+                ui.close();
+            }
+        }
+    });
+    hinted(
+        resp.response,
+        &mut app.ui_state,
+        "Pick what random flames are made of and what Mutate may change",
+        "hover: the dice profiles",
+    );
+    if let Some(entry) = picked {
+        app.load_dice_profile(entry);
+    }
 }
 
 /// A menu row that opens or closes a window, lit while it's open.

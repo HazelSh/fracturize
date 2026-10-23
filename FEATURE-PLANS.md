@@ -52,6 +52,14 @@ profiles in `scenes/dice/`. "Revert to defaults" is loading the built-in
 `default` profile; Revert goes back to the loaded one. Composites mutate per
 layer and are gated per layer; placement isn't a part yet.
 
+**Reshaped the same day** (Hazel: "there is a profile of things doable, and
+it's the same for both"): no roll half and mutate half. One list of parts,
+each on or off; a roll draws every part that's on and keeps the base scene's
+for the rest, a mutation changes a few that are on. Built-in profiles
+(`default`, `anything`, `no-symmetry`, `colour-only`, `no-colour`,
+`symmetric`) are compiled in; the picker sits in the Random flames list, the
+Mutate window and Explore. AGENTS.md "The dice" is current.
+
 1. **`RandomSettings` grows a `[mutate]` half**, so one file says what the
    dice may do, fresh or from a parent. Everything a roll can produce is a
    *part* (maps, variations, symmetry, colour, palette, background, and from

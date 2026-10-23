@@ -45,6 +45,7 @@ struct Job {
     generation: u64,
     seed: u64,
     settings: Arc<RandomSettings>,
+    base: Arc<Scene>,
 }
 
 enum Outcome {
@@ -79,6 +80,12 @@ pub struct RandomList {
     /// Asked to keep rolling past a stall.
     persist: bool,
     settings: Arc<RandomSettings>,
+    /// The scene the rows keep the parts from that the profile has off:
+    /// the one on screen when the list last started over. Rows don't follow
+    /// later edits — opening a row would otherwise throw the list away.
+    base: Arc<Scene>,
+    /// `base` has been taken from a scene, not left at its placeholder.
+    based: bool,
     changed_since: Option<Instant>,
     generation: Arc<AtomicU64>,
     base_seed: u64,
@@ -98,6 +105,8 @@ impl RandomList {
             empty_run: 0,
             persist: false,
             settings: Arc::new(settings),
+            base: Arc::new(Scene::blank()),
+            based: false,
             changed_since: None,
             generation: Arc::new(AtomicU64::new(0)),
             base_seed: fresh_seed(),
@@ -120,9 +129,18 @@ impl RandomList {
         }
     }
 
-    /// Throw the list away and roll afresh: new seeds, same settings.
-    pub fn reroll(&mut self, settings: &RandomSettings) {
+    /// Throw the list away and roll afresh: new seeds, same settings, on
+    /// `scene` as the base.
+    pub fn reroll(&mut self, settings: &RandomSettings, scene: &Scene) {
         self.settings = Arc::new(settings.clone());
+        // Only read for the parts that are off; with every part on, a copy of
+        // a large scene would buy nothing.
+        self.based = true;
+        self.base = Arc::new(if settings.parts.all().iter().all(|p| p.on) {
+            Scene::blank()
+        } else {
+            scene.clone()
+        });
         self.changed_since = None;
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.entries.clear();
@@ -166,10 +184,10 @@ impl RandomList {
     /// Collect what the workers finished, restart if the settings have
     /// settled, and keep `want` rows rolled or on their way. Called once a
     /// frame while the list is shown.
-    pub fn poll(&mut self, settings: &RandomSettings, want: usize) {
+    pub fn poll(&mut self, settings: &RandomSettings, scene: &Scene, want: usize) {
         if self.changed_since.is_some_and(|t| t.elapsed() >= SETTLE) {
             if !self.settings.same_roll(settings) {
-                self.reroll(settings);
+                self.reroll(settings, scene);
             } else {
                 // Changed and changed back: the rows on show still stand.
                 self.changed_since = None;
@@ -188,6 +206,10 @@ impl RandomList {
         }
         if self.changed_since.is_some() || self.stalled() {
             return;
+        }
+        // The first rows of all take the scene on screen as their base.
+        if !self.based {
+            self.reroll(settings, scene);
         }
         while self.entries.len() + self.in_flight < want {
             self.submit();
@@ -236,7 +258,7 @@ impl RandomList {
         let generation = self.generation.load(Ordering::Relaxed);
         let seed = self.base_seed.wrapping_add(self.next_index);
         self.next_index += 1;
-        let job = Job { generation, seed, settings: self.settings.clone() };
+        let job = Job { generation, seed, settings: self.settings.clone(), base: self.base.clone() };
         let (tx, _) = self.workers.get_or_insert_with(|| spawn_workers(self.generation.clone()));
         if tx.send(job).is_ok() {
             self.in_flight += 1;
@@ -271,7 +293,7 @@ fn spawn_workers(current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
                     if job.generation != current.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let outcome = match dice::roll_seeded(&job.settings, job.seed) {
+                    let outcome = match dice::roll_seeded(&job.settings, &job.base, job.seed) {
                         Ok(r) => Outcome::Rolled(Box::new(r)),
                         Err(f) => Outcome::Failed { attempts: f.attempts, rejected: f.rejected },
                     };
@@ -294,7 +316,7 @@ mod tests {
     fn fill(list: &mut RandomList, settings: &RandomSettings, want: usize) {
         let start = Instant::now();
         while list.entries.len() < want && !list.stalled() && start.elapsed() < Duration::from_secs(20) {
-            list.poll(settings, want);
+            list.poll(settings, &Scene::blank(), want);
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -308,7 +330,7 @@ mod tests {
         let ids: std::collections::HashSet<u64> = list.entries.iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), list.entries.len(), "ids are unique");
         for e in &list.entries {
-            let again = dice::roll_seeded(&settings, e.seed).ok().expect("a seed that rolled rolls again");
+            let again = dice::roll_seeded(&settings, &Scene::blank(), e.seed).ok().expect("a seed that rolled rolls again");
             assert_eq!(again.scene.background, e.scene.background, "seed {}", e.seed);
             assert_eq!(again.scene.transforms.len(), e.scene.transforms.len());
         }
@@ -332,9 +354,9 @@ mod tests {
     fn rolls_from_old_settings_are_dropped() {
         let settings = RandomSettings::default();
         let mut list = RandomList::new(settings.clone());
-        list.poll(&settings, 8);
+        list.poll(&settings, &Scene::blank(), 8);
         let other = RandomSettings { transforms: [7, 7], ..Default::default() };
-        list.reroll(&other);
+        list.reroll(&other, &Scene::blank());
         fill(&mut list, &other, 4);
         for e in &list.entries {
             assert_eq!(e.scene.transforms.len(), 7, "a row from the old settings survived");

@@ -3679,7 +3679,7 @@ pub fn render_rolls(
     let variants = (0..count)
         .map(|i| {
             let tile_seed = seed.wrapping_add(i as u64);
-            match crate::dice::roll_seeded(settings, tile_seed) {
+            match crate::dice::roll_seeded(settings, &params.scene, tile_seed) {
                 Ok(r) => Variant { scene: Some(r.scene), label: format!("--random --seed {tile_seed}") },
                 Err(f) => Variant { scene: None, label: format!("seed {tile_seed}: {}", f.message()) },
             }
