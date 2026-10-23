@@ -1,0 +1,86 @@
+# Flame of Flames — a fire whose every tongue is a smaller copy of the whole fire.
+#
+# Ported from a 2D canvas sketch made blind (no CRAFT.md, no other scenes).
+# Four maps: the whole flame shrunk at its own root, a narrower copy lifted
+# into the tip, and two smaller copies peeled off as licks that curl upward.
+#
+# The lick curl is a swirl centred on the lick's root, not on the world origin.
+# Fracturize's swirl turns xy by (pi/2 - r^2), so each lick's pre-rotation
+# takes off the 90 degrees, the pre-scale carries k = sqrt(0.6) (curl strength
+# 0.6 r^2), and post_scale 1/k plus post_translation put the root back. The
+# right lick mirrors x before and after, which reverses the curl.
+#
+# What the sketch had that this cannot say: the final transform (rising waves,
+# wind lean, the pinched round root), colour by height, and time.
+
+[meta]
+name = "Flame of Flames"
+author = "Claude Opus 5.5"
+point_size = 0.0022
+point_count = 6_000_000
+color_speed = 0.35
+exposure = 1.0
+background = [0.0035, 0.0016, 0.0008]
+
+[camera]
+focus = [0.0, 0.95, 0.0]
+distance = 2.9
+yaw = 0.0
+pitch = 0.08
+
+[palette]
+name = "flame-of-flames"
+cyclic = false
+stops = [
+  { at = 0.00, color = "#fff7e0" },
+  { at = 0.16, color = "#ffdb75" },
+  { at = 0.36, color = "#ff9424" },
+  { at = 0.58, color = "#f24d0a" },
+  { at = 0.80, color = "#9e1a05" },
+  { at = 1.00, color = "#330808" },
+]
+
+# The whole flame, smaller, at its own root. A smaller copy stacked *above*
+# (the sketch's first idea) puts the biggest licks at the bottom, which is a
+# tree; fire is the other way up, biggest tongues high and narrowing to the
+# fuel. Turning it about Y fans each level's licks round the flame.
+[[transform]]
+name = "root"
+translation = [0.0, 0.0, 0.0]
+scale = 0.70
+rotation = [0.0, 40.0, 0.0]
+weight = 0.30
+color_value = 0.0
+
+# The whole flame, narrower, lifted: the tip.
+[[transform]]
+name = "crown"
+translation = [0.0, 0.75, 0.0]
+scale = [0.50, 0.60, 0.50]
+rotation = [0.0, -25.0, 3.0]
+weight = 0.30
+color_value = 0.85
+
+# Licks: pre = k * R(-90deg - theta) * diag(sx, sy) (mirrored), swirl,
+# post = 1/k (mirrored), then the root. Left mirrors; right does not.
+[[transform]]
+name = "lick-left"
+translation = [0.0, 0.0, 0.0]
+scale = [-0.2789, 0.3563, 0.31]      # mirror x, [0.36, 0.46, 0.40] * k
+rotation = [0.0, 0.0, -103.0]        # -90 - 13, mirrored
+variations = { swirl = 1.0 }
+post_scale = [-1.2910, 1.2910, 1.2910]
+post_translation = [-0.22, 0.45, 0.0]
+weight = 0.20
+color_value = 0.55
+
+[[transform]]
+name = "lick-right"
+translation = [0.0, 0.0, 0.0]
+scale = [0.2634, 0.3408, 0.31]       # [0.34, 0.44, 0.40] * k
+rotation = [0.0, 0.0, -103.0]        # -13 - 90
+variations = { swirl = 1.0 }
+post_scale = 1.2910                  # 1 / k
+post_translation = [0.23, 0.52, 0.0]
+weight = 0.20
+color_value = 0.55
