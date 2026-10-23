@@ -132,7 +132,10 @@ struct Args {
     /// `transform.<name-or-index>.weight=0.5`,
     /// `transform.facet-1.variations.absfold=0.15`,
     /// `transform.0.translation.y=1.25`, `subscene.<name>.share=2`,
-    /// `subscene.<name>.transform.<name-or-index>.weight=0.5`. Arrays index by x/y/z or 0/1/2, or
+    /// `subscene.<name>.transform.<name-or-index>.weight=0.5`,
+    /// `symmetry.<index-or-motif>.group=Cyc12` (a block is its index, or any
+    /// motif in its applies_to; sweep a group with a list,
+    /// `symmetry.0.group=Cyc12,Cyc18,Cyc30`). Arrays index by x/y/z or 0/1/2, or
     /// take a whole value (`transform.a.scale=[0.05,0.6,0.05]`). This is the
     /// general form of --palette and --zoom. A path that doesn't resolve is an
     /// error, never silently ignored.

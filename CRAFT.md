@@ -936,7 +936,46 @@ recorded dead end is worth as much as a recipe.
 
   Tooling found on the way, and fixed: a sweep sheet framed every tile from
   the base scene, so `--sweep camera.pitch=…` gave identical tiles under
-  honest-looking labels (AGENTS.md, Parameter sweeps). Not fixed: `-S`
-  cannot reach `[[symmetry]]`, so the group order can't be swept. Copy the
-  file and edit `group`.
+  honest-looking labels (AGENTS.md, Parameter sweeps). Also fixed the same
+  day: `-S symmetry.<index-or-motif>.<field>` now reaches `[[symmetry]]`, so
+  `--sweep 'symmetry.0.group=Cyc12,Cyc18,Cyc30'` is one command.
+
+  **Hazel's verdict, worth keeping: the self-similarity read as glitching in
+  the fine detail.** A flame is not a ring, so the small rings inside each
+  flame look like artefacts, not structure. Self-similarity is a feature
+  when the subject's parts are already like its whole, and a defect when
+  the IFS has to hide it. See the next entry.
+
+- **2026-10-23, Opus 5.5. Romanesco (`scenes/romanesco_opus55.toml`): one
+  map, a repeat, and the tail of the spiral as one more map.** Chosen as the
+  answer to the Hob verdict above: a subject that is self-similar in life.
+  `bud` is the whole head at uniform scale. Uniform matters: squash it and
+  you get Fiddlehead's conifer, because the part stops resembling the whole.
+  A golden-angle repeat whose step has its fixed point at the apex puts the
+  buds on a logarithmic spiral on a cone.
+
+  **Packing is the repeat's `shrink`, not the bud's scale.** At shrink 0.93
+  to 0.95 the buds stood apart as separate trees on a hill, whatever the bud
+  size. At 0.97 they packed into a cone of cones, the Romanesco silhouette,
+  d = 2.25 (shell). One `--sweep symmetry.bud.shrink × transform.bud.scale`
+  sheet found it.
+
+  **A truncated repeat is finished exactly by one map.** `MAX_REPEAT` is 64.
+  Copies past N are `S^N` applied to the whole attractor, so a plain map
+  equal to `S^N` (scale `cᴺ`, turn `N·turn`, lift `step·(1−cᴺ)/(1−c)` for a
+  step along the axis) *is* the infinite tail, not an approximation.
+  Without it the tip is a hole, and so is every bud's tip.
+
+  **And it needs far more than one copy's weight.** A repeat gives each copy
+  `w/N` whatever its size, but `S^N` stands in for infinitely many copies.
+  At `w/64` its region was a dark well that looked like a colour bug: the
+  haze off made no difference, `--isolate apex` showed a thin scatter. 0.12,
+  about eight copies' worth, matched the density at the seam. When a map's
+  region renders dark under splat, check whether it is under-sampled before
+  touching the palette.
+
+  **`color = "orbit"` is `fract(color_value + k/N)`.** It is a ramp only if
+  `color_value = 0`, and then copy index reads as age: dark base, pale tip,
+  repeated inside every bud. At the default 0.5 the ramp starts mid-palette
+  and wraps through the dark end partway up the form.
 

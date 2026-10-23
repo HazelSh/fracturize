@@ -83,13 +83,16 @@ fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
     let record = |from: Option<String>| Applied { path: path.to_string(), from, to: to.clone() };
 
     // validate_path already confirmed segs.len() >= 2 and that section is one
-    // of the five recognised ones, so the splits below can't fail.
+    // of the recognised ones, so the splits below can't fail.
     let segs: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
     let section = segs[0];
     let rest = &segs[1..];
 
     if section == "transform" {
         return set_in_transform(doc.as_table_mut(), rest, value, path).map(record);
+    }
+    if section == "symmetry" {
+        return set_in_symmetry(doc.as_table_mut(), rest, value, path).map(record);
     }
     if section == "subscene" {
         return set_in_subscene(doc, rest, value, path).map(record);
@@ -290,6 +293,20 @@ const TRANSFORM_FIELDS: &[&str] = struct_fields!(
     xaos,
 );
 
+const SYMMETRY_FIELDS: &[&str] = struct_fields!(
+    _assert_symmetry_def_exhaustive,
+    crate::scene::SymmetryDef,
+    group,
+    repeat,
+    step,
+    turn,
+    shrink,
+    axis,
+    mirror,
+    applies_to,
+    color,
+);
+
 const SUBSCENE_FIELDS: &[&str] = struct_fields!(
     _assert_subscene_def_exhaustive,
     crate::subscene::SubsceneDef,
@@ -356,9 +373,25 @@ pub fn validate_path(path: &str) -> Result<(), String> {
                 Some(&k) => check_field("palette field", &[PALETTE_FIELDS], k, path),
                 None => Ok(()),
             },
-            "symmetry" => Err(format!("'{path}': symmetry blocks can't be set by path")),
+            "symmetry" => validate_path(&segs[2..].join(".")).map_err(|_| {
+                format!(
+                    "'{path}': expected subscene.{}.symmetry.<index-or-motif>.<field>, \
+                     with a field a [[symmetry]] block has",
+                    segs[1]
+                )
+            }),
             _ => Ok(()),
         };
+    }
+    if section == "symmetry" {
+        if segs.len() < 3 {
+            return Err(format!(
+                "'{path}': expected a field after the block, e.g. symmetry.{}.group \
+                 (a block is named by its index, or by any motif in its applies_to)",
+                segs[1]
+            ));
+        }
+        return check_field("symmetry field", &[SYMMETRY_FIELDS], segs[2], path);
     }
     if section == "transform" {
         if segs.len() < 3 {
@@ -396,7 +429,7 @@ pub fn validate_path(path: &str) -> Result<(), String> {
         _ => {
             return Err(format!(
                 "'{path}': unknown section '{section}' (expected meta, camera, \
-                 zoom, palette, transform or subscene)"
+                 zoom, palette, transform, symmetry or subscene)"
             ))
         }
     };
@@ -506,6 +539,9 @@ fn set_in_subscene(
         }
         return set_in_transform(table, &rest[1..], value, path);
     }
+    if rest[0] == "symmetry" {
+        return set_in_symmetry(table, &rest[1..], value, path);
+    }
     if rest[0] == "palette" && rest.len() > 1 {
         let pal = table
             .get_mut("palette")
@@ -517,6 +553,47 @@ fn set_in_subscene(
         refuse_shadowed(table, rest, path, "this subscene's rotation")?;
     }
     set_path(&mut TableRef::Table(table), rest, value, path, "subscene")
+}
+
+/// Resolve `symmetry.<index-or-motif>.<rest>` against the `[[symmetry]]` array
+/// of `doc` — the document itself, or a `[[subscene]]` block. Blocks have no
+/// names, so a block is its index or any motif in its `applies_to`: that is
+/// how a reader of the file thinks of it ("the group `cone` is in"), and it
+/// survives reordering the blocks.
+fn set_in_symmetry(
+    doc: &mut Table,
+    segs: &[&str],
+    value: Value,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let (selector, rest) = segs.split_first().expect("validated");
+    let arr = doc
+        .get_mut("symmetry")
+        .and_then(Item::as_array_of_tables_mut)
+        .ok_or_else(|| format!("--set '{path}': this scene has no [[symmetry]] blocks"))?;
+    let motifs = |t: &Table| -> Vec<String> {
+        t.get("applies_to")
+            .and_then(|i| i.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let idx = match selector.parse::<usize>() {
+        Ok(i) if i < arr.len() => i,
+        _ => arr.iter().position(|t| motifs(t).iter().any(|m| m == selector)).ok_or_else(|| {
+            let blocks: Vec<String> = arr
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("{i}:[{}]", motifs(t).join(", ")))
+                .collect();
+            format!(
+                "--set '{path}': no symmetry block is index '{selector}' or governs a \
+                 motif of that name. This scene has {}",
+                blocks.join(", ")
+            )
+        })?,
+    };
+    let table = arr.get_mut(idx).expect("index checked above");
+    set_path(&mut TableRef::Table(table), rest, value, path, "symmetry")
 }
 
 /// Resolve `transform.<name-or-index>.<rest>` against the `[[transform]]` array
@@ -1244,6 +1321,50 @@ variations = { swirl = 0.35, linear = 0.65 }
 
     fn scene_of(src: &str) -> crate::scene::SceneFile {
         toml::from_str(src).expect("parses as a scene")
+    }
+
+    const SYMMETRIC: &str = r#"
+[meta]
+name = "S"
+
+[[symmetry]]
+group = "Cyc12"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["a"]
+
+[[transform]]
+name = "a"
+translation = [0.7, 0.0, 0.0]
+scale = 0.3
+
+[[transform]]
+name = "b"
+translation = [0.0, 0.0, 0.0]
+scale = 0.4
+"#;
+
+    #[test]
+    fn a_symmetry_block_is_set_by_index_or_by_motif() {
+        let set = |spec: &str| apply_recording(SYMMETRIC, &[spec.to_string()]).expect("applies").0;
+        assert!(set("symmetry.0.group=Cyc30").contains("group = \"Cyc30\""));
+        assert!(set("symmetry.a.group=Dih5").contains("group = \"Dih5\""));
+        assert!(set("symmetry.a.axis.x=0.5").contains("axis = [0.5, 1.0, 0.0]"));
+        // And the loader takes the result: Cyc30 is thirty elements.
+        let (src, _) = apply_recording(SYMMETRIC, &["symmetry.a.group=Cyc30".to_string()]).unwrap();
+        let def = &scene_of(&src).symmetries[0];
+        assert_eq!(def.group.as_deref(), Some("Cyc30"));
+    }
+
+    #[test]
+    fn a_symmetry_path_that_names_nothing_says_what_there_is() {
+        let err = |spec: &str| apply_recording(SYMMETRIC, &[spec.to_string()]).unwrap_err();
+        assert!(err("symmetry.b.group=Cyc3").contains("0:[a]"));
+        assert!(err("symmetry.0.gruop=Cyc3").contains("did you mean 'group'"));
+        assert!(err("symmetry.0=Cyc3").contains("expected a field"));
+        // A scene without blocks says so, rather than inventing one.
+        assert!(apply_recording(SCENE, &["symmetry.0.group=Cyc3".to_string()])
+            .unwrap_err()
+            .contains("no [[symmetry]] blocks"));
     }
 
     #[test]
