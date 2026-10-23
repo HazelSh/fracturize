@@ -3910,7 +3910,8 @@ pub fn render_sweep(
 
     // A contact sheet is read tile against tile, so only the swept parameter
     // may differ — and when that parameter is the framing itself
-    // (`camera.pitch`, `meta.haze`, `meta.point_size`, `meta.color_contrast`),
+    // (`camera.pitch`, `meta.haze`, `meta.point_size`, `meta.color_contrast`,
+    // `meta.background`),
     // it has to differ. So each tile is framed from its own variant. Framing is
     // read from scene fields, never fitted to the attractor, so tiles that
     // don't sweep one get the same camera exactly. Called once here for the
@@ -3928,14 +3929,14 @@ pub fn render_sweep(
         let uniforms = CameraUniforms::new(
             cam.view_proj(aspect), cam.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
-            color_contrast, scene.background.to_array(),
+            color_contrast, variant.background.to_array(),
             transparent, variant.packs_rgb(),
         )
         .with_zoom_guard(zoom, cam.eye())
         .with_supersample(sampling.n);
         (uniforms, sampling.use_point_primitives(point_size, cam.distance, cam.fov))
     };
-    let target = TileTarget::new(
+    let mut target = TileTarget::new(
         &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
     let sheet_w = width * cols;
@@ -3961,9 +3962,14 @@ pub fn render_sweep(
         let (compute, point_count, fill) =
             fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed, kept[idx])?;
         outcome = outcome.and(fill);
+        // The ground is the tile's own too, so `--sweep meta.background=…`
+        // shows something and a --rolls sheet shows each roll's own ground.
+        let tile_clear =
+            crate::scene::clear_color(variant.background, if transparent { 0.0 } else { 1.0 });
+        target.clear = tile_clear;
         let mut renderer = TileRenderer::new(
             &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
-            filter_radius, bit_depth, clear, transparent, grade,
+            filter_radius, bit_depth, tile_clear, transparent, grade,
         );
         let (uniforms, use_point_primitives) = camera(variant, compute.zoom.as_ref());
         renderer.upload_camera(&queue, &uniforms);

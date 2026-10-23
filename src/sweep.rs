@@ -105,10 +105,42 @@ pub fn parse_axis(spec: &str, steps: usize) -> Result<Axis, String> {
         return Err(format!("--sweep '{spec}': no values"));
     }
 
-    // List first: a value that contains a comma is never a range.
+    // An array range first — `[0,0,0]:[0.1,0.05,0]` walks each component —
+    // because its ends contain commas that are not a list's.
+    if let Some((a, b)) = split_top_level(rest, ':').and_then(|v| match v.as_slice() {
+        [a, b] => Some((a.clone(), b.clone())),
+        _ => None,
+    }) {
+        if let (Some(a), Some(b)) = (parse_num_array(&a), parse_num_array(&b)) {
+            if a.len() != b.len() {
+                return Err(format!(
+                    "--sweep '{spec}': the two ends have {} and {} components",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            if steps == 0 {
+                return Err("--sweep-steps must be at least 1".to_string());
+            }
+            let values = (0..steps)
+                .map(|i| {
+                    let t = if steps == 1 { 0.0 } else { i as f64 / (steps - 1) as f64 };
+                    let parts: Vec<String> =
+                        a.iter().zip(&b).map(|(x, y)| fmt_num(x + (y - x) * t)).collect();
+                    format!("[{}]", parts.join(","))
+                })
+                .collect();
+            return Ok(Axis { paths, values });
+        }
+    }
+
+    // A list: a value that contains a comma *at the top level* is never a
+    // range. Commas inside `[…]` or `{…}` belong to the value, so a list of
+    // colours (`[0,0,0],[0.1,0,0.1]`) is two values, not six.
     if rest.contains(',') {
-        let values: Vec<String> = rest
-            .split(',')
+        let values: Vec<String> = split_top_level(rest, ',')
+            .ok_or_else(|| format!("--sweep '{spec}': unbalanced brackets"))?
+            .into_iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
@@ -143,6 +175,39 @@ pub fn parse_axis(spec: &str, steps: usize) -> Result<Axis, String> {
         "--sweep '{spec}': expected a range (0.1:0.5) or a list (a,b,c); \
          for a single value use --set"
     ))
+}
+
+/// Split on `sep` where it is not inside brackets, braces or quotes. `None`
+/// when the brackets don't balance, so a malformed value is an error rather
+/// than a different list.
+fn split_top_level(s: &str, sep: char) -> Option<Vec<String>> {
+    let (mut depth, mut quoted, mut cur, mut out) = (0i32, false, String::new(), Vec::new());
+    for ch in s.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            '[' | '{' if !quoted => depth += 1,
+            ']' | '}' if !quoted => depth -= 1,
+            c if c == sep && depth == 0 && !quoted => {
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+        cur.push(ch);
+    }
+    (depth == 0 && !quoted).then(|| {
+        out.push(cur);
+        out
+    })
+}
+
+/// `[0.1, 0.2, 0.3]` as numbers, or `None` if it isn't an array of numbers.
+fn parse_num_array(s: &str) -> Option<Vec<f64>> {
+    let inner = s.trim().strip_prefix('[')?.strip_suffix(']')?;
+    inner.split(',').map(|p| p.trim().parse().ok()).collect()
 }
 
 /// Lay axes out over a sheet. One axis is a row of tiles; two vary across
@@ -383,6 +448,25 @@ mod tests {
             t[1].sets,
             ["transform.a.variations.absfold=1", "transform.b.variations.absfold=1"]
         );
+    }
+
+    #[test]
+    fn a_list_of_arrays_is_split_between_them_not_inside() {
+        let a = parse_axis("meta.background=[0,0,0], [0.1,0.05,0.02]", 2).unwrap();
+        assert_eq!(a.values, ["[0,0,0]", "[0.1,0.05,0.02]"]);
+        // Plain lists and names are unchanged.
+        let a = parse_axis("palette.name=ember,abyss,peacock", 2).unwrap();
+        assert_eq!(a.values, ["ember", "abyss", "peacock"]);
+        assert!(parse_axis("meta.background=[0,0,0],[0.1,0", 2).unwrap_err().contains("unbalanced"));
+    }
+
+    #[test]
+    fn a_range_between_arrays_walks_each_component() {
+        let a = parse_axis("meta.background=[0,0,0.2]:[0.1,0.05,0]", 3).unwrap();
+        assert_eq!(a.values, ["[0,0,0.2]", "[0.05,0.025,0.1]", "[0.1,0.05,0]"]);
+        assert!(parse_axis("meta.background=[0,0]:[1,1,1]", 3).unwrap_err().contains("components"));
+        // A scalar range is still a scalar range.
+        assert_eq!(parse_axis("meta.haze=0:1", 3).unwrap().values, ["0", "0.5", "1"]);
     }
 
     #[test]

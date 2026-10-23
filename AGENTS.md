@@ -990,9 +990,8 @@ seed. Every roll is saved as `<out>.seed<N>.toml` *before* anything renders,
 so a tile worth keeping is already a scene file (`--scene` it, or reroll with
 `--random --seed <N>`), even if the sheet is stopped. It is a sweep sheet
 underneath (`run_rolls` in `main.rs`, `offline::render_sweep` with a builder
-that rolls a seed per tile), so each tile is framed by its own roll's camera;
-the ground is the first roll's background, because a sheet has one clear
-colour. Honours `--random-config` and `--palette`. Expect a few near-empty
+that rolls a seed per tile), so each tile is framed by its own roll's camera
+and sits on its own roll's background. Honours `--random-config` and `--palette`. Expect a few near-empty
 tiles: the dimension bound is off by default, which is what lets the dice
 produce sparse-but-striking rolls, and it also lets through rolls with d < 1
 that are truly a handful of points. `scenes/lemniscate_opus55.toml` came
@@ -3484,13 +3483,14 @@ needs the answer to be present or absent.
   parameter changes the IFS), so prefer `--effort tiny|small`. Unlike mutation
   sheets no variant files are written: a tile is fully described by one flag,
   and that flag is printed per tile, ready to paste.
-- **Each tile is framed from its own variant**: camera, point size, haze band
-  and colour contrast. Until 2026-10-23 a sheet took all four from the base
+- **Each tile is framed from its own variant**: camera, point size, haze band,
+  colour contrast and background (the tile's clear colour and the colour haze
+  fades toward). Until 2026-10-23 a sheet took all of these from the base
   scene, so `--sweep camera.pitch=0.05,0.6` printed and labelled two tiles
   that were pixel-identical, which is the silent no-op the rule above exists
   to prevent, one step later. Framing is read from scene fields, never fitted
   to the attractor, so tiles that don't sweep one still share it exactly.
-  (`meta.background` is still the base scene's: the sheet has one clear colour.)
+  The sheet's gutters (a partial last row) stay the base scene's colour.
 - `[[symmetry]]` blocks are settable: `symmetry.<index-or-motif>.<field>`
   (`group`, `axis`, `repeat`, `turn`, `shrink`, …), the block named by its
   index or by any motif in its `applies_to`, so `-S symmetry.cone.group=Cyc12`
