@@ -849,9 +849,14 @@ pub struct App {
     pub haze_amount: f32,
     /// Write an alpha channel in captured stills (S) and render jobs, so
     /// they can be composited. Session state, not scene data: it says what
-    /// leaves the app, not what the artwork is. The live window is always
-    /// opaque — its swapchain has nothing to composite through.
+    /// leaves the app, not what the artwork is. The live window is opaque
+    /// unless `transparent_window` says otherwise.
     pub transparent_render: bool,
+    /// `--transparent-window`: the live view clears to alpha 0 and writes
+    /// premultiplied coverage, so the desktop shows through everywhere the
+    /// fractal isn't. Fixed for the session — the window's visual is chosen
+    /// when it is created.
+    transparent_window: bool,
     /// Pinned haze band in world units, or `None` to auto-range off the camera
     /// distance. Only the Render window's advanced disclosure and legacy view
     /// files set this; auto is the default and the case worth optimising for.
@@ -1131,6 +1136,9 @@ impl App {
         scene: Scene,
         haze_enabled: bool,
         vsync: bool,
+        // `--transparent-window`: the window was created transparent, so
+        // render the live view with the desktop showing through it.
+        transparent_window: bool,
         scene_path: Option<String>,
         view: Option<View>,
         // `--fov`. Wins over the view, the scene and the preference alike,
@@ -1147,7 +1155,7 @@ impl App {
         // — see `resolve_grade` in `main.rs`, which the headless path shares.
         grade: crate::gpu::points::splat::Grade,
     ) -> Self {
-        let gpu = GpuContext::new(window.clone(), vsync).await;
+        let gpu = GpuContext::new(window.clone(), vsync, transparent_window).await;
 
         log::info!("Loaded scene: {} by {}", scene.name, scene.author);
 
@@ -1356,6 +1364,7 @@ impl App {
             haze_amount,
             haze_band: None,
             transparent_render: false,
+            transparent_window,
             color_falloff: scene.color_falloff,
             color_contrast: scene.color_contrast,
             fps_tracker: FpsTracker::new(),
@@ -6433,6 +6442,27 @@ impl App {
         self.pending_screenshot = true;
     }
 
+    /// What the live pass does with alpha. Screenshots don't ask this: they
+    /// go to a file, which wants straight alpha or none (`transparent_render`).
+    fn window_alpha(&self) -> crate::gpu::buffers::Alpha {
+        if self.transparent_window {
+            crate::gpu::buffers::Alpha::Premultiplied
+        } else {
+            crate::gpu::buffers::Alpha::Opaque
+        }
+    }
+
+    /// The live pass's clear. Transparent is all zeros, not the background at
+    /// alpha 0: premultiplied, any colour left in an empty pixel is light
+    /// added on top of the desktop.
+    fn window_clear(&self) -> wgpu::Color {
+        if self.transparent_window {
+            wgpu::Color::TRANSPARENT
+        } else {
+            crate::scene::clear_color(self.scene.background, 1.0)
+        }
+    }
+
     /// The point size as it is actually drawn.
     ///
     /// Under an infinite zoom this tracks the eye, because a size fixed in
@@ -7021,7 +7051,7 @@ impl App {
                     self.buffer_capacity as f64,
                     SCREENSHOT_HEIGHT as f32,
                     crate::scene::clear_color(self.scene.background, alpha),
-                    self.transparent_render,
+                    self.transparent_render.into(),
                     // A screenshot is what the window is showing, grade
                     // included — anything else and S would silently save a
                     // different picture from the one on screen.
@@ -7273,11 +7303,11 @@ impl App {
             haze.3,
             self.color_contrast,
             self.scene.background.to_array(),
-            // The window's swapchain has nothing behind it to composite
-            // through, so the live pass is always opaque.
+            // Overridden below when the window is transparent.
             false,
             self.scene.packs_rgb(),
         )
+        .with_alpha(self.window_alpha())
         // Every frame, from this frame's eye: that is what makes the zoom's
         // edge guard track the camera instead of the world.
         .with_zoom_guard(self.zoom(), self.camera.eye());
@@ -7299,7 +7329,7 @@ impl App {
                         view: &color_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(crate::scene::clear_color(self.scene.background, 1.0)),
+                            load: wgpu::LoadOp::Clear(self.window_clear()),
                             store: wgpu::StoreOp::Store,
                         },
                         depth_slice: None,
@@ -7337,8 +7367,8 @@ impl App {
                     // brightness ramp that has always been there.
                     self.buffer_capacity.min(point_count.max(1)) as f64,
                     height as f32,
-                    crate::scene::clear_color(self.scene.background, 1.0),
-                    false,
+                    self.window_clear(),
+                    self.window_alpha(),
                     // The window's own grade — the whole point of it being a
                     // live control rather than a render setting.
                     self.grade,

@@ -46,7 +46,8 @@ struct CameraUniforms {
     bg_r: f32,
     bg_g: f32,
     bg_b: f32,
-    // 1 when this pass writes an image with an alpha channel to keep.
+    // 1 when this pass writes an image with an alpha channel to keep, 2 when
+    // it is a --transparent-window swapchain (premultiplied; see Alpha).
     transparent: f32,
     // 1 when point colour is packed RGB rather than a colormap index
     color_rgb_mode: f32,
@@ -75,7 +76,8 @@ struct SplatParams {
     /// Output gain applied after the log
     gain: f32,
     /// 1.0 = write straight-alpha coverage instead of compositing over
-    /// `background` (transparent PNG output)
+    /// `background` (transparent PNG output); 2.0 = premultiplied, for a
+    /// --transparent-window swapchain
     transparent: f32,
     /// **1/gamma**, pre-inverted on the CPU so the shader never divides.
     /// 1.0 is off and reproduces every render made before this existed.
@@ -581,6 +583,21 @@ fn srgb_decode(c: f32) -> f32 {
     return pow((c + 0.055) / 1.055, 2.4);
 }
 
+/// Premultiply a straight colour the way the desktop will un-premultiply it.
+///
+/// An X11 compositor blends a 32-bit window's *code values*: what it shows is
+/// `encoded + desktop * (1 - a)`. Multiplying in linear light and letting the
+/// sRGB target encode the product gives `encode(c * a)`, which is far darker
+/// than `encode(c) * a` at low alpha — the dusty edges would go to soot. So
+/// multiply after encoding, and decode again for the hardware to undo.
+fn premultiply_encoded(c: vec3<f32>, a: f32) -> vec3<f32> {
+    return vec3<f32>(
+        srgb_decode(srgb_encode(c.r) * a),
+        srgb_decode(srgb_encode(c.g) * a),
+        srgb_decode(srgb_encode(c.b) * a),
+    );
+}
+
 /// A cheap integer hash, for per-pixel noise that is the same every render.
 ///
 /// Deterministic on purpose: two renders of the same scene should differ by
@@ -723,6 +740,10 @@ fn fs_tonemap(in: TonemapOutput) -> @location(0) vec4<f32> {
         // colour is the palette hue, coverage is the log density, so the
         // dusty edges stay dusty instead of turning into a cutout.
         let straight = emitted / max(coverage, 1e-6);
+        if params.transparent > 1.5 {
+            // A window the desktop shows through: same coverage, premultiplied.
+            return vec4<f32>(premultiply_encoded(straight, coverage), coverage);
+        }
         return vec4<f32>(dither_srgb(straight, px, params.dither), coverage);
     }
     let composited = params.background.rgb * (1.0 - coverage) + emitted;
@@ -820,6 +841,9 @@ fn fs_tonemap_volume(in: TonemapOutput) -> @location(0) vec4<f32> {
         // colour is the palette hue, coverage is the log density, so the
         // dusty edges stay dusty instead of turning into a cutout.
         let straight = emitted / max(alpha, 1e-6);
+        if params.transparent > 1.5 {
+            return vec4<f32>(premultiply_encoded(straight, alpha), alpha);
+        }
         return vec4<f32>(dither_srgb(straight, px, params.dither), alpha);
     }
     let composited = params.background.rgb * (1.0 - alpha) + emitted;

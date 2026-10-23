@@ -1248,9 +1248,8 @@ fn default_color_contrast() -> f64 {
 /// stores, so this is a repack rather than a conversion.
 ///
 /// `alpha` is 0 for a transparent render and 1 otherwise. It only ever
-/// reaches the swapchain as 1: the window has no alpha channel to composite
-/// through, so transparency is a property of what gets written to a file, not
-/// a preview mode.
+/// reaches the swapchain as 1: a `--transparent-window` clears to
+/// `wgpu::Color::TRANSPARENT` instead (see `App::window_clear`).
 pub fn clear_color(background: Vec3, alpha: f64) -> wgpu::Color {
     wgpu::Color {
         r: background.x as f64,

@@ -963,7 +963,7 @@ impl TileRenderer {
                 samples,
                 sampling.target_height(),
                 clear,
-                transparent,
+                transparent.into(),
                 grade,
             );
             TileRenderer::Splat(renderer)
@@ -1691,7 +1691,7 @@ pub fn retonemap(
         buf.samples,
         buf.screen_height,
         clear,
-        buf.transparent,
+        buf.transparent.into(),
         grade,
     );
 
@@ -1737,7 +1737,7 @@ pub fn retonemap(
             None => String::new(),
         };
         renderer.upload_params(
-            &queue, e, buf.samples, buf.screen_height, clear, buf.transparent, g,
+            &queue, e, buf.samples, buf.screen_height, clear, buf.transparent.into(), g,
         );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("retonemap_encoder"),
@@ -3123,7 +3123,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 accumulated,
                 sampling.target_height(),
                 clear,
-                transparent,
+                transparent.into(),
                 grade,
             );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

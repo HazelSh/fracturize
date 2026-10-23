@@ -18,8 +18,10 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
-    /// Create a new GPU context for the given window
-    pub async fn new(window: Arc<Window>, vsync: bool) -> Self {
+    /// Create a new GPU context for the given window. `transparent_window`
+    /// asks for a swapchain the desktop can show through; the window itself
+    /// has to have been created transparent for that to mean anything.
+    pub async fn new(window: Arc<Window>, vsync: bool, transparent_window: bool) -> Self {
         let size = window.inner_size();
 
         // Create wgpu instance - prefer Vulkan on Linux to avoid EGL issues
@@ -112,6 +114,26 @@ impl GpuContext {
 
         log::info!("Using surface format: {:?}", format);
 
+        // A transparent window wants the compositor to read our alpha, which
+        // the first mode (Opaque, nearly always) tells it not to. The shaders
+        // write premultiplied alpha for it (`Alpha::Premultiplied`), so prefer
+        // the mode that says so; Inherit means "whatever the window's visual
+        // says", and an X11 ARGB visual says premultiplied too. Some drivers
+        // (NVIDIA on X11) offer only Opaque, and present the alpha anyway.
+        let alpha_mode = if transparent_window {
+            [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::Inherit]
+                .into_iter()
+                .find(|m| surface_caps.alpha_modes.contains(m))
+                .unwrap_or(surface_caps.alpha_modes[0])
+        } else {
+            surface_caps.alpha_modes[0]
+        };
+        log::info!(
+            "Surface alpha mode: {:?} (of {:?})",
+            alpha_mode,
+            surface_caps.alpha_modes
+        );
+
         // Configure surface
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -123,7 +145,7 @@ impl GpuContext {
             } else {
                 wgpu::PresentMode::AutoNoVsync
             },
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };

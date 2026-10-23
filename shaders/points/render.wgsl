@@ -25,7 +25,8 @@ struct CameraUniforms {
     bg_r: f32,
     bg_g: f32,
     bg_b: f32,
-    // 1 when this pass writes an image with an alpha channel to keep.
+    // 1 when this pass writes an image with an alpha channel to keep, 2 when
+    // it is a --transparent-window swapchain (premultiplied; see Alpha).
     transparent: f32,
     // 1 when point colour is packed RGB rather than a colormap index
     color_rgb_mode: f32,
@@ -216,7 +217,35 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // colour at alpha 1 would bake the background into the far material,
         // which is exactly what you asked for transparency to avoid. The pass
         // clears to alpha 0, so pixels with no point in them stay empty.
+        if camera.transparent > 1.5 {
+            // A window the desktop shows through wants it premultiplied.
+            return vec4<f32>(premultiply_encoded(desaturated, transmittance), transmittance);
+        }
         return vec4<f32>(desaturated, transmittance);
     }
     return vec4<f32>(mix(background, desaturated, transmittance), 1.0);
+}
+
+// Copies of splat.wgsl's; see `premultiply_encoded` there for why the
+// multiply happens in sRGB code values.
+fn srgb_encode(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        return c * 12.92;
+    }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+fn srgb_decode(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn premultiply_encoded(c: vec3<f32>, a: f32) -> vec3<f32> {
+    return vec3<f32>(
+        srgb_decode(srgb_encode(c.r) * a),
+        srgb_decode(srgb_encode(c.g) * a),
+        srgb_decode(srgb_encode(c.b) * a),
+    );
 }
