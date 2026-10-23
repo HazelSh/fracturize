@@ -1,0 +1,94 @@
+# Hob (Opus 5.5): a gas ring, and the one flame on it that has caught.
+#
+# Claude Opus 5.5. The series so far is fires that burn wood and wax; this is
+# the other kind, a premixed flame, laminar and blue, thirty jets around a
+# burner, and one of them burning yellow where it has found some sodium.
+#
+#   Thirty copies of two motifs under Cyc30. Each jet is the whole ring,
+#   squashed thin and stood on its edge (rotation about z, ~70°), so a flame
+#   is a loop of smaller rings, and is limb-bright the way a real hollow cone
+#   is. Thirty is not decoration: at eighteen the loops are separate eggs;
+#   at thirty they overlap, and the overlap is what draws the pointed tips
+#   along the rim. `cone` is the blue body, `mantle` the violet envelope.
+#
+#   `catch` is one map outside the group: `cone` turned half a group step
+#   (6°), so it stands in the ring between two jets as a member rather than
+#   beside it (CRAFT, kintsugi's rule), taller, fatter and swirled, because a
+#   yellow flame is a lazy one.
+#
+#   The defect's real work happens a scale down. Every jet is a copy of the
+#   whole ring, yellow flame included, so every jet carries a small copy of
+#   it, and the colour EMA carries it back from 0.8 towards the cone's 0.47
+#   through the palette's white stop. Those are the white-hot inner cones in
+#   every flame. Nothing was authored to make them: they are the one flame
+#   that is different, inherited by all the others.
+#
+#   fracturize --scene scenes/hob_opus55.toml
+#   fracturize --scene scenes/hob_opus55.toml --render renders/hob_opus55.png \
+#     --effort large --splat
+
+[meta]
+name = "Hob (Opus 5.5)"
+author = "Claude Opus 5.5"
+point_size = 0.0015
+point_count = 6_000_000
+color_mode = "palette"
+color_speed = 0.6
+haze = 0.2
+exposure = 1.2
+background = [0.003, 0.003, 0.008]
+
+[palette]
+interpolate = "oklab"
+cyclic = true
+stops = [
+  { at = 0.00, color = "#000000" },
+  { at = 0.14, color = "#14072e" },
+  { at = 0.28, color = "#4223b0" },
+  { at = 0.40, color = "#1f5cff" },
+  { at = 0.52, color = "#4fc8ff" },
+  { at = 0.62, color = "#eefbff" },
+  { at = 0.72, color = "#ffd77a" },
+  { at = 0.82, color = "#ff9626" },
+  { at = 0.92, color = "#a8300a" },
+  { at = 1.00, color = "#000000" },
+]
+
+[camera]
+distance = 2.1
+yaw = 0.3
+pitch = 0.5
+focus = [0.0, 0.25, 0.0]
+
+[[symmetry]]
+group = "Cyc30"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["cone", "mantle"]
+
+[[transform]]
+name = "cone"
+translation = [0.74, 0.24, 0.0]
+scale = [0.30, 0.06, 0.12]
+rotation = [0, 0, 72]
+color_value = 0.47
+weight = 1.0
+variations = { linear = 1.0 }
+
+[[transform]]
+name = "mantle"
+translation = [0.80, 0.30, 0.0]
+scale = [0.38, 0.06, 0.12]
+rotation = [0, 0, 68]
+color_value = 0.26
+weight = 1.0
+variations = { linear = 0.85, bubble = 0.15 }
+
+[[transform]]
+name = "catch"
+translation = [0.7558, 0.30, -0.0794]
+scale = [0.55, 0.16, 0.2]
+rotation = [0, 6, 70]
+color_value = 0.8
+color_speed = 0.9
+weight = 0.1
+variations = { linear = 0.55, swirl = 0.45 }

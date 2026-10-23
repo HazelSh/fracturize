@@ -890,3 +890,53 @@ recorded dead end is worth as much as a recipe.
   `no-self-loops` strips a symmetric motif of its own lace, since the lace *is*
   the motif following itself.
 
+- **2026-10-23, Opus 5.5. A gas ring (`scenes/hob_opus55.toml`): the group's
+  order draws the outline, and the defect lands one scale down.** Two motifs
+  under a `Cyc` group plus one map outside it.
+
+  **A squashed ring is a ring; stand it on edge.** The first draft squashed
+  each jet vertically (`[0.1, 0.3, 0.1]`) and measured a Y-spread of 0.085:
+  all jets sit at one height, so the attractor's height `H` solves
+  `H = s_y·H` and goes to zero. The mini-hobs read as little crowns. Height
+  has to come from turning the ring's *diameter* upright: scale one axis of
+  the ring thin, then rotate ~70° about the tangent so the diameter becomes
+  the flame's height. Each jet is then a standing loop, limb-bright like a
+  real hollow cone.
+
+  **The group's order is a shape control, not a count.** At `Cyc12` and
+  `Cyc18` the loops were separate eggs, closed and rounded. Six variations
+  on the mantle (julia, swirl, horseshoe, bent, spherical, to 0.45) failed
+  to pinch a tip: with the variation weights summing past 1, they mostly
+  enlarge the map. At `Cyc30` neighbouring loops overlap, and the overlap
+  draws a row of pointed tongues along the rim. d went 1.72 → 2.05 on the
+  same motif. When the motif won't take the shape, try the orbit.
+
+  **A defect is inherited.** Every jet is a copy of the whole ring, yellow
+  flame included, so every jet carries a small copy of the defect. In
+  palette mode the cone's `color_speed` pulls that copy's index back from
+  0.8 towards 0.47, through the palette's white stop at 0.62, so each blue
+  flame grows a white-hot inner cone that nobody authored. It reads exactly
+  like a gas flame's inner cone. Checked: with `-S
+  transform.catch.color_value=0.47` the white disappears and the loops stay.
+  §3.6 says a defect's *shape* is decided the moment it exists; this is the
+  same fact seen from the copies' side. What a defect adds to the motifs is
+  also decided by its geometry, so place it with their copies in mind. A
+  bigger `catch` (scale.x 0.4 → 0.7) also sprouts fine spikes at every
+  jet's tip.
+
+  **`julia` forks in world space.** Its random branch is a point reflection
+  through the origin *after* the affine, so on a map far off-centre the
+  second fork lands across the ring. In most orbit views the yellow flame's
+  twin floated in the middle of the burner. Fine for a centred map,
+  surprising on a placed one.
+
+  **`--density-estimation` did nothing here, which was the answer.** A
+  premixed flame is laminar and crisp, so the lace is true to the subject.
+  The softness belongs to the one diffusion flame, which got `swirl`.
+
+  Tooling found on the way, and fixed: a sweep sheet framed every tile from
+  the base scene, so `--sweep camera.pitch=…` gave identical tiles under
+  honest-looking labels (AGENTS.md, Parameter sweeps). Not fixed: `-S`
+  cannot reach `[[symmetry]]`, so the group order can't be swept. Copy the
+  file and edit `group`.
+

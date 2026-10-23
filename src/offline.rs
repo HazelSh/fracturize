@@ -3896,11 +3896,6 @@ pub fn render_sweep(
         // (the base scene is only used for framing and grading here)
         let _ = f;
     }
-    let color_contrast = view
-        .as_ref()
-        .and_then(|v| v.color_contrast)
-        .unwrap_or(scene.color_contrast);
-
     // Build every variant BEFORE touching the GPU. A sweep over a path that
     // doesn't resolve must fail once, up front — not N times, and not after a
     // minute of rendering.
@@ -3915,24 +3910,32 @@ pub fn render_sweep(
     sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
-    // One framing and one haze band for the whole sheet: a contact sheet is
-    // read tile against tile, so only the swept parameter may differ.
-    let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
+    // A contact sheet is read tile against tile, so only the swept parameter
+    // may differ — and when that parameter is the framing itself
+    // (`camera.pitch`, `meta.haze`, `meta.point_size`, `meta.color_contrast`),
+    // it has to differ. So each tile is framed from its own variant. Framing is
+    // read from scene fields, never fitted to the attractor, so tiles that
+    // don't sweep one get the same camera exactly. Called once here for the
+    // printout; `frame_setup` below is the same thing, quietly.
+    let _ = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
-    let view_proj = base_camera.view_proj(aspect);
-    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance, base_camera.fov);
-    let (haze_near, haze_far) = haze.band(base_camera.distance);
-    // Per-variant edge guard: a sweep may be sweeping a zoom parameter, or
+    // Per-variant edge guard too: a sweep may be sweeping a zoom parameter, or
     // anything that moves the renormalizing map's fixed point.
-    let camera = |zoom: Option<&crate::renorm::Renorm>| {
-        CameraUniforms::new(
-            view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
+    let camera = |variant: &Scene, zoom: Option<&crate::renorm::Renorm>| {
+        let (cam, point_size, haze, _folded, _unpinned) =
+            frame_setup(&view, variant, haze_enabled, camera_over);
+        let (haze_near, haze_far) = haze.band(cam.distance);
+        let color_contrast =
+            view.as_ref().and_then(|v| v.color_contrast).unwrap_or(variant.color_contrast);
+        let uniforms = CameraUniforms::new(
+            cam.view_proj(aspect), cam.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
             color_contrast, scene.background.to_array(),
-            transparent, scene.packs_rgb(),
+            transparent, variant.packs_rgb(),
         )
-        .with_zoom_guard(zoom, base_camera.eye())
-        .with_supersample(sampling.n)
+        .with_zoom_guard(zoom, cam.eye())
+        .with_supersample(sampling.n);
+        (uniforms, sampling.use_point_primitives(point_size, cam.distance, cam.fov))
     };
     let target = TileTarget::new(
         &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
@@ -3964,7 +3967,8 @@ pub fn render_sweep(
             &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
             filter_radius, bit_depth, clear, transparent, grade,
         );
-        renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
+        let (uniforms, use_point_primitives) = camera(variant, compute.zoom.as_ref());
+        renderer.upload_camera(&queue, &uniforms);
         fill_total += t0.elapsed().as_secs_f32();
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
