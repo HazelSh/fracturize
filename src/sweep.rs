@@ -42,8 +42,31 @@ impl Axis {
     /// part that actually varies. `transform.facet-1.variations.absfold`
     /// -> `absfold`.
     fn short(&self) -> &str {
+        self.suffix(1)
+    }
+
+    /// The last `n` segments of the first path (all of it, if it has fewer).
+    fn suffix(&self, n: usize) -> &str {
         let first = &self.paths[0];
-        first.rsplit('.').next().unwrap_or(first)
+        match first.rmatch_indices('.').nth(n - 1) {
+            Some((i, _)) => &first[i + 1..],
+            None => first,
+        }
+    }
+}
+
+/// Labels for two axes that can be told apart. Usually the leaves, but two
+/// axes can share one (`cone.color_value` against `mantle.color_value`), and
+/// then a sheet labelled `color_value=… color_value=…` says nothing about
+/// which is which. Lengthen both until they differ.
+fn short_pair<'a>(a: &'a Axis, b: &'a Axis) -> (&'a str, &'a str) {
+    let mut n = 1;
+    loop {
+        let (sa, sb) = (a.suffix(n), b.suffix(n));
+        if sa != sb || (sa == a.paths[0] && sb == b.paths[0]) {
+            return (sa, sb);
+        }
+        n += 1;
     }
 }
 
@@ -142,6 +165,7 @@ pub fn tiles(axes: &[Axis]) -> Result<(Vec<Tile>, u32, u32), String> {
         }
         [a, b] => {
             let (cols, rows) = (a.values.len(), b.values.len());
+            let (sa, sb) = short_pair(a, b);
             let mut out = Vec::with_capacity(cols * rows);
             for r in 0..rows {
                 for c in 0..cols {
@@ -150,7 +174,7 @@ pub fn tiles(axes: &[Axis]) -> Result<(Vec<Tile>, u32, u32), String> {
                     out.push(Tile {
                         label: format!(
                             "{}={} {}={}",
-                            a.short(), a.values[c], b.short(), b.values[r]
+                            sa, a.values[c], sb, b.values[r]
                         ),
                         description: describe(&sets),
                         sets,
@@ -359,6 +383,19 @@ mod tests {
             t[1].sets,
             ["transform.a.variations.absfold=1", "transform.b.variations.absfold=1"]
         );
+    }
+
+    #[test]
+    fn two_axes_with_one_leaf_are_labelled_apart() {
+        let a = parse_axis("transform.cone.color_value=0:1", 2).unwrap();
+        let b = parse_axis("transform.mantle.color_value=0:1", 2).unwrap();
+        let (t, _, _) = tiles(&[a, b]).unwrap();
+        assert_eq!(t[0].label, "cone.color_value=0 mantle.color_value=0");
+        // Different leaves stay short.
+        let a = parse_axis("meta.haze=0:1", 2).unwrap();
+        let b = parse_axis("transform.a.weight=0:1", 2).unwrap();
+        let (t, _, _) = tiles(&[a, b]).unwrap();
+        assert_eq!(t[0].label, "haze=0 weight=0");
     }
 
     #[test]
