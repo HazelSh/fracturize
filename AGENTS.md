@@ -1157,10 +1157,39 @@ scene is byte-identical.
 and render jobs) writes an alpha channel: the clear alpha goes to 0, the
 points renderer's own alpha marks where points landed, and the splat renderer
 writes straight-alpha coverage so dusty edges stay dusty instead of becoming a
-cutout. The live window is always opaque — its swapchain has nothing behind it.
-**Not supported for animation**: frames are converted to YUV from r/g/b only,
-and neither AV1 nor H.264 carries an alpha plane here, so `--transparent` with
-an `.avif` or `.mp4` output errors rather than quietly producing opaque video.
+cutout. The live window is opaque unless launched with `--transparent-window`
+(below). **Not supported for animation**: frames are converted to YUV from
+r/g/b only, and neither AV1 nor H.264 carries an alpha plane here, so
+`--transparent` with an `.avif` or `.mp4` output errors rather than quietly
+producing opaque video.
+
+**`--transparent-window`** makes the live view itself see-through: the desktop
+shows wherever the fractal isn't, for composing it over other windows or
+capturing it with OBS. Needs a compositing window manager (xfwm4's compositor
+is on here); without one empty pixels come out black. The scene background is
+not drawn. Three parts, all in the window pass only — screenshots and render
+jobs from such a window still follow the `--transparent` checkbox:
+
+- **`gpu::buffers::Alpha`** is what a pass does with alpha: `Opaque`,
+  `Straight` (a file) or `Premultiplied` (this window). It is the
+  `transparent` uniform's value, 0/1/2, in both point shaders and
+  `SplatParams`; `CameraUniforms::with_alpha` and `upload_params` take it.
+- **Premultiplied in sRGB code values, not linear light**
+  (`premultiply_encoded`, in both shaders). An X11 compositor blends a
+  32-bit window's bytes as `encoded + desktop·(1−a)`; multiplying in linear
+  and letting the sRGB target encode the product gives `encode(c·a)`, far
+  darker than `encode(c)·a` at low alpha, and dusty edges go to soot.
+- **The surface prefers `PreMultiplied`, then `Inherit`**, and falls back to
+  whatever is first. The GTX 1080 on X11 offers only `Opaque`, and presents
+  the alpha anyway — verified by screenshotting the desktop with all three
+  renderers (`import -window root`; capturing the app's own window would show
+  nothing, and Xephyr has no compositor, so this one test runs on the real
+  display — it sends no input, which is what the Xephyr rule protects).
+  `RUST_LOG=info` logs the mode chosen. The T490 (Mesa) is untested.
+
+The overlay composite and egui already blend premultiplied, so gizmos and
+panels needed nothing; the panels stay opaque. The emphasis glow writes colour
+only, which over a premultiplied zero reads as added light — glow on glass.
 
 Save-as / fork is `Ctrl+Shift+S` or the Camera window's button — a small modal
 (`src/ui/save_as.rs`), not a native dialog: one text field doesn't justify an
@@ -1196,8 +1225,8 @@ How each renderer applies it:
   *transparency* instead — the point's own colour at `alpha = transmittance`.
   Fading toward a background that isn't going to be there would bake it into
   the far material, which is the thing transparency exists to avoid.
-  `CameraUniforms.transparent` is how the shader knows which it's doing; the
-  window is always opaque, since its swapchain has nothing behind it.
+  `CameraUniforms.transparent` is how the shader knows which it's doing; a
+  `--transparent-window` spends haze as transparency too, premultiplied.
 
 The shader's four parameters are *not* the user's parameters:
 
