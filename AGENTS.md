@@ -6,8 +6,9 @@ A 3D fractal flame renderer inspired by Apophysis, built with Rust and wgpu.
 
 Fracturize renders IFS (Iterated Function System) fractals in 3D using the chaos game
 algorithm, entirely on the GPU. A compute shader runs thousands of parallel "walkers"
-that iterate through weighted random transforms (affine matrix + nonlinear variation
-blend), writing positions into a circular point buffer that is rendered every frame.
+that iterate through weighted random transforms (affine matrix, nonlinear variation
+blend, then a post-affine matrix), writing positions into a circular point buffer
+that is rendered every frame.
 
 **Adding a feature to the scene format? Read `ADDING-A-SCENE-FEATURE.md`.** It is
 the checklist of every place a scene feature has to reach — file, save, `-S`,
@@ -121,7 +122,8 @@ All GPU, three passes per frame:
 1. **Chaos compute** (`points/chaos.wgsl`): 16384 walkers each iterate the IFS a few
    times per frame, writing into a circular buffer (full refresh every ~800 frames;
    10x faster during warmup). Per iteration: pick transform by cumulative weight,
-   apply affine matrix, then blend the 20 variation functions by weight. Diverged or
+   apply affine matrix, blend the 20 variation functions by weight, then apply the
+   post-affine matrix (identity unless the scene sets one). Diverged or
    NaN walkers are re-seeded randomly (important for nonlinear variations).
 2. **Point render** — three interchangeable modes over the same point buffer
    (`R` cycles live; `--splat`, `--volume` / a view's `renderer = "splat"` or
@@ -1436,7 +1438,17 @@ color_value = 0.25             # optional explicit colormap index (0-1)
 color_speed = 0.5              # optional per-transform override (wins over color_falloff)
 # Nonlinear variation blend; omit for classic affine ({ linear = 1.0 })
 variations = { swirl = 0.35, linear = 0.65 }
+# Optional post-affine, applied after the variation blend (and before any
+# symmetry group). Omit all three for identity. Same T·R·S order as above.
+post_translation = [0.0, 0.0, 0.0]
+post_scale = 1.0               # uniform or per-axis, like `scale`
+post_rotation = [0, 0, 0]      # Euler degrees (XYZ); no rotvec form
 ```
+
+The post-affine is what lets a variation act about a point other than the
+origin: the affine carries that point to the origin, the variation acts, and
+the post-affine carries it back. `scenes/flame_of_flames_opus55.toml` centres
+`swirl` on each lick's root this way.
 
 Per-axis scale makes L-system-style geometry expressible: a transform with
 `scale = [0.06, 0.5, 0.06]` squashes the whole attractor onto a thin vertical
