@@ -488,17 +488,24 @@ Re-tested here unless noted.
   building produced sparse floral rosettes on a curving bough — cherry blossom —
   which is nothing I would have thought to aim at. Saved as `scenes/blossom.toml`.
 
-**Lore that did not transfer:** anything that assumes a final transform, a post
-transform per xform, xaos, or the blur family — none of which exist here (§6).
-A large fraction of published Apophysis recipes use at least one, so expect to
-translate rather than port.
+**Lore that did not transfer:** anything that assumes a final transform or the
+blur family — neither exists here (§6). A large fraction of published Apophysis
+recipes use one, so expect to translate rather than port.
+
+**Lore that does transfer:** a post transform per xform (`post_translation`,
+`post_rotation`, `post_scale`; the inspector's Post-affine group) and xaos
+(§6.2). The post transform is what lets a variation act about any point rather
+than the origin: the pre-affine carries the centre to the origin, the variation
+acts, and the post-affine carries it back. `swirl` about a lick's root rather
+than the world origin is written that way in `scenes/flame_of_flames_opus55.toml`.
 
 ---
 
 ## 6. The four things most worth adding
 
 Ranked by expressive power per line of code. These are not complaints about the
-engine; they're where the ceiling currently is.
+engine; they're where the ceiling currently is. Two of them, xaos (§6.2) and
+symmetry (§6.4), are built.
 
 ### 6.1 A final transform — the big one
 
@@ -518,11 +525,10 @@ mid-2000s flame art, and there is no way to express it here at all.
 Cost: one extra transform's worth of state, applied at plot time in `chaos.wgsl`
 between the walk and the buffer write. It does not touch the iteration.
 
-**It also unlocks rotational symmetry for nonlinear maps.** n-fold symmetry needs
-the map set `{Rᵏ ∘ f}` — the rotation applied *after* `f`. Since a transform here is
-affine-then-variations, `Rᵏ ∘ f` is only expressible when `f` is pure affine (fold
-the rotation into the matrix). I built a 5-fold symmetric IFS this way and it works
-— but only because every map was affine. With variations, it cannot be written down.
+Rotational symmetry of nonlinear maps does not need it. n-fold symmetry needs the
+map set `{Rᵏ ∘ f}`, the rotation applied *after* `f`, and a transform here is
+pre-affine, variations, then post-affine, so `Rᵏ ∘ f` is a post-rotation; native
+`[[symmetry]]` applies the group after the whole map for exactly this reason.
 
 ### 6.2 xaos — a transition matrix
 
@@ -545,9 +551,8 @@ fog is a genuinely new material, and it's about four lines of WGSL.
 
 ### 6.4 A symmetry generator
 
-"Make this 5-fold about Y" is one click in Apophysis and a Python script here (I
-wrote one; it's in the experiment log). Given §6.1, the affine case is easy and
-worth having on its own.
+*Built: `[[symmetry]]`, the five finite rotation groups plus `repeat`, for affine
+and nonlinear maps alike. See AGENTS.md "Symmetry" and `scenes/reliquary.toml`.*
 
 ---
 
