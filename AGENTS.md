@@ -4271,6 +4271,12 @@ needs the answer to be present or absent.
   to prevent, one step later. Framing is read from scene fields, never fitted
   to the attractor, so tiles that don't sweep one still share it exactly.
   (`meta.background` is still the base scene's: the sheet has one clear colour.)
+- `[[symmetry]]` blocks are settable: `symmetry.<index-or-motif>.<field>`
+  (`group`, `axis`, `repeat`, `turn`, `shrink`, …), the block named by its
+  index or by any motif in its `applies_to`, so `-S symmetry.cone.group=Cyc12`
+  and `--sweep 'symmetry.0.group=Cyc12,Cyc18,Cyc30'` work. Inside a subscene,
+  `subscene.<s>.symmetry.<…>`. Until 2026-10-23 this was refused with no
+  stated reason; nothing in the model needed the refusal.
 - When both axes end in the same field, labels lengthen until they differ:
   `cone.color_value=0.38 mantle.color_value=0.16`, not `color_value=…` twice.
 

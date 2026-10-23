@@ -1,0 +1,86 @@
+# Romanesco (Opus 5.5): a cone of buds, each bud a cone of buds.
+#
+# Claude Opus 5.5. Made after Hob, whose self-similarity read as glitching:
+# a flame is not a ring, so the rings inside its flames looked like
+# artefacts. Here the part *is* the whole. Romanesco is the plant that does
+# what an IFS does, so the recursion is the subject, not a side effect.
+#
+#   One map, `bud`: the whole head at 0.30 scale, out at the base and tilted
+#   up 15°. A `repeat` turns it 137.5° (the golden angle), lifts it 0.05 and
+#   shrinks it 0.97, sixty-four times. The step is a similarity whose fixed
+#   point is the apex, so the copies climb a logarithmic spiral on a cone and
+#   converge on the tip: Vogel's model of phyllotaxis, from one transform.
+#
+#   `apex` is the rest of the infinite spiral, exactly. Copies 64, 65, … are
+#   S⁶⁴ applied to the whole head, so one map, S⁶⁴ itself (scale 0.97⁶⁴,
+#   turned 64 × 137.5°, lifted the sum of the steps), finishes what the
+#   64-copy cap truncates. Without it the tip is a hole, and so is the tip of
+#   every bud, because every bud is the head. Its weight is not one copy's:
+#   it stands in for an infinite tail, and at a copy's weight (1/64) its
+#   region came out a dark, under-sampled well, again at every scale.
+#
+#   Colour is `color = "orbit"`: copy k targets k/64 on a one-way ramp, so
+#   older buds near the base are deep green and younger ones near the tip
+#   pale. The ramp must start at `color_value = 0`, since the target is
+#   `fract(color_value + k/N)`; at 0.5 it wraps through the dark end halfway
+#   up the head. And because every bud is the head, every bud is darker at
+#   its foot and paler at its own tip.
+#
+#   fracturize --scene scenes/romanesco_opus55.toml
+#   fracturize --scene scenes/romanesco_opus55.toml --render renders/romanesco.png \
+#     --effort large --splat
+#   Seen from above, the spirals inside the spirals:
+#     -S camera.pitch=1.45 -S camera.distance=2.5 -S 'camera.focus=[0,0.9,0]'
+
+[meta]
+name = "Romanesco (Opus 5.5)"
+author = "Claude Opus 5.5"
+point_size = 0.0015
+point_count = 6_000_000
+color_mode = "palette"
+color_speed = 0.5
+haze = 0.25
+exposure = 1.0
+background = [0.010, 0.009, 0.006]
+
+[palette]
+interpolate = "oklab"
+cyclic = false
+stops = [
+  { at = 0.00, color = "#1b4a17" },
+  { at = 0.30, color = "#4a9a2c" },
+  { at = 0.60, color = "#a3d447" },
+  { at = 0.85, color = "#d6ec84" },
+  { at = 1.00, color = "#fbfce6" },
+]
+
+[camera]
+distance = 3.1
+yaw = 0.4
+pitch = 0.65
+focus = [0.0, 0.72, 0.0]
+
+[[symmetry]]
+repeat = 64
+axis = [0.0, 1.0, 0.0]
+step = [0.0, 0.05, 0.0]
+turn = 137.5
+shrink = 0.97
+applies_to = ["bud"]
+color = "orbit"
+
+[[transform]]
+name = "bud"
+translation = [0.8, 0.0, 0.0]
+scale = 0.30
+rotation = [0, 0, -15]
+color_value = 0.0
+weight = 1.0
+
+[[transform]]
+name = "apex"
+translation = [0.0, 1.42940, 0.0]
+scale = 0.14236
+rotation = [0, 160.0, 0]
+color_value = 0.95
+weight = 0.12
