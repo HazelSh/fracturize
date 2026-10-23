@@ -4278,6 +4278,11 @@ needs the answer to be present or absent.
   and `--sweep 'symmetry.0.group=Cyc12,Cyc18,Cyc30'` work. Inside a subscene,
   `subscene.<s>.symmetry.<…>`. Until 2026-10-23 this was refused with no
   stated reason; nothing in the model needed the refusal.
+- **Arrays sweep too.** A list splits at top-level commas only, so
+  `meta.background=[0,0,0],[0.03,0.005,0.03]` is two colours; a range
+  between two arrays walks each component,
+  `meta.background=[0.004,0.004,0.008]:[0.05,0.012,0.04]`, which is the CLI's
+  colour slider. One channel alone is `meta.background.x=0:0.05`.
 - When both axes end in the same field, labels lengthen until they differ:
   `cone.color_value=0.38 mantle.color_value=0.16`, not `color_value=…` twice.
 

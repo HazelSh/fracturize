@@ -1004,7 +1004,10 @@ struct Args {
     /// `transform.facet-1.variations.absfold=0.05:0.55` walks --sweep-steps
     /// values between the ends; `palette.name=ember,abyss,peacock` uses the
     /// list verbatim (checked for first, so a value containing a comma is
-    /// never read as a range). Give it twice and you get a grid, not a strip:
+    /// never read as a range). Arrays work in both forms: a list splits only
+    /// between values (`meta.background=[0,0,0],[0.03,0,0.03]`), and a range
+    /// between two arrays walks each component
+    /// (`meta.background=[0,0,0]:[0.05,0.01,0.04]`). Give it twice and you get a grid, not a strip:
     /// the first varies across columns, the second down rows, so two sweeps
     /// of --sweep-steps 4 make a 4x4 sheet of 16 tiles, every combination of
     /// the two. A third --sweep is refused. Composes with --set, which sets the
