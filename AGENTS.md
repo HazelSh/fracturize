@@ -30,8 +30,13 @@ src/
   history.rs     # Unified snapshot undo/redo behind App::commit_edit (all edits)
   haze.rs        # Aerial perspective: one amount, band and falloffs derived
   indicators.rs  # Selection offset/rotation lines, and camera-path polylines
-  randomize.rs   # Random flame generator: RandomSettings, a CPU chaos-game
-                 # quality gate, dimension steering, lacunarity rejection
+  dice/          # One generator for random flames AND mutations (see "The dice")
+    mod.rs         # Source::{Fresh, From(parent)}, the one search loop, Roll/RollFailure
+    settings.rs    # RandomSettings: the profile — roll half + [mutate] half
+    roll.rs        # Fresh rolls, part by part (keep the order of rng draws!)
+    mutate.rs      # Mutation operators: each part nudged or re-rolled
+    gate.rs        # The quality gate: faults, judged absolutely or against a parent
+    profile.rs     # Profiles as files: format, named lookup, comment-keeping save
   random_list.rs # The Random flames list's model: rolls on worker threads
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
@@ -70,7 +75,6 @@ src/
   avif.rs        # AV1 backend for .avif (rav1e)
   h264.rs        # H.264 backend for .mp4 (openh264)
   pick.rs        # Gizmo hit-testing and drag geometry (pure math, unit-tested)
-  mutate.rs      # Random scene mutation operators (U key, --mutations)
   trace.rs       # CPU chaos walkers (variation port) for the trace overlay
   volume_ref.rs  # Exact emission-absorption transport for volume mode, to score it
   prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
@@ -312,7 +316,7 @@ lands on the same pixel). Blending is serialized per sample, so six million
 fragments on one texel is six million operations the GPU cannot overlap:
 measured on the reference desktop, **654 FPS → 46 FPS** at 6M points, scaling
 linearly with the count. The budget is the attractor's screen footprint
-(measured by `trace::measure`, the same CPU walkers `randomize.rs` gates on)
+(measured by `trace::measure`, the same CPU walkers `dice/gate.rs` gates on)
 times a generous points-per-pixel, floored well past where more points change
 anything. It restores 46 → 567 FPS and leaves real scenes untouched. Splat
 exposure is normalized by the drawn count, so brightness doesn't move either;
@@ -660,9 +664,9 @@ where "start a new document" lives in every program.
 |--------|------------------|
 | Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
 | History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
-| Mutate | Mutation strength (a preference), the Mutate button, Undo |
+| Mutate | Mutation strength (the dice profile's, shared with Random settings), the Mutate button, Undo |
 | Random flames | A scrolling list of rolls under the random settings, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
-| Random settings | What the dice may roll: maps, variations and their weight ranges, dimension and lacunarity bounds, the try budget |
+| Random settings | The dice profile: load / save / save as / revert (with a `*` when changed), then what a roll may make — maps, variations and their weight ranges, symmetry, dimension and lacunarity bounds, the try budget — and what a mutation may change. See "The dice" |
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
@@ -978,14 +982,15 @@ done/total), the pulse should go with it and this exception disappears.
 ## Random Flames
 
 `--random` (windowed or with `--render`), Explore → Random flame, and every row
-of the Random flames list all call `randomize::roll_seeded(settings, seed)`.
+of the Random flames list all call `dice::roll_seeded(settings, seed)`.
 Randomising an IFS is easy; randomising one that renders is not, so every
 candidate runs a short CPU chaos game (`trace.rs` walkers, the same variation
 port the shader uses) and is rejected unless it lands in a bounded attractor
 with real extent on two axes and *fractal* rather than solid occupancy.
 
 **What gets rolled is `RandomSettings`** — a preference (`[random]` in
-prefs.toml, edited in the Random settings window), never scene data:
+prefs.toml, edited in the Random settings window, saved as named profiles —
+see "The dice"), never scene data:
 
 - maps per flame, and the range each map's scale is drawn from (log-uniform),
   plus the chance of a squashed axis;
@@ -1029,10 +1034,10 @@ a list that silently stops growing would read as a bug.
 
 **Every roll is reproducible from its seed**, and is named after it
 (`random-<seed>`). `--random --seed N` reproduces a roll made with the
-defaults; `--random-config FILE` supplies the settings, and takes either a bare
-settings table or any file with a `[random]` table — prefs.toml itself — so
-`--random --seed N --random-config ~/.config/fracturize/prefs.toml` rolls
-exactly what the app did. A row's tooltip prints that command. A rolled flame
+defaults; `--random-config <name|file>` supplies a dice profile (see "The
+dice") — by name while the window's settings are an unchanged profile, else
+`~/.config/fracturize/prefs.toml`, which holds them as they are — so a row's
+tooltip prints exactly the command that rolls it again. A rolled flame
 is a normal history entry: one Ctrl+Z restores what was there.
 
 **The Random flames list** (`src/ui/random_flames.rs`, model
@@ -1059,6 +1064,100 @@ the point pass composites the flame over the background by coverage and a
 paper-white ground would swallow colours rolled at value 0.7–1.0. Override any
 of it with `--palette` / `--random-palette` / `--color-mode`, which apply after
 the roll.
+
+## The dice: profiles, and mutation through the same gate
+
+`src/dice/` is one generator with two sources (`dice::Source`): **fresh**, a
+flame built from nothing, and **from a parent**, a mutation. Both draw
+candidates under one **profile** (`RandomSettings`), put each through the same
+gate (`gate.rs`), spend the same try budget, count the same `Rejections`, and
+fail with the same `RollFailure` — one loop, `dice::generate`, with
+`roll_seeded` and `mutate_seeded` as its two seeded entries. `U`, the Mutate
+window, `--mutations`, `--random`, `--random-sheet`, Explore → Random flame and
+the Random flames list all come through it.
+
+**A profile is a file**, and reads like a scene file — `[meta]`, then `[roll]`
+(what a fresh flame may be made of), `[roll.variations]` one line per
+variation, `[roll.symmetry]`, then `[mutate]` and `[mutate.parts]` one line per
+part. Every key is optional and takes the **shipped default at every depth**
+(a part given only `odds` keeps its shipped `reroll`), and a key this version
+doesn't know is reported — `--random-config` prints it to stderr, the window
+puts it in the status bar — rather than silently ignored, because these files
+are written by hand and by agents. A fresh save writes every key with a one-line
+note beside it; saving over an existing file merges with `toml_edit`, so
+comments written into a profile survive the window's Save, as they do for
+scenes. Floats are written at `f32` precision (`0.45`, not prefs.toml's
+`0.44999998807907104`). Two older shapes still read: a bare settings table, and
+any file with a `[random]` table — prefs.toml.
+
+**Profiles have names.** `~/.config/fracturize/dice/<name>.toml` are the
+person's own; `scenes/dice/<name>.toml` are shared in the repository (the
+person's win a clash); `default` is built in and is always the shipped
+settings. `--random-config` takes a name or a path. In the app the Random
+settings window has a profile picker, Save (the person's own profiles only —
+shared and built-in ones go to Save as), Save as…, and Revert, and the name
+carries a `*` while the settings differ from the profile. prefs.toml keeps the
+current settings (`[random]`) and the file they came from (`random_profile`),
+so the window's `*` survives a restart. Loading a profile isn't undoable — it's
+a preference, not the scene — which is what Revert and the profile itself are
+for. Changing only the mutate half does not restart the Random flames list
+(`RandomSettings::same_roll`).
+
+**The mutate half** says what a mutation may change and how hard: `strength`
+(moved here from prefs' old `mutate_strength`, which is migrated once; the
+Mutate window's slider edits it), how many parts one mutation changes
+(`operators`), `backoff`, `steer_dimension`, and per **part** — translate,
+rotate, scale, weight, variations, colour, colour value, add, remove,
+background, symmetry — relative `odds` and a `reroll` chance. A touched part is
+**nudged** (the old `U` operators, scaled by strength) or **re-rolled** with the
+very draw a fresh roll makes, under the same ranges: new variations come only
+off the enabled list at their weight ranges, a re-rolled scale from the scale
+range, a new map the way a roll makes one, a new palette from
+`palette::random`. So a profile that never rolls `spherical` never mutates it
+in either — the old operator could introduce any variation at all. A part at
+odds 0 is never touched, so **a mask is just a profile** (`scenes/dice/
+colour-only.toml`). Adding and removing respect the roll's map count, with the
+gate's rule below: a layer already past it may not go further, but isn't stuck.
+Background and symmetry are off by default — they're bigger steps, to ask for.
+
+**A mutation is judged against its parent, not against the bounds.** Each check
+is a *fault* — how far past its limit the flame is, 0 within it — so both kinds
+of judging are one comparison: a fresh roll is held to no faults, a child to
+its parent's, per layer. A check the parent passes, the child must pass; one
+the parent fails, the child may not fail further (5% slack, because the
+measurements are walks). Without that, a hand-authored scene outside the
+profile's bounds — plenty of good ones are — could never be mutated. **After a
+run of `backoff` rejections the strength halves**, down to a sixteenth, so a
+strong setting on a delicate scene still finds something close; the log says
+so ("strength backed off to 0.25 to find this"). Dimension steering stays a
+fresh-roll thing unless `steer_dimension` asks: it rescales every map, a
+bigger change than the mutation. A mutation that finds nothing leaves the
+scene alone and says why, like a roll.
+
+**Seeds.** `roll.rs` keeps the order of rng draws it always had, so every
+recorded `--random --seed N` still rolls the same flame. Mutations are seeded
+too (`mutate_seeded(profile, parent, seed)`), but mutation sheets made before
+the gate won't reproduce: the gate changes what is drawn.
+
+**CLI.** `--random-config <name|file>` works for `--random`, `--mutations` and
+`--random-sheet`, and is refused without one of them. `--mutation-strength`
+overrides the profile's strength. `--random-sheet N` (1–25) is the random batch
+sheet: tile N is `--random --seed <seed+N>`, framed by its own camera on its own
+background, saved as `<out>.rollN.toml`. A mutation sheet tile where nothing
+passed is left empty, labelled, and explained on stdout.
+
+```
+# a sheet of nine rolls under a shared profile
+fracturize --random-sheet 9 --random-config symmetric -r renders/sym.png \
+  --effort tiny --width 320 --height 180
+# recolour a scene eight ways, the form untouched
+fracturize -s scenes/koru.toml -r renders/koru-col.png --mutations 8 \
+  --random-config colour-only --effort tiny --width 320 --height 180
+```
+
+Not yet (FEATURE-PLANS.md Track A, items 3–5): xaos and infinite zoom as parts
+of the profile, and the 3×3 / 5×5 mutation grid, which is this generator with
+the Random flames list's model and a grid layout.
 
 ## The scene browser
 
@@ -3533,8 +3632,11 @@ scene plus N random variants (tile 0 = original, near-square grid). Each
 variant is saved as `<out>.mutN.toml` and its operator list printed per tile
 ("T2 rotate 21° about (...)", "T1 +swirl 0.18", ...), so you can look at the
 sheet, pick a tile, and load/iterate on its TOML. `--seed` reproduces a
-sheet (the used seed is always printed), `--mutation-strength` scales the
-perturbations (default 1.0). Unlike camera grids, each tile refills the point
+sheet (the used seed is always printed), `--random-config` picks the dice
+profile that says what may change, and `--mutation-strength` overrides its
+strength. Every tile went through the gate, judged against the original (see
+"The dice"); one where nothing passed is left empty and says why.
+`--random-sheet N` is the same sheet of fresh rolls instead. Unlike camera grids, each tile refills the point
 buffer, so prefer `--effort tiny|small`. The same operators run in-app on `U`.
 
 ```

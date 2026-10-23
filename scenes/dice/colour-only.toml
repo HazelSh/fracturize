@@ -1,0 +1,33 @@
+# A mutation mask: change the colour and nothing else.
+#
+# Every part a mutation can touch is listed under [mutate.parts]; a part at
+# odds 0 is never touched, so this profile leaves the form exactly as it is
+# and only re-colours — the transform hues, the gradient in palette mode,
+# where each map sits on it, and now and then the background.
+#
+#   fracturize -s scenes/koru.toml -r renders/koru-colours.png \
+#     --mutations 8 --random-config colour-only --effort tiny
+#
+# Fresh rolls under it are the default rolls: [roll] is left out.
+
+[meta]
+name = "colour-only"
+description = "Mutations recolour; the form is never touched"
+author = "Claude Opus 5.5"
+
+[mutate]
+strength = 1.0
+operators = [1, 2]
+
+[mutate.parts]
+translate = { odds = 0.0 }
+rotate = { odds = 0.0 }
+scale = { odds = 0.0 }
+weight = { odds = 0.0 }
+variations = { odds = 0.0 }
+add = { odds = 0.0 }
+remove = { odds = 0.0 }
+symmetry = { odds = 0.0 }
+color = { odds = 0.5, reroll = 0.2 }
+color_value = { odds = 0.3, reroll = 0.1 }
+background = { odds = 0.2, reroll = 0.4 }

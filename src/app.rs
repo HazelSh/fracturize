@@ -1049,6 +1049,9 @@ pub struct App {
     /// The Random flames list: rolls under the person's random settings,
     /// made on background threads. See `random_list`.
     pub random_list: crate::random_list::RandomList,
+    /// The dice profile the random settings came from: its name, and what it
+    /// said, so the Random settings window can mark them changed.
+    dice_profile: crate::dice::profile::Selected,
     /// The chaos game's and the window's splat pipelines, compiled once. See
     /// `ChaosPipelines`.
     chaos_pipelines: crate::gpu::points::compute::ChaosPipelines,
@@ -1301,6 +1304,7 @@ impl App {
 
         let prefs = crate::prefs::Prefs::load();
         let random_list = crate::random_list::RandomList::new(prefs.random.clone());
+        let dice_profile = crate::dice::profile::Selected::remembered(prefs.random_profile.as_deref());
         let ui_state = UiState::from_prefs(&prefs);
         // Read before `prefs` is moved into the struct below.
         let (help_open, browser_open) = (prefs.panels.help_open, prefs.panels.browser_open);
@@ -1435,6 +1439,7 @@ impl App {
             browser_selected: 0,
             thumbs,
             random_list,
+            dice_profile,
             chaos_pipelines,
             splat_pipelines,
             history: History::new(),
@@ -3112,14 +3117,16 @@ impl App {
         })
     }
 
-    /// Strength multiplier for U's random mutation (Mutate window slider;
-    /// persisted in prefs).
+    /// Strength multiplier for U's random mutation (Mutate window slider).
+    /// Part of the dice profile, so it is saved with it.
     pub fn mutate_strength(&self) -> f32 {
-        self.prefs.mutate_strength
+        self.prefs.random.mutate.strength
     }
 
     pub fn set_mutate_strength(&mut self, strength: f32) {
-        self.prefs.mutate_strength = strength.clamp(0.1, 3.0);
+        let mut s = self.prefs.random.clone();
+        s.mutate.strength = strength;
+        self.set_random_settings(s);
     }
 
     /// Write prefs to disk now (callers debounce — e.g. on slider
@@ -4795,8 +4802,21 @@ impl App {
 
     // === Evolutionary exploration (U / Shift+U) ===
 
+    /// The `--random-config` that gets the dice's current settings back from
+    /// the command line, with its leading space, or nothing for the defaults:
+    /// the profile's name while it is unchanged, else prefs.toml, which holds
+    /// the settings as they are.
+    pub fn dice_config_flag(&self) -> String {
+        let p = &self.dice_profile;
+        match (&p.entry.path, p.modified(&self.prefs.random)) {
+            (None, false) => String::new(),
+            (Some(_), false) => format!(" --random-config {}", p.entry.name),
+            (_, true) => " --random-config ~/.config/fracturize/prefs.toml".to_string(),
+        }
+    }
+
     /// Replace the whole scene with a freshly generated random flame
-    /// (`src/randomize.rs`), rolled under the random settings — see
+    /// (`src/dice/`), rolled under the random settings — see
     /// `adopt_scene` for why that's an edit rather than a load.
     ///
     /// When nothing meets the settings the scene stays as it was and the
@@ -4806,13 +4826,13 @@ impl App {
     /// to see.
     pub fn random_flame(&mut self) {
         let seed = crate::random_list::fresh_seed();
-        match crate::randomize::roll_seeded(&self.prefs.random, seed) {
+        match crate::dice::roll_seeded(&self.prefs.random, seed) {
             Ok(r) => {
                 log::info!(
                     "Random flame seed {seed}: {} transforms, {} tries (reproduce with --random --seed {seed}{})",
                     r.scene.transforms.len(),
                     r.attempts,
-                    if self.prefs.random == Default::default() { "" } else { " --random-config <prefs.toml>" },
+                    self.dice_config_flag(),
                 );
                 self.adopt_scene(r.scene, &format!("Random flame (seed {seed})"));
             }
@@ -4822,13 +4842,13 @@ impl App {
 
     // === Random flames list and settings ===
 
-    pub fn random_settings(&self) -> &crate::randomize::RandomSettings {
+    pub fn random_settings(&self) -> &crate::dice::RandomSettings {
         &self.prefs.random
     }
 
     /// Change what the dice roll. Persisted; the Random flames list starts
     /// over once the settings stop moving.
-    pub fn set_random_settings(&mut self, settings: crate::randomize::RandomSettings) {
+    pub fn set_random_settings(&mut self, settings: crate::dice::RandomSettings) {
         let settings = settings.normalized();
         if settings == self.prefs.random {
             return;
@@ -4836,6 +4856,82 @@ impl App {
         self.prefs.random = settings;
         self.prefs_dirty_since = Some(std::time::Instant::now());
         self.random_list.settings_changed(&self.prefs.random);
+    }
+
+    // === Dice profiles: the settings, saved and named ===
+
+    /// The profile the settings came from.
+    pub fn dice_profile(&self) -> &crate::dice::profile::Selected {
+        &self.dice_profile
+    }
+
+    /// Replace the settings with a profile's. Not undoable — these are
+    /// preferences, not the scene — but Revert gets the profile back, and the
+    /// settings it replaced can be had again by loading their own profile.
+    pub fn load_dice_profile(&mut self, entry: crate::dice::profile::Entry) {
+        match crate::dice::profile::load(&entry) {
+            Ok(loaded) => {
+                if !loaded.warnings.is_empty() {
+                    self.set_notice(format!("Profile {}: {}", entry.name, loaded.warnings.join("; ")), true);
+                }
+                self.prefs.random_profile = entry.path.clone();
+                self.dice_profile =
+                    crate::dice::profile::Selected { entry, baseline: Some(loaded.settings.clone()) };
+                self.set_random_settings(loaded.settings);
+                self.prefs_dirty_since = Some(std::time::Instant::now());
+            }
+            Err(e) => self.set_notice(format!("Couldn't load the profile: {e}"), true),
+        }
+    }
+
+    /// Back to what the profile says.
+    pub fn revert_dice_profile(&mut self) {
+        let entry = self.dice_profile.entry.clone();
+        self.load_dice_profile(entry);
+    }
+
+    /// Write the settings back into the profile they came from. Only the
+    /// person's own profiles are written in place; anything else is a Save as.
+    pub fn save_dice_profile(&mut self) -> Result<(), String> {
+        if !self.dice_profile.writable() {
+            return Err(format!("'{}' can't be saved over — use Save as", self.dice_profile.entry.name));
+        }
+        let entry = self.dice_profile.entry.clone();
+        let path = entry.path.clone().unwrap_or_default();
+        // Keep what the file says about itself; the merge keeps its comments.
+        let meta = crate::dice::profile::load(&entry).map(|l| l.meta).unwrap_or_else(|_| {
+            crate::dice::profile::Meta { name: entry.name.clone(), ..Default::default() }
+        });
+        crate::dice::profile::save(&path, &self.prefs.random, &meta)?;
+        self.dice_profile.baseline = Some(self.prefs.random.clone());
+        log::info!("Dice profile saved to {}", path.display());
+        Ok(())
+    }
+
+    /// Save the settings as a new profile of the person's own, and make it
+    /// the current one. Refuses to replace a different existing profile: Save
+    /// as is how a profile is forked, and a fork that silently overwrote
+    /// another one would lose it.
+    pub fn save_dice_profile_as(&mut self, name: &str) -> Result<(), String> {
+        let name = crate::dice::profile::check_name(name)?;
+        let path = crate::dice::profile::user_path(&name).ok_or("no config folder to save profiles in")?;
+        if path.exists() && self.dice_profile.entry.path.as_deref() != Some(path.as_path()) {
+            return Err(format!("there's already a profile called '{name}' — load it to change it"));
+        }
+        let meta = crate::dice::profile::Meta {
+            name: name.clone(),
+            description: String::new(),
+            author: self.prefs.author.clone().unwrap_or_default(),
+        };
+        crate::dice::profile::save(&path, &self.prefs.random, &meta)?;
+        self.prefs.random_profile = Some(path.clone());
+        self.dice_profile = crate::dice::profile::Selected {
+            entry: crate::dice::profile::entry_for(&path),
+            baseline: Some(self.prefs.random.clone()),
+        };
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+        log::info!("Dice profile saved as {}", path.display());
+        Ok(())
     }
 
     /// Throw the list away and roll a fresh one.
@@ -4911,11 +5007,33 @@ impl App {
         self.commit_edit(label, None, before);
     }
 
+    /// Mutate the scene under the dice profile (U, the Mutate window). The
+    /// child goes through the same gate a random flame does, judged against
+    /// this scene, so a mutation that blows the attractor up or collapses it
+    /// is never shown; if nothing passes in the profile's budget, the scene
+    /// stays as it was and the status bar says why.
     pub fn mutate_scene(&mut self) {
+        let seed = crate::random_list::fresh_seed();
+        let r = match crate::dice::mutate_seeded(&self.prefs.random, &self.scene, seed) {
+            Ok(r) => r,
+            Err(f) => {
+                self.set_notice(format!("Mutate: {}. Kept the scene you had.", f.message()), true);
+                return;
+            }
+        };
         let before = self.edit_snapshot();
-
-        let log = crate::mutate::mutate(&mut self.scene, &mut rand::thread_rng(), self.prefs.mutate_strength);
-        log::info!("Mutation: {}", log.join("; "));
+        let log = r.log;
+        log::info!(
+            "Mutation seed {seed}: {} ({} tries{}; reproduce with --mutations 1 --seed {}{})",
+            log.join("; "),
+            r.attempts,
+            r.strength.filter(|&s| s < self.prefs.random.mutate.strength).map_or(String::new(), |s| format!(
+                ", strength backed off to {s:.2}"
+            )),
+            seed.wrapping_sub(1),
+            self.dice_config_flag(),
+        );
+        self.scene = r.scene;
         self.bump_matrix_generation();
         self.after_scene_shape_change();
 

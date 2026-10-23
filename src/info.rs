@@ -2318,7 +2318,7 @@ mod tests {
     /// table, so the margin is the one layout rule worth a test.
     #[test]
     fn no_line_is_wider_than_the_margin() {
-        for scene in [Scene::blank(), crate::randomize::random_flame(
+        for scene in [Scene::blank(), crate::dice::random_flame(
             &mut <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(7),
         )] {
             let text = report(&Subject::new(&scene, "test"));

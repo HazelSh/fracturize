@@ -2,12 +2,12 @@
 //! order they land, growing as the list is scrolled.
 //!
 //! Rolling is off the UI thread because a bound can make it slow. One roll is
-//! ~1 ms at the default settings (`randomize::random_flame_study`), but a
+//! ~1 ms at the default settings (`dice::roll::random_flame_study`), but a
 //! lacunarity bound is rejection-sampled, and a tight one can spend its whole
 //! budget of candidates — a hitch per row if it ran in the frame.
 //!
 //! **Every roll is reproducible from its seed.** A row's seed seeds a
-//! `StdRng` that is handed to `randomize::roll` with the settings the list was
+//! `StdRng` that is handed to `dice::roll` with the settings the list was
 //! rolled under — exactly what `--random --seed N --random-config FILE` does —
 //! so a row someone liked can be had again from the command line.
 //!
@@ -22,7 +22,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::randomize::{self, Rejections, RandomSettings};
+use crate::dice::{self, Rejections, RandomSettings};
 use crate::scene::{Scene, VARIATION_NAMES};
 
 /// One roll in the list.
@@ -48,7 +48,7 @@ struct Job {
 }
 
 enum Outcome {
-    Rolled(Box<randomize::Roll>),
+    Rolled(Box<dice::Roll>),
     Failed { attempts: u32, rejected: Rejections },
 }
 
@@ -115,7 +115,7 @@ impl RandomList {
 
     /// The settings changed; start over once they settle.
     pub fn settings_changed(&mut self, settings: &RandomSettings) {
-        if *self.settings != *settings {
+        if !self.settings.same_roll(settings) {
             self.changed_since = Some(Instant::now());
         }
     }
@@ -168,7 +168,7 @@ impl RandomList {
     /// frame while the list is shown.
     pub fn poll(&mut self, settings: &RandomSettings, want: usize) {
         if self.changed_since.is_some_and(|t| t.elapsed() >= SETTLE) {
-            if *self.settings != *settings {
+            if !self.settings.same_roll(settings) {
                 self.reroll(settings);
             } else {
                 // Changed and changed back: the rows on show still stand.
@@ -271,7 +271,7 @@ fn spawn_workers(current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
                     if job.generation != current.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let outcome = match randomize::roll_seeded(&job.settings, job.seed) {
+                    let outcome = match dice::roll_seeded(&job.settings, job.seed) {
                         Ok(r) => Outcome::Rolled(Box::new(r)),
                         Err(f) => Outcome::Failed { attempts: f.attempts, rejected: f.rejected },
                     };
@@ -308,7 +308,7 @@ mod tests {
         let ids: std::collections::HashSet<u64> = list.entries.iter().map(|e| e.id).collect();
         assert_eq!(ids.len(), list.entries.len(), "ids are unique");
         for e in &list.entries {
-            let again = randomize::roll_seeded(&settings, e.seed).ok().expect("a seed that rolled rolls again");
+            let again = dice::roll_seeded(&settings, e.seed).ok().expect("a seed that rolled rolls again");
             assert_eq!(again.scene.background, e.scene.background, "seed {}", e.seed);
             assert_eq!(again.scene.transforms.len(), e.scene.transforms.len());
         }
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn impossible_settings_stall_instead_of_spinning() {
         let settings = RandomSettings {
-            lacunarity: randomize::Bound { on: true, range: [900.0, 1000.0] },
+            lacunarity: dice::Bound { on: true, range: [900.0, 1000.0] },
             attempts: 3,
             ..Default::default()
         };

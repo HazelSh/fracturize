@@ -176,6 +176,10 @@ pub struct UiState {
     pub import_error: Option<String>,
     /// The Random settings window's "Defaults" button (see `confirm::Arm`).
     pub random_reset_arm: confirm::Arm,
+    /// The Random settings window's "Save as…" field while it is open.
+    pub dice_save_as: Option<String>,
+    /// Why the last profile save failed, shown until the next attempt.
+    pub dice_profile_error: Option<String>,
 }
 
 impl UiState {
@@ -214,6 +218,8 @@ impl UiState {
             renaming_subscene: None,
             import_error: None,
             random_reset_arm: confirm::Arm::default(),
+            dice_save_as: None,
+            dice_profile_error: None,
         }
     }
 }

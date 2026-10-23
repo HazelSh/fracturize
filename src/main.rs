@@ -12,7 +12,6 @@ mod gpu;
 mod h264;
 mod history;
 mod indicators;
-mod mutate;
 mod offline;
 mod palette;
 mod path;
@@ -29,7 +28,7 @@ mod sweep;
 mod symmetry;
 mod tile;
 mod glyphs;
-mod randomize;
+mod dice;
 mod random_list;
 mod record;
 mod renorm;
@@ -179,14 +178,17 @@ struct Args {
     #[arg(long, conflicts_with = "scene", help_heading = "Scene")]
     random: bool,
 
-    /// What --random may roll, from a TOML file [the defaults]
+    /// Dice profile for --random, --mutations, --random-sheet [default]
     ///
-    /// Variations and their weight ranges, maps per flame, bounds on dimension
-    /// and lacunarity — the app's Random settings window. Takes the settings
-    /// table on its own, or any file with a [random] table in it, which is
-    /// what the app's prefs.toml is: pass ~/.config/fracturize/prefs.toml to
-    /// roll exactly what the window would.
-    #[arg(long, value_name = "FILE", requires = "random", help_heading = "Scene")]
+    /// A profile's name (`~/.config/fracturize/dice/<name>.toml`, then
+    /// `scenes/dice/<name>.toml`; `default` is built in) or a file. A profile
+    /// says what a fresh roll may be made of — variations and their weight
+    /// ranges, maps per flame, symmetry, bounds on dimension and lacunarity —
+    /// and what a mutation may change and how hard: the app's Random settings
+    /// window, saved. Also takes a bare settings table, or any file with a
+    /// [random] table in it — prefs.toml — to roll exactly what the window
+    /// would. Keys it doesn't know are reported on stderr.
+    #[arg(long, value_name = "NAME|FILE", help_heading = "Scene")]
     random_config: Option<String>,
 
     /// Start from a blank scene: two plain half-scale transforms
@@ -897,13 +899,24 @@ struct Args {
     /// Sheet of the scene plus N mutations, tile 0 = original [no sheet]
     ///
     /// Each variant is saved as <out>.mutN.toml and described on stdout.
-    /// Mutually exclusive with the camera grids.
+    /// What a mutation may change comes from --random-config, and every one
+    /// is checked like a random roll — judged against the scene it came from,
+    /// so it renders at least as well as its parent did. A tile where nothing
+    /// passed is left empty and says why. Mutually exclusive with the camera
+    /// grids.
     #[arg(long, value_name = "1-24", help_heading = "Contact sheets")]
     mutations: Option<u32>,
 
-    /// How much each --mutations variant changes, as a multiplier
-    #[arg(long, default_value = "1.0", value_name = "SCALE", help_heading = "Contact sheets")]
-    mutation_strength: f32,
+    /// How much each --mutations variant changes [the profile's, else 1.0]
+    #[arg(long, value_name = "SCALE", help_heading = "Contact sheets")]
+    mutation_strength: Option<f32>,
+
+    /// Sheet of N random flames under --random-config [no sheet]
+    ///
+    /// Tile N is `--random --seed <seed+N>`, framed by its own camera on its
+    /// own background, and saved as <out>.rollN.toml. Needs no --scene.
+    #[arg(long, value_name = "1-25", conflicts_with_all = ["scene", "mutations"], help_heading = "Contact sheets")]
+    random_sheet: Option<u32>,
 
     /// Sheet varying a scene value; twice makes a 2D grid [no sheet]
     ///
@@ -1677,6 +1690,27 @@ fn warn_set_cannot_apply(args: &Args) -> Vec<set::Applied> {
     Vec::new()
 }
 
+/// The dice profile `--random-config` names, or the defaults without one.
+/// What the file says that this version doesn't understand goes to stderr;
+/// a profile that can't be read at all is fatal, since it was asked for.
+fn dice_profile(config: Option<&str>) -> dice::RandomSettings {
+    let Some(arg) = config else { return dice::RandomSettings::default() };
+    match dice::profile::open(arg) {
+        Ok((entry, loaded)) => {
+            for w in &loaded.warnings {
+                eprintln!("warning: --random-config {}: {}", arg, w);
+            }
+            let source = entry.path.as_ref().map_or("built in".to_string(), |p| p.display().to_string());
+            eprintln!("dice profile: {} ({})", entry.name, source);
+            loaded.settings
+        }
+        Err(e) => {
+            eprintln!("--random-config {}: {}", arg, e);
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Roll a random flame for `--random`, honouring `--seed` and logging the
 /// seed either way so any roll can be reproduced exactly.
 ///
@@ -1694,17 +1728,8 @@ fn random_scene(seed: Option<u64>, config: Option<&str>) -> (Scene, u64) {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
     });
-    let settings = match config {
-        None => randomize::RandomSettings::default(),
-        Some(path) => std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| randomize::RandomSettings::from_toml(&t))
-            .unwrap_or_else(|e| {
-                eprintln!("--random-config {}: {}", path, e);
-                std::process::exit(1);
-            }),
-    };
-    let scene = match randomize::roll_seeded(&settings, seed) {
+    let settings = dice_profile(config);
+    let scene = match dice::roll_seeded(&settings, seed) {
         Ok(r) => r.scene,
         Err(f) if config.is_none() => {
             log::warn!("Random flame: {}", f.message());
@@ -2529,6 +2554,16 @@ fn main() {
 
     // Parse CLI args
     let mut args = Args::parse();
+    // A dice profile is read by three things; with none of them it would be
+    // read by nothing, which is a mistake worth saying out loud.
+    if args.random_config.is_some() && !args.random && args.mutations.is_none() && args.random_sheet.is_none() {
+        eprintln!("--random-config is read by --random, --mutations and --random-sheet; give one of them");
+        std::process::exit(2);
+    }
+    if args.random_sheet.is_some() && args.render.is_none() {
+        eprintln!("--random-sheet renders a contact sheet: give it --render <out.png>");
+        std::process::exit(2);
+    }
     // --xaos becomes whole-row -S edits ahead of the user's own, so every path
     // that reads a scene file — render, sheets, --info, the window — gets it.
     if let Some(preset) = args.xaos.clone() {
@@ -2776,6 +2811,7 @@ fn main() {
         let many_images = args.orbit_grid.is_some()
             || args.move_grid.is_some()
             || args.mutations.is_some()
+            || args.random_sheet.is_some()
             || !args.sweep.is_empty()
             || args.map_grid
             || args.edge_grid
@@ -2959,6 +2995,7 @@ fn main() {
         let result = if let Some(format) = format {
             if !matches!(grid, offline::GridMode::Single)
                 || args.mutations.is_some()
+                || args.random_sheet.is_some()
                 || !args.sweep.is_empty()
                 || args.map_grid
                 || args.edge_grid
@@ -2995,6 +3032,19 @@ fn main() {
                 _ if args.map_grid => run_map_grid(params, &args, grid, effort_points),
                 _ if args.edge_grid => run_edge_grid(params, &args, grid, effort_points),
                 (false, _) => run_sweep(params, &args, grid, effort_points),
+                _ if args.random_sheet.is_some() => {
+                    let n = args.random_sheet.unwrap_or(0);
+                    if !matches!(grid, offline::GridMode::Single) {
+                        eprintln!("--random-sheet cannot be combined with --orbit-grid/--move-grid");
+                        std::process::exit(1);
+                    }
+                    if n == 0 || n > 25 {
+                        eprintln!("--random-sheet must be 1..=25");
+                        std::process::exit(1);
+                    }
+                    let settings = dice_profile(args.random_config.as_deref());
+                    offline::render_rolls(params, n, &settings, args.seed)
+                }
                 (true, Some(n)) => {
                     if !matches!(grid, offline::GridMode::Single) {
                         eprintln!("--mutations cannot be combined with --orbit-grid/--move-grid");
@@ -3004,7 +3054,12 @@ fn main() {
                         eprintln!("--mutations must be 1..=24");
                         std::process::exit(1);
                     }
-                    offline::render_mutations(params, n, args.mutation_strength, args.seed)
+                    let mut settings = dice_profile(args.random_config.as_deref());
+                    if let Some(s) = args.mutation_strength {
+                        settings.mutate.strength = s;
+                        settings = settings.normalized();
+                    }
+                    offline::render_mutations(params, n, &settings, args.seed)
                 }
                 (true, None) => offline::render(params),
             }

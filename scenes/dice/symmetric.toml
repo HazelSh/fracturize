@@ -1,0 +1,24 @@
+# Every roll takes a symmetry group, with one map left outside it (CRAFT
+# §3.6: symmetry gets you a form, one map outside the group gets you a
+# picture). Mutations may tilt the group's axis or swap it for another.
+#
+#   fracturize --random-sheet 9 --random-config symmetric -r renders/sym.png \
+#     --effort tiny --width 320 --height 180
+
+[meta]
+name = "symmetric"
+description = "Every flame symmetric, one map outside the group"
+author = "Claude Opus 5.5"
+
+[roll]
+transforms = [2, 4]
+# Keep it out of a lump: sixty copies under Icosa fill space fast.
+dimension = { on = true, range = [1.6, 2.4] }
+
+[roll.symmetry]
+chance = 1.0
+repeat = true
+free = [1, 1]
+
+[mutate.parts]
+symmetry = { odds = 0.1, reroll = 0.4 }

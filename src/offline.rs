@@ -15,7 +15,6 @@ use std::path::Path;
 use std::time::Instant;
 
 use glam::{Mat4, Vec3};
-use rand::SeedableRng;
 
 use crate::camera::{CameraOverride, Fov, OrbitCamera};
 use crate::glyphs;
@@ -3288,13 +3287,13 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
     Ok(outcome)
 }
 
-/// Delete `<stem>.mutN.toml` leftovers from previous runs at the same out
+/// Delete `<stem>.<suffix>N.toml` leftovers (`mut`, `roll`) from previous runs at the same out
 /// path, so the variant files on disk always describe the current sheet
 /// (a stale mutN also hijacks the comment-preserving save into merging with
 /// the old variant). Purely best-effort: missing dirs/files, unreadable
 /// entries, or racing deletions are all silently fine — the render itself
 /// never depends on this.
-fn remove_stale_variants(out_stem: &Path) {
+fn remove_stale_variants(out_stem: &Path, suffix: &str) {
     let Some(name) = out_stem.file_name().and_then(|n| n.to_str()) else {
         return;
     };
@@ -3305,7 +3304,7 @@ fn remove_stale_variants(out_stem: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let prefix = format!("{name}.mut");
+    let prefix = format!("{name}.{suffix}");
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let Some(f) = file_name.to_str() else { continue };
@@ -3618,17 +3617,82 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     Ok(outcome)
 }
 
+/// One tile of a variant sheet: a scene, or why there isn't one.
+struct Variant {
+    scene: Option<Scene>,
+    label: String,
+}
+
+/// The seed a sheet's tiles are numbered from: `--seed`, else the clock.
+fn sheet_seed(seed: Option<u64>) -> u64 {
+    seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    })
+}
+
 /// Render a mutation contact sheet: tile 0 is the unmutated scene, tiles
-/// 1..=count are random variants (each also saved as `<out>.mutN.toml` next
-/// to the sheet so a good one can be kept). Unlike the camera grids, every
-/// tile needs its own chaos-game fill.
+/// 1..=count are mutations of it under the dice profile (each also saved as
+/// `<out>.mutN.toml` next to the sheet so a good one can be kept). Every
+/// mutation goes through the same gate as a fresh roll, judged against the
+/// parent (`dice::generate`), so a tile is never a blown-up or collapsed
+/// child; one that found nothing in its budget is left empty and says why.
+/// Every tile is framed by the parent's camera, so the comparison is of form.
 pub fn render_mutations(
     params: OfflineParams,
     count: u32,
-    strength: f32,
+    settings: &crate::dice::RandomSettings,
     seed: Option<u64>,
 ) -> Result<Outcome, String> {
-    print_start("variant sheet", params.width, params.height, params.out_path);
+    let seed = sheet_seed(seed);
+    println!("Mutation seed: {} (pass --seed {} to reproduce; tile N is seed {}+N)", seed, seed, seed);
+    let mut variants = vec![Variant { scene: Some(params.scene.clone()), label: "original".to_string() }];
+    for i in 1..=count {
+        let tile_seed = seed.wrapping_add(i as u64);
+        variants.push(match crate::dice::mutate_seeded(settings, &params.scene, tile_seed) {
+            Ok(r) => {
+                let mut label = r.log.join("; ");
+                if let Some(note) = r.backoff_note(settings) {
+                    label = format!("{label} ({note})");
+                }
+                Variant { scene: Some(r.scene), label }
+            }
+            Err(f) => Variant { scene: None, label: f.message() },
+        });
+    }
+    render_variant_sheet(params, variants, false)
+}
+
+/// Render a sheet of fresh random flames: tile N is `--random --seed
+/// <seed+N>` under the dice profile, each framed by its own camera on its own
+/// background, and saved as `<out>.rollN.toml`.
+pub fn render_rolls(
+    params: OfflineParams,
+    count: u32,
+    settings: &crate::dice::RandomSettings,
+    seed: Option<u64>,
+) -> Result<Outcome, String> {
+    let seed = sheet_seed(seed);
+    println!("Random sheet seed: {} (pass --seed {} to reproduce; tile N is --random --seed {}+N)", seed, seed, seed);
+    let variants = (0..count)
+        .map(|i| {
+            let tile_seed = seed.wrapping_add(i as u64);
+            match crate::dice::roll_seeded(settings, tile_seed) {
+                Ok(r) => Variant { scene: Some(r.scene), label: format!("--random --seed {tile_seed}") },
+                Err(f) => Variant { scene: None, label: format!("seed {tile_seed}: {}", f.message()) },
+            }
+        })
+        .collect();
+    render_variant_sheet(params, variants, true)
+}
+
+/// The sheet both of those draw. `rolls`: every tile is its own flame, framed
+/// by its own camera and cleared to its own background; otherwise tile 0 is
+/// the parent and every tile shares its framing.
+fn render_variant_sheet(params: OfflineParams, variants: Vec<Variant>, rolls: bool) -> Result<Outcome, String> {
+    print_start(if rolls { "random sheet" } else { "variant sheet" }, params.width, params.height, params.out_path);
     let OfflineParams {
         mut scene,
         view,
@@ -3667,12 +3731,13 @@ pub fn render_mutations(
         gpu_reserve: _,
         gpu_share: _,
     } = params;
-    reject_spp(spp, "a variant sheet", "Set the sheet's density with --points instead.")?;
-    reject_isolate(isolate, "a mutation sheet", "Isolate a map in one variant's .mutN.toml instead.")?;
-    reject_grade_out(grade_out, "a variant sheet", "Render the tile you want on its own.")?;
-    reject_checkpoint(checkpoint_out, resume_from, "a variant sheet", "Render the tile you want on its own.")?;
-    reject_density_estimation(density_estimation, "a variant sheet", "Render the tile you want on its own.")?;
-    reject_volume(opacity, "a variant sheet", "Render the tile you want on its own.")?;
+    let what = if rolls { "a random sheet" } else { "a variant sheet" };
+    reject_spp(spp, what, "Set the sheet's density with --points instead.")?;
+    reject_isolate(isolate, what, "Isolate a map in one tile's .toml instead.")?;
+    reject_grade_out(grade_out, what, "Render the tile you want on its own.")?;
+    reject_checkpoint(checkpoint_out, resume_from, what, "Render the tile you want on its own.")?;
+    reject_density_estimation(density_estimation, what, "Render the tile you want on its own.")?;
+    reject_volume(opacity, what, "Render the tile you want on its own.")?;
     let sampling = Sampling::new(supersample, height);
     let t_start = Instant::now();
 
@@ -3680,113 +3745,123 @@ pub fn render_mutations(
         scene.color_falloff = f;
         scene.resolve_all_color_speeds(f);
     }
-    let color_contrast = view
-        .as_ref()
-        .and_then(|v| v.color_contrast)
-        .unwrap_or(scene.color_contrast);
+    let color_contrast = |s: &Scene| view.as_ref().and_then(|v| v.color_contrast).unwrap_or(s.color_contrast);
 
-    let seed = seed.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    });
-    println!("Mutation seed: {} (pass --seed {} to reproduce)", seed, seed);
-
-    // Build the variants (tile 0 = original)
-    let mut variants: Vec<(Scene, String)> = vec![(scene.clone(), "original".to_string())];
-    for i in 1..=count {
-        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed.wrapping_add(i as u64));
-        let mut variant = scene.clone();
-        let log = crate::mutate::mutate(&mut variant, &mut rng, strength);
-        variants.push((variant, log.join("; ")));
-    }
-
-    // Sheet layout: near-square grid over count+1 tiles
+    // Sheet layout: near-square grid
     let n = variants.len() as u32;
     let cols = (n as f32).sqrt().ceil() as u32;
     let rows = n.div_ceil(cols);
 
-    let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
+    let clear_of = |s: &Scene| crate::scene::clear_color(s.background, if transparent { 0.0 } else { 1.0 });
+    let clear = clear_of(&scene);
 
     let (device, queue, _adapter) = create_device()?;
     sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
-    let (base_camera, point_size, haze, _folded) = base_setup(&view, &scene, haze_enabled, camera_over);
     let aspect = width as f32 / height as f32;
-    let view_proj = base_camera.view_proj(aspect);
-    let use_point_primitives = sampling.use_point_primitives(point_size, base_camera.distance, base_camera.fov);
-    let (haze_near, haze_far) = haze.band(base_camera.distance);
-    // One framing and one haze band for every tile; only the edge guard is
-    // per-variant, because mutating the transforms moves the zoom's fixed
-    // point and a guard aimed at the wrong centre would fade the wrong side
-    // of the picture. A variant whose zoom no longer resolves simply goes
-    // unguarded — the tile is a still, and the sheet is worth more than the
-    // one tile is.
-    let camera = |zoom: Option<&crate::renorm::Renorm>| {
-        CameraUniforms::new(
-            view_proj, base_camera.fov, sampling.target_height(), point_size, aspect, 1.0,
+    // One framing and one haze band for a mutation sheet; a random sheet
+    // frames each tile by its own camera. Only the edge guard is always
+    // per-tile, because mutating the transforms moves the zoom's fixed point
+    // and a guard aimed at the wrong centre would fade the wrong side of the
+    // picture. A variant whose zoom no longer resolves simply goes unguarded —
+    // the tile is a still, and the sheet is worth more than the one tile is.
+    let shared = (!rolls).then(|| base_setup(&view, &scene, haze_enabled, camera_over));
+    let camera_for = |s: &Scene, zoom: Option<&crate::renorm::Renorm>| {
+        let (cam, point_size, haze, _) = match &shared {
+            Some(setup) => setup.clone(),
+            None => {
+                let (c, p, h, f, _) = frame_setup(&view, s, haze_enabled, camera_over);
+                (c, p, h, f)
+            }
+        };
+        let view_proj = cam.view_proj(aspect);
+        let use_point_primitives = sampling.use_point_primitives(point_size, cam.distance, cam.fov);
+        let (haze_near, haze_far) = haze.band(cam.distance);
+        let uniforms = CameraUniforms::new(
+            view_proj, cam.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
-            color_contrast, scene.background.to_array(),
-            transparent, scene.packs_rgb(),
+            color_contrast(s), s.background.to_array(),
+            transparent, s.packs_rgb(),
         )
-        .with_zoom_guard(zoom, base_camera.eye())
-        .with_supersample(sampling.n)
+        .with_zoom_guard(zoom, cam.eye())
+        .with_supersample(sampling.n);
+        (uniforms, use_point_primitives)
     };
 
-    let target = TileTarget::new(
-        &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
-    );
+    let shared_target = (!rolls).then(|| {
+        TileTarget::new(&device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth)
+    });
     let sheet_w = width * cols;
     let sheet_h = height * rows;
     let mut sheet = blank_sheet(sheet_w, sheet_h, clear);
 
     let out_stem = out_path.with_extension("");
-    remove_stale_variants(&out_stem);
+    let suffix = if rolls { "roll" } else { "mut" };
+    remove_stale_variants(&out_stem, suffix);
     let mut fill_total = 0.0f32;
     let mut outcome = Outcome::Complete;
     let mut done = 0usize;
-    for (idx, (variant, label)) in variants.iter().enumerate() {
+    for (idx, variant) in variants.iter().enumerate() {
+        let (col, row) = (idx as u32 % cols, idx as u32 / cols);
+        let is_parent = !rolls && idx == 0;
+        let Some(tile) = &variant.scene else {
+            // Nothing met the profile for this tile: leave it at the clear
+            // colour, and say so on the tile and on stdout.
+            println!("tile [row {}, col {}]: {}", row, col, variant.label);
+            if labels {
+                label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, "NONE MET THE SETTINGS");
+            }
+            done += 1;
+            continue;
+        };
         let t0 = Instant::now();
         // Each variant is a different IFS: refill the point buffer
         let (compute, point_count, fill) =
-            fill_points(&device, &queue, variant, accumulate, control.as_ref(), gpu_timing, chaos_seed, None)?;
+            fill_points(&device, &queue, tile, accumulate, control.as_ref(), gpu_timing, chaos_seed, None)?;
         // A tile cut off mid-fill is still a tile — sparser than its
         // neighbours, which is exactly what a sheet read tile-against-tile must
         // not hide, so the whole sheet is reported partial.
         outcome = outcome.and(fill);
-        let mut renderer =
-            TileRenderer::new(
-        &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
-        filter_radius, bit_depth, clear, transparent, grade,
-    );
-        renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
+        let tile_clear = if rolls { clear_of(tile) } else { clear };
+        let mut renderer = TileRenderer::new(
+            &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
+            filter_radius, bit_depth, tile_clear, transparent, grade,
+        );
+        let (uniforms, use_point_primitives) = camera_for(tile, compute.zoom.as_ref());
+        renderer.upload_camera(&queue, &uniforms);
         fill_total += t0.elapsed().as_secs_f32();
 
-        let (col, row) = (idx as u32 % cols, idx as u32 / cols);
+        let own_target;
+        let target = match &shared_target {
+            Some(t) => t,
+            None => {
+                own_target = TileTarget::new(
+                    &device, &queue, width, height, tile_clear, sampling, filter, filter_radius, bit_depth,
+                );
+                &own_target
+            }
+        };
         target.render_tile(
             &device, &queue, &mut renderer, point_count, use_point_primitives,
             &mut sheet, sheet_w, col, row,
         );
 
-        if idx == 0 {
+        if is_parent {
             println!("tile [row 0, col 0]: original");
         } else {
-            let toml_path = format!("{}.mut{}.toml", out_stem.display(), idx);
-            variant
-                .save(&toml_path)
-                .map_err(|e| format!("Failed to save variant {}: {}", idx, e))?;
-            println!("tile [row {}, col {}]: {} -> {}", row, col, label, toml_path);
+            let toml_path = format!("{}.{}{}.toml", out_stem.display(), suffix, idx);
+            tile.save(&toml_path).map_err(|e| format!("Failed to save tile {}: {}", idx, e))?;
+            println!("tile [row {}, col {}]: {} -> {}", row, col, variant.label, toml_path);
         }
         if labels {
-            let text = if idx == 0 { "ORIGINAL" } else { label.as_str() };
+            let text = if is_parent { "ORIGINAL" } else { variant.label.as_str() };
             label_tile(&mut sheet, sheet_w, sheet_h, width, height, col, row, text);
         }
         done += 1;
-        // Every tile is its own fill, so this is where a mutation sheet is
-        // stopped. The tiles already drawn are worth keeping; the rest of the
-        // sheet stays at the clear colour.
+        // Every tile is its own fill, so this is where a sheet is stopped. The
+        // tiles already drawn are worth keeping; the rest of the sheet stays
+        // at the clear colour.
         if let Some(c) = &control {
             if c.should_stop() {
                 c.log(format!("stopped after {} of {} tiles", done, n));
@@ -3797,17 +3872,17 @@ pub fn render_mutations(
     }
     let t_render = Instant::now();
 
-    // No record: a mutation or sweep sheet is many different scenes, and a
-    // `fracturize:scene` chunk claiming one of them would be a confident lie
-    // about the other tiles. The per-tile mapping is printed, and mutation
-    // variants are already written out as `<out>.mutN.toml`.
+    // No record: a mutation, random or sweep sheet is many different scenes,
+    // and a `fracturize:scene` chunk claiming one of them would be a confident
+    // lie about the other tiles. The per-tile mapping is printed, and every
+    // tile but the original is already written out as `<out>.<kind>N.toml`.
     save_sheet(out_path, &sheet, sheet_w, sheet_h, bit_depth, None)?;
     let t_done = Instant::now();
 
     println!(
-        "{} {}x{} ({} of {} mutation tiles of {}x{}) -> {}",
+        "{} {}x{} ({} of {} {} tiles of {}x{}) -> {}",
         if outcome.is_partial() { "Stopped, partial sheet" } else { "Rendered" },
-        sheet_w, sheet_h, done, n, width, height, out_path.display(),
+        sheet_w, sheet_h, done, n, if rolls { "random" } else { "mutation" }, width, height, out_path.display(),
     );
     // Fill and render interleave per tile here; report fill separately
     println!(

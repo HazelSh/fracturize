@@ -1,4 +1,4 @@
-//! Random settings: what the dice may roll (`randomize::RandomSettings`).
+//! Random settings: what the dice may roll (`dice::RandomSettings`).
 //!
 //! Three groups — the maps, the variations they carry, and bounds on the
 //! attractor — then the budget. Edits apply to the next roll of the dice and
@@ -11,9 +11,9 @@
 //! inverted under the pointer.
 
 use crate::app::App;
-use crate::randomize::{
-    Bound, RandomSettings, DIMENSION_LIMITS, LACUNARITY_LIMITS, MAX_ATTEMPTS,
-    MAX_TRANSFORMS, SCALE_LIMITS, WEIGHT_LIMIT,
+use crate::dice::{
+    Bound, RandomSettings, DIMENSION_LIMITS, LACUNARITY_LIMITS, MAX_ATTEMPTS, MAX_OPERATORS, ODDS_LIMIT,
+    MAX_TRANSFORMS, SCALE_LIMITS, STRENGTH_LIMITS, WEIGHT_LIMIT,
 };
 use crate::scene::{NUM_VARIATIONS, VARIATION_NAMES};
 
@@ -28,10 +28,15 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     }
     let mut s = app.random_settings().clone();
     let mut reset = false;
+    let mut action = None;
 
     super::window(ctx, app, super::WindowKey::RandomSettings, "Random settings")
         .open(&mut open)
         .show(ctx, |ui| {
+            egui::Panel::top("fracturize_random_settings_profile").show(ui, |ui| {
+                action = profile_bar(ui, app, &s);
+                ui.add_space(2.0);
+            });
             egui::Panel::bottom("fracturize_random_settings_foot").show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -71,6 +76,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 symmetry(ui, &mut app.ui_state, &mut s);
                 ui.add_space(6.0);
                 bounds(ui, &mut app.ui_state, &mut s, &app.random_list);
+                ui.add_space(6.0);
+                mutation(ui, &mut app.ui_state, &mut s);
             });
         });
     super::remember(ctx, app, super::WindowKey::RandomSettings);
@@ -78,8 +85,223 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     if reset {
         s = RandomSettings::default();
     }
-    app.set_random_settings(s);
+    match action {
+        // Loading replaces the settings, so this frame's edits go with them.
+        Some(ProfileAction::Load(entry)) => app.load_dice_profile(entry),
+        Some(ProfileAction::Revert) => app.revert_dice_profile(),
+        Some(ProfileAction::Save) => {
+            app.set_random_settings(s);
+            app.ui_state.dice_profile_error = app.save_dice_profile().err();
+        }
+        Some(ProfileAction::SaveAs(name)) => {
+            app.set_random_settings(s);
+            match app.save_dice_profile_as(&name) {
+                Ok(()) => {
+                    app.ui_state.dice_save_as = None;
+                    app.ui_state.dice_profile_error = None;
+                }
+                Err(e) => app.ui_state.dice_profile_error = Some(e),
+            }
+        }
+        None => app.set_random_settings(s),
+    }
     app.ui_state.panels.random_settings_open = open;
+}
+
+enum ProfileAction {
+    Load(crate::dice::profile::Entry),
+    Revert,
+    Save,
+    SaveAs(String),
+}
+
+/// Which profile these settings are, and the document verbs for it: pick one,
+/// Save, Save as…, Revert. The name carries a `*` while the settings differ
+/// from the profile, as a scene's does.
+fn profile_bar(ui: &mut egui::Ui, app: &mut App, s: &RandomSettings) -> Option<ProfileAction> {
+    use crate::dice::profile;
+    let mut action = None;
+    let selected = app.dice_profile().clone();
+    let modified = selected.modified(s);
+    let caption = format!("{}{}", selected.entry.name, if modified { " *" } else { "" });
+    ui.horizontal(|ui| {
+        ui.label("Profile");
+        let combo = egui::ComboBox::from_id_salt("fracturize_dice_profile")
+            .selected_text(caption)
+            .show_ui(ui, |ui| {
+                for entry in profile::list() {
+                    let label = if entry.shared { format!("{}  (shared)", entry.name) } else { entry.name.clone() };
+                    let current = entry == selected.entry;
+                    if ui.selectable_label(current, label).clicked() {
+                        action = Some(ProfileAction::Load(entry));
+                    }
+                }
+            });
+        hinted(
+            combo.response,
+            &mut app.ui_state,
+            "Load a dice profile: what the dice may roll and a mutation may change, saved. \
+             Yours live in ~/.config/fracturize/dice, shared ones in scenes/dice; `default` \
+             is the shipped settings. --random-config takes the same names.",
+            "click: load a dice profile",
+        );
+
+        let writable = selected.writable();
+        let resp = ui.add_enabled(writable && modified, egui::Button::new((icons::SAVE, "Save")));
+        let tip = if !writable {
+            "The built-in and shared profiles can't be saved over — Save as makes one of your own"
+        } else if !modified {
+            "Nothing to save: the settings are what the profile says"
+        } else {
+            "Write these settings into the profile, keeping any comments in its file"
+        };
+        if hinted(resp, &mut app.ui_state, tip, "click: save the profile").clicked() {
+            action = Some(ProfileAction::Save);
+        }
+        let resp = ui.button("Save as…");
+        if hinted(resp, &mut app.ui_state, "Save these settings as a new profile of your own", "click: save as a new profile")
+            .clicked()
+        {
+            app.ui_state.dice_save_as = Some(String::new());
+            app.ui_state.dice_profile_error = None;
+        }
+        let resp = ui.add_enabled(modified && selected.baseline.is_some(), egui::Button::new((icons::UNDO, "Revert")));
+        if hinted(resp, &mut app.ui_state, "Put the settings back to what the profile says", "click: revert to the profile")
+            .clicked()
+        {
+            action = Some(ProfileAction::Revert);
+        }
+    });
+    if selected.baseline.is_none() {
+        ui.label(egui::RichText::new("The profile's file is gone or no longer reads; Save as keeps these settings.").small().weak());
+    }
+
+    if let Some(mut name) = app.ui_state.dice_save_as.take() {
+        let mut keep = true;
+        ui.horizontal(|ui| {
+            let field = ui.add(egui::TextEdit::singleline(&mut name).hint_text("name").desired_width(140.0));
+            let field = hinted(field, &mut app.ui_state, "The new profile's name: letters, digits, '-', '_'", "type: profile name");
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let resp = ui.add_enabled(!name.trim().is_empty(), egui::Button::new((icons::SAVE, "Save")));
+            if hinted(resp, &mut app.ui_state, "Save the profile under this name", "click: save as").clicked() || enter {
+                action = Some(ProfileAction::SaveAs(name.clone()));
+            }
+            let resp = ui.button("Cancel");
+            if hinted(resp, &mut app.ui_state, "Don't save a new profile", "click: cancel").clicked() {
+                keep = false;
+                app.ui_state.dice_profile_error = None;
+            }
+        });
+        if keep {
+            app.ui_state.dice_save_as = Some(name);
+        }
+    }
+    if let Some(e) = &app.ui_state.dice_profile_error {
+        ui.colored_label(ui.visuals().warn_fg_color, e);
+    }
+    action
+}
+
+/// What a mutation may change: how hard, how much, and the odds of each part.
+fn mutation(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
+    heading(ui, "Mutation");
+    let m = &mut s.mutate;
+    egui::Grid::new("fracturize_random_mutate").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+        ui.label("strength");
+        let resp = num::drag(
+            ui,
+            5,
+            2,
+            egui::DragValue::new(&mut m.strength).range(STRENGTH_LIMITS[0]..=STRENGTH_LIMITS[1]).speed(0.01),
+        );
+        hinted(
+            resp,
+            st,
+            "How much each nudge changes the scene: 1 is a noticeable but usually safe step. \
+             The Mutate window's slider is this same setting.",
+            "drag: mutation strength",
+        );
+        ui.end_row();
+
+        ui.label("parts");
+        count_range(
+            ui,
+            st,
+            &mut m.operators,
+            1,
+            MAX_OPERATORS,
+            "How many parts one mutation changes",
+            "drag: parts changed per mutation",
+        );
+        ui.end_row();
+
+        ui.label("back off");
+        let resp = num::drag(ui, 5, 0, egui::DragValue::new(&mut m.backoff).range(0..=MAX_ATTEMPTS).speed(0.1));
+        hinted(
+            resp,
+            st,
+            "Halve the strength after this many rejected tries in a row, down to a sixteenth, \
+             so a delicate scene still gives something close. 0 never backs off.",
+            "drag: rejections before the strength halves",
+        );
+        ui.end_row();
+
+        ui.label("");
+        let resp = ui.checkbox(&mut m.steer_dimension, "steer dimension");
+        hinted(
+            resp,
+            st,
+            "Rescale a mutation onto the dimension bound, as a fresh roll is. Off, a mutation \
+             is judged against the scene it came from instead: no further out of bounds than \
+             its parent was.",
+            "click: steer mutations onto the dimension bound",
+        );
+        ui.end_row();
+    });
+
+    ui.add_space(4.0);
+    egui::Grid::new("fracturize_random_parts").num_columns(3).spacing([6.0, 2.0]).striped(true).show(ui, |ui| {
+        ui.label(egui::RichText::new("part").small().weak());
+        ui.label(egui::RichText::new("odds").small().weak());
+        ui.label(egui::RichText::new("re-roll").small().weak());
+        ui.end_row();
+        for (name, part) in crate::dice::Parts::NAMES.iter().zip(m.parts.all_mut()) {
+            ui.label(name.replace('_', " "));
+            let resp = num::drag(ui, 5, 2, egui::DragValue::new(&mut part.odds).range(0.0..=ODDS_LIMIT).speed(0.005));
+            hinted(
+                resp,
+                st,
+                &format!("{} Relative to the other parts' odds; 0 never touches it.", part_tip(name)),
+                "drag: odds of changing this part",
+            );
+            chance(
+                ui,
+                st,
+                &mut part.reroll,
+                "Chance a change re-rolls this part the way a fresh roll would, under the \
+                 settings above, rather than nudging what's there",
+                "drag: chance of a re-roll",
+            );
+            ui.end_row();
+        }
+    });
+}
+
+fn part_tip(name: &str) -> &'static str {
+    match name {
+        "translate" => "A map's position.",
+        "rotate" => "A map's turn about its own origin.",
+        "scale" => "A map's size; re-rolled from the scale range above.",
+        "weight" => "A map's chaos-game weight.",
+        "variations" => "A map's variation blend; new ones only from the enabled list above.",
+        "color" => "A map's colour, or the gradient in palette mode.",
+        "color_value" => "Where a map sits on the gradient.",
+        "add" => "A new map: a nudged copy, or (re-rolled) a fresh one. Never past the most maps above.",
+        "remove" => "A map deleted. Never below the fewest maps above.",
+        "background" => "The background colour.",
+        "symmetry" => "The symmetry group: its axis tilts, or another is drawn from the settings above.",
+        _ => "",
+    }
 }
 
 fn heading(ui: &mut egui::Ui, text: &str) {
@@ -411,7 +633,7 @@ fn bounds(
 
     // What the list has measured under these settings, so a bound that is
     // too tight shows up as a number rather than as a list that stops growing.
-    if list.settings() == s && list.candidates > 0 {
+    if list.settings().same_roll(s) && list.candidates > 0 {
         let flames = list.entries.len() as u64;
         let text = format!(
             "The list found {} flame{} in {} candidates{}.",

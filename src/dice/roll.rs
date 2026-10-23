@@ -1,493 +1,35 @@
-//! Random flame generator: a whole new `Scene` from nothing, for the Explore
-//! menu's dice, the Random flames list, and `--random`.
+//! Fresh rolls: a whole new flame from nothing, part by part.
 //!
-//! Randomising an IFS is easy; randomising one that *renders* is not. Most
-//! random parameter sets either collapse to a point or diverge to a haze, so
-//! every candidate is run through a short CPU chaos game (the same `trace.rs`
-//! walkers the GPU shader mirrors) and rejected unless it settles into a
-//! bounded attractor with real extent on more than one axis.
-//!
-//! **What gets rolled is configurable** ([`RandomSettings`]): which variations
-//! may appear and at what weights, how many maps a flame has and how big they
-//! are, and bounds on the similarity dimension and the lacunarity. The two
-//! bounds are met in different ways, because they cost different amounts:
-//!
-//! - **Dimension is steered, not rejected.** It is analytic (`Σ sᵢᵈ = 1` over
-//!   the maps' contractions), and scaling every map by one factor `k` moves it
-//!   predictably: `k = (Σ sᵢᵗ)^(-1/t)` puts it exactly on a target `t`. So a
-//!   flame outside the bound is rescaled onto a target drawn inside it, which
-//!   keeps the maps' relative sizes and costs nothing. Only a rescale that
-//!   would stop a map contracting is a rejection.
-//! - **Lacunarity is rejected.** It is measured by a chaos walk, and nothing
-//!   predicts it from the parameters, so a candidate outside the bound is
-//!   thrown away and another rolled — up to [`RandomSettings::attempts`]
-//!   tries, with the reasons counted ([`Rejections`]) so a bound that is too
-//!   tight can say so instead of silently returning nothing.
+//! Randomising an IFS is easy; randomising one that *renders* is not. This
+//! module only draws candidates — the maps, their variations, a symmetry, the
+//! colours and the background. Whether a candidate is kept is the gate's call
+//! (`super::gate`), inside the search loop both fresh rolls and mutations
+//! share (`super::generate`). The draws are also what a mutation *re-rolls* a
+//! part with, so they're `pub(super)` one by one rather than only as a whole.
 //!
 //! Colour is rolled as well as form — the colour source (all three modes),
 //! the gradient a palette-mode roll needs, and the background it all sits on.
 //! Every draw comes off the caller's rng, so `--random --seed N` reproduces a
-//! roll exactly, colours included, given the same settings.
-
-use std::collections::BTreeMap;
+//! roll exactly, colours included, given the same settings. **Keep the order
+//! of draws** when changing anything here: a reordering silently changes what
+//! every recorded seed rolls.
 
 use glam::{Mat4, Quat, Vec3};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 
+use super::gate::rescale;
+use super::settings::{RandomSettings, SymmetrySettings};
 use crate::path::CameraPath;
-use crate::scene::{
-    generate_colormap, resolve_color_speeds, similarity_dimension, Scene, TransformSpec,
-    NUM_VARIATIONS, VARIATION_NAMES,
-};
-use crate::trace::{self, AttractorStats};
-
-/// Variations rolled unless the settings say otherwise: the ones that stay
-/// bounded under repeated application in 3D. Notably absent: `spherical`,
-/// whose 1/r² inversion reliably blows scenes out (see AGENTS.md) — a fine
-/// thing to reach for by hand, and something the settings can switch on, but
-/// a bad default for dice.
-const FRIENDLY: &[&str] = &[
-    "sinusoidal",
-    "swirl",
-    "bubble",
-    "fisheye",
-    "julia",
-    "horseshoe",
-    "disc",
-    "spiral",
-    "bulb",
-];
-
-/// Attractor radius bounds. Below the floor it's collapsed to a speck, above
-/// the ceiling it's a diverging haze that no camera framing will save.
-const MIN_RADIUS: f32 = 0.15;
-const MAX_RADIUS: f32 = 8.0;
-/// Per-axis standard deviation under which the attractor is degenerate (a
-/// point or a line rather than a form). At least two axes must clear it.
-const MIN_AXIS_SPREAD: f32 = 0.02;
-/// Fraction of the bounding box's cells the attractor may fill before it
-/// reads as a solid lump rather than a fractal. A set that fills space
-/// uniformly puts a point in nearly every cell at this sample count; the
-/// dusty, self-similar structure this renderer exists for does not.
-const MAX_OCCUPANCY: f32 = 0.22;
-/// The second-widest axis must be at least this fraction of the widest.
-/// The absolute floor above only catches literal degeneracy; this catches
-/// the far more common near-miss — a thin ribbon or filament that technically
-/// has extent on two axes but reads as a line on screen.
-const MIN_AXIS_RATIO: f32 = 0.25;
-/// Largest axis scale a map may have after the dimension rescale. Past this
-/// it barely contracts, and the walk takes forever to settle, if it does.
-const MAX_AXIS_SCALE: f32 = 0.95;
-
-/// One variation's place in the dice: whether it can be rolled, and the
-/// range its weight is drawn from (a magnitude; the sign is
-/// [`RandomSettings::negative`]'s job).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-#[serde(default)]
-pub struct VariationRange {
-    pub enabled: bool,
-    pub weight: [f32; 2],
-}
-
-impl Default for VariationRange {
-    fn default() -> Self {
-        Self { enabled: false, weight: [0.12, 0.75] }
-    }
-}
-
-/// Whether, and how, a rolled flame is symmetric (`crate::symmetry`).
-///
-/// Off unless `chance` says otherwise, so the default dice are unchanged. When
-/// a roll takes a group, it picks one of the enabled kinds, makes some of the
-/// flame's maps its motifs and leaves `free` of them outside — CRAFT §3.6:
-/// *symmetry gets you a form, one map outside the group gets you a picture*,
-/// because an orbit spreads measure evenly by construction and a wholly
-/// symmetric flame reads as wallpaper.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-#[serde(default)]
-pub struct SymmetrySettings {
-    /// Chance a flame is symmetric at all.
-    pub chance: f32,
-    /// `Cyc<n>`: n-fold about an axis.
-    pub cyclic: bool,
-    /// `Dih<n>`: n-fold plus the half-turn flip.
-    pub dihedral: bool,
-    /// The fold `n` for cyclic and dihedral.
-    pub fold: [u32; 2],
-    pub tetra: bool,
-    pub octa: bool,
-    pub icosa: bool,
-    /// A repeat: copies stepped along a helix, which is not a group (see
-    /// `symmetry::OrbitKind`) but is the same machinery.
-    pub repeat: bool,
-    /// Copies in a repeat.
-    pub repeat_count: [u32; 2],
-    /// Maps kept outside the group. At least one motif is always left.
-    pub free: [u32; 2],
-    /// Chance the group is extended by the central inversion, doubling it.
-    pub mirror: f32,
-    /// Chance the orbit is coloured by group element rather than shared.
-    pub orbit_color: f32,
-}
-
-impl Default for SymmetrySettings {
-    fn default() -> Self {
-        Self {
-            chance: 0.0,
-            cyclic: true,
-            dihedral: true,
-            fold: [3, 8],
-            tetra: true,
-            octa: true,
-            icosa: true,
-            repeat: false,
-            repeat_count: [5, 16],
-            free: [1, 1],
-            mirror: 0.15,
-            orbit_color: 0.25,
-        }
-    }
-}
-
-impl SymmetrySettings {
-    /// Whether any kind is switched on — with none, `chance` means nothing.
-    pub fn any_kind(&self) -> bool {
-        self.cyclic || self.dihedral || self.tetra || self.octa || self.icosa || self.repeat
-    }
-}
-
-/// A bound that can be switched off without forgetting its range.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-#[serde(default)]
-pub struct Bound {
-    pub on: bool,
-    pub range: [f32; 2],
-}
-
-impl Bound {
-    fn off(range: [f32; 2]) -> Self {
-        Self { on: false, range }
-    }
-
-    /// Whether `v` satisfies the bound. Off passes everything; on, a value
-    /// that couldn't be measured fails.
-    pub fn admits(&self, v: Option<f32>) -> bool {
-        !self.on || v.is_some_and(|v| v >= self.range[0] && v <= self.range[1])
-    }
-}
-
-impl Default for Bound {
-    fn default() -> Self {
-        Self::off([0.0, 1.0])
-    }
-}
-
-/// What the dice may roll. Persisted to prefs as `[random]`, edited in the
-/// Random settings window, and readable by `--random-config`.
-///
-/// Every range is `[min, max]`, inclusive; [`Self::normalized`] puts them in
-/// order and inside what the generator can use, so a hand-edited file can't
-/// hand it an inverted or impossible range.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(default)]
-pub struct RandomSettings {
-    /// Maps per flame.
-    pub transforms: [u32; 2],
-    /// Each map's base scale, drawn log-uniformly — before any dimension
-    /// rescale, which keeps the maps' ratios but not this range.
-    pub scale: [f32; 2],
-    /// Chance a map has one axis squashed, which is what turns blobs into
-    /// sheets and ribbons.
-    pub squash: f32,
-    /// Chance a flame carries no variations at all — pure affine.
-    pub affine: f32,
-    /// How many different variations a flame draws its maps' variations
-    /// from. One kind across several maps reads as a coherent form; many
-    /// kinds read as a pile of unrelated distortions.
-    pub kinds: [u32; 2],
-    /// Variations on each map, chosen from the flame's kinds. At least one
-    /// map always gets one (unless the flame rolled affine).
-    pub per_map: [u32; 2],
-    /// Chance a rolled variation weight is negative (Apophysis-style).
-    pub negative: f32,
-    /// Per variation, by name. A name not listed takes the default: enabled
-    /// if it is one of the bounded variations, at `[0.12, 0.75]`. `linear` is
-    /// never listed — it is what's left: `1 − Σ|w|`, floored at 0.
-    pub variations: BTreeMap<String, VariationRange>,
-    /// Symmetry groups, and how often.
-    pub symmetry: SymmetrySettings,
-    /// Bound on the similarity dimension of the maps' affine parts. Steered:
-    /// see the module docs.
-    pub dimension: Bound,
-    /// Bound on the lacunarity summary (1 = a random scatter, higher =
-    /// clumpier). Rejection-sampled.
-    pub lacunarity: Bound,
-    /// Candidates tried per flame before giving up.
-    pub attempts: u32,
-}
-
-impl Default for RandomSettings {
-    fn default() -> Self {
-        let variations = VARIATION_NAMES
-            .iter()
-            .skip(1)
-            .map(|&name| {
-                let range = VariationRange { enabled: FRIENDLY.contains(&name), ..Default::default() };
-                (name.to_string(), range)
-            })
-            .collect();
-        Self {
-            transforms: [2, 5],
-            scale: [0.35, 0.75],
-            squash: 0.3,
-            affine: 0.08,
-            kinds: [1, 2],
-            per_map: [0, 1],
-            negative: 0.15,
-            variations,
-            symmetry: SymmetrySettings::default(),
-            dimension: Bound::off([1.5, 2.5]),
-            // p10-p75 of default rolls (`random_flame_study`): on, it keeps
-            // most of what the dice make and trims the smooth and the sparse.
-            lacunarity: Bound::off([8.0, 30.0]),
-            attempts: 60,
-        }
-    }
-}
-
-/// Ranges' outer limits, shared by `normalized` and the settings window.
-pub const MAX_TRANSFORMS: u32 = 12;
-pub const SCALE_LIMITS: [f32; 2] = [0.05, 0.95];
-pub const WEIGHT_LIMIT: f32 = 2.0;
-pub const DIMENSION_LIMITS: [f32; 2] = [0.1, 6.0];
-pub const LACUNARITY_LIMITS: [f32; 2] = [0.1, 1000.0];
-pub const MAX_ATTEMPTS: u32 = 1000;
-
-fn ordered<T: PartialOrd + Copy>(r: [T; 2], lo: T, hi: T) -> [T; 2] {
-    let clamp = |v: T| if v < lo { lo } else if v > hi { hi } else { v };
-    let (a, b) = (clamp(r[0]), clamp(r[1]));
-    if a <= b { [a, b] } else { [b, a] }
-}
-
-impl RandomSettings {
-    /// Ranges in order and in bounds, and every variation listed.
-    pub fn normalized(mut self) -> Self {
-        self.transforms = ordered(self.transforms, 1, MAX_TRANSFORMS);
-        self.scale = ordered(self.scale, SCALE_LIMITS[0], SCALE_LIMITS[1]);
-        self.squash = self.squash.clamp(0.0, 1.0);
-        self.affine = self.affine.clamp(0.0, 1.0);
-        self.kinds = ordered(self.kinds, 1, NUM_VARIATIONS as u32 - 1);
-        self.per_map = ordered(self.per_map, 0, NUM_VARIATIONS as u32 - 1);
-        self.negative = self.negative.clamp(0.0, 1.0);
-        let defaults = Self::default().variations;
-        // Unknown names dropped, missing ones filled in.
-        self.variations.retain(|k, _| defaults.contains_key(k));
-        for (name, d) in defaults {
-            let v = self.variations.entry(name).or_insert(d);
-            v.weight = ordered(v.weight, 0.0, WEIGHT_LIMIT);
-        }
-        let sym = &mut self.symmetry;
-        sym.chance = sym.chance.clamp(0.0, 1.0);
-        sym.fold = ordered(sym.fold, 2, crate::symmetry::MAX_FOLD);
-        sym.repeat_count = ordered(sym.repeat_count, 2, crate::symmetry::MAX_REPEAT);
-        sym.free = ordered(sym.free, 0, MAX_TRANSFORMS);
-        sym.mirror = sym.mirror.clamp(0.0, 1.0);
-        sym.orbit_color = sym.orbit_color.clamp(0.0, 1.0);
-        self.dimension.range = ordered(self.dimension.range, DIMENSION_LIMITS[0], DIMENSION_LIMITS[1]);
-        self.lacunarity.range =
-            ordered(self.lacunarity.range, LACUNARITY_LIMITS[0], LACUNARITY_LIMITS[1]);
-        self.attempts = self.attempts.clamp(1, MAX_ATTEMPTS);
-        self
-    }
-
-    /// The variation in GPU slot `slot` (1.., never linear), defaulted if
-    /// the settings don't list it.
-    pub fn variation(&self, slot: usize) -> VariationRange {
-        let name = VARIATION_NAMES[slot];
-        self.variations.get(name).copied().unwrap_or(VariationRange {
-            enabled: FRIENDLY.contains(&name),
-            ..Default::default()
-        })
-    }
-
-    /// Slots that may be rolled.
-    pub fn enabled_slots(&self) -> Vec<usize> {
-        (1..NUM_VARIATIONS).filter(|&s| self.variation(s).enabled).collect()
-    }
-
-    /// Read settings from a TOML file: either the table itself, or a file
-    /// with a `[random]` table in it — which is what prefs.toml is, so the
-    /// GUI's settings can be handed straight to `--random-config`.
-    pub fn from_toml(text: &str) -> Result<Self, String> {
-        let value: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
-        let table = match value.get("random") {
-            Some(toml::Value::Table(t)) => t.clone(),
-            _ => value,
-        };
-        let settings: Self = toml::Value::Table(table).try_into().map_err(|e: toml::de::Error| e.to_string())?;
-        Ok(settings.normalized())
-    }
-}
-
-/// Why candidates were thrown away, counted.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rejections {
-    /// Collapsed, diverged, a line, or a lump: the quality gate.
-    pub shape: u32,
-    /// No rescale could put the dimension in bounds without a map ceasing to
-    /// contract.
-    pub dimension: u32,
-    /// Lacunarity outside its bound.
-    pub lacunarity: u32,
-}
-
-impl Rejections {
-    pub fn total(&self) -> u32 {
-        self.shape + self.dimension + self.lacunarity
-    }
-
-    /// "52 lacunarity, 7 shape", biggest first, for messages.
-    pub fn describe(&self) -> String {
-        let mut parts = [
-            (self.lacunarity, "lacunarity"),
-            (self.dimension, "dimension"),
-            (self.shape, "shape"),
-        ];
-        parts.sort_by(|a, b| b.0.cmp(&a.0));
-        parts
-            .iter()
-            .filter(|(n, _)| *n > 0)
-            .map(|(n, what)| format!("{n} {what}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-/// A flame that met the settings, and what it measured.
-pub struct Roll {
-    pub scene: Scene,
-    /// Similarity dimension of the maps' affine parts.
-    pub dimension: Option<f32>,
-    /// Lacunarity summary (`trace::lacunarity_summary`).
-    pub lacunarity: Option<f32>,
-    /// Candidates it took, this one included.
-    pub attempts: u32,
-    pub rejected: Rejections,
-}
-
-/// Nothing met the settings in the budget.
-pub struct RollFailure {
-    pub attempts: u32,
-    pub rejected: Rejections,
-    /// The last candidate, framed neutrally, for a caller that must return
-    /// *something*.
-    pub last: Scene,
-}
-
-impl RollFailure {
-    pub fn message(&self) -> String {
-        format!(
-            "no flame met the random settings in {} tries (rejected for {}) — loosen a bound or allow more tries",
-            self.attempts,
-            self.rejected.describe(),
-        )
-    }
-}
-
-/// Only the tests call this now: the app and `--random` go through
-/// [`roll_seeded`], so every roll has a seed it can be had again from.
-#[cfg_attr(not(test), allow(dead_code))]
-/// Build a random flame with the default settings. Always returns one: if
-/// nothing passes the gate in the budget, the last roll comes back with a
-/// neutral framing rather than an error the dice can't act on.
-pub fn random_flame(rng: &mut impl Rng) -> Scene {
-    match roll(&RandomSettings::default(), rng) {
-        Ok(r) => r.scene,
-        Err(f) => {
-            log::warn!("Random flame: {}", f.message());
-            f.last
-        }
-    }
-}
-
-/// One roll from a seed: what `--random --seed N` does, and what the dice
-/// and the Random flames list do with a seed of their own, so any of them can
-/// be had again from the command line. The scene is named after its seed.
-pub fn roll_seeded(settings: &RandomSettings, seed: u64) -> Result<Roll, RollFailure> {
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut rolled = roll(settings, &mut rng);
-    let name = format!("random-{seed}");
-    match &mut rolled {
-        Ok(r) => r.scene.name = name,
-        Err(f) => f.last.name = name,
-    }
-    rolled
-}
-
-/// Build a random flame that meets `settings`.
-pub fn roll(settings: &RandomSettings, rng: &mut impl Rng) -> Result<Roll, RollFailure> {
-    let mut rejected = Rejections::default();
-    let mut last = None;
-    for attempt in 1..=settings.attempts.max(1) {
-        let mut c = build_candidate(settings, rng);
-        let dimension = match steer_dimension(&mut c.transforms, settings, rng) {
-            Ok(d) => d,
-            Err(()) => {
-                rejected.dimension += 1;
-                last = Some(c);
-                continue;
-            }
-        };
-        let Some(stats) = measure_candidate(&c.transforms) else {
-            rejected.shape += 1;
-            last = Some(c);
-            continue;
-        };
-        log::debug!(
-            "Random flame attempt {}: r95 {:.3}, spread {:?}, occupancy {:.3} -> {}",
-            attempt,
-            stats.radius,
-            stats.spread,
-            stats.occupancy,
-            if stats.acceptable() { "accept" } else { "reject" },
-        );
-        if !stats.acceptable() {
-            rejected.shape += 1;
-            last = Some(c);
-            continue;
-        }
-        let lacunarity = trace::lacunarity_summary(&c.transforms, &vec![true; c.transforms.len()]);
-        if !settings.lacunarity.admits(lacunarity) {
-            rejected.lacunarity += 1;
-            last = Some(c);
-            continue;
-        }
-        return Ok(Roll {
-            scene: finish(c, stats.center, stats.radius, rng),
-            dimension,
-            lacunarity,
-            attempts: attempt,
-            rejected,
-        });
-    }
-    let last = last.unwrap_or_else(|| build_candidate(settings, rng));
-    Err(RollFailure {
-        attempts: settings.attempts.max(1),
-        rejected,
-        last: finish(last, Vec3::ZERO, 1.0, rng),
-    })
-}
+use crate::scene::{generate_colormap, resolve_color_speeds, Scene, TransformSpec, NUM_VARIATIONS};
 
 /// A candidate before quality checking: just the parts the chaos game needs.
-struct Candidate {
-    transforms: Vec<TransformSpec>,
-    names: Vec<Option<String>>,
-    colors: Vec<Vec3>,
+pub(super) struct Candidate {
+    pub transforms: Vec<TransformSpec>,
+    pub names: Vec<Option<String>>,
+    pub colors: Vec<Vec3>,
 }
 
-fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
+pub(super) fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
     let n = rng.gen_range(settings.transforms[0]..=settings.transforms[1]).max(1) as usize;
 
     let mut transforms = Vec::with_capacity(n);
@@ -585,9 +127,40 @@ fn build_candidate(settings: &RandomSettings, rng: &mut impl Rng) -> Candidate {
 /// throws away. Reliquary's hand-sized icosahedral facet is about this size.
 /// A dimension bound, if on, then steers from there as usual.
 fn apply_symmetry(transforms: &mut [TransformSpec], s: &SymmetrySettings, rng: &mut impl Rng) {
-    use crate::symmetry::{OrbitColor, OrbitKind, Repeat, Symmetry};
     if !s.any_kind() || rng.r#gen::<f32>() >= s.chance {
         return;
+    }
+    let Some(sym) = random_symmetry(s, rng) else { return };
+
+    let n = transforms.len();
+    let free = (rng_range_u32(rng, s.free) as usize).min(n - 1);
+    let order = choose(rng, &(0..n).collect::<Vec<_>>(), n - free);
+    let k = motif_shrink(&sym);
+    for i in order {
+        let t = &mut transforms[i];
+        let (scale, rot, mut p) = t.matrix.to_scale_rotation_translation();
+        // A motif on the centre is copied onto itself; push it out to where
+        // its copies land apart.
+        if p.length() < 0.4 {
+            p = if p.length() > 1e-3 { p.normalize() } else { random_quat(rng) * Vec3::X } * 0.4;
+        }
+        t.matrix = Mat4::from_scale_rotation_translation(scale * k, rot, p);
+        t.symmetry = Some(sym.clone());
+    }
+}
+
+/// How much a motif shrinks on joining `sym` (see [`apply_symmetry`]).
+pub(super) fn motif_shrink(sym: &crate::symmetry::Symmetry) -> f32 {
+    const D: f32 = 2.2;
+    sym.element_scales().iter().map(|e| e.powf(D)).sum::<f32>().powf(-1.0 / D)
+}
+
+/// A group drawn from the enabled kinds, about a random axis. `None` when no
+/// kind is enabled, or the one drawn can't be built.
+pub(super) fn random_symmetry(s: &SymmetrySettings, rng: &mut impl Rng) -> Option<crate::symmetry::Symmetry> {
+    use crate::symmetry::{OrbitColor, OrbitKind, Repeat, Symmetry};
+    if !s.any_kind() {
+        return None;
     }
     let mut kinds = Vec::new();
     let fold = |rng: &mut _| rng_range_u32(rng, s.fold);
@@ -622,32 +195,15 @@ fn apply_symmetry(transforms: &mut [TransformSpec], s: &SymmetrySettings, rng: &
     let kind = kinds[rng.gen_range(0..kinds.len())];
     let mirror = kind.is_group() && rng.r#gen::<f32>() < s.mirror;
     let color = if rng.r#gen::<f32>() < s.orbit_color { OrbitColor::Orbit } else { OrbitColor::Shared };
-    let Ok(sym) = Symmetry::new(kind, axis, mirror, color) else { return };
-
-    let n = transforms.len();
-    let free = (rng_range_u32(rng, s.free) as usize).min(n - 1);
-    let order = choose(rng, &(0..n).collect::<Vec<_>>(), n - free);
-    const D: f32 = 2.2;
-    let k = sym.element_scales().iter().map(|e| e.powf(D)).sum::<f32>().powf(-1.0 / D);
-    for i in order {
-        let t = &mut transforms[i];
-        let (scale, rot, mut p) = t.matrix.to_scale_rotation_translation();
-        // A motif on the centre is copied onto itself; push it out to where
-        // its copies land apart.
-        if p.length() < 0.4 {
-            p = if p.length() > 1e-3 { p.normalize() } else { random_quat(rng) * Vec3::X } * 0.4;
-        }
-        t.matrix = Mat4::from_scale_rotation_translation(scale * k, rot, p);
-        t.symmetry = Some(sym.clone());
-    }
+    Symmetry::new(kind, axis, mirror, color).ok()
 }
 
-fn rng_range_u32(rng: &mut impl Rng, r: [u32; 2]) -> u32 {
+pub(super) fn rng_range_u32(rng: &mut impl Rng, r: [u32; 2]) -> u32 {
     rng.gen_range(r[0]..=r[1].max(r[0]))
 }
 
 /// `k` distinct items of `from`, in random order.
-fn choose(rng: &mut impl Rng, from: &[usize], k: usize) -> Vec<usize> {
+pub(super) fn choose(rng: &mut impl Rng, from: &[usize], k: usize) -> Vec<usize> {
     let mut v = from.to_vec();
     for i in (1..v.len()).rev() {
         v.swap(i, rng.gen_range(0..=i));
@@ -657,95 +213,18 @@ fn choose(rng: &mut impl Rng, from: &[usize], k: usize) -> Vec<usize> {
 }
 
 /// A weight for `slot`, from its range, negative at the settings' odds.
-fn roll_weight(settings: &RandomSettings, slot: usize, rng: &mut impl Rng) -> f32 {
+pub(super) fn roll_weight(settings: &RandomSettings, slot: usize, rng: &mut impl Rng) -> f32 {
     let [lo, hi] = settings.variation(slot).weight;
     let w = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
     if rng.r#gen::<f32>() < settings.negative { -w } else { w }
 }
 
-/// Scale every map's linear part by `k`, about its own translation.
-fn rescale(transforms: &mut [TransformSpec], k: f32) {
-    for t in transforms {
-        let (s, r, p) = t.matrix.to_scale_rotation_translation();
-        t.matrix = Mat4::from_scale_rotation_translation(s * k, r, p);
-    }
-}
-
-/// Put the similarity dimension inside the settings' bound, if it has one,
-/// by rescaling every map together. Returns the dimension it ends on; `Err`
-/// when the rescale that would do it leaves a map that barely contracts.
-fn steer_dimension(
-    transforms: &mut [TransformSpec],
-    settings: &RandomSettings,
-    rng: &mut impl Rng,
-) -> Result<Option<f32>, ()> {
-    let d = similarity_dimension(transforms);
-    if settings.dimension.admits(d) {
-        return Ok(d);
-    }
-    let [lo, hi] = settings.dimension.range;
-    let target = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
-    // The effective map set, as `similarity_dimension` counts it: a motif
-    // contributes one contraction per element of its group (all the motif's
-    // size for a group, tapering for a repeat). Scaling every map by `k`
-    // scales every one of these by `k`, so the same closed form holds.
-    let mut contractions = Vec::new();
-    for t in transforms.iter() {
-        let s = t.linear_determinant().abs().cbrt();
-        if !(s > 0.0 && s.is_finite()) {
-            return Err(());
-        }
-        match &t.symmetry {
-            Some(g) => contractions.extend(g.element_scales().into_iter().map(|e| s * e)),
-            None => contractions.push(s),
-        }
-    }
-    // Σ (k·sᵢ)ᵗ = 1  ⇒  k = (Σ sᵢᵗ)^(−1/t)
-    let sum: f32 = contractions.iter().map(|s| s.powf(target)).sum();
-    let k = sum.powf(-1.0 / target);
-    let widest = transforms
-        .iter()
-        .map(|t| t.matrix.to_scale_rotation_translation().0.abs().max_element())
-        .fold(0.0f32, f32::max);
-    if !k.is_finite() || widest * k > MAX_AXIS_SCALE {
-        return Err(());
-    }
-    rescale(transforms, k);
-    let d = similarity_dimension(transforms);
-    // Bisection inside `similarity_dimension` lands within its tolerance of
-    // the target, which can sit a hair outside a bound placed at the target.
-    let slack = 1e-3;
-    match d {
-        Some(v) if v >= lo - slack && v <= hi + slack => Ok(Some(v.clamp(lo, hi))),
-        _ => Err(()),
-    }
-}
-
-fn random_transform(settings: &RandomSettings, rng: &mut impl Rng) -> TransformSpec {
-    // Translation: uniform-ish inside a ball, so transforms don't all pile up
-    // near the origin the way independent per-axis ranges would.
-    let dir = Vec3::new(
-        rng.gen_range(-1.0..1.0),
-        rng.gen_range(-1.0..1.0),
-        rng.gen_range(-1.0..1.0),
-    );
-    let dir = if dir.length_squared() < 1e-6 { Vec3::X } else { dir.normalize() };
-    let translation = dir * rng.gen_range(0.0f32..0.9).cbrt() * 0.9;
-
+/// A plain map — affine only, linear weight 1 — at a random place, turn and
+/// size. Variations are the caller's.
+pub(super) fn random_transform(settings: &RandomSettings, rng: &mut impl Rng) -> TransformSpec {
+    let translation = random_translation(rng);
     let rotation = random_quat(rng);
-
-    // Log-uniform so 0.35 and 0.75 are equally likely to be *interesting*,
-    // rather than the top of the range dominating.
-    let [lo, hi] = settings.scale;
-    let base = if hi > lo { rng.gen_range(lo.ln()..=hi.ln()).exp() } else { lo };
-    let scale = if rng.r#gen::<f32>() < settings.squash {
-        // Squash one axis: this is what turns blobs into sheets and ribbons.
-        let mut s = Vec3::splat(base);
-        s[rng.gen_range(0..3)] = base * rng.gen_range(0.15..0.6);
-        s
-    } else {
-        Vec3::splat(base)
-    };
+    let scale = random_scale(settings, rng);
 
     let mut variations = [0.0f32; NUM_VARIATIONS];
     variations[0] = 1.0;
@@ -764,20 +243,41 @@ fn random_transform(settings: &RandomSettings, rng: &mut impl Rng) -> TransformS
     }
 }
 
+/// A map's position: uniform-ish inside a ball, so transforms don't all pile
+/// up near the origin the way independent per-axis ranges would.
+pub(super) fn random_translation(rng: &mut impl Rng) -> Vec3 {
+    let dir = Vec3::new(
+        rng.gen_range(-1.0..1.0),
+        rng.gen_range(-1.0..1.0),
+        rng.gen_range(-1.0..1.0),
+    );
+    let dir = if dir.length_squared() < 1e-6 { Vec3::X } else { dir.normalize() };
+    dir * rng.gen_range(0.0f32..0.9).cbrt() * 0.9
+}
+
+/// A map's per-axis size from the settings' scale range.
+pub(super) fn random_scale(settings: &RandomSettings, rng: &mut impl Rng) -> Vec3 {
+    // Log-uniform so 0.35 and 0.75 are equally likely to be *interesting*,
+    // rather than the top of the range dominating.
+    let [lo, hi] = settings.scale;
+    let base = if hi > lo { rng.gen_range(lo.ln()..=hi.ln()).exp() } else { lo };
+    if rng.r#gen::<f32>() < settings.squash {
+        // Squash one axis: this is what turns blobs into sheets and ribbons.
+        let mut s = Vec3::splat(base);
+        s[rng.gen_range(0..3)] = base * rng.gen_range(0.15..0.6);
+        s
+    } else {
+        Vec3::splat(base)
+    }
+}
+
 /// Uniformly-distributed random rotation (Shoemake's subgroup method).
-fn random_quat(rng: &mut impl Rng) -> Quat {
+pub(super) fn random_quat(rng: &mut impl Rng) -> Quat {
     let u1: f32 = rng.r#gen();
     let u2: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
     let u3: f32 = rng.gen_range(0.0..std::f32::consts::TAU);
     let (s1, s2) = ((1.0 - u1).sqrt(), u1.sqrt());
     Quat::from_xyzw(s1 * u2.sin(), s1 * u2.cos(), s2 * u3.sin(), s2 * u3.cos())
-}
-
-/// Measure a candidate flame. Everything is enabled at this point — a rolled
-/// flame has no disabled transforms — so this is just `trace::measure` with
-/// that spelled out.
-fn measure_candidate(transforms: &[TransformSpec]) -> Option<AttractorStats> {
-    trace::measure(transforms, &vec![true; transforms.len()])
 }
 
 /// Geometric mean of a matrix's axis lengths — a cheap stand-in for "how much
@@ -787,29 +287,8 @@ fn mean_singular_value(m: Mat4) -> f32 {
     (s.x.abs() * s.y.abs() * s.z.abs()).cbrt()
 }
 
-impl AttractorStats {
-    fn acceptable(&self) -> bool {
-        if !(self.radius.is_finite() && (MIN_RADIUS..=MAX_RADIUS).contains(&self.radius)) {
-            return false;
-        }
-        // A form, not a point or a line: at least two axes with real extent,
-        // both in absolute terms and relative to the widest one.
-        let mut axes = [self.spread.x, self.spread.y, self.spread.z];
-        axes.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        if axes[1] <= MIN_AXIS_SPREAD || axes[0] <= 0.0 {
-            return false;
-        }
-        if axes[1] / axes[0] < MIN_AXIS_RATIO {
-            return false;
-        }
-        // Structure, not a lump.
-        self.occupancy <= MAX_OCCUPANCY
-    }
-}
-
-
 /// Wrap an accepted candidate up as a full `Scene`, framed for its size.
-fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Scene {
+pub(super) fn finish(mut c: Candidate, center: Vec3, radius: f32, rng: &mut impl Rng) -> Scene {
     let color_speed = 0.5;
     let color_falloff = if rng.r#gen::<f32>() < 0.4 { rng.gen_range(0.6..1.2) } else { 0.0 };
     resolve_color_speeds(&mut c.transforms, color_speed, color_falloff);
@@ -896,7 +375,7 @@ const P_PALETTE: f32 = 0.25;
 /// Palette mode is the only one that needs anything built: `mix` reads the
 /// per-transform RGBs the candidate already has, and `transforms` is what
 /// those RGBs were made for.
-fn random_color_mode(rng: &mut impl Rng) -> (crate::scene::ColorMode, Option<crate::palette::Palette>) {
+pub(super) fn random_color_mode(rng: &mut impl Rng) -> (crate::scene::ColorMode, Option<crate::palette::Palette>) {
     use crate::scene::ColorMode;
     let roll: f32 = rng.r#gen();
     if roll < P_PALETTE {
@@ -913,7 +392,7 @@ fn random_color_mode(rng: &mut impl Rng) -> (crate::scene::ColorMode, Option<cra
 /// Sampled rather than averaged: the mean of a complementary or triadic
 /// scheme is mud, and a background tinted from mud is just grey. One real
 /// colour out of the set keeps the background in the flame's family.
-fn tint(scene: &Scene, rng: &mut impl Rng) -> Vec3 {
+pub(super) fn tint(scene: &Scene, rng: &mut impl Rng) -> Vec3 {
     match scene.color_mode {
         crate::scene::ColorMode::Palette => scene
             .palette
@@ -947,7 +426,7 @@ const LIGHT_BACKGROUND_LEVEL: std::ops::Range<f32> = 0.06..0.2;
 /// Hue comes from the flame rather than from nowhere, so the two agree; the
 /// level and the chroma are what make it a *ground* rather than another
 /// element — dark and saturated, or mid and nearly neutral.
-fn random_background(rng: &mut impl Rng, tint: Vec3) -> Vec3 {
+pub(super) fn random_background(rng: &mut impl Rng, tint: Vec3) -> Vec3 {
     // Mostly the flame's own hue family, which reads as one scene; sometimes
     // its opposite, which makes the form pop off the ground. Rotating in
     // Oklab keeps the shift a hue shift rather than a lightness one.
@@ -979,7 +458,7 @@ fn random_background(rng: &mut impl Rng, tint: Vec3) -> Vec3 {
 
 /// HSV (h in degrees, s/v in 0-1) to linear RGB (0-1). Mirrors the private
 /// helper in app.rs; kept local so this module stays free of UI deps.
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
+pub(super) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
     let h = h.rem_euclid(360.0) / 60.0;
     let c = v * s;
     let x = c * (1.0 - (h % 2.0 - 1.0).abs());
@@ -997,6 +476,10 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dice::gate::measure as measure_candidate;
+    use crate::dice::settings::{Bound, SymmetrySettings, VariationRange};
+    use crate::dice::{random_flame, roll};
+    use crate::scene::{similarity_dimension, VARIATION_NAMES};
     use rand::SeedableRng;
 
     /// The generator's whole job is to not hand back garbage. Roll a batch
@@ -1227,23 +710,6 @@ mod tests {
         assert_eq!(f.attempts, 8);
         assert_eq!(f.rejected.total(), 8);
         assert!(f.rejected.lacunarity > 0, "{:?}", f.rejected);
-    }
-
-    #[test]
-    fn settings_read_bare_or_from_prefs() {
-        let bare = "transforms = [6, 3]\n[variations.spherical]\nenabled = true\n";
-        let s = RandomSettings::from_toml(bare).unwrap();
-        assert_eq!(s.transforms, [3, 6], "range put in order");
-        assert!(s.variation(2).enabled, "spherical switched on");
-        assert!(s.variation(3).enabled, "swirl kept its default");
-        assert_eq!(s.variations.len(), NUM_VARIATIONS - 1);
-
-        let prefs = "invert_pitch = true\n[random]\nattempts = 5\n[random.lacunarity]\non = true\nrange = [4.0, 2.0]\n";
-        let s = RandomSettings::from_toml(prefs).unwrap();
-        assert_eq!(s.attempts, 5);
-        assert!(s.lacunarity.on);
-        assert_eq!(s.lacunarity.range, [2.0, 4.0]);
-        assert!(RandomSettings::from_toml("transforms = \"many\"").is_err());
     }
 
     /// Not a correctness test: how dimension and lacunarity fall across

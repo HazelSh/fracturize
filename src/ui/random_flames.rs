@@ -139,7 +139,7 @@ fn list(ui: &mut egui::Ui, app: &mut App) -> (usize, Option<usize>, Option<u64>,
     let ppp = ui.ctx().pixels_per_point();
     let px = ((THUMB.x * ppp).round() as u32, (THUMB.y * ppp).round() as u32);
     let open_name = app.scene.name.clone();
-    let custom = *app.random_settings() != Default::default();
+    let config = app.dice_config_flag();
 
     let (list, thumbs, ui_state) = app.random_list_parts();
     let width = (ui.available_width() - 2.0 * PAD).clamp(64.0, THUMB.x);
@@ -165,7 +165,7 @@ fn list(ui: &mut egui::Ui, app: &mut App) -> (usize, Option<usize>, Option<u64>,
                 };
                 let is_open = entry.scene.name == open_name;
                 let resp = row(ui, entry, is_open, thumb_size, row_h, px, thumbs);
-                let resp = hinted(resp, ui_state, tooltip(entry, custom), "click: open this flame (undoable) · the row under the pointer flies its camera");
+                let resp = hinted(resp, ui_state, tooltip(entry, &config), "click: open this flame (undoable) · the row under the pointer flies its camera");
                 if resp.hovered() {
                     hovered = Some(entry.id);
                 }
@@ -177,12 +177,12 @@ fn list(ui: &mut egui::Ui, app: &mut App) -> (usize, Option<usize>, Option<u64>,
     (end, adopt, hovered, persist)
 }
 
-fn tooltip(entry: &RandomEntry, custom: bool) -> String {
+fn tooltip(entry: &RandomEntry, config: &str) -> String {
     format!(
         "Seed {seed}. Click to open it — an edit, so one Ctrl+Z brings back what you had.\n\n\
          From the command line:\n  fracturize --random --seed {seed}{config}",
         seed = entry.seed,
-        config = if custom { " --random-config ~/.config/fracturize/prefs.toml" } else { "" },
+        config = config,
     )
 }
 

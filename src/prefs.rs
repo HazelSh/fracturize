@@ -25,7 +25,7 @@ pub struct PanelPrefs {
     /// The Random flames list down the left of the screen.
     #[serde(default)]
     pub random_open: bool,
-    /// What the dice may roll (`randomize::RandomSettings`).
+    /// What the dice may roll (`dice::RandomSettings`).
     #[serde(default)]
     pub random_settings_open: bool,
     #[serde(default)]
@@ -47,10 +47,6 @@ pub struct PanelPrefs {
     /// The Xaos window: a layer's whole transition matrix.
     #[serde(default)]
     pub xaos_open: bool,
-}
-
-fn default_mutate_strength() -> f32 {
-    1.0
 }
 
 fn default_ui_scale() -> f32 {
@@ -94,21 +90,29 @@ pub struct Prefs {
     /// Open/closed state of the Phase 2 panel windows
     #[serde(default)]
     pub panels: PanelPrefs,
-    /// Strength multiplier for U's random mutation (Mutate window slider)
-    #[serde(default = "default_mutate_strength")]
-    pub mutate_strength: f32,
+    /// Where mutation strength lived before it moved into the dice profile
+    /// (`random.mutate.strength`). Read once, to carry an old setting over,
+    /// and never written again.
+    #[serde(default, skip_serializing)]
+    pub mutate_strength: Option<f32>,
     /// Multiplier on every panel's size, over and above the window's own scale
     /// factor. egui takes the display's scale factor already; this is the
     /// separate, expected setting for "the panels are too small on this
     /// monitor" — which on a 4K display is a real complaint and had no answer.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
-    /// What the dice may roll — the Random settings window. Follows the
-    /// person rather than any scene. `--random` never reads it (a render must
-    /// be reproducible from flags plus scene); `--random-config` can point at
-    /// this file to borrow it deliberately.
+    /// What the dice may roll and a mutation may change — the Random
+    /// settings window. Follows the person rather than any scene. `--random`
+    /// never reads it (a render must be reproducible from flags plus scene);
+    /// `--random-config` can point at this file to borrow it deliberately, or
+    /// name the profile it was loaded from.
     #[serde(default)]
-    pub random: crate::randomize::RandomSettings,
+    pub random: crate::dice::RandomSettings,
+    /// The dice profile file `random` was loaded from or last saved to, which
+    /// the window compares against to mark it changed. `None` = the built-in
+    /// defaults.
+    #[serde(default)]
+    pub random_profile: Option<PathBuf>,
     /// Who to credit on scenes made in-app. Scene files carry their own
     /// author; this is only the default for one that doesn't have one yet (a
     /// blank canvas, a random flame), so a person doesn't have to type their
@@ -167,9 +171,10 @@ impl Default for Prefs {
             orbit_style: OrbitStyle::default(),
             fov: None,
             panels: PanelPrefs::default(),
-            mutate_strength: default_mutate_strength(),
+            mutate_strength: None,
             ui_scale: default_ui_scale(),
             random: Default::default(),
+            random_profile: None,
             author: None,
             point_count: None,
             threads: None,
@@ -194,12 +199,21 @@ impl Prefs {
         prefs_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| toml::from_str::<Self>(&s).ok())
-            .map(|mut p| {
-                // A hand-edited range comes back in order and in bounds.
-                p.random = p.random.normalized();
-                p
-            })
+            .map(Self::migrated)
             .unwrap_or_default()
+    }
+
+    /// Prefs as read, brought up to date: hand-edited ranges in order and in
+    /// bounds, and a mutation strength from before the dice profile held it
+    /// carried into the profile — unless the profile already says otherwise.
+    fn migrated(mut self) -> Self {
+        if let Some(s) = self.mutate_strength.take() {
+            if self.random.mutate.strength == crate::dice::MutateSettings::default().strength {
+                self.random.mutate.strength = s;
+            }
+        }
+        self.random = self.random.normalized();
+        self
     }
 
     pub fn save(&self) {
@@ -269,8 +283,23 @@ mod tests {
         let back: Prefs = toml::from_str(&s).unwrap();
         assert_eq!(back.random, p.random);
         // The prefs file is a valid --random-config.
-        let from_file = crate::randomize::RandomSettings::from_toml(&s).unwrap();
-        assert_eq!(from_file, p.random);
+        let from_file = crate::dice::profile::parse(&s).unwrap();
+        assert_eq!(from_file.settings, p.random);
+        assert!(from_file.warnings.is_empty(), "{:?}", from_file.warnings);
+    }
+
+    /// Mutation strength moved from prefs into the dice profile; an old
+    /// setting is carried over once, and then never written back.
+    #[test]
+    fn an_old_mutation_strength_moves_into_the_profile() {
+        let old = "invert_pitch = true\nmutate_strength = 2.5\n";
+        let p = toml::from_str::<Prefs>(old).unwrap().migrated();
+        assert_eq!(p.random.mutate.strength, 2.5);
+        let s = toml::to_string(&p).unwrap();
+        assert!(!s.contains("\nmutate_strength"), "the old key must not be written: {s}");
+        // A profile that already states a strength keeps it.
+        let both = "mutate_strength = 2.5\n[random.mutate]\nstrength = 0.5\n";
+        assert_eq!(toml::from_str::<Prefs>(both).unwrap().migrated().random.mutate.strength, 0.5);
     }
 
 }

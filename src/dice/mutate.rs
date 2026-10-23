@@ -1,0 +1,649 @@
+//! Mutation operators: a few parts of a scene nudged or re-rolled.
+//!
+//! One call to [`mutate`] applies a handful of operators (the profile's
+//! `mutate.operators`), each to a part drawn by the profile's odds — a map's
+//! place, turn, size, weight, variation blend or colour, a map added or
+//! removed, the background, the symmetry group — and returns human- and
+//! LLM-readable descriptions of what changed.
+//!
+//! Each touched part is **nudged** (what is there perturbed, scaled by the
+//! strength) or **re-rolled** (replaced using the very draw a fresh roll uses,
+//! from `roll.rs`, under the same ranges). That is the point of keeping
+//! mutation inside the dice: "give map 2 new variations" draws from the same
+//! enabled list and weight ranges a fresh roll would, so a profile that never
+//! rolls `spherical` never mutates it in either.
+//!
+//! This only *proposes*; whether a mutation is kept is the gate's call, in
+//! the search loop `super::generate` runs.
+
+use glam::{Mat4, Vec3};
+use rand::Rng;
+
+use super::roll;
+use super::settings::RandomSettings;
+use crate::scene::{Scene, NUM_VARIATIONS, VARIATION_NAMES};
+
+/// A nudge that brings in a new variation weighs it at this share of a weight
+/// the roll would draw, times the strength — a step, not a re-roll.
+const NUDGE_SHARE: f32 = 0.45;
+
+/// Apply the profile's operators to `scene` at `strength` (1.0 = a noticeable
+/// but usually non-destructive step). Derived state (colour speeds, colormap)
+/// is refreshed before returning.
+pub fn mutate(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &mut impl Rng) -> Vec<String> {
+    let n_ops = roll::rng_range_u32(rng, settings.mutate.operators);
+    let mut log = Vec::new();
+    for _ in 0..n_ops {
+        apply_one(scene, settings, strength, rng, &mut log);
+    }
+    if log.is_empty() {
+        log.push("nothing changed: no part this scene has is given any odds".to_string());
+    }
+
+    let falloff = scene.color_falloff;
+    scene.resolve_all_color_speeds(falloff);
+    scene.regenerate_colormap();
+    log
+}
+
+/// Uniform random unit vector (rejection-sampled)
+fn random_unit(rng: &mut impl Rng) -> Vec3 {
+    loop {
+        let v = Vec3::new(
+            rng.gen_range(-1.0..1.0),
+            rng.gen_range(-1.0..1.0),
+            rng.gen_range(-1.0..1.0),
+        );
+        let len = v.length();
+        if len > 1e-3 && len <= 1.0 {
+            return v / len;
+        }
+    }
+}
+
+/// Indices into `Parts::NAMES`.
+mod part {
+    pub const TRANSLATE: usize = 0;
+    pub const ROTATE: usize = 1;
+    pub const SCALE: usize = 2;
+    pub const WEIGHT: usize = 3;
+    pub const VARIATIONS: usize = 4;
+    pub const COLOR: usize = 5;
+    pub const COLOR_VALUE: usize = 6;
+    pub const ADD: usize = 7;
+    pub const REMOVE: usize = 8;
+    pub const BACKGROUND: usize = 9;
+    pub const SYMMETRY: usize = 10;
+}
+
+/// Maps in map `i`'s layer.
+fn layer_len(scene: &Scene, i: usize) -> usize {
+    let layer = scene.transforms[i].layer;
+    scene.transforms.iter().filter(|t| t.layer == layer).count()
+}
+
+/// Whether part `k` can be changed on map `i` of this scene at all.
+///
+/// Adding and removing follow the same rule the gate does for bounds: the
+/// roll's map count is the profile's say on how many maps a flame has, so a
+/// mutation may not take a layer past it — but a scene already past it isn't
+/// stuck, it just can't go further.
+fn applicable(k: usize, scene: &Scene, i: usize, settings: &RandomSettings) -> bool {
+    let n = layer_len(scene, i);
+    match k {
+        part::VARIATIONS => {
+            !settings.enabled_slots().is_empty() || scene.transforms[i].variations.iter().any(|&w| w != 0.0)
+        }
+        part::ADD => n < settings.transforms[1] as usize,
+        part::REMOVE => n > (settings.transforms[0] as usize).max(1),
+        part::SYMMETRY => {
+            settings.symmetry.any_kind() || scene.transforms.iter().any(|t| t.symmetry.is_some())
+        }
+        _ => true,
+    }
+}
+
+fn apply_one(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    let n = scene.transforms.len();
+    if n == 0 {
+        return;
+    }
+    let i = rng.gen_range(0..n);
+    let parts = settings.mutate.parts.all();
+    let odds: Vec<f32> = parts
+        .iter()
+        .enumerate()
+        .map(|(k, p)| if applicable(k, scene, i, settings) { p.odds } else { 0.0 })
+        .collect();
+    let total: f32 = odds.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    let mut r = rng.r#gen::<f32>() * total;
+    let k = odds.iter().position(|&o| {
+        r -= o;
+        r < 0.0 && o > 0.0
+    });
+    // Rounding can leave `r` a hair above zero after the last part.
+    let k = k.unwrap_or_else(|| odds.iter().rposition(|&o| o > 0.0).unwrap_or(0));
+    let reroll = rng.r#gen::<f32>() < parts[k].reroll;
+
+    match k {
+        part::TRANSLATE => translate(scene, i, reroll, strength, rng, log),
+        part::ROTATE => rotate(scene, i, reroll, strength, rng, log),
+        part::SCALE => scale(scene, i, reroll, settings, strength, rng, log),
+        part::WEIGHT => weight(scene, i, reroll, strength, rng, log),
+        part::VARIATIONS => variations(scene, i, reroll, settings, strength, rng, log),
+        part::COLOR => color(scene, i, reroll, strength, rng, log),
+        part::COLOR_VALUE => color_value(scene, i, reroll, strength, rng, log),
+        part::ADD => add(scene, i, reroll, settings, strength, rng, log),
+        part::REMOVE => {
+            scene.remove_transform(i);
+            log.push(format!("delete T{}", i));
+        }
+        part::BACKGROUND => background(scene, reroll, strength, rng, log),
+        part::SYMMETRY => symmetry(scene, i, reroll, settings, strength, rng, log),
+        _ => unreachable!("a part with no operator"),
+    }
+}
+
+fn translate(scene: &mut Scene, i: usize, reroll: bool, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    let m = &mut scene.transforms[i].matrix;
+    if reroll {
+        let p = roll::random_translation(rng);
+        m.w_axis = p.extend(1.0);
+        log.push(format!("T{} moved to ({:+.2},{:+.2},{:+.2})", i, p.x, p.y, p.z));
+    } else {
+        let d = random_unit(rng) * rng.gen_range(0.03..0.18) * strength;
+        m.w_axis += d.extend(0.0);
+        log.push(format!("T{} translate ({:+.2},{:+.2},{:+.2})", i, d.x, d.y, d.z));
+    }
+}
+
+fn rotate(scene: &mut Scene, i: usize, reroll: bool, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    let m = scene.transforms[i].matrix;
+    if reroll {
+        let (s, _, p) = m.to_scale_rotation_translation();
+        scene.transforms[i].matrix = Mat4::from_scale_rotation_translation(s, roll::random_quat(rng), p);
+        log.push(format!("T{} turned anew", i));
+    } else {
+        // Rotate the linear part around a random axis through its origin
+        let axis = random_unit(rng);
+        let deg = rng.gen_range(5.0..30.0) * strength;
+        scene.transforms[i].matrix =
+            crate::rot::turn_linear_part(m, crate::rot::Turn::about(axis, deg.to_radians()));
+        log.push(format!(
+            "T{} rotate {:.0}° about ({:+.2},{:+.2},{:+.2})",
+            i, deg, axis.x, axis.y, axis.z
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scale(
+    scene: &mut Scene,
+    i: usize,
+    reroll: bool,
+    settings: &RandomSettings,
+    strength: f32,
+    rng: &mut impl Rng,
+    log: &mut Vec<String>,
+) {
+    let m = &mut scene.transforms[i].matrix;
+    if reroll {
+        let (_, r, p) = m.to_scale_rotation_translation();
+        let s = roll::random_scale(settings, rng);
+        *m = Mat4::from_scale_rotation_translation(s, r, p);
+        log.push(format!("T{} resized to ({:.2},{:.2},{:.2})", i, s.x, s.y, s.z));
+    } else {
+        let f = (rng.gen_range(-0.25..0.25) * strength).exp();
+        m.x_axis *= f;
+        m.y_axis *= f;
+        m.z_axis *= f;
+        log.push(format!("T{} scale ×{:.2}", i, f));
+    }
+}
+
+fn weight(scene: &mut Scene, i: usize, reroll: bool, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    let w = &mut scene.transforms[i].weight;
+    if reroll {
+        // The range `roll::random_transform` draws from.
+        *w = rng.gen_range(0.5..2.0);
+        log.push(format!("T{} weight {:.2}", i, w));
+    } else {
+        let f = (rng.gen_range(-0.5..0.5) * strength).exp();
+        *w = (*w * f).clamp(0.01, 100.0);
+        log.push(format!("T{} weight ×{:.2}", i, f));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn variations(
+    scene: &mut Scene,
+    i: usize,
+    reroll: bool,
+    settings: &RandomSettings,
+    strength: f32,
+    rng: &mut impl Rng,
+    log: &mut Vec<String>,
+) {
+    let pool = settings.enabled_slots();
+    let t = &mut scene.transforms[i];
+    if reroll && !pool.is_empty() {
+        // A blend made the way a fresh roll makes one: some variations off the
+        // enabled list at their ranges, linear taking up the rest.
+        let m = (roll::rng_range_u32(rng, settings.per_map) as usize).clamp(1, pool.len());
+        t.variations = [0.0; NUM_VARIATIONS];
+        let mut names = Vec::new();
+        for slot in roll::choose(rng, &pool, m) {
+            t.variations[slot] = roll::roll_weight(settings, slot, rng);
+            names.push(format!("{} {:.2}", VARIATION_NAMES[slot], t.variations[slot]));
+        }
+        let nonlinear: f32 = t.variations[1..].iter().map(|w| w.abs()).sum();
+        t.variations[0] = (1.0 - nonlinear).max(0.0);
+        log.push(format!("T{} variations re-rolled: {}", i, names.join(", ")));
+        return;
+    }
+    // Usually adjust an existing slot, sometimes bring in a new one from the
+    // enabled list.
+    let existing: Vec<usize> =
+        t.variations.iter().enumerate().filter(|&(_, &w)| w != 0.0).map(|(s, _)| s).collect();
+    let introduce = !pool.is_empty() && (existing.is_empty() || rng.r#gen::<f32>() < 0.4);
+    if introduce {
+        let slot = pool[rng.gen_range(0..pool.len())];
+        let w = roll::roll_weight(settings, slot, rng) * NUDGE_SHARE * strength;
+        t.variations[slot] += w;
+        log.push(format!("T{} +{} {:.2}", i, VARIATION_NAMES[slot], w));
+    } else {
+        // `applicable` guarantees one of the two branches has something.
+        let slot = existing[rng.gen_range(0..existing.len())];
+        let dw = rng.gen_range(-0.15..0.15) * strength;
+        let w = &mut t.variations[slot];
+        *w = (*w + dw).clamp(-4.0, 4.0);
+        if w.abs() < 0.03 {
+            *w = 0.0;
+            log.push(format!("T{} -{} (removed)", i, VARIATION_NAMES[slot]));
+        } else {
+            log.push(format!("T{} {} {:+.2} -> {:.2}", i, VARIATION_NAMES[slot], dw, w));
+        }
+    }
+}
+
+/// The colour operator, which is a different thing in each mode. Hue-shifting
+/// one transform's RGB is meaningless once a palette owns the colours —
+/// nothing downstream reads it — so in palette mode the gradient is what
+/// changes instead. Without this, `U` in palette mode would spend a mutation
+/// doing nothing visible.
+fn color(scene: &mut Scene, i: usize, reroll: bool, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    let palette_mode = scene.color_mode == crate::scene::ColorMode::Palette && scene.palette.is_some();
+    match (palette_mode, reroll) {
+        (true, true) => {
+            scene.set_palette(crate::palette::random::palette(rng));
+            log.push("palette re-rolled".to_string());
+        }
+        (true, false) => {
+            if let Some(p) = scene.palette.as_mut() {
+                log.push(crate::palette::random::perturb(p, rng, strength));
+            }
+        }
+        (false, true) => {
+            scene.colors[i] = roll::hsv_to_rgb(rng.gen_range(0.0..360.0), rng.gen_range(0.6..1.0), rng.gen_range(0.7..1.0));
+            log.push(format!("T{} colour re-rolled", i));
+        }
+        (false, false) => {
+            let deg = rng.gen_range(-90.0..90.0) * strength;
+            scene.colors[i] = rotate_hue(scene.colors[i], deg);
+            log.push(format!("T{} hue {:+.0}°", i, deg));
+        }
+    }
+}
+
+fn color_value(scene: &mut Scene, i: usize, reroll: bool, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    let cv = &mut scene.transforms[i].color_value;
+    if reroll {
+        *cv = rng.r#gen();
+        log.push(format!("T{} color_value {:.2}", i, cv));
+    } else {
+        let d = rng.gen_range(-0.2..0.2) * strength;
+        *cv = (*cv + d).rem_euclid(1.0);
+        log.push(format!("T{} color_value {:+.2}", i, d));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add(
+    scene: &mut Scene,
+    i: usize,
+    reroll: bool,
+    settings: &RandomSettings,
+    strength: f32,
+    rng: &mut impl Rng,
+    log: &mut Vec<String>,
+) {
+    let n = scene.transforms.len();
+    if reroll {
+        // A map made the way a fresh roll makes one, in map `i`'s layer.
+        let mut spec = roll::random_transform(settings, rng);
+        spec.layer = scene.transforms[i].layer;
+        let pool = settings.enabled_slots();
+        if !pool.is_empty() && rng.r#gen::<f32>() >= settings.affine {
+            let m = (roll::rng_range_u32(rng, settings.per_map) as usize).min(pool.len());
+            for slot in roll::choose(rng, &pool, m) {
+                spec.variations[slot] = roll::roll_weight(settings, slot, rng);
+            }
+            let nonlinear: f32 = spec.variations[1..].iter().map(|w| w.abs()).sum();
+            spec.variations[0] = (1.0 - nonlinear).max(0.0);
+        }
+        spec.color_value = rng.r#gen();
+        let color = roll::hsv_to_rgb(rng.gen_range(0.0..360.0), rng.gen_range(0.6..1.0), rng.gen_range(0.7..1.0));
+        scene.insert_transform(n, spec, None, color, None);
+        log.push(format!("new map T{}", n));
+    } else {
+        // Duplicate with a translate nudge
+        let mut spec = scene.transforms[i].clone();
+        let d = random_unit(rng) * rng.gen_range(0.05..0.2) * strength;
+        spec.matrix.w_axis += d.extend(0.0);
+        let name = scene.transform_names[i].as_ref().map(|s| format!("{} mut", s));
+        let color = scene.colors[i];
+        scene.insert_transform(n, spec, name, color, Some(i));
+        log.push(format!("duplicate T{} -> T{}", i, n));
+    }
+}
+
+fn background(scene: &mut Scene, reroll: bool, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+    if reroll {
+        let tint = roll::tint(scene, rng);
+        scene.background = roll::random_background(rng, tint);
+        log.push("background re-rolled".to_string());
+    } else {
+        let deg = rng.gen_range(-30.0..30.0) * strength;
+        let level = (rng.gen_range(-0.3f32..0.3) * strength).exp();
+        let bg = crate::palette::random::rotate_hue(scene.background, deg) * level;
+        scene.background = bg.clamp(Vec3::ZERO, Vec3::ONE);
+        log.push(format!("background hue {:+.0}°, level ×{:.2}", deg, level));
+    }
+}
+
+/// Nudge: the group's axis tilts. Re-roll: another group off the profile's
+/// symmetry settings on the same motifs — or, on a flame without one, a group
+/// made the way a fresh roll makes it.
+#[allow(clippy::too_many_arguments)]
+fn symmetry(
+    scene: &mut Scene,
+    i: usize,
+    reroll: bool,
+    settings: &RandomSettings,
+    strength: f32,
+    rng: &mut impl Rng,
+    log: &mut Vec<String>,
+) {
+    use crate::symmetry::Symmetry;
+    // The group map `i` is in, else the first one in the scene.
+    let group = scene.transforms[i]
+        .symmetry
+        .clone()
+        .or_else(|| scene.transforms.iter().find_map(|t| t.symmetry.clone()));
+    let can_reroll = settings.symmetry.any_kind();
+    let Some(old) = group else {
+        if !can_reroll {
+            return;
+        }
+        // No group yet: give map `i`'s layer one, as a fresh roll would.
+        let layer = scene.transforms[i].layer;
+        let idx: Vec<usize> = (0..scene.transforms.len()).filter(|&j| scene.transforms[j].layer == layer).collect();
+        let Some(sym) = roll::random_symmetry(&settings.symmetry, rng) else { return };
+        let free = (roll::rng_range_u32(rng, settings.symmetry.free) as usize).min(idx.len() - 1);
+        let k = roll::motif_shrink(&sym);
+        for j in roll::choose(rng, &idx, idx.len() - free) {
+            let (s, r, p) = scene.transforms[j].matrix.to_scale_rotation_translation();
+            scene.transforms[j].matrix = Mat4::from_scale_rotation_translation(s * k, r, p);
+            scene.transforms[j].symmetry = Some(sym.clone());
+        }
+        log.push(format!("symmetry {} added", sym.label()));
+        return;
+    };
+    let (new, rescale, line) = if reroll && can_reroll {
+        let Some(sym) = roll::random_symmetry(&settings.symmetry, rng) else { return };
+        // The motifs were shrunk for the old group's size; size them for the new.
+        let k = roll::motif_shrink(&sym) / roll::motif_shrink(&old);
+        let line = format!("symmetry {} -> {}", old.label(), sym.label());
+        (sym, k, line)
+    } else {
+        let tilt = (rng.gen_range(3.0f32..15.0) * strength).to_radians();
+        let axis = glam::Quat::from_axis_angle(random_unit(rng), tilt) * old.axis();
+        let Ok(sym) = Symmetry::new(old.kind(), axis, old.mirror(), old.color()) else { return };
+        let line = format!("symmetry {} axis tilted", old.label());
+        (sym, 1.0, line)
+    };
+    for t in scene.transforms.iter_mut().filter(|t| t.symmetry.as_ref() == Some(&old)) {
+        if rescale != 1.0 {
+            let (s, r, p) = t.matrix.to_scale_rotation_translation();
+            t.matrix = Mat4::from_scale_rotation_translation(s * rescale, r, p);
+        }
+        t.symmetry = Some(new.clone());
+    }
+    log.push(line);
+}
+
+/// Rotate a color's hue by `deg` degrees, preserving saturation/value
+fn rotate_hue(c: Vec3, deg: f32) -> Vec3 {
+    // Minimal RGB<->HSV roundtrip (matches app.rs helpers)
+    let max = c.x.max(c.y).max(c.z);
+    let min = c.x.min(c.y).min(c.z);
+    let delta = max - min;
+    let h = if delta < 1e-6 {
+        0.0
+    } else if max == c.x {
+        60.0 * (((c.y - c.z) / delta).rem_euclid(6.0))
+    } else if max == c.y {
+        60.0 * ((c.z - c.x) / delta + 2.0)
+    } else {
+        60.0 * ((c.x - c.y) / delta + 4.0)
+    };
+    let s = if max < 1e-6 { 0.0 } else { delta / max };
+    roll::hsv_to_rgb(h + deg, s, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    fn test_scene(dir_name: &str) -> Scene {
+        let dir = std::env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("base.toml");
+        std::fs::write(
+            &path,
+            r#"
+[meta]
+name = "Mutate Base"
+point_size = 0.002
+
+[[transform]]
+translation = [0.0, 0.0, 0.5]
+scale = 0.5
+color = [1.0, 0.2, 0.2]
+
+[[transform]]
+translation = [0.0, 0.47, -0.17]
+scale = 0.5
+color = [0.2, 1.0, 0.2]
+
+[[transform]]
+translation = [-0.41, -0.24, -0.17]
+scale = 0.5
+color = [0.2, 0.2, 1.0]
+"#,
+        )
+        .unwrap();
+        Scene::load(&path).unwrap()
+    }
+
+    /// In palette mode the gradient is what colour *is*, so `U` has to reach
+    /// it. Before this, every colour mutation edited per-transform RGB that
+    /// nothing downstream read, and mutating a palette scene never changed
+    /// its colours at all.
+    #[test]
+    fn mutation_reaches_the_palette_in_palette_mode() {
+        let settings = RandomSettings::default();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(11);
+        let mut scene = test_scene("fracturize_mutate_palette");
+        scene.set_palette(crate::palette::library::get("ember").unwrap());
+
+        let mut palette_changed = false;
+        for _ in 0..60 {
+            let before = scene.palette.clone().unwrap();
+            let log = mutate(&mut scene, &settings, 1.0, &mut rng);
+            if scene.palette.as_ref() != Some(&before) {
+                palette_changed = true;
+                assert!(
+                    log.iter().any(|l| l.starts_with("palette")),
+                    "a palette change must be reported: {log:?}"
+                );
+            }
+            // Whatever happened, the rendered gradient must still agree with
+            // the palette — a stale colormap would show the old colours.
+            assert_eq!(scene.colormap, scene.effective_palette().to_colormap());
+            assert_eq!(scene.color_mode, crate::scene::ColorMode::Palette);
+        }
+        assert!(palette_changed, "60 mutations never touched the palette");
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_palette")).ok();
+    }
+
+    /// ...and in transforms mode it must still do the old thing.
+    #[test]
+    fn mutation_still_shifts_transform_hues_without_a_palette() {
+        let settings = RandomSettings::default();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(11);
+        let mut scene = test_scene("fracturize_mutate_hue");
+        let before = scene.colors.clone();
+        let mut saw_hue = false;
+        for _ in 0..60 {
+            let log = mutate(&mut scene, &settings, 1.0, &mut rng);
+            saw_hue |= log.iter().any(|l| l.contains("hue"));
+            assert!(scene.palette.is_none(), "transforms mode must not invent a palette");
+        }
+        assert!(saw_hue, "60 mutations never shifted a transform hue");
+        assert_ne!(scene.colors, before);
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_hue")).ok();
+    }
+
+    /// Every part, nudged and re-rolled, keeps the scene consistent and
+    /// saveable.
+    #[test]
+    fn mutations_stay_consistent_and_saveable() {
+        let mut settings = RandomSettings::default();
+        // Every part on, half re-rolls, so every operator runs.
+        for p in settings.mutate.parts.all_mut() {
+            *p = crate::dice::Part { odds: 1.0, reroll: 0.5 };
+        }
+        settings.symmetry.chance = 1.0;
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+        let dir = std::env::temp_dir().join("fracturize_mutate_consistent");
+        for round in 0..80 {
+            let mut scene = test_scene("fracturize_mutate_consistent");
+            let log = mutate(&mut scene, &settings, 1.0, &mut rng);
+            assert!(!log.is_empty(), "round {}: no ops logged", round);
+            // Parallel arrays stay in sync
+            assert_eq!(scene.transforms.len(), scene.colors.len());
+            assert_eq!(scene.transforms.len(), scene.transform_names.len());
+            assert!(scene.transforms.len() >= 2);
+            assert!(scene.transforms.len() <= 5, "round {round}: past the roll's most maps");
+            // Everything stays finite
+            for t in &scene.transforms {
+                assert!(t.matrix.to_cols_array().iter().all(|v| v.is_finite()), "round {round}: {log:?}");
+                assert!(t.weight.is_finite() && t.weight > 0.0);
+            }
+            assert!(scene.background.to_array().iter().all(|c| (0.0..=1.0).contains(c)));
+            // And the result round-trips through the TOML format
+            let out = dir.join("mutated.toml");
+            scene.save(&out).unwrap();
+            Scene::load(&out).unwrap_or_else(|e| panic!("round {round}: {e}\n{log:?}"));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every part at odds 0 but part `k`. (`Parts::default()` is the shipped
+    /// odds, not zeros.)
+    fn only(k: usize, reroll: f32) -> crate::dice::Parts {
+        let mut parts = crate::dice::Parts::default();
+        for (i, p) in parts.all_mut().into_iter().enumerate() {
+            *p = crate::dice::Part { odds: if i == k { 1.0 } else { 0.0 }, reroll };
+        }
+        parts
+    }
+
+    /// A part with no odds is never touched: a profile can mask everything
+    /// but colour.
+    #[test]
+    fn zeroed_parts_are_left_alone() {
+        let mut settings = RandomSettings::default();
+        settings.mutate.parts = only(part::COLOR, 0.3);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(5);
+        let base = test_scene("fracturize_mutate_mask");
+        for _ in 0..30 {
+            let mut scene = base.clone();
+            mutate(&mut scene, &settings, 1.0, &mut rng);
+            let maps = |s: &Scene| s.transforms.iter().map(|t| (t.matrix, t.weight, t.variations, t.color_value)).collect::<Vec<_>>();
+            assert_eq!(maps(&scene), maps(&base), "a masked mutation moved a map");
+            assert_eq!(scene.background, base.background);
+        }
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_mask")).ok();
+    }
+
+    /// A variation brought in by a mutation comes off the profile's enabled
+    /// list — the same list a fresh roll draws from.
+    #[test]
+    fn new_variations_come_from_the_enabled_list() {
+        let mut settings = RandomSettings::default();
+        for v in settings.variations.values_mut() {
+            v.enabled = false;
+        }
+        settings.variations.get_mut("julia").unwrap().enabled = true;
+        settings.mutate.parts = only(part::VARIATIONS, 0.5);
+        let julia = VARIATION_NAMES.iter().position(|&v| v == "julia").unwrap();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
+        for _ in 0..40 {
+            let mut scene = test_scene("fracturize_mutate_pool");
+            mutate(&mut scene, &settings, 1.0, &mut rng);
+            for t in &scene.transforms {
+                for (slot, &w) in t.variations.iter().enumerate().skip(1) {
+                    assert!(slot == julia || w == 0.0, "mutated in {}", VARIATION_NAMES[slot]);
+                }
+            }
+        }
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_pool")).ok();
+    }
+
+    #[test]
+    fn seeded_mutation_is_deterministic() {
+        let settings = RandomSettings::default();
+        let a = test_scene("fracturize_mutate_deterministic");
+        let ra = crate::dice::mutate_seeded(&settings, &a, 7).ok().unwrap();
+        let rb = crate::dice::mutate_seeded(&settings, &a, 7).ok().unwrap();
+        assert_eq!(ra.log, rb.log);
+        let matrices = |s: &Scene| s.transforms.iter().map(|t| t.matrix).collect::<Vec<_>>();
+        assert_eq!(matrices(&ra.scene), matrices(&rb.scene));
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_deterministic")).ok();
+    }
+
+    /// A mutation that passes is held to its parent: whatever came back
+    /// measures no worse on shape than the parent did.
+    #[test]
+    fn gated_mutations_still_render() {
+        let settings = RandomSettings::default();
+        let parent = test_scene("fracturize_mutate_gated");
+        let mut found = 0;
+        for seed in 0..12 {
+            if let Ok(r) = crate::dice::mutate_seeded(&settings, &parent, seed) {
+                found += 1;
+                let stats = crate::dice::gate::measure(&r.scene.transforms).expect("a passed child measures");
+                assert!(stats.acceptable(), "seed {seed}: {:?}", r.log);
+            }
+        }
+        assert!(found >= 10, "only {found} of 12 mutations passed");
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_gated")).ok();
+    }
+}
