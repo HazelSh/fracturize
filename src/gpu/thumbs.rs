@@ -162,7 +162,7 @@ impl Thumbnail {
             POINTS as f64,
             height as f32,
             crate::scene::clear_color(scene.background, 1.0),
-            false,
+            crate::gpu::buffers::Alpha::Opaque,
             Grade::default(),
         );
 

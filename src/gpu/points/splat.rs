@@ -10,7 +10,7 @@
 
 use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, TextureFormat};
 
-use crate::gpu::buffers::{create_camera_buffer, CameraUniforms};
+use crate::gpu::buffers::{create_camera_buffer, Alpha, CameraUniforms};
 use crate::gpu::points::downsample::{Downsampler, Filter, Source};
 use crate::gpu::points::volume::{VolumeParams, BINS};
 use crate::gpu::points::renderer::DEPTH_FORMAT;
@@ -57,8 +57,9 @@ struct SplatParams {
     background: [f32; 4],
     exposure_scale: f32,
     gain: f32,
-    /// 1.0 = write straight-alpha coverage instead of compositing over
-    /// `background`. Takes one of the two pad slots, so the uniform's size
+    /// `Alpha::shader_value`: 1.0 = write straight-alpha coverage instead of
+    /// compositing over `background`, 2.0 = the same coverage premultiplied
+    /// for a compositor. Takes one of the two pad slots, so the uniform's size
     /// and alignment are unchanged.
     transparent: f32,
     /// `1/gamma`, inverted here so the shader never divides.
@@ -840,7 +841,7 @@ impl SplatRenderer {
         samples: f64,
         screen_height: f32,
         background: wgpu::Color,
-        transparent: bool,
+        alpha: Alpha,
         grade: Grade,
     ) {
         let grade = grade.clamped();
@@ -859,7 +860,7 @@ impl SplatRenderer {
             ],
             exposure_scale,
             gain: GAIN,
-            transparent: transparent as u32 as f32,
+            transparent: alpha.shader_value(),
             gamma_inv: 1.0 / grade.gamma,
             gamma_threshold: grade.gamma_threshold,
             vibrancy: grade.vibrancy,

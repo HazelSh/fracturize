@@ -210,6 +210,40 @@ impl GpuTransform {
     }
 }
 
+/// What a pass does with the alpha channel it writes.
+///
+/// Three answers because there are two places alpha can go and they disagree
+/// on its meaning. A PNG stores straight alpha. An X11 compositor reads a
+/// 32-bit window as *premultiplied*, and multiplies in sRGB code values rather
+/// than linear light — see `premultiply_encoded` in the shaders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alpha {
+    /// Composite over the scene background, alpha 1.
+    Opaque,
+    /// A file with an alpha channel: a `--transparent` render or screenshot.
+    Straight,
+    /// A `--transparent-window` swapchain the desktop shows through.
+    Premultiplied,
+}
+
+impl Alpha {
+    /// The uniform's encoding, shared by `render.wgsl` and `splat.wgsl`.
+    pub fn shader_value(self) -> f32 {
+        match self {
+            Alpha::Opaque => 0.0,
+            Alpha::Straight => 1.0,
+            Alpha::Premultiplied => 2.0,
+        }
+    }
+}
+
+impl From<bool> for Alpha {
+    /// The `transparent` flag files have always been rendered with.
+    fn from(transparent: bool) -> Self {
+        if transparent { Alpha::Straight } else { Alpha::Opaque }
+    }
+}
+
 /// Camera uniforms (144 bytes, must be 16-byte aligned)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -241,8 +275,9 @@ pub struct CameraUniforms {
     /// The background, linear RGB. Haze fades toward it, so the shaders need
     /// to know what it is; it sits in what used to be tail padding.
     pub background: [f32; 3], // 12 bytes
-    /// 1 when this pass is writing an image with an alpha channel (a
-    /// `--transparent` render or screenshot), 0 for the window. The points
+    /// `Alpha::shader_value`: 1 when this pass is writing an image with an
+    /// alpha channel (a `--transparent` render or screenshot), 2 for a
+    /// `--transparent-window` swapchain, 0 for an opaque window. The points
     /// renderer is opaque and depth-tested, so it has no other way to know
     /// that the alpha it writes will be kept — see `render.wgsl`.
     pub transparent: f32,   // 4 bytes
@@ -399,6 +434,13 @@ impl CameraUniforms {
             self.guard_ln_near = ln_near;
             self.guard_inv_ln_width = inv_ln_width;
         }
+        self
+    }
+
+    /// Override what `new`'s `transparent` flag said. Only the window pass
+    /// needs this, to ask for `Alpha::Premultiplied`, which a bool can't say.
+    pub fn with_alpha(mut self, alpha: Alpha) -> Self {
+        self.transparent = alpha.shader_value();
         self
     }
 }

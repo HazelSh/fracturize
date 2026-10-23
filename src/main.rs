@@ -1080,6 +1080,15 @@ struct Args {
     /// Disable vsync (uncapped frame rate, useful for benchmarking)
     #[arg(long, help_heading = "Windowed mode")]
     no_vsync: bool,
+
+    /// Let the desktop show through wherever the fractal isn't
+    ///
+    /// For composing the live view over other windows, or capturing it with
+    /// something like OBS. Needs a compositing window manager (xfwm4's
+    /// compositor, picom, any Wayland compositor); without one the empty
+    /// pixels come out black. The scene's background colour is not drawn.
+    #[arg(long, help_heading = "Windowed mode")]
+    transparent_window: bool,
 }
 
 /// Parse `--focus x,y,z`
@@ -1942,7 +1951,9 @@ impl ApplicationHandler for AppWrapper {
             .with_title("Fracturize - 3D IFS Fractal Renderer")
             // Roomy enough for the toolbar, a couple of floating panels and
             // the status bar without eating a 1080p desktop whole.
-            .with_inner_size(PhysicalSize::new(1440u32, 860u32));
+            .with_inner_size(PhysicalSize::new(1440u32, 860u32))
+            // An ARGB visual on X11; see `--transparent-window`.
+            .with_transparent(self.args.transparent_window);
 
         let window = Arc::new(
             event_loop
@@ -1993,6 +2004,7 @@ impl ApplicationHandler for AppWrapper {
             scene,
             self.args.fog,
             !self.args.no_vsync,
+            self.args.transparent_window,
             self.args.scene.clone(),
             view,
             self.args.fov.map(camera::Fov::from_degrees),
