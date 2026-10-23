@@ -1,8 +1,10 @@
 //! Mutate window: how strongly a mutation perturbs the scene, and the button
-//! that does one. The same `App::mutate_scene` U runs, so a mutation from here
+//! that does one. Strength is the dice profile's (see `crate::dice`), so it
+//! is the same number the Random settings window shows under Mutation. The same `App::mutate_scene` U runs, so a mutation from here
 //! and one from the key are the same edit and undo the same way.
 
 use crate::app::App;
+use crate::dice::STRENGTH_LIMITS;
 
 use super::hints::hinted;
 use super::icons;
@@ -18,7 +20,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .show(ctx, |ui| {
             let mut strength = app.mutate_strength();
             let resp = ui.add(
-                egui::Slider::new(&mut strength, 0.1..=3.0)
+                egui::Slider::new(&mut strength, STRENGTH_LIMITS[0]..=STRENGTH_LIMITS[1])
                     .text("strength")
                     .clamping(egui::SliderClamping::Always),
             );
@@ -33,9 +35,26 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             hinted(
                 resp,
                 &mut app.ui_state,
-                "How much each mutation changes the scene, from this button or U",
-                "drag: change mutation strength",
+                "How much each mutation changes the scene, from this button or U. \
+                 Part of the dice profile; it halves on its own when a scene \
+                 rejects strong changes",
+                "drag: change the profile's mutation strength",
             );
+
+            let profile = app.dice_profile();
+            let marker = if profile.modified(app.random_settings()) { "*" } else { "" };
+            let caption = format!("profile: {}{marker}", profile.entry.name);
+            let resp = ui.add(egui::Button::new((icons::DICE, caption)).frame(false));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "The dice profile says which parts a mutation may change and how. \
+                 Click to open Random settings, where it is edited, saved and loaded",
+                "click: open Random settings",
+            );
+            if resp.clicked() {
+                app.ui_state.panels.random_settings_open = true;
+            }
 
             ui.horizontal(|ui| {
                 let resp = ui.button((icons::SHUFFLE, "Mutate"));

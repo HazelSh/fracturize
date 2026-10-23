@@ -128,6 +128,7 @@ fn profile_bar(ui: &mut egui::Ui, app: &mut App, s: &RandomSettings) -> Option<P
         ui.label("Profile");
         let combo = egui::ComboBox::from_id_salt("fracturize_dice_profile")
             .selected_text(caption)
+            .width(200.0)
             .show_ui(ui, |ui| {
                 for entry in profile::list() {
                     let label = if entry.shared { format!("{}  (shared)", entry.name) } else { entry.name.clone() };
@@ -145,7 +146,10 @@ fn profile_bar(ui: &mut egui::Ui, app: &mut App, s: &RandomSettings) -> Option<P
              is the shipped settings. --random-config takes the same names.",
             "click: load a dice profile",
         );
-
+    });
+    // The buttons get a row of their own, so the bar fits the window's
+    // narrowest width with nothing clipped.
+    ui.horizontal(|ui| {
         let writable = selected.writable();
         let resp = ui.add_enabled(writable && modified, egui::Button::new((icons::SAVE, "Save")));
         let tip = if !writable {

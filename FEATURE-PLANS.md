@@ -46,6 +46,12 @@ of the first list and the second list goes away.
 
 ### 1. One settings profile, save/load, read by both
 
+**Built** (2026-10-24, `src/dice/`; AGENTS.md "The dice"). As planned, plus
+`--random-sheet N` (the CLI batch sheet of fresh rolls) and two shared
+profiles in `scenes/dice/`. "Revert to defaults" is loading the built-in
+`default` profile; Revert goes back to the loaded one. Composites mutate per
+layer and are gated per layer; placement isn't a part yet.
+
 1. **`RandomSettings` grows a `[mutate]` half**, so one file says what the
    dice may do, fresh or from a parent. Everything a roll can produce is a
    *part* (maps, variations, symmetry, colour, palette, background, and from

@@ -33,8 +33,12 @@ const NUDGE_SHARE: f32 = 0.45;
 pub fn mutate(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &mut impl Rng) -> Vec<String> {
     let n_ops = roll::rng_range_u32(rng, settings.mutate.operators);
     let mut log = Vec::new();
+    // Maps an earlier operator changed, so a later one doesn't delete them
+    // and throw that operator away. New maps are appended, and count.
+    let mut touched = vec![false; scene.transforms.len()];
     for _ in 0..n_ops {
-        apply_one(scene, settings, strength, rng, &mut log);
+        apply_one(scene, settings, strength, rng, &mut touched, &mut log);
+        touched.resize(scene.transforms.len(), true);
     }
     if log.is_empty() {
         log.push("nothing changed: no part this scene has is given any odds".to_string());
@@ -88,14 +92,14 @@ fn layer_len(scene: &Scene, i: usize) -> usize {
 /// roll's map count is the profile's say on how many maps a flame has, so a
 /// mutation may not take a layer past it — but a scene already past it isn't
 /// stuck, it just can't go further.
-fn applicable(k: usize, scene: &Scene, i: usize, settings: &RandomSettings) -> bool {
+fn applicable(k: usize, scene: &Scene, i: usize, settings: &RandomSettings, touched: &[bool]) -> bool {
     let n = layer_len(scene, i);
     match k {
         part::VARIATIONS => {
             !settings.enabled_slots().is_empty() || scene.transforms[i].variations.iter().any(|&w| w != 0.0)
         }
         part::ADD => n < settings.transforms[1] as usize,
-        part::REMOVE => n > (settings.transforms[0] as usize).max(1),
+        part::REMOVE => !touched[i] && n > (settings.transforms[0] as usize).max(1),
         part::SYMMETRY => {
             settings.symmetry.any_kind() || scene.transforms.iter().any(|t| t.symmetry.is_some())
         }
@@ -103,7 +107,14 @@ fn applicable(k: usize, scene: &Scene, i: usize, settings: &RandomSettings) -> b
     }
 }
 
-fn apply_one(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &mut impl Rng, log: &mut Vec<String>) {
+fn apply_one(
+    scene: &mut Scene,
+    settings: &RandomSettings,
+    strength: f32,
+    rng: &mut impl Rng,
+    touched: &mut Vec<bool>,
+    log: &mut Vec<String>,
+) {
     let n = scene.transforms.len();
     if n == 0 {
         return;
@@ -113,7 +124,7 @@ fn apply_one(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &
     let odds: Vec<f32> = parts
         .iter()
         .enumerate()
-        .map(|(k, p)| if applicable(k, scene, i, settings) { p.odds } else { 0.0 })
+        .map(|(k, p)| if applicable(k, scene, i, settings, touched) { p.odds } else { 0.0 })
         .collect();
     let total: f32 = odds.iter().sum();
     if total <= 0.0 {
@@ -139,11 +150,16 @@ fn apply_one(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: &
         part::ADD => add(scene, i, reroll, settings, strength, rng, log),
         part::REMOVE => {
             scene.remove_transform(i);
+            touched.remove(i);
             log.push(format!("delete T{}", i));
+            return;
         }
         part::BACKGROUND => background(scene, reroll, strength, rng, log),
         part::SYMMETRY => symmetry(scene, i, reroll, settings, strength, rng, log),
         _ => unreachable!("a part with no operator"),
+    }
+    if k != part::BACKGROUND {
+        touched[i] = true;
     }
 }
 
@@ -591,6 +607,38 @@ color = [0.2, 0.2, 1.0]
             assert_eq!(scene.background, base.background);
         }
         std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_mask")).ok();
+    }
+
+    /// An operator's work is never thrown away by a later one deleting its
+    /// map: a mutation that moved T1 doesn't then delete T1.
+    #[test]
+    fn a_changed_map_is_not_deleted() {
+        let mut settings = RandomSettings::default();
+        settings.mutate.parts = only(part::TRANSLATE, 0.0);
+        settings.mutate.parts.remove.odds = 1.0;
+        settings.mutate.operators = [4, 4];
+        settings.transforms = [1, 6];
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
+        let base = test_scene("fracturize_mutate_touched");
+        let mut deletions = 0;
+        for _ in 0..60 {
+            let mut scene = base.clone();
+            let log = mutate(&mut scene, &settings, 1.0, &mut rng);
+            // Indices in the log are as of each step, so replay them.
+            let mut touched = vec![false; base.transforms.len()];
+            for line in &log {
+                let i: usize = line.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()).unwrap().parse().unwrap();
+                if line.starts_with("delete") {
+                    assert!(!touched[i], "deleted a map it had changed: {log:?}");
+                    touched.remove(i);
+                    deletions += 1;
+                } else {
+                    touched[i] = true;
+                }
+            }
+        }
+        assert!(deletions > 0, "never deleted anything, so this tested nothing");
+        std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_touched")).ok();
     }
 
     /// A variation brought in by a mutation comes off the profile's enabled
