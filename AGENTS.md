@@ -57,7 +57,7 @@ src/
     subscenes.rs   # Subscenes window: layers, eye, share, import, placement
     xaos.rs        # Xaos: inspector block, matrix window, viewport edge overlay
     history.rs     # History window: every edit, click a row to jump to it
-    mutate.rs      # Mutate window: strength + the button
+    mutate.rs      # Mutate window: strength, its profile, the button
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
     random_settings.rs # What the dice may roll: variations, maps, bounds
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
@@ -478,7 +478,7 @@ Three rules the gizmo geometry depends on:
   faithful T·R·S. This is not fussiness: the scene format has no way to write a
   sheared matrix, so a drag that introduced shear would author something the
   save silently discards (see `GIZMO-PLAN.md` §1.1, which also notes that
-  `mutate.rs` already hits this).
+  `dice/mutate.rs` already hits this).
 * **An axis that projects shorter than `pick::MIN_AXIS_PX` offers no tip, no
   shaft and no adjacent rotate edge.** An axis pointing near the camera has
   almost no screen gain, so dragging along it doesn't degrade — it explodes.
