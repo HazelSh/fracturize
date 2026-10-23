@@ -904,6 +904,16 @@ struct Args {
     #[arg(long, value_name = "1-24", help_heading = "Contact sheets")]
     mutations: Option<u32>,
 
+    /// With --random: a sheet of N independent rolls, one tile per seed [no sheet]
+    ///
+    /// Seeds run from --seed (or a time-based one) upward, one per tile, and
+    /// each tile is labelled with its seed. Every roll is saved as
+    /// <out>.seed<N>.toml, so a tile you like is already a scene file: load it
+    /// with --scene, or reroll it with --random --seed <N>. Each tile is
+    /// framed by its own roll's camera. Honours --random-config.
+    #[arg(long, value_name = "1-36", help_heading = "Contact sheets")]
+    rolls: Option<u32>,
+
     /// How much each --mutations variant changes, as a multiplier
     #[arg(long, default_value = "1.0", value_name = "SCALE", help_heading = "Contact sheets")]
     mutation_strength: f32,
@@ -1360,7 +1370,74 @@ fn run_sweep(
         std::process::exit(1);
     });
     let build = sheet_scene_builder(args, scene_path, effort_points);
-    offline::render_sweep(params, &tiles, cols, rows, &build, &[])
+    offline::render_sweep(params, &tiles, cols, rows, &|i| build(&tiles[i].sets), &[])
+}
+
+/// `--random --rolls N`: a sheet of N independent rolls, seeds `seed..seed+N`.
+///
+/// A sweep sheet underneath — it frames each tile from its own scene, which a
+/// roll needs, since every roll picks its own camera — whose tiles are seeds
+/// rather than `--set`s. Every roll is saved before anything renders, so a
+/// stopped sheet still leaves every tile's scene on disk.
+fn run_rolls(
+    params: offline::OfflineParams,
+    args: &Args,
+    grid: offline::GridMode,
+    effort_points: Option<usize>,
+) -> Result<render_job::Outcome, String> {
+    let n = args.rolls.unwrap_or(0);
+    if !args.random || args.scene.is_some() {
+        eprintln!("--rolls is a sheet of random flames: use it with --random (and no --scene)");
+        std::process::exit(1);
+    }
+    if !matches!(grid, offline::GridMode::Single)
+        || args.mutations.is_some()
+        || !args.sweep.is_empty()
+        || args.map_grid
+        || args.edge_grid
+    {
+        eprintln!("--rolls is a sheet of its own: it cannot be combined with --orbit-grid, \
+                   --move-grid, --mutations, --sweep, --map-grid or --edge-grid");
+        std::process::exit(1);
+    }
+    if n == 0 || n > 36 {
+        eprintln!("--rolls must be 1..=36");
+        std::process::exit(1);
+    }
+    let base = args.seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    });
+    println!(
+        "Roll seeds: {} to {} (pass --seed {} to reproduce the sheet)",
+        base,
+        base + n as u64 - 1,
+        base
+    );
+    let stem = params.out_path.with_extension("");
+    let points = args.points.or(effort_points);
+    let mut scenes = Vec::with_capacity(n as usize);
+    let mut tiles = Vec::with_capacity(n as usize);
+    for i in 0..n as u64 {
+        let seed = base.wrapping_add(i);
+        let (mut scene, _) = random_scene(Some(seed), args.random_config.as_deref());
+        apply_palette_args(&mut scene, args, false);
+        let path = format!("{}.seed{}.toml", stem.display(), seed);
+        scene.save(&path).map_err(|e| format!("Failed to save roll {}: {}", seed, e))?;
+        if let Some(p) = points {
+            scene.point_count = p;
+        }
+        scenes.push(scene);
+        tiles.push(sweep::Tile {
+            sets: Vec::new(),
+            label: format!("seed {}", seed),
+            description: format!("--scene {}  (or --random --seed {})", path, seed),
+        });
+    }
+    let (cols, rows) = offline::grid_shape(n as usize);
+    offline::render_sweep(params, &tiles, cols, rows, &|i| Ok(scenes[i].clone()), &[])
 }
 
 /// `--map-grid`: a sweep sheet whose tiles differ only in which map they
@@ -1415,7 +1492,7 @@ fn run_map_grid(
     let lit: Vec<Option<gpu::points::compute::Isolate>> = (0..n).map(|i| Some(i.into())).collect();
     let (cols, rows) = offline::grid_shape(n);
     let build = sheet_scene_builder(args, scene_path, effort_points);
-    offline::render_sweep(params, &tiles, cols, rows, &build, &lit)
+    offline::render_sweep(params, &tiles, cols, rows, &|i| build(&tiles[i].sets), &lit)
 }
 
 /// `--isolate`'s argument: a map, or `a>b` for one xaos edge — the points `b`
@@ -1515,7 +1592,7 @@ fn run_edge_grid(
         }
     }
     let build = sheet_scene_builder(args, scene_path, effort_points);
-    offline::render_sweep(params, &tiles, n as u32, n as u32, &build, &lit)
+    offline::render_sweep(params, &tiles, n as u32, n as u32, &|i| build(&tiles[i].sets), &lit)
 }
 
 /// Each map's share of the points: the chance it is the one drawn, which is
@@ -2779,6 +2856,7 @@ fn main() {
         let many_images = args.orbit_grid.is_some()
             || args.move_grid.is_some()
             || args.mutations.is_some()
+            || args.rolls.is_some()
             || !args.sweep.is_empty()
             || args.map_grid
             || args.edge_grid
@@ -2962,6 +3040,7 @@ fn main() {
         let result = if let Some(format) = format {
             if !matches!(grid, offline::GridMode::Single)
                 || args.mutations.is_some()
+                || args.rolls.is_some()
                 || !args.sweep.is_empty()
                 || args.map_grid
                 || args.edge_grid
@@ -2995,6 +3074,7 @@ fn main() {
             )
         } else {
             match (args.sweep.is_empty(), args.mutations) {
+                _ if args.rolls.is_some() => run_rolls(params, &args, grid, effort_points),
                 _ if args.map_grid => run_map_grid(params, &args, grid, effort_points),
                 _ if args.edge_grid => run_edge_grid(params, &args, grid, effort_points),
                 (false, _) => run_sweep(params, &args, grid, effort_points),

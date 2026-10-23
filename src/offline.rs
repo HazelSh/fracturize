@@ -3829,8 +3829,9 @@ pub fn render_mutations(
 /// point buffer**. The camera grids share one fill because they only re-aim the
 /// camera; doing that here would render the same attractor N times.
 ///
-/// `build` turns a tile's extra `--set` arguments into a scene. It's a closure
-/// rather than a path so that `main.rs` stays the single owner of the
+/// `build` turns a tile's index into its scene — for a sweep, by applying that
+/// tile's extra `--set` arguments; for `--rolls`, by rolling a seed. It's a
+/// closure rather than a path so that `main.rs` stays the single owner of the
 /// load-then-`--zoom`-then-`--palette` pipeline; reloading from disk in here
 /// would silently drop those.
 pub fn render_sweep(
@@ -3838,7 +3839,7 @@ pub fn render_sweep(
     tiles: &[crate::sweep::Tile],
     cols: u32,
     rows: u32,
-    build: &dyn Fn(&[String]) -> Result<Scene, String>,
+    build: &dyn Fn(usize) -> Result<Scene, String>,
     // The map each tile isolates, by tile; a tile without one isolates
     // whatever `--isolate` asked for, if anything. This is what `--map-grid` is.
     tile_isolate: &[Option<crate::gpu::points::compute::Isolate>],
@@ -3899,10 +3900,7 @@ pub fn render_sweep(
     // Build every variant BEFORE touching the GPU. A sweep over a path that
     // doesn't resolve must fail once, up front — not N times, and not after a
     // minute of rendering.
-    let variants: Vec<Scene> = tiles
-        .iter()
-        .map(|t| build(&t.sets))
-        .collect::<Result<_, _>>()?;
+    let variants: Vec<Scene> = (0..tiles.len()).map(build).collect::<Result<_, _>>()?;
 
     let clear = crate::scene::clear_color(scene.background, if transparent { 0.0 } else { 1.0 });
 

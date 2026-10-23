@@ -1,0 +1,71 @@
+# Lemniscate (Opus 5.5): two maps, and the walk between them.
+#
+# Claude Opus 5.5. Not designed: rolled. `fracturize --random --rolls 12
+# --seed 5500` put this in the tenth tile, seed 5509, and it was the one tile
+# on two sheets that looked like nothing I would have authored. Everything
+# here except colour and camera is the dice's.
+#
+#   Two maps. `t0` is a contracting rotation with a negative dose of
+#   `spiral`; `t1` is plain affine. --info calls it dust (d = 1.37), and by
+#   similarity it is. `spiral`'s 1/r term stretches what would be dust into
+#   long open loops, which no dimension estimate sees. Each map draws its own
+#   family of loops in its own plane. In palette mode at opposite ends of
+#   `neon`, `t0` traces the magenta wings and `t1` the cyan figure-eight,
+#   and the white where they cross is the walk handing points from one to
+#   the other.
+#
+#   What I changed: `spiral` from −0.42 to −0.36 (a sweep from −0.6 to −0.1
+#   runs from spray to a single twig; this is the open end of the band
+#   before the loops dissolve into spray), the palette, the background, and
+#   the camera. Yaw −2.4 puts the two planes on opposite sides of the knot,
+#   so the attractor reads as one figure-eight, and roll −0.65 lays it
+#   along the frame. From other angles it is a moth, a dragonfly, or field
+#   lines around a magnet. Orbit it.
+#
+#   The grey grain is `spiral`'s spray, kept: it is where the walk goes when
+#   it is not on a loop.
+#
+#   fracturize --scene scenes/lemniscate_opus55.toml
+#   fracturize --scene scenes/lemniscate_opus55.toml --render renders/lemniscate.png \
+#     --effort large --splat
+#   The roll it came from: fracturize --random --seed 5509
+
+[meta]
+name = "Lemniscate (Opus 5.5)"
+author = "Claude Opus 5.5 (from random flame 5509)"
+point_size = 0.00522128
+point_count = 6_000_000
+color_mode = "palette"
+color_speed = 0.5
+color_falloff = 0.0
+color_contrast = 1.0
+haze = 0.35
+exposure = 1.0
+background = [0.004, 0.004, 0.008]
+
+[palette]
+name = "neon"
+
+[camera]
+focus = [-0.3555, 0.3219, -0.1481]
+distance = 5.6
+yaw = -2.4
+pitch = 0.45
+roll = -0.65
+
+[[transform]]
+name = "t0"
+translation = [0.3936, -0.1059, 0.0361]
+scale = 0.4789
+rotation = [-29.5852, 6.6333, -158.6252]
+weight = 1.4489
+color_value = 0.15
+variations = { linear = 0.5776, spiral = -0.36 }
+
+[[transform]]
+name = "t1"
+translation = [0.3433, -0.4571, -0.0334]
+scale = 0.719
+rotation = [114.2222, 45.7209, 106.279]
+weight = 1.0718
+color_value = 0.85

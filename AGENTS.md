@@ -984,6 +984,20 @@ candidate runs a short CPU chaos game (`trace.rs` walkers, the same variation
 port the shader uses) and is rejected unless it lands in a bounded attractor
 with real extent on two axes and *fractal* rather than solid occupancy.
 
+**A batch from the CLI: `--random --rolls N`** (1–36) renders one sheet of N
+independent rolls, seeds `--seed`, `--seed`+1, …, each tile labelled with its
+seed. Every roll is saved as `<out>.seed<N>.toml` *before* anything renders,
+so a tile worth keeping is already a scene file (`--scene` it, or reroll with
+`--random --seed <N>`), even if the sheet is stopped. It is a sweep sheet
+underneath (`run_rolls` in `main.rs`, `offline::render_sweep` with a builder
+that rolls a seed per tile), so each tile is framed by its own roll's camera;
+the ground is the first roll's background, because a sheet has one clear
+colour. Honours `--random-config` and `--palette`. Expect a few near-empty
+tiles: the dimension bound is off by default, which is what lets the dice
+produce sparse-but-striking rolls, and it also lets through rolls with d < 1
+that are truly a handful of points. `scenes/lemniscate_opus55.toml` came
+from the tenth tile of `--rolls 12 --seed 5500`.
+
 **What gets rolled is `RandomSettings`** — a preference (`[random]` in
 prefs.toml, edited in the Random settings window), never scene data:
 
