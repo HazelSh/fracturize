@@ -13,13 +13,13 @@ description = "Recolour; the form is never touched"
 author = "Claude Opus 5.5"
 
 [parts]
-translate = { on = false }
-rotate = { on = false }
-scale = { on = false }
-weight = { on = false }
-variations = { on = false }
-count = { on = false }
-symmetry = { on = false }
+translate = { odds = 0.0 }
+rotate = { odds = 0.0 }
+scale = { odds = 0.0 }
+weight = { odds = 0.0 }
+variations = { odds = 0.0 }
+count = { odds = 0.0 }
+symmetry = { odds = 0.0 }
 color = { odds = 0.5, reroll = 0.2 }
 color_value = { odds = 0.3, reroll = 0.1 }
 background = { odds = 0.2, reroll = 0.4 }

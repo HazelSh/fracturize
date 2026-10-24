@@ -130,7 +130,7 @@ fn apply_one(
     let odds: Vec<f32> = parts
         .iter()
         .enumerate()
-        .map(|(k, p)| if applicable(k, scene, i, settings, touched) { p.live_odds() } else { 0.0 })
+        .map(|(k, p)| if applicable(k, scene, i, settings, touched) { p.odds } else { 0.0 })
         .collect();
     let total: f32 = odds.iter().sum();
     if total <= 0.0 {
@@ -563,7 +563,7 @@ color = [0.2, 0.2, 1.0]
         let mut settings = RandomSettings::default();
         // Every part on, half re-rolls, so every operator runs.
         for p in settings.parts.all_mut() {
-            *p = crate::dice::Part { on: true, odds: 1.0, reroll: 0.5 };
+            *p = crate::dice::Part { odds: 1.0, reroll: 0.5 };
         }
         settings.symmetry.chance = 1.0;
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
@@ -595,7 +595,7 @@ color = [0.2, 0.2, 1.0]
     fn only(k: usize, reroll: f32) -> crate::dice::Parts {
         let mut parts = crate::dice::Parts::default();
         for (i, p) in parts.all_mut().into_iter().enumerate() {
-            *p = crate::dice::Part { on: i == k, odds: 1.0, reroll };
+            *p = crate::dice::Part { odds: if i == k { 1.0 } else { 0.0 }, reroll };
         }
         parts
     }
@@ -624,7 +624,7 @@ color = [0.2, 0.2, 1.0]
     fn a_changed_map_is_not_deleted() {
         let mut settings = RandomSettings::default();
         settings.parts = only(part::TRANSLATE, 0.0);
-        settings.parts.count.on = true;
+        settings.parts.count.odds = 1.0;
         settings.mutation.changes = [4, 4];
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
         let base = test_scene("fracturize_mutate_touched");

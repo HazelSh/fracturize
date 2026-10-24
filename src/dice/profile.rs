@@ -10,7 +10,7 @@
 //! description = "Few transforms, sharp folds, never smooth"
 //!
 //! [parts]                    # what the dice may make: one line per part
-//! color = { on = false }     # off: kept as it was, by a roll or a mutation
+//! color = { odds = 0.0 }     # off: kept as it was, by a roll or a mutation
 //! variations = { odds = 0.4, reroll = 0.25 }
 //!
 //! [ranges]                   # how each part is drawn
@@ -228,9 +228,10 @@ const HEADER: &str = "\
 const NOTES: &[(&str, &str)] = &[
     (
         "parts",
-        "What the dice may make. on: whether they may (off = keep the scene's own,\n\
-         by a roll or a mutation). odds: how often a mutation picks it against the\n\
-         others. reroll: chance a mutation replaces it rather than nudging it.",
+        "What the dice may make. odds: 0 is off (a roll and a mutation both keep the\n\
+         scene's own); above 0 it's on, and how often a mutation picks it against\n\
+         the others (0.0001 at least). reroll: chance a mutation replaces it\n\
+         rather than nudging it.",
     ),
     ("ranges", "How each part is drawn."),
     ("ranges.transforms", "transforms per flame"),
@@ -624,7 +625,7 @@ mod tests {
         s.symmetry.chance = 0.3;
         s.mutation.strength = 0.7;
         s.parts.background.odds = 0.05;
-        s.parts.color.on = false;
+        s.parts.color.odds = 0.0;
         let meta = Meta { name: "spiky".into(), description: "few maps, sharp".into(), author: "Hazel".into() };
         let text = to_toml_string(&s, &meta);
         let back = parse(&text).unwrap();
@@ -636,15 +637,15 @@ mod tests {
         assert!(at("[meta]") < at("[parts]") && at("[parts]") < at("[ranges]") && at("[ranges]") < at("[mutation]"), "{text}");
         assert!(text.contains("strength = 0.7"), "{text}");
         assert!(text.contains("julia = { enabled = true, weight = [0.2, 0.6] }"), "{text}");
-        assert!(text.contains("background = { on = true, odds = 0.05, reroll = 0.5 }"), "{text}");
-        assert!(text.contains("color = { on = false,"), "{text}");
+        assert!(text.contains("background = { odds = 0.05, reroll = 0.5 }"), "{text}");
+        assert!(text.contains("color = { odds = 0.0,"), "{text}");
         assert!(at("translate =") < at("background ="), "parts in their own order:\n{text}");
     }
 
     /// A profile written by hand states only what it cares about.
     #[test]
     fn a_partial_profile_takes_defaults_and_reports_typos() {
-        let text = "[meta]\nname = \"x\"\ncolour = 1\n[parts]\nrotate = { on = false }\nwobble = { odds = 1.0 }\n\
+        let text = "[meta]\nname = \"x\"\ncolour = 1\n[parts]\nrotate = { odds = 0 }\nwobble = { odds = 1.0 }\n\
                     count = { odds = 0.1 }\n[ranges]\ntransforms = [4, 4]\ntransfroms = [1, 1]\n\
                     [ranges.variations]\njulia = { enabled = false }\nnot_a_variation = { enabled = true }\n\
                     [mutation]\nstrength = 2.0\n";
@@ -655,13 +656,12 @@ mod tests {
         assert!(!l.settings.variations["julia"].enabled);
         assert_eq!(l.settings.variations["julia"].weight, d.variations["julia"].weight);
         assert_eq!(l.settings.mutation.strength, 2.0);
-        assert!(!l.settings.parts.rotate.on);
-        assert_eq!(l.settings.parts.rotate.odds, d.parts.rotate.odds);
+        assert!(!l.settings.parts.rotate.on());
         assert_eq!(l.settings.parts.translate, d.parts.translate);
         // A part given only its odds keeps the rest as shipped.
         assert_eq!(l.settings.parts.count.odds, 0.1);
         assert_eq!(l.settings.parts.count.reroll, d.parts.count.reroll);
-        assert!(l.settings.parts.count.on);
+        assert!(l.settings.parts.count.on());
         let w = l.warnings.join("\n");
         for typo in ["meta.colour", "ranges.transfroms", "ranges.variations.not_a_variation", "parts.wobble"] {
             assert!(w.contains(typo), "{typo} not reported:\n{w}");
@@ -716,21 +716,20 @@ mod tests {
         use super::super::Parts;
         let get = |n: &str| load(&Entry::builtin(n)).unwrap().settings;
         let on = |s: &RandomSettings| -> Vec<&str> {
-            Parts::NAMES.iter().zip(s.parts.all()).filter(|(_, p)| p.on).map(|(n, _)| *n).collect()
+            Parts::NAMES.iter().zip(s.parts.all()).filter(|(_, p)| p.on()).map(|(n, _)| *n).collect()
         };
         assert_eq!(on(&RandomSettings::default()), Parts::NAMES, "the default has every part on");
 
         let any = get("anything");
         assert!(any.variations.values().all(|v| v.enabled));
         assert!(any.symmetry.chance > 0.0 && any.symmetry.repeat);
-        assert!(any.parts.all().iter().all(|p| p.on && p.odds > 0.0), "anything leaves a part alone");
+        assert!(any.parts.all().iter().all(|p| p.odds >= 0.05), "anything leaves a part all but alone");
 
         // On, with no chance of a group: a roll draws "no group", where off
-        // would keep the base scene's.
+        // would keep the base scene's; and a mutation all but never picks it.
         let plain = get("no-symmetry");
-        assert!(plain.parts.symmetry.on);
+        assert_eq!(plain.parts.symmetry.odds, super::super::MIN_ODDS);
         assert_eq!(plain.symmetry.chance, 0.0);
-        assert_eq!(plain.parts.symmetry.odds, 0.0);
         assert_eq!(plain.variations, any.variations, "no-symmetry should be anything's range");
 
         assert_eq!(on(&get("colour-only")), ["color", "color_value", "background"]);

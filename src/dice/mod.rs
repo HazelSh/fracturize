@@ -225,7 +225,7 @@ pub fn generate<R: Rng>(settings: &RandomSettings, base: &Scene, action: Action,
     } else {
         Gate::relative_to(settings, base)
     };
-    let steer = parts.scale.on && (action == Action::Roll || settings.mutation.steer_dimension);
+    let steer = parts.scale.on() && (action == Action::Roll || settings.mutation.steer_dimension);
     match action {
         Action::Roll => {
             match search(settings, &gate, steer, rng, |rng, _| roll::build_candidate(settings, base, rng)) {

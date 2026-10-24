@@ -35,6 +35,7 @@ pub mod num;
 pub mod radio;
 pub mod random_flames;
 pub mod random_settings;
+pub mod table;
 pub mod render_job;
 pub mod render_panel;
 pub mod save_as;

@@ -136,7 +136,7 @@ impl RandomList {
         // Only read for the parts that are off; with every part on, a copy of
         // a large scene would buy nothing.
         self.based = true;
-        self.base = Arc::new(if settings.parts.all().iter().all(|p| p.on) {
+        self.base = Arc::new(if settings.parts.all().iter().all(|p| p.on()) {
             Scene::blank()
         } else {
             scene.clone()

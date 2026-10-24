@@ -1076,8 +1076,10 @@ the roll.
 the **parts** of a flame — each transform's position, turn, size, weight and
 variations; how many transforms; the symmetry group; the colours (each
 transform's, the colour source, the gradient); where each sits on the
-gradient; the background — each switched **on or off**, with the ranges it is
-drawn from. Two actions read that list, the same way (`dice::Action`):
+gradient; the background — each **on or off**, with the ranges it is drawn
+from. **A part's odds are its only state**: 0 is off, anything above is on,
+and the least a part that's on can have is `MIN_ODDS` (0.0001), so on and
+off can't be said two ways. Ticking a part on in the window starts it there. Two actions read that list, the same way (`dice::Action`):
 
 - **Roll** draws every part that's on and keeps the base scene's own for
   every part that's off (`roll.rs`).
@@ -1094,12 +1096,12 @@ quietly did nothing to rolls.
 
 The only settings one action reads and the other doesn't are a mutation's
 **step** (`[mutation]`: strength, changes per mutation, ease-off, dimension
-steering) and each part's **odds** and **re-roll** chance, which say *which*
-of the parts a mutation picks and how — a roll takes all of them. A part can
-be on with odds 0: a roll draws it, a mutation never picks it. That is how the
-default treats the background and the symmetry group (a bigger step, to ask
-for), and how `no-symmetry` says "a roll draws no group" — off would instead
-keep the scene's own.
+steering) and how big each part's odds are and its **re-roll** chance, which
+say *which* of the parts a mutation picks and how — a roll takes every part
+that's on. A part at `MIN_ODDS` is drawn by every roll and all but never
+picked by a mutation. That is how the default treats the background and the
+symmetry group (a bigger step, to ask for), and how `no-symmetry` says "a
+roll draws no group" — off would instead keep the scene's own.
 
 Both go through **one search**, `dice::generate(settings, base, action, rng)`:
 draw a candidate, steer the dimension if size is the dice's to change (a
@@ -1144,8 +1146,8 @@ name = "spiky"
 description = "Few transforms, sharp folds, never smooth"
 
 [parts]                       # one line per part
-color = { on = false }        # off: kept as it is, by a roll or a mutation
-variations = { on = true, odds = 0.4, reroll = 0.25 }
+color = { odds = 0.0 }        # off: kept as it is, by a roll or a mutation
+variations = { odds = 0.4, reroll = 0.25 }
 
 [ranges]                      # how each part is drawn
 transforms = [2, 4]
@@ -1162,7 +1164,7 @@ strength = 0.7
 ```
 
 Every key is optional and takes the **shipped default at every depth** (a
-part given only `on` keeps its shipped odds), and a key this version doesn't
+part given only `odds` keeps its shipped re-roll chance), and a key this version doesn't
 know is reported — `--random-config` prints it to stderr, the window puts it
 in the status bar — rather than silently ignored. A fresh save writes every
 key with a one-line note; saving over an existing file merges with
@@ -1174,14 +1176,17 @@ file with a `[random]` table — prefs.toml.
 the Random flames list, in the Mutate window, and as Explore → Dice profile —
 all the same picker (`ui::random_settings::profile_picker`), built-ins under
 their own heading, each one's description on hover, a `*` while edited. The
-Random settings window edits it: one list of parts grouped Shape (position,
-turn, size, weight, variations), Structure (how many transforms, symmetry
-group) and Colour (colours, place on gradient, background), each with its on
-switch, its odds, its share of a mutation's changes and its re-roll chance on
-one row, and **the ranges that shape it indented right under it** — size
-under size, the variation list (folded) under variations, the group kinds
-(folded) under symmetry. Then the quality check (dimension, lacunarity,
-tries), then each mutation's step, and Roll one and Mutate at the foot.
+Random settings window edits it in seven folding sections, **each one table
+holding one kind of value** (`ui::table`, `egui_extras::TableBuilder` in the
+house style: hinted column headers, drawn column rules, striped rows):
+**Parts** (part · odds · share of a mutation's changes · re-roll, grouped
+Shape / Structure / Colour), **Ranges** (setting · low · high), **Chances**
+(setting · chance, as a percentage), **Symmetry groups**, **Variations**
+(variation · low · high weight), **Quality check** (bound · low · high, then
+the try budget) and **Mutation step**; Roll one and Mutate at the foot. A
+range or chance row greys while the part it draws is off. They used to share
+one grid, chances and low/high pairs in the same unruled columns, and read as
+a scatter of fields.
 prefs.toml keeps the settings (`[random]`) and where they came from
 (`random_profile`, or `random_profile_builtin` by name), so the `*` survives
 a restart. Loading a profile isn't undoable — it's a preference, not the

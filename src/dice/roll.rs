@@ -64,7 +64,7 @@ impl<'a> Base<'a> {
 pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut impl Rng) -> Candidate {
     let p = &settings.parts;
     let base = Base::of(base);
-    let n = if p.count.on || base.len() == 0 {
+    let n = if p.count.on() || base.len() == 0 {
         rng.gen_range(settings.transforms[0]..=settings.transforms[1]).max(1) as usize
     } else {
         base.len()
@@ -76,7 +76,7 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
         transforms.push(random_transform(settings, rng));
     }
     for (t, b) in transforms.iter_mut().zip(&base.transforms) {
-        let (p_on, r_on, s_on) = (p.translate.on, p.rotate.on, p.scale.on);
+        let (p_on, r_on, s_on) = (p.translate.on(), p.rotate.on(), p.scale.on());
         if !(p_on || r_on || s_on) {
             // The whole affine kept, shear and post-affine included.
             t.matrix = b.matrix;
@@ -90,10 +90,10 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
                 if p_on { pos } else { bp },
             );
         }
-        if !p.weight.on {
+        if !p.weight.on() {
             t.weight = b.weight;
         }
-        if !p.count.on {
+        if !p.count.on() {
             // The same transforms, so the same transitions between them.
             t.xaos = b.xaos.clone();
         }
@@ -107,12 +107,12 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
         .map(|t| mean_singular_value(t.matrix))
         .sum::<f32>()
         / n as f32;
-    if mean > 0.85 && p.scale.on {
+    if mean > 0.85 && p.scale.on() {
         rescale(&mut transforms, 0.75 / mean);
     }
 
-    if p.symmetry.on {
-        apply_symmetry(&mut transforms, &settings.symmetry, p.scale.on, p.translate.on, rng);
+    if p.symmetry.on() {
+        apply_symmetry(&mut transforms, &settings.symmetry, p.scale.on(), p.translate.on(), rng);
     } else {
         for (t, b) in transforms.iter_mut().zip(&base.transforms) {
             t.symmetry = b.symmetry.clone();
@@ -130,7 +130,7 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
     // of unrelated distortions; varying which maps carry them, and at what
     // strength, is what keeps it from looking uniform.
     let pool = settings.enabled_slots();
-    if !p.variations.on {
+    if !p.variations.on() {
         for (t, b) in transforms.iter_mut().zip(&base.transforms) {
             t.variations = b.variations;
         }
@@ -179,7 +179,7 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
             )
         })
         .collect();
-    if !p.color.on && base.len() > 0 {
+    if !p.color.on() && base.len() > 0 {
         // The base's colours, and a new transform takes one of them, so the
         // set stays the base's.
         for (i, c) in colors.iter_mut().enumerate() {
@@ -190,14 +190,14 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
     for (i, t) in transforms.iter_mut().enumerate() {
         t.color_value = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
     }
-    if !p.color_value.on {
+    if !p.color_value.on() {
         for (t, b) in transforms.iter_mut().zip(&base.transforms) {
             t.color_value = b.color_value;
         }
     }
 
     let mut names: Vec<Option<String>> = (0..n).map(|i| Some(format!("t{}", i))).collect();
-    if !p.count.on {
+    if !p.count.on() {
         names[..kept].clone_from_slice(&base.names[..kept]);
     }
     Candidate { transforms, names, colors }
@@ -469,7 +469,7 @@ pub(super) fn finish(
     let tint = tint(&scene, rng);
     scene.background = random_background(rng, tint);
 
-    if !p.color.on {
+    if !p.color.on() {
         scene.color_falloff = base.color_falloff;
         scene.color_speed = base.color_speed;
         scene.color_contrast = base.color_contrast;
@@ -478,7 +478,7 @@ pub(super) fn finish(
         let falloff = scene.color_falloff;
         scene.resolve_all_color_speeds(falloff);
     }
-    if !p.background.on {
+    if !p.background.on() {
         scene.background = base.background;
     }
     if p.no_form() {

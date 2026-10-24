@@ -15,7 +15,7 @@ description = "Every variation, but no symmetry and no xaos"
 author = "Claude Opus 5.5"
 
 [parts]
-symmetry = { on = true, odds = 0.0 }
+symmetry = { odds = 0.0001 }  # on, but a mutation all but never picks it
 background = { odds = 0.05 }
 
 [ranges]

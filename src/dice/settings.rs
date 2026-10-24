@@ -159,17 +159,19 @@ impl Default for Bound {
 /// mutation, which changes only a few parts at a time — how often it is the
 /// one changed and how.
 ///
-/// **`on` is the whole of what the dice may do, for a roll and a mutation
-/// alike.** A roll draws every part that is on and keeps the base scene's own
-/// for every part that is off; a mutation picks among the parts that are on.
-/// So a mask is a profile with some parts off, and it means the same thing
-/// whichever button is pressed.
+/// **Its odds are the whole of what the dice may do with it, for a roll and a
+/// mutation alike.** Above zero it is on: a roll draws it, and a mutation
+/// picks it that often against the other parts. At zero it is off: a roll
+/// keeps the base scene's own, and a mutation never picks it. There is no
+/// separate switch, so "on but never picked" can't be said two ways — the
+/// least a part that's on can have is [`MIN_ODDS`], which is "rolled, and a
+/// mutation all but never touches it". So a mask is a profile with some odds
+/// at zero, and it means the same thing whichever button is pressed.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
 pub struct Part {
-    pub on: bool,
-    /// How often a mutation picks this part, against the other parts' odds.
-    /// A roll draws every part that's on, so this is a mutation's business.
+    /// 0 is off. Otherwise how often a mutation picks this part, against the
+    /// other parts' odds; never below [`MIN_ODDS`].
     pub odds: f32,
     /// Chance a mutation replaces the part outright — the very draw a roll
     /// makes, under the same ranges — rather than nudging what's there.
@@ -178,12 +180,19 @@ pub struct Part {
 
 impl Part {
     const fn new(odds: f32, reroll: f32) -> Self {
-        Self { on: true, odds, reroll }
+        Self { odds, reroll }
     }
 
-    /// Odds a mutation picks it with: its odds while on, else none.
-    pub fn live_odds(&self) -> f32 {
-        if self.on { self.odds } else { 0.0 }
+    /// Whether the dice may make it: odds above zero.
+    pub fn on(&self) -> bool {
+        self.odds > 0.0
+    }
+
+    /// Switch it on (at the least odds, if it was off) or off (odds 0).
+    pub fn set_on(&mut self, on: bool) {
+        if on != self.on() {
+            self.odds = if on { MIN_ODDS } else { 0.0 };
+        }
     }
 }
 
@@ -273,22 +282,23 @@ impl Parts {
     /// form, and is judged by the bounds alone.
     pub fn whole_form(&self) -> bool {
         let all = self.all();
-        Self::FORM.iter().all(|&i| all[i].on)
+        Self::FORM.iter().all(|&i| all[i].on())
     }
 
     /// No part of the form is on: the form is the base scene's, untouched.
     pub fn no_form(&self) -> bool {
         let all = self.all();
-        Self::FORM.iter().all(|&i| !all[i].on)
+        Self::FORM.iter().all(|&i| !all[i].on())
     }
 }
 
 impl Default for Parts {
     /// Every part on, so a roll owes nothing to the scene it was rolled from.
     /// The odds are the ones `U` always had, with re-rolls where a fresh draw
-    /// is a useful kind of change. A mutation never picks the background or
-    /// the symmetry (odds 0): changing the ground or the group is a bigger
-    /// step than the rest, and one to ask for.
+    /// is a useful kind of change. The background and the symmetry group are
+    /// at the least odds: a roll draws them, and a mutation all but never
+    /// changes the ground or the group — a bigger step than the rest, and one
+    /// to ask for.
     fn default() -> Self {
         Self {
             translate: Part::new(0.18, 0.0),
@@ -297,10 +307,10 @@ impl Default for Parts {
             weight: Part::new(0.12, 0.0),
             variations: Part::new(0.18, 0.15),
             count: Part::new(0.08, 0.3),
-            symmetry: Part::new(0.0, 0.5),
+            symmetry: Part::new(MIN_ODDS, 0.5),
             color: Part::new(0.09, 0.1),
             color_value: Part::new(0.05, 0.0),
-            background: Part::new(0.0, 0.5),
+            background: Part::new(MIN_ODDS, 0.5),
         }
     }
 }
@@ -422,6 +432,9 @@ pub const STRENGTH_LIMITS: [f32; 2] = [0.1, 3.0];
 pub const MAX_CHANGES: u32 = 8;
 /// Past this a part's odds stop meaning anything the others can answer.
 pub const ODDS_LIMIT: f32 = 10.0;
+/// The least odds a part that's on can have: rolled, and all but never
+/// picked by a mutation. Anything below it is off.
+pub const MIN_ODDS: f32 = 0.0001;
 
 fn ordered<T: PartialOrd + Copy>(r: [T; 2], lo: T, hi: T) -> [T; 2] {
     let clamp = |v: T| if v < lo { lo } else if v > hi { hi } else { v };
@@ -462,7 +475,7 @@ impl RandomSettings {
         m.changes = ordered(m.changes, 1, MAX_CHANGES);
         m.backoff = m.backoff.min(MAX_ATTEMPTS);
         for p in self.parts.all_mut() {
-            p.odds = if p.odds.is_finite() { p.odds.clamp(0.0, ODDS_LIMIT) } else { 0.0 };
+            p.odds = if p.odds.is_finite() && p.odds > 0.0 { p.odds.clamp(MIN_ODDS, ODDS_LIMIT) } else { 0.0 };
             p.reroll = if p.reroll.is_finite() { p.reroll.clamp(0.0, 1.0) } else { 0.0 };
         }
         self
@@ -491,7 +504,7 @@ impl RandomSettings {
             let mut s = s.clone();
             s.mutation = MutationSettings::default();
             for p in s.parts.all_mut() {
-                *p = Part { on: p.on, odds: 0.0, reroll: 0.0 };
+                *p = Part { odds: if p.on() { 1.0 } else { 0.0 }, reroll: 0.0 };
             }
             s
         };
@@ -529,6 +542,26 @@ mod tests {
 
     /// A roll reads which parts are on and the ranges; only a mutation reads
     /// the step and the odds.
+    /// Off is odds 0 and nothing else: a part that's on never sits below the
+    /// least odds, and switching one on lands it there.
+    #[test]
+    fn a_part_is_on_or_off_one_way() {
+        let mut s = RandomSettings::default();
+        s.parts.rotate.odds = 0.00001;
+        s.parts.weight.odds = -3.0;
+        let s = s.normalized();
+        assert_eq!(s.parts.rotate.odds, MIN_ODDS);
+        assert_eq!(s.parts.weight.odds, 0.0);
+        let mut p = Part { odds: 0.0, reroll: 0.2 };
+        p.set_on(true);
+        assert_eq!(p.odds, MIN_ODDS);
+        p.odds = 0.4;
+        p.set_on(true);
+        assert_eq!(p.odds, 0.4, "switching on what's on changes nothing");
+        p.set_on(false);
+        assert!(!p.on());
+    }
+
     #[test]
     fn the_roll_reads_the_switches_not_the_odds() {
         let a = RandomSettings::default();
@@ -536,7 +569,7 @@ mod tests {
         b.mutation.strength = 2.0;
         b.parts.rotate.odds = 3.0;
         assert!(a.same_roll(&b));
-        b.parts.color.on = false;
+        b.parts.color.set_on(false);
         assert!(!a.same_roll(&b));
         let mut c = a.clone();
         c.transforms = [3, 3];
@@ -546,8 +579,8 @@ mod tests {
     #[test]
     fn parts_are_named_in_field_order() {
         let mut p = Parts::default();
-        *p.all_mut()[4] = Part { on: false, odds: 9.0, reroll: 0.5 };
-        assert_eq!(p.variations, Part { on: false, odds: 9.0, reroll: 0.5 });
+        *p.all_mut()[4] = Part { odds: 9.0, reroll: 0.5 };
+        assert_eq!(p.variations, Part { odds: 9.0, reroll: 0.5 });
         assert_eq!(Parts::NAMES[4], "variations");
         // And the names are the serialized keys, which the file format uses.
         let t = toml::Value::try_from(p).unwrap();

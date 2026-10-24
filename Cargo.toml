@@ -16,6 +16,7 @@ pollster = "0.4"
 egui = "0.35"
 egui-wgpu = "0.35"
 egui-winit = "0.35"
+egui_extras = { version = "0.35", default-features = false }
 # egui-phosphor omitted: no release matching egui 0.35 exists yet as of this
 # writing (latest 0.12.0 pins egui ^0.34); add in Phase 2 once available.
 

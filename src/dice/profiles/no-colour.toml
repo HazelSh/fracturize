@@ -16,7 +16,7 @@ description = "Change the form; the colours are never touched"
 author = "Claude Opus 5.5"
 
 [parts]
-count = { on = false }
-color = { on = false }
-color_value = { on = false }
-background = { on = false }
+count = { odds = 0.0 }
+color = { odds = 0.0 }
+color_value = { odds = 0.0 }
+background = { odds = 0.0 }
