@@ -181,7 +181,7 @@ fn draw_layers(ui: &mut egui::Ui, app: &mut App) {
                 ui,
                 5,
                 2,
-                egui::DragValue::new(&mut share).range(0.0..=100.0).speed(0.01),
+                num::Drag::new(&mut share).range(0.0..=100.0).speed(0.01),
             );
             let resp = hinted(
                 resp,
@@ -267,14 +267,14 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
     egui::Grid::new("fracturize_subscene_place").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
         ui.label("at");
         for (axis, v) in ["x", "y", "z"].iter().zip(t.iter_mut()) {
-            let resp = num::drag(ui, 7, 3, egui::DragValue::new(v).speed(0.005).prefix(format!("{} ", axis)));
+            let resp = num::drag(ui, 7, 3, num::Drag::new(v).speed(0.005).prefix(format!("{} ", axis)));
             let resp = hinted(resp, &mut app.ui_state, "Where the subscene sits in the scene", "drag: move the subscene");
             changed |= resp.changed();
         }
         ui.end_row();
         ui.label("turn");
         for (axis, v) in ["x", "y", "z"].iter().zip(e.iter_mut()) {
-            let resp = num::drag(ui, 7, 1, egui::DragValue::new(v).speed(0.5).suffix("°").prefix(format!("{} ", axis)));
+            let resp = num::drag(ui, 7, 1, num::Drag::new(v).speed(0.5).suffix("°").prefix(format!("{} ", axis)));
             let resp = hinted(resp, &mut app.ui_state, "The subscene's rotation, in degrees about x, then y, then z", "drag: turn the subscene");
             if resp.changed() {
                 changed = true;
@@ -283,7 +283,7 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
         }
         ui.end_row();
         ui.label("scale");
-        let resp = num::drag(ui, 7, 3, egui::DragValue::new(&mut scale).range(0.001..=1000.0).speed(0.005));
+        let resp = num::drag(ui, 7, 3, num::Drag::new(&mut scale).range(0.001..=1000.0).speed(0.005));
         let resp = hinted(
             resp,
             &mut app.ui_state,

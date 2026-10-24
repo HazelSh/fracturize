@@ -728,6 +728,12 @@ Conventions worth keeping:
   it is what stops dragging **x** through zero from shoving **y** and **z**
   sideways while your pointer is on the control.
 
+  **Every number box is `num::Drag`, never a bare `egui::DragValue`.** Same
+  builder methods; the difference is the drag. egui's snaps to the roundest
+  number within a pixel each frame and rounds that, so values stick and jump;
+  `Drag` accumulates exactly, at half the call site's speed
+  (`num::DRAG_GAIN`), so every pixel of travel moves the value one even step.
+
   The same module's `icon_button_width` / `text_button_width` do this for a
   *button* whose caption changes length between states (Edit Mode/View Mode,
   Play/Pause, the point-count readout). **Pin the width, then pin the caption

@@ -479,7 +479,7 @@ fn draw_selected_stop(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>)
             app.set_palette_stop_color(idx, crate::palette::from_srgb8(srgb));
         }
 
-        let resp = ui.add(egui::DragValue::new(&mut at).speed(0.002).range(0.0..=0.999));
+        let resp = ui.add(super::num::Drag::new(&mut at).speed(0.002).range(0.0..=0.999));
         let resp = hinted(
             resp,
             &mut app.ui_state,

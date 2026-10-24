@@ -363,7 +363,7 @@ fn odds(ui: &mut egui::Ui, st: &mut super::UiState, part: &mut Part) {
     let mut v = part.odds;
     let resp = ui.add_sized(
         cell_size(ui, 6),
-        egui::DragValue::new(&mut v)
+        num::Drag::new(&mut v)
             .range(0.0..=ODDS_LIMIT)
             .speed(0.005)
             .custom_formatter(|v, _| odds_text(v as f32))
@@ -404,7 +404,7 @@ fn cell_size(ui: &egui::Ui, chars: usize) -> [f32; 2] {
 fn percent(ui: &mut egui::Ui, st: &mut super::UiState, v: &mut f32, tip: &str, hint: &str) {
     let resp = ui.add_sized(
         cell_size(ui, 4),
-        egui::DragValue::new(v)
+        num::Drag::new(v)
             .range(0.0..=1.0)
             .speed(0.005)
             .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
@@ -429,14 +429,14 @@ fn count_cells(
     let max = r[1];
     row.col(|ui| {
         ui.add_enabled_ui(on, |ui| {
-            let resp = num::drag(ui, 3, 0, egui::DragValue::new(&mut r[0]).range(lo..=max).speed(0.05));
+            let resp = num::drag(ui, 3, 0, num::Drag::new(&mut r[0]).range(lo..=max).speed(0.05));
             hinted(resp, st, tip, hint);
         });
     });
     let min = r[0];
     row.col(|ui| {
         ui.add_enabled_ui(on, |ui| {
-            let resp = num::drag(ui, 3, 0, egui::DragValue::new(&mut r[1]).range(min..=hi).speed(0.05));
+            let resp = num::drag(ui, 3, 0, num::Drag::new(&mut r[1]).range(min..=hi).speed(0.05));
             hinted(resp, st, tip, hint);
         });
     });
@@ -459,14 +459,14 @@ fn float_cells(
     let max = r[1];
     row.col(|ui| {
         ui.add_enabled_ui(on, |ui| {
-            let dv = egui::DragValue::new(&mut r[0]).range(limits[0]..=max).speed(speed);
+            let dv = num::Drag::new(&mut r[0]).range(limits[0]..=max).speed(speed);
             hinted(num::drag(ui, chars, decimals, dv), st, tip, hint);
         });
     });
     let min = r[0];
     row.col(|ui| {
         ui.add_enabled_ui(on, |ui| {
-            let dv = egui::DragValue::new(&mut r[1]).range(min..=limits[1]).speed(speed);
+            let dv = num::Drag::new(&mut r[1]).range(min..=limits[1]).speed(speed);
             hinted(num::drag(ui, chars, decimals, dv), st, tip, hint);
         });
     });
@@ -792,7 +792,7 @@ fn bounds(
 
     ui.horizontal(|ui| {
         ui.label("tries");
-        let resp = num::drag(ui, 5, 0, egui::DragValue::new(&mut s.attempts).range(1..=MAX_ATTEMPTS).speed(1.0));
+        let resp = num::drag(ui, 5, 0, num::Drag::new(&mut s.attempts).range(1..=MAX_ATTEMPTS).speed(1.0));
         hinted(
             resp,
             st,
@@ -835,7 +835,7 @@ fn mutation(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) 
                        The Mutate window's slider is this same setting.";
             name_cell(&mut row, st, true, "strength", tip);
             row.col(|ui| {
-                let dv = egui::DragValue::new(&mut m.strength).range(STRENGTH_LIMITS[0]..=STRENGTH_LIMITS[1]).speed(0.01);
+                let dv = num::Drag::new(&mut m.strength).range(STRENGTH_LIMITS[0]..=STRENGTH_LIMITS[1]).speed(0.01);
                 hinted(num::drag(ui, 5, 2, dv), st, tip, "drag: mutation strength");
             });
         });
@@ -844,7 +844,7 @@ fn mutation(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) 
                        so a delicate scene still gets something close. 0 never eases off.";
             name_cell(&mut row, st, true, "ease off after (failed tries)", tip);
             row.col(|ui| {
-                let dv = egui::DragValue::new(&mut m.backoff).range(0..=MAX_ATTEMPTS).speed(0.1);
+                let dv = num::Drag::new(&mut m.backoff).range(0..=MAX_ATTEMPTS).speed(0.1);
                 hinted(num::drag(ui, 5, 0, dv), st, tip, "drag: failed tries before the strength halves");
             });
         });
