@@ -130,6 +130,21 @@ XAOS-PLAN.md §6, as profile settings:
 
 ### 3. The mutation grid: 3×3 and 5×5, click to accept, recurse
 
+**Built** (2026-10-24, `src/mutation_grid.rs`, `src/ui/mutation_grid.rs`;
+AGENTS.md "The mutation grid"). Points 1, 2, 4 and 5 as planned, with two
+changes from Hazel:
+
+- **Every tile shares the main view's camera**, live, instead of point 3's
+  hover-to-fly: orbit, play or zoom and all the tiles turn together, so a
+  mutation can be browsed from any angle. Drag a tile to turn the view, wheel
+  to zoom; a click picks, and works while the camera plays.
+- **No onion skin** (point 6) for now.
+
+Ctrl+Z's grid comes back through the grid's own memory, keyed by the
+history's serial, rather than through seeds carried in the history entry —
+the same effect, with the history left alone. It is a window for now; it
+moves into the pane grid once item 2 exists.
+
 The Random flames list *is* this feature with a different source: rows of
 gated generations with live thumbnails, rolled off-thread, click to open.
 So the grid is the same model (`random_list.rs`, generalised to take a

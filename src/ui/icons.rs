@@ -86,6 +86,8 @@ pub const TARGET: &str = "\u{E1D6}";
 /// Mutate the scene — Phosphor `shuffle`, distinct from `DICE` (a fresh random
 /// flame from nothing; this perturbs the one already on screen)
 pub const SHUFFLE: &str = "\u{E424}";
+/// Mutation grid window (squares-four)
+pub const GRID: &str = "\u{E464}";
 /// Dimension-lock toggle: locked — Phosphor `lock`. Verified the same way as
 /// the block above (contact sheet over the vendored font's PUA range,
 /// rendered with Pillow and read off the page): the lock family sits at

@@ -275,35 +275,52 @@ pub fn fresh_seed() -> u64 {
 /// Threads rolling flames: a couple, leaving the rest of the machine to the
 /// renderer and the person. They live as long as the app.
 fn spawn_workers(current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
-    let (job_tx, job_rx) = channel::<Job>();
-    let (done_tx, done_rx) = channel::<Done>();
+    spawn_pool("random-flames", move |job: Job| {
+        // Settings moved on while this sat in the queue.
+        if job.generation != current.load(Ordering::Relaxed) {
+            return None;
+        }
+        let outcome = match dice::roll_seeded(&job.settings, &job.base, job.seed) {
+            Ok(r) => Outcome::Rolled(Box::new(r)),
+            Err(f) => Outcome::Failed { attempts: f.attempts, rejected: f.rejected },
+        };
+        Some(Done { generation: job.generation, seed: job.seed, outcome })
+    })
+}
+
+/// A couple of threads doing `work` on whatever is sent, and sending back
+/// what it returns (`None`: nothing to say, as for a job gone stale in the
+/// queue). Shared by this list and the mutation grid. The threads end when
+/// either channel's other end is dropped.
+pub(crate) fn spawn_pool<J, D>(
+    name: &str,
+    work: impl Fn(J) -> Option<D> + Send + Clone + 'static,
+) -> (Sender<J>, Receiver<D>)
+where
+    J: Send + 'static,
+    D: Send + 'static,
+{
+    let (job_tx, job_rx) = channel::<J>();
+    let (done_tx, done_rx) = channel::<D>();
     let job_rx = Arc::new(Mutex::new(job_rx));
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(2)).clamp(1, 3);
     for i in 0..threads {
         let job_rx = job_rx.clone();
         let done_tx = done_tx.clone();
-        let current = current.clone();
-        let spawned = std::thread::Builder::new()
-            .name(format!("random-flames-{i}"))
-            .spawn(move || {
-                loop {
-                    let Ok(job) = job_rx.lock().map(|rx| rx.recv()) else { return };
-                    let Ok(job) = job else { return };
-                    // Settings moved on while this sat in the queue.
-                    if job.generation != current.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    let outcome = match dice::roll_seeded(&job.settings, &job.base, job.seed) {
-                        Ok(r) => Outcome::Rolled(Box::new(r)),
-                        Err(f) => Outcome::Failed { attempts: f.attempts, rejected: f.rejected },
-                    };
-                    if done_tx.send(Done { generation: job.generation, seed: job.seed, outcome }).is_err() {
-                        return;
-                    }
+        let work = work.clone();
+        let spawned = std::thread::Builder::new().name(format!("{name}-{i}")).spawn(move || {
+            loop {
+                let Ok(job) = job_rx.lock().map(|rx| rx.recv()) else { return };
+                let Ok(job) = job else { return };
+                if let Some(done) = work(job)
+                    && done_tx.send(done).is_err()
+                {
+                    return;
                 }
-            });
+            }
+        });
         if let Err(e) = spawned {
-            log::warn!("Random flames: couldn't start a worker: {e}");
+            log::warn!("{name}: couldn't start a worker: {e}");
         }
     }
     (job_tx, done_rx)

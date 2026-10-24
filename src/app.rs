@@ -1054,6 +1054,13 @@ pub struct App {
     /// The Random flames list: rolls under the person's random settings,
     /// made on background threads. See `random_list`.
     pub random_list: crate::random_list::RandomList,
+    /// The mutation grid: the scene amid a ring of its mutations, made on
+    /// background threads. See `mutation_grid`.
+    pub mutation_grid: crate::mutation_grid::MutationGrid,
+    /// Bumped whenever a document is opened (which clears the history), so
+    /// the history's serials — which name a grid — can't be mistaken across
+    /// documents.
+    document_epoch: u64,
     /// The dice profile the random settings came from: its name, and what it
     /// said, so the Random settings window can mark them changed.
     dice_profile: crate::dice::profile::Selected,
@@ -1312,6 +1319,7 @@ impl App {
 
         let prefs = crate::prefs::Prefs::load();
         let random_list = crate::random_list::RandomList::new(prefs.random.clone());
+        let mutation_grid = crate::mutation_grid::MutationGrid::new(prefs.mutation_grid_size);
         let dice_profile = crate::dice::profile::Selected::remembered(
             prefs.random_profile.as_deref(),
             prefs.random_profile_builtin.as_deref(),
@@ -1451,6 +1459,8 @@ impl App {
             browser_selected: 0,
             thumbs,
             random_list,
+            mutation_grid,
+            document_epoch: 0,
             dice_profile,
             chaos_pipelines,
             splat_pipelines,
@@ -4262,6 +4272,7 @@ impl App {
         // editor ever written. The surprise was never the clear — it was that
         // it happened without asking, which is what `request_load_scene` fixes.
         self.history.clear();
+        self.document_epoch += 1;
         self.mark_saved();
         self.rebuild_pipelines();
     }
@@ -4978,6 +4989,77 @@ impl App {
         (&self.random_list, &mut self.thumbs, &mut self.ui_state)
     }
 
+    // === The mutation grid ===
+
+    /// Where the history is, which is what names a grid (see `mutation_grid`).
+    pub fn grid_key(&self) -> crate::mutation_grid::GridKey {
+        (self.document_epoch, self.history.top_serial())
+    }
+
+    /// Collect finished tiles; start over if the scene or settings moved.
+    pub fn poll_mutation_grid(&mut self) {
+        let key = self.grid_key();
+        self.mutation_grid.size = self.prefs.mutation_grid_size;
+        self.mutation_grid.poll(key, &self.scene, &self.prefs.random);
+    }
+
+    /// 3×3 or 5×5.
+    pub fn mutation_grid_size(&self) -> crate::mutation_grid::GridSize {
+        self.prefs.mutation_grid_size
+    }
+
+    /// 3×3 or 5×5. Remembered.
+    pub fn set_mutation_grid_size(&mut self, size: crate::mutation_grid::GridSize) {
+        if self.prefs.mutation_grid_size != size {
+            self.prefs.mutation_grid_size = size;
+            self.prefs_dirty_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// A new ring round the scene, from a fresh seed. Not an edit: the scene
+    /// hasn't changed.
+    pub fn reroll_mutation_grid(&mut self) {
+        self.mutation_grid.reroll();
+    }
+
+    /// Make grid tile `n` the scene: one history entry, named for what the
+    /// mutation did, after which a new ring grows round it. The camera stays
+    /// where it is, as for `U` — the grid is a comparison of form.
+    pub fn adopt_grid_tile(&mut self, n: usize) {
+        let Some(tile) = self.mutation_grid.tile(n) else { return };
+        let crate::mutation_grid::TileState::Ready(child) = &tile.state else { return };
+        let (scene, id, seed) = (child.scene.clone(), child.id, tile.seed);
+        let label = format!("Grid: {}", child.log.join("; "));
+        let reproduce = self.mutation_grid.seed().map_or(String::new(), |(g, size)| {
+            format!(" (tile {n} of --mutations {} --seed {g}{})", size.children(), self.dice_config_flag())
+        });
+        log::info!("{label}, seed {seed}{reproduce}");
+        let before = self.edit_snapshot();
+        self.scene = scene;
+        self.bump_matrix_generation();
+        self.after_scene_shape_change();
+        self.commit_edit(truncate_label(label), None, before);
+        self.mutation_grid.accepted(self.grid_key(), id);
+    }
+
+    /// Turn the camera by a drag of `dx`, `dy` pixels, as a drag on empty
+    /// viewport does: off its path, and honouring the orbit style and
+    /// inverted pitch. For a drag on a grid tile, which shows the same view.
+    pub fn orbit_view_by(&mut self, dx: f32, dy: f32) {
+        let dy = if self.prefs.invert_pitch { -dy } else { dy };
+        self.path_t = None;
+        self.camera.orbit(dx, dy, self.prefs.orbit_style);
+        self.invalidate_default_path();
+    }
+
+    /// Zoom the camera by wheel `steps`, as scrolling empty viewport does.
+    pub fn zoom_view_by(&mut self, steps: f32) {
+        self.note_pointer_activity();
+        self.cancel_camera_glide();
+        self.zoom_steps(steps);
+        self.invalidate_default_path();
+    }
+
     /// Start over on an empty canvas (`Scene::blank`) — the build-from-nothing
     /// workflow's entry point. An *edit*, like a random flame: one Ctrl+Z
     /// brings back whatever was on screen, so it's safe to reach for.
@@ -5055,19 +5137,7 @@ impl App {
         self.bump_matrix_generation();
         self.after_scene_shape_change();
 
-        // Label from the op log, truncated so the history list stays tidy
-        // (the op log can contain multi-byte glyphs like '°', so truncate at
-        // the nearest char boundary rather than a raw byte index)
-        let mut label = log.join("; ");
-        if label.len() > 60 {
-            let mut cut = 57;
-            while cut > 0 && !label.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            label.truncate(cut);
-            label.push_str("...");
-        }
-        self.commit_edit(label, None, before);
+        self.commit_edit(truncate_label(log.join("; ")), None, before);
     }
 
     /// Reconcile app state after the scene changed under us (mutation/undo
@@ -7344,7 +7414,12 @@ impl App {
             self.take_screenshot();
         }
         // Before egui paints, so a thumbnail built or flown this frame is the
-        // one it draws.
+        // one it draws. The mutation grid's tiles draw from this frame's view.
+        self.thumbs.set_view(crate::gpu::thumbs::SharedView {
+            camera: self.camera,
+            point_size: self.rendered_point_size(),
+            haze: self.haze_uniforms(),
+        });
         self.thumbs.service(&self.gpu.device, &self.gpu.queue, egui_renderer);
 
         let (width, height) = self.gpu.size();
@@ -7849,4 +7924,18 @@ mod axis_scale_tests {
         assert!((axis_scale_length(0.66, 0.5, 0.5, true) - 0.7).abs() < 1e-6);
         assert!((axis_scale_length(0.6, 0.5, 1.2, true) + 0.1).abs() < 1e-6);
     }
+}
+
+/// A mutation's operator log as a history label: cut to fit the History
+/// window, at a char boundary because the log carries glyphs like '°'.
+fn truncate_label(mut label: String) -> String {
+    if label.len() > 60 {
+        let mut cut = 57;
+        while cut > 0 && !label.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        label.truncate(cut);
+        label.push_str("...");
+    }
+    label
 }

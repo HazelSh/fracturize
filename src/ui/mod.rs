@@ -34,6 +34,7 @@ pub mod mutate;
 pub mod num;
 pub mod radio;
 pub mod random_flames;
+pub mod mutation_grid;
 pub mod random_settings;
 pub mod render_job;
 pub mod render_panel;
@@ -246,6 +247,7 @@ pub enum WindowKey {
     Mutate,
     Random,
     RandomSettings,
+    MutationGrid,
     Scenes,
     Keybinds,
     Transforms,
@@ -262,6 +264,7 @@ impl WindowKey {
             Self::Mutate => "mutate",
             Self::Random => "random",
             Self::RandomSettings => "random_settings",
+            Self::MutationGrid => "mutation_grid",
             Self::Scenes => "scenes",
             Self::Keybinds => "keybinds",
             Self::Transforms => "transforms",
@@ -311,6 +314,8 @@ impl WindowKey {
             Self::Random => egui::vec2(200.0, 260.0),
             // The variation rows are a name and a min-max pair.
             Self::RandomSettings => egui::vec2(300.0, 260.0),
+            // The two-row bar over a grid with tiles big enough to see.
+            Self::MutationGrid => egui::vec2(340.0, 280.0),
             // The preset row and the radio above a grid of at least a few cells.
             Self::Xaos => egui::vec2(300.0, 220.0),
             _ => egui::vec2(180.0, 100.0),
@@ -352,6 +357,14 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
             egui::vec2(380.0, (screen.height() - top - 40.0).clamp(300.0, 780.0)),
         ),
         WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(720.0, 520.0)),
+        // Large and central: it is the thing being looked at while it's open.
+        WindowKey::MutationGrid => (
+            egui::pos2(300.0, top),
+            egui::vec2(
+                (screen.width() - 620.0).clamp(400.0, 900.0),
+                (screen.height() - top - 60.0).clamp(320.0, 640.0),
+            ),
+        ),
         WindowKey::Keybinds => (egui::pos2(620.0, top), egui::vec2(360.0, 420.0)),
         WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),
         WindowKey::Camera => (
@@ -441,6 +454,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     history::draw(&ctx, app);
     mutate::draw(&ctx, app);
     random_flames::draw(&ctx, app);
+    mutation_grid::draw(&ctx, app);
     random_settings::draw(&ctx, app);
     step("explore", t, &mut timings);
     let t = std::time::Instant::now();

@@ -30,6 +30,7 @@ mod tile;
 mod glyphs;
 mod dice;
 mod random_list;
+mod mutation_grid;
 mod record;
 mod renorm;
 mod render_job;

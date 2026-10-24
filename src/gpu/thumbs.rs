@@ -26,6 +26,13 @@
 //! `renders/thumb-study/`): shape and colour read from 8k points on nearly
 //! every scene, where 2k reads only on compact ones; 2x supersampling isn't
 //! worth its fill at this size.
+//!
+//! **Mutation grid tiles follow the main view instead.** A tile is the same
+//! still, but drawn from the window's own camera ([`SharedView`]), so every
+//! tile shows its mutation from wherever the person is looking, while the
+//! camera plays or is dragged. Each tile redraws only when that view moved:
+//! a still view costs nothing, a moving one a splat a tile a frame. Tiles are
+//! bigger than browser rows, so they get more points ([`grid_points`]).
 
 use crate::camera::{CameraOverride, OrbitCamera};
 use crate::gpu::buffers::CameraUniforms;
@@ -49,6 +56,28 @@ const EGUI_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Points in a thumbnail's ring.
 pub const POINTS: u32 = 8192;
+
+/// Most points a mutation grid tile gets.
+const GRID_POINTS_MAX: u32 = 65536;
+
+/// Points for a mutation grid tile `width` x `height` pixels: about one for
+/// every pixel and a half, never fewer than a browser thumbnail's. A tile is
+/// read side by side with its neighbours, and at 8k points the larger tiles
+/// show the sample more than the form.
+pub fn grid_points(width: u32, height: u32) -> u32 {
+    let want = (width as f32 * height as f32 * 0.66) as u32;
+    want.div_ceil(256).saturating_mul(256).clamp(POINTS, GRID_POINTS_MAX)
+}
+
+/// A framing that isn't a thumbnail's own: the main view's camera, point size
+/// and haze, which the mutation grid's tiles all draw from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SharedView {
+    pub camera: OrbitCamera,
+    pub point_size: f32,
+    /// Near, far, transmittance, saturation: `App::haze_uniforms`.
+    pub haze: (f32, f32, f32, f32),
+}
 
 /// One workgroup: 256 walkers, so a lap is 32 iterations each.
 const WORKGROUPS: u32 = 1;
@@ -85,6 +114,10 @@ pub struct Thumbnail {
     depth_view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// Points in its ring.
+    points: u32,
+    /// The shared view it was last drawn from; `None` when from its own.
+    drawn: Option<SharedView>,
     /// How long one flight of the camera path takes, in seconds: the authored
     /// path's, else the default orbit's. The hovered entry plays at this rate.
     seconds: f32,
@@ -103,17 +136,18 @@ impl Thumbnail {
         scene: Scene,
         width: u32,
         height: u32,
+        points: u32,
     ) -> Result<Self, String> {
         let table = LayerTable::build(&scene, &[], scene.color_contrast);
         let mut compute = PointCompute::with_pipelines(
-            device, &pipes.chaos, &table, POINTS, DEFAULT_SEED, WORKGROUPS,
+            device, &pipes.chaos, &table, points, DEFAULT_SEED, WORKGROUPS,
         );
         compute.zoom = crate::offline::scene_zoom(&scene)?;
 
         // Burn in, then one lap. Two submits, because `advance_with_iters`
         // writes the params through the queue and both writes would otherwise
         // land before either dispatch runs.
-        let lap = POINTS.div_ceil(compute.num_walkers);
+        let lap = points.div_ceil(compute.num_walkers);
         for iters in [BURN_IN, lap] {
             compute.advance_with_iters(queue, iters);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -159,7 +193,7 @@ impl Thumbnail {
         splat.upload_params(
             queue,
             scene.exposure,
-            POINTS as f64,
+            points as f64,
             height as f32,
             crate::scene::clear_color(scene.background, 1.0),
             crate::gpu::buffers::Alpha::Opaque,
@@ -170,7 +204,8 @@ impl Thumbnail {
         let seconds = crate::path::resolve(scene.camera_path.as_ref(), &default).duration();
 
         let mut thumb = Self {
-            scene, compute, splat, texture, view, egui_view, depth_view, width, height, seconds, folded: 0,
+            scene, compute, splat, texture, view, egui_view, depth_view, width, height, points,
+            drawn: None, seconds, folded: 0,
         };
         thumb.render(device, queue, None);
         Ok(thumb)
@@ -183,20 +218,45 @@ impl Thumbnail {
         let over = CameraOverride { path_t, ..Default::default() };
         let (camera, point_size, haze, folded, _) =
             crate::offline::frame_setup(&None, &self.scene, false, over);
+        let (near, far) = haze.band(camera.distance);
+        self.drawn = None;
+        self.draw(device, queue, &camera, point_size, (near, far, haze.transmittance, haze.saturation), Some(folded));
+    }
 
+    /// Redraw from the main view's framing, if it moved since the last time.
+    /// The ring is not carried through zoom wraps here: the window's camera is
+    /// already folded into its band.
+    pub fn render_view(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &SharedView) {
+        if self.drawn.as_ref() == Some(view) {
+            return;
+        }
+        self.drawn = Some(*view);
+        self.draw(device, queue, &view.camera, view.point_size, view.haze, None);
+    }
+
+    fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &OrbitCamera,
+        point_size: f32,
+        (haze_near, haze_far, transmittance, saturation): (f32, f32, f32, f32),
+        folded: Option<i32>,
+    ) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("thumb_render_encoder"),
         });
-        if folded != self.folded {
+        if let Some(folded) = folded
+            && folded != self.folded
+        {
             self.compute.rewrap_in(queue, &mut encoder, folded - self.folded);
             self.folded = folded;
         }
 
         let aspect = self.width as f32 / self.height as f32;
-        let (haze_near, haze_far) = haze.band(camera.distance);
         let uniforms = CameraUniforms::new(
             camera.view_proj(aspect), camera.fov, self.height as f32, point_size, aspect, 1.0,
-            haze_near, haze_far, haze.transmittance, haze.saturation,
+            haze_near, haze_far, transmittance, saturation,
             self.scene.color_contrast, self.scene.background.to_array(),
             false, self.scene.packs_rgb(),
         )
@@ -207,7 +267,7 @@ impl Thumbnail {
             OrbitCamera::point_pixels(point_size, camera.distance, self.height as f32, camera.fov) <= 1.5;
         self.splat.render(
             device, &mut encoder, &self.view, &self.depth_view,
-            self.width, self.height, POINTS, primitives,
+            self.width, self.height, self.points, primitives,
         );
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -226,12 +286,13 @@ pub enum ThumbState<'a> {
     Failed(&'a str),
 }
 
-/// What a thumbnail is of: a scene file, or a roll in the Random flames list
-/// (by its id there, which is never reused).
+/// What a thumbnail is of: a scene file, a roll in the Random flames list, or
+/// a tile of the mutation grid (by its id there, which is never reused).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ThumbKey {
     File(std::path::PathBuf),
     Random(u64),
+    Grid(u64),
 }
 
 struct Slot {
@@ -258,13 +319,17 @@ struct Slot {
 pub struct ThumbCache {
     pipes: ThumbPipelines,
     slots: std::collections::HashMap<ThumbKey, Slot>,
-    wanted: Vec<(ThumbKey, Option<std::time::SystemTime>, (u32, u32), Scene)>,
+    wanted: Vec<(ThumbKey, Option<std::time::SystemTime>, (u32, u32), u32, Scene)>,
     /// The entry under the pointer, flying its path, and since when.
     hovered: Option<(ThumbKey, std::time::Instant)>,
     /// What this frame's lists reported under the pointer (see [`Self::hover`]).
     hover_now: Option<ThumbKey>,
     /// One that stopped being hovered and needs putting back on its still.
     settle: Option<ThumbKey>,
+    /// What this frame's grid reported following the shared view.
+    follow_now: Vec<ThumbKey>,
+    /// The main view's framing, this frame.
+    view: Option<SharedView>,
     frame: u64,
 }
 
@@ -286,6 +351,8 @@ impl ThumbCache {
             hovered: None,
             hover_now: None,
             settle: None,
+            follow_now: Vec::new(),
+            view: None,
             frame: 0,
         }
     }
@@ -305,7 +372,11 @@ impl ThumbCache {
             .is_some_and(|s| s.modified == modified && s.size == size);
         if !fresh {
             if !self.wanted.iter().any(|(k, ..)| k == key) {
-                self.wanted.push((key.clone(), modified, size, scene.clone()));
+                let points = match key {
+                    ThumbKey::Grid(_) => grid_points(size.0, size.1),
+                    _ => POINTS,
+                };
+                self.wanted.push((key.clone(), modified, size, points, scene.clone()));
             }
             return ThumbState::Pending;
         }
@@ -323,6 +394,18 @@ impl ThumbCache {
     /// [`Self::service`] takes what was reported and treats silence as none.
     pub fn hover(&mut self, key: ThumbKey) {
         self.hover_now = Some(key);
+    }
+
+    /// Draw `key` from the shared view this frame, rather than as a still
+    /// from its own camera. Reported per frame, like [`Self::hover`].
+    pub fn follow(&mut self, key: ThumbKey) {
+        self.follow_now.push(key);
+    }
+
+    /// The main view's framing, which followed thumbnails draw from. Set
+    /// once a frame, before [`Self::service`].
+    pub fn set_view(&mut self, view: SharedView) {
+        self.view = Some(view);
     }
 
     fn update_hovered(&mut self) {
@@ -349,8 +432,8 @@ impl ThumbCache {
         let start = std::time::Instant::now();
         let mut built = 0;
         while !self.wanted.is_empty() && (built == 0 || start.elapsed() < BUILD_BUDGET) {
-            let (key, modified, size, scene) = self.wanted.remove(0);
-            let built_thumb = Thumbnail::new(device, queue, &self.pipes, scene, size.0, size.1)
+            let (key, modified, size, points, scene) = self.wanted.remove(0);
+            let built_thumb = Thumbnail::new(device, queue, &self.pipes, scene, size.0, size.1, points)
                 .map(|t| {
                     let id = egui.register_native_texture(device, t.view(), wgpu::FilterMode::Linear);
                     (t, id)
@@ -378,6 +461,14 @@ impl ThumbCache {
         {
             let t_path = (since.elapsed().as_secs_f32() / t.seconds.max(0.1)).fract();
             t.render(device, queue, Some(t_path));
+        }
+        let follow = std::mem::take(&mut self.follow_now);
+        if let Some(view) = &self.view {
+            for key in &follow {
+                if let Some(Slot { built: Ok((t, _)), .. }) = self.slots.get_mut(key) {
+                    t.render_view(device, queue, view);
+                }
+            }
         }
 
         if self.slots.len() > MAX_SLOTS {
@@ -458,7 +549,7 @@ mod tests {
             let t = Instant::now();
             let scene = Scene::load(format!("scenes/{name}.toml")).unwrap();
             let parsed = t.elapsed();
-            let thumb = Thumbnail::new(&device, &queue, &pipes, scene, 96, 96).unwrap();
+            let thumb = Thumbnail::new(&device, &queue, &pipes, scene, 96, 96, POINTS).unwrap();
             wait(&device);
             println!(
                 "{name:12} parse {:.2} ms, build+converge+draw {:.2} ms",

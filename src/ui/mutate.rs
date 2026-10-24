@@ -84,6 +84,15 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 if resp.clicked() {
                     app.ui_state.panels.random_settings_open = true;
                 }
+
+                let resp = ui.toggle_value(&mut app.ui_state.panels.mutation_grid_open, (icons::GRID, "Grid…"));
+                hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "See a ring of mutations round the scene and pick one, rather than rolling one \
+                     at a time",
+                    "toggle the Mutation grid window",
+                );
             });
         });
 

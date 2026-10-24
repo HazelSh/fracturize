@@ -3621,6 +3621,9 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
 struct Variant {
     scene: Option<Scene>,
     label: String,
+    /// Its number: what `<out>.mutN.toml` is called, and its seed's offset.
+    /// 0 is the parent of a mutation sheet.
+    number: usize,
 }
 
 /// The seed a sheet's tiles are numbered from: `--seed`, else the clock.
@@ -3633,36 +3636,60 @@ fn sheet_seed(seed: Option<u64>) -> u64 {
     })
 }
 
-/// Render a mutation contact sheet: tile 0 is the unmutated scene, tiles
-/// 1..=count are mutations of it under the dice profile (each also saved as
+/// Render a mutation contact sheet: the unmutated scene, and tiles
+/// 1..=count of mutations of it under the dice profile (each also saved as
 /// `<out>.mutN.toml` next to the sheet so a good one can be kept). Every
 /// mutation goes through the same gate as a fresh roll, judged against the
 /// parent (`dice::generate`), so a tile is never a blown-up or collapsed
 /// child; one that found nothing in its budget is left empty and says why.
 /// Every tile is framed by the parent's camera, so the comparison is of form.
+///
+/// 8 and 24 are the app's mutation grid: 3×3 or 5×5 with the parent in the
+/// centre, numbered row by row round it, a 5×5's outer ring at twice the
+/// strength (`mutation_grid`). Any other count puts the parent first in a
+/// near-square grid.
 pub fn render_mutations(
     params: OfflineParams,
     count: u32,
     settings: &crate::dice::RandomSettings,
     seed: Option<u64>,
 ) -> Result<Outcome, String> {
+    use crate::mutation_grid::{cells, ring_settings, GridSize};
     let seed = sheet_seed(seed);
     println!("Mutation seed: {} (pass --seed {} to reproduce; tile N is seed {}+N)", seed, seed, seed);
-    let mut variants = vec![Variant { scene: Some(params.scene.clone()), label: "original".to_string() }];
-    for i in 1..=count {
-        let tile_seed = seed.wrapping_add(i as u64);
-        variants.push(match crate::dice::mutate_seeded(settings, &params.scene, tile_seed) {
-            Ok(r) => {
-                let mut label = r.log.join("; ");
-                if let Some(note) = r.backoff_note(settings) {
-                    label = format!("{label} ({note})");
-                }
-                Variant { scene: Some(r.scene), label }
-            }
-            Err(f) => Variant { scene: None, label: f.message() },
-        });
+    let grid = GridSize::for_children(count as usize);
+    let layout: Vec<(usize, u32)> = match grid {
+        Some(size) => cells(size).iter().map(|c| (c.tile, c.ring)).collect(),
+        None => (0..=count as usize).map(|n| (n, (n > 0) as u32)).collect(),
+    };
+    if let Some(size) = grid {
+        println!(
+            "Laid out {0}x{0} with the original in the centre, as the app's mutation grid{1}",
+            size.side(),
+            if size == GridSize::Five { "; the outer ring at twice the strength" } else { "" },
+        );
     }
-    render_variant_sheet(params, variants, false)
+    let variants = layout
+        .into_iter()
+        .map(|(number, ring)| {
+            if number == 0 {
+                return Variant { scene: Some(params.scene.clone()), label: "original".to_string(), number };
+            }
+            let settings = ring_settings(settings, ring);
+            let tile_seed = seed.wrapping_add(number as u64);
+            match crate::dice::mutate_seeded(&settings, &params.scene, tile_seed) {
+                Ok(r) => {
+                    let mut label = r.log.join("; ");
+                    if let Some(note) = r.backoff_note(&settings) {
+                        label = format!("{label} ({note})");
+                    }
+                    Variant { scene: Some(r.scene), label, number }
+                }
+                Err(f) => Variant { scene: None, label: f.message(), number },
+            }
+        })
+        .collect();
+    render_variant_sheet(params, variants, false, grid.map(|g| g.side() as u32))
 }
 
 /// Render a sheet of fresh random flames: tile N is `--random --seed
@@ -3680,18 +3707,32 @@ pub fn render_rolls(
         .map(|i| {
             let tile_seed = seed.wrapping_add(i as u64);
             match crate::dice::roll_seeded(settings, &params.scene, tile_seed) {
-                Ok(r) => Variant { scene: Some(r.scene), label: format!("--random --seed {tile_seed}") },
-                Err(f) => Variant { scene: None, label: format!("seed {tile_seed}: {}", f.message()) },
+                Ok(r) => Variant {
+                    scene: Some(r.scene),
+                    label: format!("--random --seed {tile_seed}"),
+                    number: i as usize,
+                },
+                Err(f) => Variant {
+                    scene: None,
+                    label: format!("seed {tile_seed}: {}", f.message()),
+                    number: i as usize,
+                },
             }
         })
         .collect();
-    render_variant_sheet(params, variants, true)
+    render_variant_sheet(params, variants, true, None)
 }
 
-/// The sheet both of those draw. `rolls`: every tile is its own flame, framed
-/// by its own camera and cleared to its own background; otherwise tile 0 is
-/// the parent and every tile shares its framing.
-fn render_variant_sheet(params: OfflineParams, variants: Vec<Variant>, rolls: bool) -> Result<Outcome, String> {
+/// The sheet both of those draw, the variants in reading order. `rolls`:
+/// every tile is its own flame, framed by its own camera and cleared to its
+/// own background; otherwise the tile numbered 0 is the parent and every tile
+/// shares its framing. `cols`: the sheet's width in tiles, else near-square.
+fn render_variant_sheet(
+    params: OfflineParams,
+    variants: Vec<Variant>,
+    rolls: bool,
+    cols: Option<u32>,
+) -> Result<Outcome, String> {
     print_start(if rolls { "random sheet" } else { "variant sheet" }, params.width, params.height, params.out_path);
     let OfflineParams {
         mut scene,
@@ -3749,7 +3790,7 @@ fn render_variant_sheet(params: OfflineParams, variants: Vec<Variant>, rolls: bo
 
     // Sheet layout: near-square grid
     let n = variants.len() as u32;
-    let cols = (n as f32).sqrt().ceil() as u32;
+    let cols = cols.unwrap_or((n as f32).sqrt().ceil() as u32);
     let rows = n.div_ceil(cols);
 
     let clear_of = |s: &Scene| crate::scene::clear_color(s.background, if transparent { 0.0 } else { 1.0 });
@@ -3804,7 +3845,7 @@ fn render_variant_sheet(params: OfflineParams, variants: Vec<Variant>, rolls: bo
     let mut done = 0usize;
     for (idx, variant) in variants.iter().enumerate() {
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);
-        let is_parent = !rolls && idx == 0;
+        let is_parent = !rolls && variant.number == 0;
         let Some(tile) = &variant.scene else {
             // Nothing met the profile for this tile: leave it at the clear
             // colour, and say so on the tile and on stdout.
@@ -3848,10 +3889,10 @@ fn render_variant_sheet(params: OfflineParams, variants: Vec<Variant>, rolls: bo
         );
 
         if is_parent {
-            println!("tile [row 0, col 0]: original");
+            println!("tile [row {}, col {}]: original", row, col);
         } else {
-            let toml_path = format!("{}.{}{}.toml", out_stem.display(), suffix, idx);
-            tile.save(&toml_path).map_err(|e| format!("Failed to save tile {}: {}", idx, e))?;
+            let toml_path = format!("{}.{}{}.toml", out_stem.display(), suffix, variant.number);
+            tile.save(&toml_path).map_err(|e| format!("Failed to save tile {}: {}", variant.number, e))?;
             println!("tile [row {}, col {}]: {} -> {}", row, col, variant.label, toml_path);
         }
         if labels {

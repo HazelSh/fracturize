@@ -28,6 +28,9 @@ pub struct PanelPrefs {
     /// What the dice may roll (`dice::RandomSettings`).
     #[serde(default)]
     pub random_settings_open: bool,
+    /// The mutation grid: the scene amid a ring of its mutations.
+    #[serde(default)]
+    pub mutation_grid_open: bool,
     #[serde(default)]
     pub camera_open: bool,
     #[serde(default)]
@@ -117,6 +120,9 @@ pub struct Prefs {
     /// `None`. `None` here too = `default`.
     #[serde(default)]
     pub random_profile_builtin: Option<String>,
+    /// The mutation grid's size: 3×3 or 5×5.
+    #[serde(default)]
+    pub mutation_grid_size: crate::mutation_grid::GridSize,
     /// Who to credit on scenes made in-app. Scene files carry their own
     /// author; this is only the default for one that doesn't have one yet (a
     /// blank canvas, a random flame), so a person doesn't have to type their
@@ -180,6 +186,7 @@ impl Default for Prefs {
             random: Default::default(),
             random_profile: None,
             random_profile_builtin: None,
+            mutation_grid_size: Default::default(),
             author: None,
             point_count: None,
             threads: None,

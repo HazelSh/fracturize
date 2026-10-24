@@ -40,6 +40,9 @@ src/
     profile.rs     # Profiles as files: format, built-ins, named lookup, comment-keeping save
     profiles/      # The built-in profiles, compiled in (anything, colour-only, …)
   random_list.rs # The Random flames list's model: rolls on worker threads
+                 # (and the worker pool the mutation grid shares)
+  mutation_grid.rs # The mutation grid's model: a ring of mutations round
+                 # the scene, numbered as --mutations 8|24 numbers them
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
   xaos.rs        # Xaos: per-map transition rows, the exact sampler (GPU twin),
@@ -60,6 +63,8 @@ src/
     history.rs     # History window: every edit, click a row to jump to it
     mutate.rs      # Mutate window: profile, strength, the button
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
+    mutation_grid.rs   # Mutation grid: 3×3 / 5×5, every tile seen from the
+                       # main view's camera; click one to make it the scene
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
@@ -656,7 +661,7 @@ the opposite trade, so they get visible buttons as well as menu rows.
 
 **Explore is the other menu**: the ways of finding a scene by chance, and the
 undo that makes them safe to try. Random flame, the Random flames list, Random
-settings…; Mutate (U), Mutate…; Undo, Redo, History…. It used to be a window
+settings…; Mutate (U), Mutate…, Mutation grid…; Undo, Redo, History…. It used to be a window
 holding five unrelated jobs in a column (two "new scene" buttons, the mutation
 slider, undo/redo, the history list). Each is its own thing now — commands are
 menu rows, and what needs room is a window the menu opens, lit in the menu
@@ -669,6 +674,7 @@ where "start a new document" lives in every program.
 | History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
 | Mutate | The dice profile picker, mutation strength (the profile's), Mutate, Undo, Settings… |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
+| Mutation grid | The scene amid 8 or 24 of its mutations, every tile seen from the main view's camera; click one to make it the scene, Ctrl+Z for the ring it came from. See "The mutation grid" |
 | Random settings | The dice profile: picker, save / save as / revert (with a `*` when changed); one list of parts — shape, structure, colour — each switched on or off with its ranges under it; the quality check; how big a mutation's step is; Roll one and Mutate at the foot. See "The dice" |
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
@@ -898,13 +904,11 @@ undefended absence reads as an accident, so they are written down:
 - **Transform reordering.** Meaningless for an IFS: order doesn't affect the
   attractor, weights do. This one is deferred permanently.
 - **A menu bar.** See the File-menu note above.
-- **The 3×3 mutation grid** — Apophysis's signature exploration UI, showing
-  eight perturbations around the current flame so mutation becomes *look,
-  choose* rather than *roll, judge, undo*. The highest-value single addition
-  left, and the largest job: it needs offscreen thumbnail rendering, which
-  `render_job.rs` / `offline.rs` can already do at arbitrary point counts.
-  Eight 200×200 thumbnails at low point counts are cheap next to a 50M-point
-  live view. Still on `todo.txt`.
+- **The mutation grid as panes.** It is a window of thumbnails for now; it
+  moves into the multiview pane grid (FEATURE-PLANS item 2) once that exists,
+  at which point a tile can be a full live view rather than an 8–64k-point
+  still. And no onion skin (the hovered child over a dim parent in the main
+  view): Hazel's call, not needed yet.
 
 ### The chrome doesn't move
 
@@ -1051,7 +1055,8 @@ lacunarity bound never costs a frame, and keeps eight rows ahead of the last
 one on screen — scroll and it grows, without end. Changing a setting restarts
 it once the settings have been still for 400 ms, and drops any roll still in
 flight under the old ones. Thumbnails share `gpu::thumbs::ThumbCache` with the
-scene browser (keyed by `ThumbKey::Random(id)`), so the same rules hold: only
+scene browser (keyed by `ThumbKey::Random(id)`; the mutation grid's are
+`ThumbKey::Grid(id)`), so the same rules hold: only
 the hovered row flies its camera, and thumbnails are never reframed. Hover is
 reported per frame (`ThumbCache::hover`) rather than set, so two lists open at
 once can't clear each other's.
@@ -1212,9 +1217,58 @@ fracturize -s scenes/koru.toml -r renders/koru-mut.png --mutations 8 \
   --random-config colour-only --effort tiny --width 320 --height 180
 ```
 
-Not yet (FEATURE-PLANS.md Track A, items 3–5): xaos and infinite zoom as
-parts, and the 3×3 / 5×5 mutation grid, which is this generator with the
-Random flames list's model and a grid layout.
+Not yet (FEATURE-PLANS.md Track A, items 4–5): xaos and infinite zoom as
+parts.
+
+## The mutation grid
+
+Explore → Mutation grid… (or Grid… in the Mutate window): the scene in the
+centre, a ring of its mutations round it — 8 in a 3×3, 24 in a 5×5, where the
+outer ring mutates at twice the profile's strength so one grid shows near and
+far. Mutation becomes *look, choose* rather than *roll, judge, undo*. The model
+is `src/mutation_grid.rs`, the window `src/ui/mutation_grid.rs`; the dice are
+the ones `U` uses (`dice::mutate_seeded`, judged against the parent by the
+gate), rolled on the Random flames list's worker pool
+(`random_list::spawn_pool`).
+
+- **Every tile is seen from the main view's camera**, and stays in step with
+  it: orbit, play the path, zoom, and all the tiles turn together, so a
+  mutation can be judged from any angle and tiles always compare like with
+  like. This is unlike the browser and the Random flames list, where a
+  thumbnail is a still from its own camera and only the hovered one flies.
+  `ThumbCache::follow` (per frame, like `hover`) marks a tile as drawn from the
+  `SharedView` the app sets each frame, and a tile redraws only when that view
+  changed — a still camera costs nothing, a moving one one splat a tile a
+  frame. Tiles get more points than a browser row (`thumbs::grid_points`, up to
+  64k), because they are read side by side and bigger.
+- **Drag a tile to turn the view, wheel over one to zoom it**: the same camera,
+  so it is also the main view's. A drag takes the camera off its path, as on
+  the viewport. A *click* — a press that never became a drag — picks the tile,
+  and works while the camera is playing.
+- **Picking a tile is one edit**, named for its operators ("Grid: T3 rotate…"),
+  logged with the `--mutations` command that draws its grid. The camera stays
+  put, as for `U`. A new ring grows round it at once, the picked tile's
+  thumbnail moving to the centre. Clicking the centre deals a new ring round
+  the same scene.
+- **Ctrl+Z brings back the previous centre and its ring**, so a sibling can be
+  picked instead. Grids are remembered (up to 32) by `GridKey` — the document
+  (`App::document_epoch`, bumped on every open, since opening clears the
+  history) and `History::top_serial`, which is unique and never reused. The
+  history knows nothing of the grid: a ring is its seed, so a remembered one
+  with tiles still in flight simply makes them again.
+- **Anything else that changes the scene** — an edit, `U`, a load — or the
+  profile starts the ring over once things have been still for 400 ms, from a
+  fresh seed for a new scene and the same seed for new settings. Work begun
+  for an old ring is dropped, never shown.
+- **The CLI draws the same grid.** Tiles are numbered row by row round the
+  centre and tile `k` is mutation seed `G + k`; `--mutations 8` and `24` lay
+  out 3×3 / 5×5 with the original in the middle and the outer ring doubled, so
+  the status line's seed reproduces the window's grid:
+
+```
+fracturize -s scene.toml -r renders/grid.png --mutations 24 --seed 2913110551 \
+  --effort tiny --width 256 --height 144
+```
 
 ## The scene browser
 
@@ -3724,7 +3778,8 @@ grid/mutation sheets. Options:
   Verify output with `ffprobe` / extract frames with `ffmpeg`.
 
 **Mutation sheets** (evolutionary exploration): `--mutations N` renders the
-scene plus N random variants (tile 0 = original, near-square grid). Each
+scene plus N random variants (tile 0 = original, near-square grid; 8 and 24
+are the app's mutation grid instead, 3×3 / 5×5 round the original). Each
 variant is saved as `<out>.mutN.toml` and its operator list printed per tile
 ("T2 rotate 21° about (...)", "T1 +swirl 0.18", ...), so you can look at the
 sheet, pick a tile, and load/iterate on its TOML. `--seed` reproduces a

@@ -221,6 +221,14 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
             &format!("{} Mutate…", icons::SHUFFLE),
             "The dice profile, the mutation strength, and a button to mutate with them.",
         );
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.mutation_grid_open,
+            &format!("{} Mutation grid…", icons::GRID),
+            "The scene amid a ring of its mutations, all seen from your camera. Click one to make \
+             it the scene; Ctrl+Z brings back the ring it came from.",
+        );
 
         ui.separator();
 
