@@ -157,7 +157,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
             ui,
             16,
             2,
-            egui::DragValue::new(&mut distance)
+            num::Drag::new(&mut distance)
                 .speed(0.02)
                 .range(0.05..=100.0)
                 .prefix("distance: "),
@@ -188,7 +188,7 @@ fn draw_framing(ui: &mut egui::Ui, app: &mut App) {
                 ui,
                 14,
                 1,
-                egui::DragValue::new(&mut roll_deg).speed(0.5).suffix("°").prefix("roll: "),
+                num::Drag::new(&mut roll_deg).speed(0.5).suffix("°").prefix("roll: "),
             )
         })
         .inner;
@@ -527,7 +527,7 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
 
         let mut secs = seconds;
         let resp = ui.add(
-            egui::DragValue::new(&mut secs)
+            num::Drag::new(&mut secs)
                 .speed(0.1)
                 .range(0.1..=600.0)
                 .suffix("s"),
@@ -645,7 +645,7 @@ fn draw_loop(
         let suffix = if periods == 1 { " repeat" } else { " repeats" };
         let resp = ui.add_enabled(
             current.is_some(),
-            egui::DragValue::new(&mut periods).speed(0.05).range(1..=64).suffix(suffix),
+            num::Drag::new(&mut periods).speed(0.05).range(1..=64).suffix(suffix),
         );
         let resp = hinted(
             resp,

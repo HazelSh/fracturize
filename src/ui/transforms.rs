@@ -1192,7 +1192,7 @@ fn drag_row(
                 ui,
                 chars,
                 decimals,
-                egui::DragValue::new(v)
+                super::num::Drag::new(v)
                     .speed(speed)
                     .prefix(format!("{}: ", axis))
                     .suffix(suffix),
@@ -1404,7 +1404,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         let mut n = fold as f32;
         let resp = ui.add_enabled(
             kind.fold().is_some(),
-            egui::DragValue::new(&mut n)
+            super::num::Drag::new(&mut n)
                 .speed(0.08)
                 .range(if matches!(kind, crate::symmetry::OrbitKind::Dihedral(_)) {
                     2.0..=crate::symmetry::MAX_FOLD as f32
@@ -1470,7 +1470,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                         ui,
                         5,
                         2,
-                        egui::DragValue::new(v).speed(0.01).prefix(format!("{}: ", name)),
+                        super::num::Drag::new(v).speed(0.01).prefix(format!("{}: ", name)),
                     )
                 });
                 let resp = hinted(
@@ -1507,7 +1507,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             ui.label("copies");
             let mut n = r.count as f32;
             let resp = ui.add(
-                egui::DragValue::new(&mut n)
+                super::num::Drag::new(&mut n)
                     .speed(0.1)
                     .range(1.0..=crate::symmetry::MAX_REPEAT as f32)
                     .fixed_decimals(0),
@@ -1524,7 +1524,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             }
 
             ui.label("turn");
-            let resp = ui.add(egui::DragValue::new(&mut r.turn).speed(0.5).suffix("°"));
+            let resp = ui.add(super::num::Drag::new(&mut r.turn).speed(0.5).suffix("°"));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
@@ -1542,7 +1542,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                 ("y", &mut r.translate.y),
                 ("z", &mut r.translate.z),
             ] {
-                let resp = ui.add(egui::DragValue::new(v).speed(0.005).prefix(label).fixed_decimals(3));
+                let resp = ui.add(super::num::Drag::new(v).speed(0.005).prefix(label).fixed_decimals(3));
                 let resp = hinted(
                     resp,
                     &mut app.ui_state,
@@ -1557,7 +1557,7 @@ fn draw_symmetry(ui: &mut egui::Ui, app: &mut App, idx: usize) {
         ui.horizontal(|ui| {
             ui.label("shrink");
             let resp = ui.add(
-                egui::DragValue::new(&mut r.scale).speed(0.002).range(0.05..=1.0).fixed_decimals(3),
+                super::num::Drag::new(&mut r.scale).speed(0.002).range(0.05..=1.0).fixed_decimals(3),
             );
             let resp = hinted(
                 resp,
@@ -1704,7 +1704,7 @@ fn draw_post_affine(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
                 ui,
                 10,
                 3,
-                egui::DragValue::new(v)
+                super::num::Drag::new(v)
                     .speed(0.005)
                     .prefix(format!("{}: ", label))
                     .range(-1000.0..=1000.0),
@@ -1862,7 +1862,7 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
                 ui,
                 10,
                 3,
-                egui::DragValue::new(v)
+                super::num::Drag::new(v)
                     .speed(0.005)
                     .prefix(format!("{}: ", label))
                     .range(-1000.0..=1000.0),
@@ -1938,7 +1938,7 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
                 ui.label(["x", "y", "z"][row]);
                 for col in 0..4 {
                     let v = &mut cache.matrix_cols[col][row];
-                    let resp = ui.add(egui::DragValue::new(v).speed(0.01));
+                    let resp = ui.add(super::num::Drag::new(v).speed(0.01));
                     let resp = hinted(
                         resp,
                         &mut app.ui_state,
@@ -2000,7 +2000,7 @@ fn draw_weight(ui: &mut egui::Ui, app: &mut App, idx: usize) {
             ui,
             6,
             2,
-            egui::DragValue::new(&mut weight).speed(speed).range(0.01..=100.0),
+            super::num::Drag::new(&mut weight).speed(speed).range(0.01..=100.0),
         );
         let resp = hinted(
             resp,
@@ -2280,7 +2280,7 @@ fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
                     ui,
                     5,
                     2,
-                    egui::DragValue::new(&mut v).speed(0.05).range(-4.0..=4.0),
+                    super::num::Drag::new(&mut v).speed(0.05).range(-4.0..=4.0),
                 );
                 let resp = hinted(
                     resp,

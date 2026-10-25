@@ -623,7 +623,7 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
         ui.add_enabled_ui(pinned && !overridden, |ui| {
             ui.horizontal(|ui| {
                 let resp = ui.add(
-                    egui::DragValue::new(&mut near)
+                    num::Drag::new(&mut near)
                         .speed(0.05)
                         .range(0.01..=(far - 0.05) as f64)
                         .prefix("near: "),
@@ -637,7 +637,7 @@ fn draw_haze(ui: &mut egui::Ui, app: &mut App) {
                 .changed();
 
                 let resp = ui.add(
-                    egui::DragValue::new(&mut far)
+                    num::Drag::new(&mut far)
                         .speed(0.05)
                         .range((near + 0.05) as f64..=100.0)
                         .prefix("far: "),

@@ -165,7 +165,7 @@ fn draw_block_body(ui: &mut egui::Ui, app: &mut App, idx: usize, me: usize, sum:
                 ui,
                 5,
                 2,
-                egui::DragValue::new(&mut v).speed(speed).range(0.0..=100.0).prefix("×"),
+                super::num::Drag::new(&mut v).speed(speed).range(0.0..=100.0).prefix("×"),
             );
             let (a, b) = (name_of(app, from_idx), name_of(app, to_idx));
             let r = hinted(
@@ -216,7 +216,7 @@ fn draw_block_body(ui: &mut egui::Ui, app: &mut App, idx: usize, me: usize, sum:
                 ui,
                 5,
                 2,
-                egui::DragValue::new(&mut c).speed(speed).range(0.0..=100.0).prefix("×"),
+                super::num::Drag::new(&mut c).speed(speed).range(0.0..=100.0).prefix("×"),
             );
             let r = hinted(
                 r,
@@ -917,7 +917,7 @@ fn draw_edge_popover(ctx: &egui::Context, app: &mut App, edges: &[OverlayEdge]) 
                 ui.horizontal(|ui| {
                     let mut v = x;
                     let speed = (v.max(0.05) * 0.02) as f64;
-                    let r = super::num::drag(ui, 5, 2, egui::DragValue::new(&mut v).speed(speed).range(0.0..=100.0).prefix("×"));
+                    let r = super::num::drag(ui, 5, 2, super::num::Drag::new(&mut v).speed(speed).range(0.0..=100.0).prefix("×"));
                     let r = hinted(r, &mut app.ui_state, "The odds of this edge, relative to the target's weight. 1 is as usual, 0 never.", "drag: scale this edge · click: type");
                     if r.changed() {
                         app.set_xaos_edge(a, b, v);

@@ -827,13 +827,13 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
 
     ui.horizontal(|ui| {
         let mut w = app.ui_state.render_job.width;
-        let resp = ui.add(egui::DragValue::new(&mut w).range(16..=16384).prefix("w "));
+        let resp = ui.add(num::Drag::new(&mut w).range(16..=16384).prefix("w "));
         let resp = hinted(resp, &mut app.ui_state, "Output width in pixels", "drag: output width");
         if resp.changed() {
             app.ui_state.render_job.width = w;
         }
         let mut h = app.ui_state.render_job.height;
-        let resp = ui.add(egui::DragValue::new(&mut h).range(16..=16384).prefix("h "));
+        let resp = ui.add(num::Drag::new(&mut h).range(16..=16384).prefix("h "));
         let resp = hinted(resp, &mut app.ui_state, "Output height in pixels", "drag: output height");
         if resp.changed() {
             app.ui_state.render_job.height = h;
@@ -850,7 +850,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
         let max = crate::gpu::points::downsample::MAX_SUPERSAMPLE;
         let mut ss = app.ui_state.render_job.supersample;
         let resp = ui.add(
-            egui::DragValue::new(&mut ss).range(1..=max).prefix("supersample ").suffix("x"),
+            num::Drag::new(&mut ss).range(1..=max).prefix("supersample ").suffix("x"),
         );
         let resp = hinted(
             resp,
@@ -883,7 +883,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
 
             let mut radius = app.ui_state.render_job.filter_radius;
             let resp = ui.add(
-                egui::DragValue::new(&mut radius)
+                num::Drag::new(&mut radius)
                     .speed(0.05)
                     .range(
                         crate::gpu::points::downsample::MIN_FILTER_RADIUS
@@ -924,7 +924,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
         ui.add_enabled_ui(splat, |ui| {
             let mut exposure = app.ui_state.render_job.exposure;
             let resp = ui.add(
-                egui::DragValue::new(&mut exposure)
+                num::Drag::new(&mut exposure)
                     .speed(0.05)
                     .range(0.01..=100.0)
                     .prefix("exp "),
@@ -1008,7 +1008,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
     if app.ui_state.render_job.mode == Mode::Animation {
         ui.horizontal(|ui| {
             let mut fps = app.ui_state.render_job.fps;
-            let resp = ui.add(egui::DragValue::new(&mut fps).range(1..=120).suffix(" fps"));
+            let resp = ui.add(num::Drag::new(&mut fps).range(1..=120).suffix(" fps"));
             let resp = hinted(resp, &mut app.ui_state, "Frames per second", "drag: frame rate");
             if resp.changed() {
                 app.ui_state.render_job.fps = fps;
@@ -1016,7 +1016,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
 
             let mut seconds = app.ui_state.render_job.seconds;
             let resp = ui.add(
-                egui::DragValue::new(&mut seconds)
+                num::Drag::new(&mut seconds)
                     .speed(0.1)
                     .range(0.1..=600.0)
                     .suffix("s"),
@@ -1033,7 +1033,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
 
             let mut quality = app.ui_state.render_job.quality;
             let codec = app.ui_state.render_job.format.codec_label();
-            let resp = ui.add(egui::DragValue::new(&mut quality).range(0..=100).prefix("q "));
+            let resp = ui.add(num::Drag::new(&mut quality).range(0..=100).prefix("q "));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
@@ -1054,7 +1054,7 @@ fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
             let max = crate::app::App::max_render_threads();
             let mut threads = app.ui_state.render_job.threads;
             let resp = ui.add(
-                egui::DragValue::new(&mut threads)
+                num::Drag::new(&mut threads)
                     .range(1..=max)
                     .prefix("threads "),
             );
