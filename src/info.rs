@@ -507,9 +507,46 @@ fn ramp_rows(stops: &[Vec3], color: bool, indent: &str, per_line: usize) -> Vec<
 /// the number *is* — a map with a negative determinant turns space inside out,
 /// and the cube root of a negative determinant is negative. It costs no column
 /// and there is nothing to look up.
+///
+/// It is the scale of the map's **affine parts only** — pre times post — and
+/// sees nothing of what the variations do between them. That makes it the
+/// map's real contraction for a plain map ([`is_plain`]) and only half the
+/// story for any other: an inversion's two affine halves multiply to exactly
+/// 1 whatever the sphere, while `spherical` between them is what contracts.
 fn contraction_of(t: &TransformSpec) -> f32 {
     let det = t.linear_determinant();
     det.abs().powf(1.0 / 3.0) * det.signum()
+}
+
+/// A map whose variations are `linear = 1` and nothing else: a pure affine
+/// map, the only kind [`contraction_of`] describes completely.
+/// The share of re-seeded steps past which `shape` says the walk doesn't
+/// settle. A settled walk scores 0; a healthy scene with an unbounded
+/// variation (`spherical` near its pole) can lose a walker now and then.
+const ESCAPE_NOTE: f32 = 0.005;
+
+fn is_plain(t: &TransformSpec) -> bool {
+    t.variations
+        .iter()
+        .enumerate()
+        .all(|(i, &w)| if i == 0 { (w - 1.0).abs() < 1e-6 } else { w == 0.0 })
+}
+
+/// The weighted geometric mean of the maps' contractions, unclamped: below 1
+/// the maps contract on average, which is enough for a chaos game to settle
+/// even with an expanding map among them. `None` unless every map that fires
+/// is plain, because for any other map the number isn't its contraction.
+fn average_contraction(transforms: &[TransformSpec]) -> Option<f32> {
+    let firing: Vec<&TransformSpec> = transforms.iter().filter(|t| t.weight > 0.0).collect();
+    let total: f32 = firing.iter().map(|t| t.weight).sum();
+    if total <= 0.0 || !firing.iter().all(|t| is_plain(t)) {
+        return None;
+    }
+    let log: f32 = firing
+        .iter()
+        .map(|t| (t.weight / total) * contraction_of(t).abs().max(1e-9).ln())
+        .sum();
+    Some(log.exp())
 }
 
 /// Everything `--info` prints, as one string
@@ -859,6 +896,35 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     ]);
     s.pair("box", format!("{} to {}", point(m.bounds[0]), point(m.bounds[1])));
 
+    // Whether the walk settles, measured rather than read off the matrices:
+    // an inversion's affine halves cancel to exactly 1 and a fold's say
+    // nothing about where it sends the point, so for any map with variations
+    // the only honest answer is to count. An escaping walk is re-seeded into
+    // the unit cube and its points look like an ordinary cloud, which is why
+    // this is a count of re-seeds and not something the box above could show.
+    let escape = if composite {
+        (0..scene.layer_count())
+            .filter_map(|k| {
+                let maps: Vec<TransformSpec> =
+                    scene.transforms.iter().filter(|t| t.layer as usize == k).cloned().collect();
+                crate::trace::escape_fraction(&maps, &vec![true; maps.len()])
+            })
+            .reduce(f32::max)
+    } else {
+        crate::trace::escape_fraction(&scene.transforms, &enabled)
+    };
+    if let Some(e) = escape.filter(|&e| e >= ESCAPE_NOTE) {
+        notes.add(
+            "shape",
+            format!(
+                "the walk escapes and is re-seeded on {:.1}% of steps, so it does \
+                 not settle: the picture is the paths walkers take on their way \
+                 out, and the measurements here describe those",
+                e * 100.0
+            ),
+        );
+    }
+
     // Similarity dimension: the single best predictor of dust/shell/mush.
     // Per subscene in a composite — the maps of two attractors have no joint
     // dimension — so it is reported in `subscenes` instead.
@@ -872,6 +938,13 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         .transforms
         .iter()
         .any(|t| t.weight > 0.0 && contraction_of(t).abs() >= 1.0);
+    // Whether that is a map expanding or only an affine half whose variations
+    // do the contracting (an inversion, a fold) — the dimension is unknown
+    // either way, but the reason differs.
+    let plain_expands = scene
+        .transforms
+        .iter()
+        .any(|t| t.weight > 0.0 && is_plain(t) && contraction_of(t).abs() >= 1.0);
     let dim = if composite || expands {
         None
     } else {
@@ -879,7 +952,8 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     };
     let dim_str = dim.map_or("n/a".to_string(), |d| format!("{:>8.2}", d));
     let dim_class = match dim {
-        None if expands && !composite => "a map expands",
+        None if plain_expands && !composite => "a map expands",
+        None if expands && !composite => "variations rescale",
         Some(d) if d < 1.7 => "dust",
         Some(d) if d < 2.1 => "lace",
         Some(d) if d < 2.6 => "shell",
@@ -1316,6 +1390,9 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
             None => 0.0,
         };
         let c = contraction_of(t);
+        let average = average_contraction(
+            &scene.transforms.iter().filter(|u| u.layer == t.layer).cloned().collect::<Vec<_>>(),
+        );
 
         // The colour a map actually renders as, which is the thing you cannot
         // get from the file: in palette mode the gradient sampled at the map's
@@ -1332,16 +1409,37 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
             }
         };
 
-        // A map that expands has no fixed point to walk toward and a map that
-        // never fires is dead weight. Both go in `notes` rather than in a
-        // marker column here: the judgement belongs at the top of the report,
-        // and a column that is empty on every healthy scene is a column that
-        // costs fifteen rows to say nothing.
-        if c.abs() >= 1.0 {
-            notes.add(
-                "maps",
-                format!("[{}] {} expands ({:.3}) — the walk will not settle", i, names[i], c.abs()),
-            );
+        // A plain map that expands is worth a note and a map that never fires
+        // is dead weight. Both go in `notes` rather than in a marker column
+        // here: the judgement belongs at the top of the report, and a column
+        // that is empty on every healthy scene is a column that costs fifteen
+        // rows to say nothing.
+        //
+        // An expanding map alone doesn't stop the walk settling: maps that
+        // contract *on average* are enough. So the note says which case this
+        // is, when every map is plain and the average means something. A map
+        // with variations gets no note for its affine scale, because that
+        // number isn't its contraction (an inversion's is exactly 1); whether
+        // such a walk settles is measured instead, in `shape`.
+        if c.abs() >= 1.0 && is_plain(t) {
+            let text = match average {
+                Some(a) if a < 1.0 => format!(
+                    "[{}] {} expands ({:.3}), but the maps contract on average \
+                     ({:.3} a step), which pulls the walk back",
+                    i, names[i], c.abs(), a
+                ),
+                Some(a) => format!(
+                    "[{}] {} expands ({:.3}) and the maps don't contract on average \
+                     ({:.3} a step): the walk will not settle",
+                    i, names[i], c.abs(), a
+                ),
+                None => format!(
+                    "[{}] {} expands ({:.3}); only the other maps' variations can \
+                     pull the walk back",
+                    i, names[i], c.abs()
+                ),
+            };
+            notes.add("maps", text);
         }
         if t.weight <= 0.0 {
             notes.add("maps", format!("[{}] {} has weight 0 and never fires", i, names[i]));
@@ -1352,7 +1450,13 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
             i,
             names[i],
             percent(share),
-            if c.abs() >= 1.0 { "expansion  " } else { "contraction" },
+            if !is_plain(t) {
+                "affine     "
+            } else if c.abs() >= 1.0 {
+                "expansion  "
+            } else {
+                "contraction"
+            },
             c,
             hex_tinted(rendered, subject.color),
             t.color_value,
@@ -1418,9 +1522,12 @@ fn maps_section(subject: &Subject, resolved: &Palette, notes: &mut Notes) -> Sec
     // the other euler branch. Say so rather than have someone diff it against
     // the file and conclude the loader is wrong. At the end, because it is a
     // footnote and the top of a block is the best real estate in it.
-    s.text("a negative contraction is a map that reflects; one at or past 1.0");
-    s.text("expands. rotations are re-derived from the matrix, so the euler");
-    s.text("branch may differ from the file — the rotation itself is the same");
+    s.text("contraction is the scale of the affine parts alone, pre times post");
+    s.text("as a cube root: negative reflects, 1.0 or more expands. a map with");
+    s.text("any variation besides linear 1 prints affine, since its variations");
+    s.text("rescale space too (spherical inverts, folds reflect); shape says if");
+    s.text("the walk settles. rotations are re-derived from the matrix, so the");
+    s.text("euler branch may differ from the file — the rotation is the same");
     s
 }
 
@@ -2602,6 +2709,57 @@ levels = 14
         assert!(text.contains("expands (2.000)"), "{}", text);
     }
 
+    /// One expanding map among contracting ones still settles when the maps
+    /// contract on average, and the note must say which case it is rather
+    /// than promise a walk that runs away.
+    #[test]
+    fn an_expanding_map_is_judged_by_the_average() {
+        let mut scene = Scene::blank();
+        scene.transforms[1].matrix *= glam::Mat4::from_scale(Vec3::splat(2.4));
+        scene.transforms[0].weight = 4.0;
+        let text = report(&Subject::new(&scene, "blank"));
+        assert!(text.contains("but the maps contract on average"), "{}", text);
+        assert!(!text.contains("will not settle"), "{}", text);
+        assert!(!text.contains("re-seeded"), "{}", text);
+
+        let mut alone = Scene::blank();
+        alone.transforms[0].matrix *= glam::Mat4::from_scale(Vec3::splat(4.0));
+        alone.transforms[1].matrix *= glam::Mat4::from_scale(Vec3::splat(4.0));
+        let text = report(&Subject::new(&alone, "blank"));
+        assert!(text.contains("don't contract on average"), "{}", text);
+        // ...and the measurement agrees.
+        assert!(text.contains("re-seeded on"), "{}", text);
+    }
+
+    /// An inversion is a map whose affine halves multiply to exactly 1 and
+    /// whose `spherical` does the contracting. It is labelled as an affine
+    /// part, not called an expansion, and earns no note: its walk settles.
+    #[test]
+    fn an_inversion_is_not_an_expanding_map() {
+        let mut scene = Scene::blank();
+        for (t, c) in scene.transforms.iter_mut().zip([Vec3::X, -Vec3::X]) {
+            let r = 0.8;
+            t.matrix = glam::Mat4::from_scale_rotation_translation(
+                Vec3::splat(1.0 / r),
+                glam::Quat::IDENTITY,
+                -c / r,
+            );
+            t.post_affine = glam::Mat4::from_scale_rotation_translation(
+                Vec3::splat(r),
+                glam::Quat::IDENTITY,
+                c,
+            );
+            t.variations = [0.0; crate::scene::NUM_VARIATIONS];
+            t.variations[2] = 1.0;
+            t.xaos = crate::xaos::Xaos::default();
+        }
+        let text = report(&Subject::new(&scene, "blank"));
+        assert!(text.contains("affine       1.000"), "{}", text);
+        assert!(!text.contains("expands ("), "{}", text);
+        assert!(!text.contains("re-seeded"), "{}", text);
+        assert!(text.contains("(variations rescale)"), "{}", text);
+    }
+
     /// Every map is three lines whatever it contains. Two reports that diff
     /// row for row is the whole reason the convention exists.
     #[test]
@@ -2613,9 +2771,9 @@ levels = 14
             .skip_while(|l| !l.starts_with("maps"))
             .take_while(|l| !l.is_empty())
             .collect();
-        // header + 2 maps x 4 lines + 3 footnote lines
-        assert_eq!(maps.len(), 12, "{:#?}", maps);
-        assert!(maps.iter().filter(|l| l.contains("linear")).count() == 2, "{:#?}", maps);
+        // header + 2 maps x 4 lines + 6 footnote lines
+        assert_eq!(maps.len(), 15, "{:#?}", maps);
+        assert!(maps.iter().filter(|l| l.contains("vars  linear")).count() == 2, "{:#?}", maps);
     }
 
     /// A suggestion you have to reassemble into a flag is a suggestion

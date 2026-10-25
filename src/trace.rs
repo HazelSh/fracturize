@@ -181,6 +181,9 @@ pub struct Walker<'a> {
     last: Option<usize>,
     pub pos: Vec3,
     pub color_val: f32,
+    /// Times this walker ran past the re-seed bound and was dropped back into
+    /// the unit cube. Zero on a walk that settles; see [`escape_fraction`].
+    pub reseeds: u32,
 }
 
 impl<'a> Walker<'a> {
@@ -222,6 +225,7 @@ impl<'a> Walker<'a> {
                 rng.gen_range(-1.0..1.0),
             ),
             color_val: 0.5,
+            reseeds: 0,
         })
     }
 
@@ -260,6 +264,7 @@ impl<'a> Walker<'a> {
 
         // Re-seed diverged/NaN walkers, like the shader
         if !(self.pos.dot(self.pos) < 1e12) {
+            self.reseeds += 1;
             self.last = None;
             self.pos = Vec3::new(
                 rng.gen_range(-1.0..1.0),
@@ -474,12 +479,33 @@ fn allocate_samples(shares: &[f32]) -> Vec<usize> {
 /// The points `measure` walks, for a caller that wants them rather than
 /// their summary — `--info` projects them through the camera.
 pub(crate) fn walk_points(transforms: &[TransformSpec], enabled: &[bool]) -> Option<Vec<Vec3>> {
+    walk_points_counted(transforms, enabled).map(|(points, _)| points)
+}
+
+/// The share of measured steps on which the walk escaped and was re-seeded:
+/// `measure`'s walk, counted. This is the measured answer to "does it
+/// settle?", which no reading of the matrices can give once variations are
+/// involved: an inversion's affine halves cancel to a scale of exactly 1, a
+/// fold's to whatever they were, and neither says where the walk goes.
+///
+/// It can't be read off `measure`'s points, because a re-seeded walker lands
+/// back in the unit cube and an escaping walk looks like an ordinary cloud.
+pub(crate) fn escape_fraction(transforms: &[TransformSpec], enabled: &[bool]) -> Option<f32> {
+    walk_points_counted(transforms, enabled)
+        .map(|(_, reseeds)| reseeds as f32 / MEASURE_STEPS as f32)
+}
+
+fn walk_points_counted(
+    transforms: &[TransformSpec],
+    enabled: &[bool],
+) -> Option<(Vec<Vec3>, u32)> {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
     let mut walker = Walker::new(transforms, enabled, &mut rng)?;
     for _ in 0..BURN_IN_STEPS {
         walker.step(&mut rng);
     }
+    walker.reseeds = 0;
     let mut points = Vec::with_capacity(MEASURE_STEPS);
     for _ in 0..MEASURE_STEPS {
         walker.step(&mut rng);
@@ -488,7 +514,7 @@ pub(crate) fn walk_points(transforms: &[TransformSpec], enabled: &[bool]) -> Opt
         }
         points.push(walker.pos);
     }
-    Some(points)
+    Some((points, walker.reseeds))
 }
 
 /// Centre, 95th-percentile radius, spread and occupancy of a point set —

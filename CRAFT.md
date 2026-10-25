@@ -919,12 +919,19 @@ recorded dead end is worth as much as a recipe.
   with the centre outside them all does this. A seventh ball at the centre
   breaks it (Indra's pearls).
 
-  **The Mandelbox can't be made this way.** Forcing box fold then sphere fold
-  with xaos (`box -> sphere -> box`, post-scale 2) runs the real iteration, but
-  forward: orbits escape to the re-seed bound and the frame holds a few
-  hundred scattered points. The set lives in the backward direction, and its
-  inverse branches are position-dependent (box fold: x, 2-x or -2-x by which
-  side of the walls; sphere fold: y/4 below radius 2, identity above, a
-  discontinuous switch). No blend of continuous variations makes that switch,
-  and xaos conditions on the last map, not on position. It needs a renderer
-  feature: position-conditioned branches, or an escape-time rejection sampler.
+  **The Mandelbox can't be made this way.** The set lives in the backward
+  direction, and its inverse branches depend on position (box fold: x, 2-x
+  or -2-x by which side of the walls; sphere fold: y/4 below radius 2,
+  identity above, a discontinuous switch). No blend of continuous variations
+  makes that switch, and xaos conditions on the last map, not on position. It
+  needs a renderer feature: position-conditioned branches, or an escape-time
+  rejection sampler.
+
+  Forcing the *forward* map with xaos (`box -> sphere -> box`, post-scale 2,
+  c = (0.3, 0.2, 0.1)) is a different object, a bounded chaotic attractor of
+  the Mandelbox iteration (numpy, f32 or f64: 52 escapes in 200k steps), and
+  it rendered as ~300 dots. Not escape, as first written here: **every GPU
+  walker starts at the origin**, and when every map has exactly one exit the
+  RNG only picks the first step, so all 16,384 walkers trace one of two
+  orbits. Any fully deterministic walk hits this. Per-walker random starts
+  would fix it, at the cost of byte-identical renders.

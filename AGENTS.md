@@ -3493,9 +3493,10 @@ report found with the section each is about, and a count on its first line —
 so "is this scene sound?" is one line to read rather than fifty. `notes none`
 is the cheapest possible signal that nothing is wrong. It catches, among
 others: a `point_size` over the crisp bound, a framing far from the one that
-fills the frame, a map that expands or never fires, a flat gradient, a
-`--view` framed against a different scene, an `edge_guard` ramp reaching into
-the picture.
+fills the frame, a map that never fires, an expanding plain map (and whether
+the maps still contract on average), a walk that escapes and keeps being
+re-seeded, a flat gradient, a `--view` framed against a different scene, an
+`edge_guard` ramp reaching into the picture.
 
 **Where the report has computed a number you will act on, it emits the action.**
 `shape` prints `-S camera.distance=1.42`, not `~1.42`; the zoom eligibility
@@ -3506,10 +3507,23 @@ smallest slice of who reads this.
 `shape` is the part a TOML cannot answer: `point_size` and `camera distance`
 are the two things most often wrong in a hand-authored scene, and neither can
 be checked by looking at the file. In `maps`, contraction is the **signed** cube
-root of the determinant — negative means the map reflects, at or past 1.0 means
-it expands — and rotations are re-derived from the matrix, so an authored
-`(-26, 138, 0)` can print as `(154, 42, -180)`: same rotation, other euler
-branch.
+root of the affine parts' determinant, pre times post — negative means the map
+reflects, at or past 1.0 means it expands — and rotations are re-derived from
+the matrix, so an authored `(-26, 138, 0)` can print as `(154, 42, -180)`: same
+rotation, other euler branch.
+
+**That number is the whole map only for a plain map** (`linear = 1`, nothing
+else). A map with variations prints it as `affine`, because the variations
+rescale space between the two affine halves: an inversion (affine,
+`spherical`, post-affine) has affine halves multiplying to exactly 1 and still
+contracts, and a fold's scale says nothing about where it sends a point. So
+`--info` doesn't judge settling from the matrices. It *counts*: `shape` notes
+the share of steps on which the CPU walk escaped and was re-seeded
+(`trace::escape_fraction`), which is the measured answer, and is something the
+box can't show, since a re-seeded walker lands back in the unit cube and looks
+like part of the cloud. An expanding plain map alone doesn't stop the walk
+settling either: the chaos game converges when the maps contract *on average*,
+and the note says which side of that the scene is on.
 
 `shape` also says **where the walk falls in the frame** that would render —
 `on screen x 30% to 74%, y 10% to 83%`, 0% to 100% being the frame left to

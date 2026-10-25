@@ -50,7 +50,7 @@ maps     3   share of the walk, contraction, colour as rendered
              scale 0.600                    rot (   0,  32,   0)°   speed 0.26
              move  ( 0.000,  0.000,  0.000)
              vars  linear
-         [1] mirror-fold   21.3%   contraction -0.450   #fada99 @0.60
+         [1] mirror-fold   21.3%   affine      -0.450   #fada99 @0.60
              scale [-0.450, 0.450, 0.450]   rot ( -24,  16,   0)°   speed 0.38
              move  (-0.320, -0.300, -0.780)
              vars  absfold 0.55 + linear 0.45
@@ -58,9 +58,12 @@ maps     3   share of the walk, contraction, colour as rendered
              scale [0.050, 0.620, 0.050]    rot (   0,   0,   0)°   speed 0.73
              move  ( 0.000,  0.300,  0.000)
              vars  linear
-         a negative contraction is a map that reflects; one at or past 1.0
-         expands. rotations are re-derived from the matrix, so the euler
-         branch may differ from the file — the rotation itself is the same
+         contraction is the scale of the affine parts alone, pre times post
+         as a cube root: negative reflects, 1.0 or more expands. a map with
+         any variation besides linear 1 prints affine, since its variations
+         rescale space too (spherical inverts, folds reflect); shape says if
+         the walk settles. rotations are re-derived from the matrix, so the
+         euler branch may differ from the file — the rotation is the same
 
 render   point_size    0.0018   point_count   4000000
          haze            0.50   decay            0.80
