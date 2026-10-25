@@ -164,10 +164,15 @@ pub fn show(
 /// A row naming a group of the rows under it, in the first column.
 pub fn group_row(body: &mut egui_extras::TableBody<'_>, title: &str) {
     let h = body.ui_mut().spacing().interact_size.y;
+    let cols = body.widths().len();
     body.row(h, |mut row| {
         row.col(|ui| {
             ui.label(egui::RichText::new(title).small().weak());
         });
+        // Every cell, so the row's stripe runs the table's whole width.
+        for _ in 1..cols {
+            row.col(|_| {});
+        }
     });
 }
 

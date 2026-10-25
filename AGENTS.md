@@ -1184,7 +1184,11 @@ all the same picker (`ui::random_settings::profile_picker`), built-ins under
 their own heading, each one's description on hover, a `*` while edited. The
 Random settings window edits it in seven folding sections, **each one table
 holding one kind of value** (`ui::table`, `egui_extras::TableBuilder` in the
-house style: hinted column headers, drawn column rules, striped rows):
+house style: hinted column headers, strong stripes and faint column rules —
+you read a table along its rows — exact widths with the name column taking
+the slack, and every switch in an **On** column flush right, so the ticks
+line up from one table to the next; a part's tick and its odds are one
+state, ticking on sets the least odds and dragging the odds to 0 unticks):
 **Parts** (part · odds · share of a mutation's changes · re-roll, grouped
 Shape / Structure / Colour), **Ranges** (setting · low · high), **Chances**
 (setting · chance, as a percentage), **Symmetry groups**, **Variations**

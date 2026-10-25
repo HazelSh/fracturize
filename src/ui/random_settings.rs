@@ -707,7 +707,7 @@ fn part_label(name: &str) -> &'static str {
         "scale" => "size",
         "weight" => "weight",
         "variations" => "variations",
-        "count" => "how many transforms",
+        "count" => "transform count",
         "symmetry" => "symmetry group",
         "color" => "colours",
         "color_value" => "place on gradient",
