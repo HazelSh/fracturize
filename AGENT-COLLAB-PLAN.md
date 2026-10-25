@@ -56,7 +56,7 @@ running Claude Code session and a local-model backend on top (§5, §6).*
 
  Local LLM (llama-server :8080) ◀──HTTP── the GUI's own agent loop (§6; no MCP)
 
- Any agent, GUI or not ──files──▶ renders/collab/<scene>/   +   fracturize collab …   (§7)
+ Any agent, GUI or not ──files──▶ renders/collab/<scene>/   +   fracturize --thread …   (§7)
 ```
 
 **MCP rather than A2A.** A2A is for peer agents that discover each other over
@@ -273,7 +273,7 @@ It can't apply anything to the live scene, so it has no Apply.
 A new message addressed to Hazel badges the window's toolbar button and fires
 `notify-send` if the window isn't focused. It never opens a window over her
 work. A new message for an agent is pushed over the channel (§5) where there
-is one. Otherwise it waits for `fracturize collab wait`.
+is one. Otherwise it waits for `fracturize --wait-reply`.
 
 ### 4.6 Settings
 
@@ -318,7 +318,7 @@ it, and the Collaborate window shows that session's name.
 |---|---|
 | `get_state` | scene TOML, path, dirty flag, selection, view, render-panel settings |
 | `get_render` | a PNG of the current view (existing screenshot path), returned as a file path *and* as image content; optional size |
-| `thread` | `{thread, since?}`: the thread's messages, diffs included, as `collab show` prints them |
+| `thread` | `{thread, since?}`: the thread's messages, diffs included, as `--thread` prints them |
 | `request` | `{thread, text, transforms?}`: ask Hazel for something |
 | `propose` | `{thread, replying_to?, revises?, message, ask, options: [{id, scene_toml, note}], base_toml?}`: the GUI renders any option without a render, computes the diffs and shows the cards (§4.4) |
 | `respond` | `{thread, message, verdict, picks?, comments?, send_back?: [{option, note, scene_toml?}]}`: answer a proposal of Hazel's |
@@ -434,28 +434,33 @@ reason. The headroom number is shared with `with-llm`, not copied.
 ## 7. The CLI side of a thread
 
 For agents without the bridge (headless scripts, `llm-author`, a Claude Code
-session told to poll), and for the bridge to call underneath:
+session told to wait on a thread), and for the bridge to call underneath.
+
+**Flags, not subcommands** (Hazel, 2026-10-25): a subcommand is for a distinct
+workflow, something outside "do one thing and exit" and outside "open the
+GUI". Every thread operation is do-one-thing-and-exit, so each is a flag, and
+the thread is the scene's, named by `-s` like everything else:
 
 ```sh
-fracturize collab list [--scene s.toml] [--waiting]   # threads, and what's waiting on whom
-fracturize collab show <thread> [--since <message>]   # the thread as text, diffs included
-fracturize collab request <thread> "text"             # a request
-fracturize collab propose <thread> <dir>              # validate a proposal dir and post it
-fracturize collab respond <thread> <message> --verdict "…" \
-    [--pick B] [--reject C --reason "…"] [--send-back B --note "…" --scene tweak.toml]
-fracturize collab wait <thread> [--timeout 30m]       # block until a message for me arrives;
-                                                      # print it; exit 0, 3 timed out, 4 withdrawn
-fracturize collab withdraw <thread> <message> --reason "…"
+fracturize --threads [--waiting]                        # every thread, and what's waiting on whom
+fracturize -s s.toml --thread [--since <message>]       # the thread as text, diffs included
+fracturize -s s.toml --request "text"                   # a request
+fracturize -s s.toml --propose <dir>                    # validate a proposal dir and post it
+fracturize -s s.toml --respond <message> --verdict "…" \
+    [--pick B] [--reject C --reason "…"] [--send-back B --note "…" --tweak tweak.toml]
+fracturize -s s.toml --wait-reply [--timeout 30m]       # block until a message for me arrives;
+                                                        # print it; exit 0, 3 timed out, 4 withdrawn
+fracturize -s s.toml --withdraw <message> --reason "…"
 ```
 
-`propose` validates: every option parses, every render exists, `ask` is one of
-the three, there are at most 9 options, and `base.toml` is present. It
-computes the diffs itself, so an agent never has to write one by hand.
+`--wait-reply` blocks, but it is still one thing that exits. The bridge is
+the exception: `fracturize mcp` is a long-running stdio server that Claude
+Code starts and talks to, neither a CLI run nor the GUI, so it is the CLI's
+one subcommand.
 
-`collab` and `mcp` would be the CLI's first subcommands. Today everything is a
-flag on one command and the scene comes in through `-s`, so nothing positional
-collides. An optional clap subcommand alongside the existing flags keeps every
-current invocation working. **Hazel's call**; the plan assumes subcommands.
+`--propose` validates: every option parses, every render exists, `ask` is one
+of the three, there are at most 9 options, and `base.toml` is present. It
+computes the diffs itself, so an agent never has to write one by hand.
 
 **Withdraw:** a sender can withdraw a message that hasn't been answered. It
 stays in the thread, greyed out with the reason, so nobody answers into
@@ -471,10 +476,10 @@ short "proposing to a human" note at phase 2.
    (with `--base` for three ways), the round-trip test over `scenes/` ×
    mutations, the merge and its conflicts as a value the GUI can show, and the
    GUI-callable recorded render.
-2. **Threads on files.** The message formats, `fracturize collab …`, and the
+2. **Threads on files.** The message formats, `fracturize --thread …`, and the
    Collaborate window: thread, composer, cards, Preview with the hold-to-blink,
    Tweak's sandbox, Apply with the conflict dialog, Send back, Reject, Keep. No
-   IPC yet, so a Claude Code session joins by running `collab wait` in a loop.
+   IPC yet, so a Claude Code session joins by running `--wait-reply` in a loop.
    This ships first because it is the whole workflow, end to end, for any agent
    with a shell. Everything after makes it faster, not different.
 3. **Socket and bridge.** The GUI listener and `EventLoopProxy`,
@@ -523,13 +528,13 @@ Hazel's answers, 2026-10-23/24:
 6. **One flow, not two** (2026-10-25): requests, proposals and responses
    from either side, with preview, tweak, apply, reject and send back. The
    Ask dialog and review packets of the first draft merge into §4.
-7. **MCP over A2A** and **the GUI owns the socket with a stdio bridge** (§2):
+7. **Flags for the thread operations, a subcommand only for `mcp`** (§7).
+8. **MCP over A2A** and **the GUI owns the socket with a stdio bridge** (§2):
    Claude's recommendation, taken with the plan.
 
 Still open, for when the phase reaches them:
 
 - the Collaborate window's keybind, the hold-to-blink key, and all GUI wording;
 - the default `max_turns` (6 is a guess; llm-author runs used 4–6 rounds);
-- subcommands vs flags for `mcp` and `collab` (§7);
 - whether the headless backend's resumed session should be the *same* one as
   the channel session, so that one Claude remembers both, or a separate one.
