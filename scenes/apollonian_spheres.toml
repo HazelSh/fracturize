@@ -1,0 +1,100 @@
+# Apollonian sphere packing — the residual set, as the limit set of a group.
+#
+# Five mutually tangent spheres (a Descartes configuration: four unit balls on
+# a regular tetrahedron of edge 2, and the outer ball of radius 1 + sqrt(3/2)
+# that holds them, curvatures 1,1,1,1, 2 - sqrt 6). For each ball there is a
+# DUAL sphere orthogonal to the other four, through their six tangency points.
+# Inverting in it fixes those four and swaps the fifth ball for the other one
+# tangent to all four. Those five inversions generate the Apollonian group, and
+# its orbit of the first five balls is the whole packing.
+#
+# The chaos game is the group's random walk. Each map below is one inversion,
+# written the way this renderer can say it: affine carries the dual sphere to
+# the unit sphere, `spherical` (p/|p|^2) inverts, post-affine carries it back.
+# Points land on the LIMIT SET, which is the residual set: the closure of every
+# sphere surface in the packing, dimension ~2.474. So the picture is shells
+# inside shells inside one big shell.
+#
+# Why xaos: inversions are involutions, S_i S_i = 1, so a walk that inverts
+# twice in the same sphere just undoes a step. `xaos = { self = 0 }` removes
+# those. The dual spheres meet pairwise at 60 degrees, so S_i S_j is a 120-degree
+# rotation and (S_i S_j)^3 = 1 too — the group is the Coxeter group with every
+# m_ij = 3. A one-step memory cannot forbid those, and need not: they only
+# move density, never the support.
+#
+# What it is for: the outer ball's surface is in the limit set, so the whole
+# packing sits inside an opaque shell. The points renderer shows a ball and
+# nothing else; splat shows every nested shell through it; volume sits between
+# by opacity. A clean test of whether a renderer shows internal structure.
+#
+#   fracturize -s scenes/apollonian_spheres.toml            # points: a ball
+#   fracturize -s scenes/apollonian_spheres.toml --splat    # the packing
+#   fracturize -s scenes/apollonian_spheres.toml --volume --opacity 0.5
+#
+# No similarity dimension applies (inversions are not similarities), so the
+# status bar's d means nothing here.
+
+[meta]
+name = "Apollonian Spheres"
+author = "Claude Opus 5.5"
+point_size = 0.003
+point_count = 6_000_000
+color_mode = "mix"
+color_speed = 0.85
+exposure = 1.0
+background = [0.008, 0.008, 0.014]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 7.0
+yaw = 0.3
+pitch = 0.35
+
+[[transform]]
+name = "ina"            # inversion in the sphere dual to unit ball 1
+translation = [0.612372, 0.612372, 0.612372]
+scale = 0.158919
+variations = { spherical = 1.0 }
+post_translation = [-3.853371, -3.853371, -3.853371]
+post_scale = 6.292529
+color = [1.0, 0.45, 0.2]
+xaos = { ina = 0 }
+
+[[transform]]
+name = "inb"            # inversion in the sphere dual to unit ball 2
+translation = [0.612372, -0.612372, -0.612372]
+scale = 0.158919
+variations = { spherical = 1.0 }
+post_translation = [-3.853371, 3.853371, 3.853371]
+post_scale = 6.292529
+color = [0.25, 0.7, 1.0]
+xaos = { inb = 0 }
+
+[[transform]]
+name = "inc"            # inversion in the sphere dual to unit ball 3
+translation = [-0.612372, 0.612372, -0.612372]
+scale = 0.158919
+variations = { spherical = 1.0 }
+post_translation = [3.853371, -3.853371, 3.853371]
+post_scale = 6.292529
+color = [0.55, 1.0, 0.35]
+xaos = { inc = 0 }
+
+[[transform]]
+name = "ind"            # inversion in the sphere dual to unit ball 4
+translation = [-0.612372, -0.612372, 0.612372]
+scale = 0.158919
+variations = { spherical = 1.0 }
+post_translation = [3.853371, 3.853371, -3.853371]
+post_scale = 6.292529
+color = [0.95, 0.3, 0.75]
+xaos = { ind = 0 }
+
+[[transform]]
+name = "core"           # inversion in the sphere dual to the outer ball
+translation = [0.0, 0.0, 0.0]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_scale = 0.707107
+color = [1.0, 0.9, 0.55]
+xaos = { core = 0 }
