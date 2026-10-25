@@ -3540,6 +3540,42 @@ would have to survive every save the GUI makes — baked away it loses what the
 author wrote, kept it means un-turning every edit before writing — and a pasted
 block is just a transform.
 
+### What changed: `--diff`, and three-way merges
+
+`--diff A B` prints the changes from scene A to scene B (`src/scene_diff.rs`),
+and is the shared core of agent collaboration (`AGENT-COLLAB-PLAN.md` §3).
+Each value change is printed as a line `-S` accepts, so applying them to A gives
+B. That holds over every scene in `scenes/` × its mutations
+(`set_ops_rebuild_the_other_scene`). What `-S` can't say is listed after it: a
+transform added, removed or reordered, a key back to its default, a block
+(symmetry, a camera path, an xaos matrix) rewritten. Exits 0 when the scenes
+are the same and 1 when they differ, like diff(1).
+
+`--diff MINE THEIRS --base BASE` merges three ways: THEIRS' changes from BASE
+laid over MINE, so edits made since BASE survive. A value both sides changed
+differently is a **conflict**: listed, MINE kept unless `--take-theirs <path>`
+names it. A transform one side removed and the other edited is one conflict on
+the whole transform. `--merged FILE` writes the result. This is what the GUI's
+Apply will do to a proposal.
+
+```
+fracturize --diff scenes/koru.toml renders/koru.mut3.toml
+fracturize --diff live.toml option-B.toml --base sent.toml --merged out.toml
+```
+
+Three things it depends on:
+
+- **Both sides are compared as canonical TOML, read back and written twice**
+  (`canonical_text`). A scene in memory can hold a rotation the writer spells
+  on one euler branch while the same matrix, read back, spells on the other;
+  one pass made a merge of nothing look like a changed rotation.
+- **Transforms and subscenes are matched by name**, and by position where they
+  are unnamed or share a name, which goes wrong as soon as one is inserted
+  before them.
+- **A transform without a `color` takes a hue from its index**, so adding one
+  moves the others' colours, and the diff says so. That is the transform ring's
+  known defect (see "Colour"), reported honestly, not noise.
+
 ### Reading a picture: `--stats`
 
 `--stats <png>` reports on a rendered image: luminance and clipping, how much of

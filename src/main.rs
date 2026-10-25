@@ -20,6 +20,7 @@ mod trace;
 mod pick;
 mod scene;
 mod scene_browser;
+mod scene_diff;
 mod scene_source;
 mod set;
 mod stats;
@@ -1074,6 +1075,37 @@ struct Args {
     /// like a base colour and an accent, are not.
     #[arg(long, value_name = "IMAGE", help_heading = "Inspecting")]
     stats: Option<std::path::PathBuf>,
+
+    /// Print what changed from scene A to scene B, and exit [off]
+    ///
+    /// Each change is a line you can pass to -S, where one exists: applying
+    /// them to A gives B. What -S can't say (a transform added, removed or
+    /// reordered, a key back to its default, a symmetry block rewritten) is
+    /// listed after. Comments and formatting are not changes. Either side
+    /// can be a render PNG. Exits 0 when the scenes are the same, 1 when they
+    /// differ.
+    #[arg(long, num_args = 2, value_names = ["A", "B"], help_heading = "Inspecting")]
+    diff: Vec<std::path::PathBuf>,
+
+    /// With --diff: merge three ways, B's changes from BASE laid over A [none]
+    ///
+    /// A is mine, B is theirs. A value only one side changed takes that side.
+    /// One both changed differently is a conflict: listed, and A's value kept
+    /// unless --take-theirs names it. Prints what the merge does to A, then
+    /// the conflicts. Exits 0 with no conflicts, 1 with some.
+    #[arg(long, value_name = "FILE", requires = "diff", help_heading = "Inspecting")]
+    base: Option<std::path::PathBuf>,
+
+    /// With --base: take B's side of this conflict, repeatable [A's side]
+    ///
+    /// The path as the conflict list prints it: `meta.haze`, or
+    /// `transform.petal` for a transform one side removed.
+    #[arg(long, value_name = "PATH", requires = "base", help_heading = "Inspecting")]
+    take_theirs: Vec<String>,
+
+    /// With --base: write the merged scene here [not written]
+    #[arg(long, value_name = "FILE", requires = "base", help_heading = "Inspecting")]
+    merged: Option<std::path::PathBuf>,
 
     // -------------------------------------------------------- Windowed mode
     /// Capture a screenshot and exit after --delay frames
@@ -2582,6 +2614,59 @@ fn default_scene() -> Scene {
     }
 }
 
+/// `--diff A B [--base BASE]`. Returns the exit status: 0 the same (or no
+/// conflicts), 1 different (or conflicts), 2 a scene that didn't load.
+fn run_diff(args: &Args) -> i32 {
+    let load = |p: &std::path::Path| {
+        scene::Scene::load(p).map_err(|e| eprintln!("{}: {e}", p.display())).ok()
+    };
+    let (Some(a), Some(b)) = (load(&args.diff[0]), load(&args.diff[1])) else { return 2 };
+    let Some(base_path) = &args.base else {
+        return match scene_diff::diff(&a, &b) {
+            Ok(changes) => {
+                print!("{}", scene_diff::render(&changes));
+                i32::from(!changes.is_empty())
+            }
+            Err(e) => {
+                eprintln!("--diff: {e}");
+                2
+            }
+        };
+    };
+    let Some(base) = load(base_path) else { return 2 };
+    let take: std::collections::BTreeSet<String> = args.take_theirs.iter().cloned().collect();
+    let dir = args.diff[0].parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let merged = match scene_diff::merge(&base, &a, &b, &take, dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("--diff --base: {e}");
+            return 2;
+        }
+    };
+    for path in &take {
+        if !merged.conflicts.iter().any(|c| &c.path == path) {
+            eprintln!("--take-theirs {path}: not a conflict in this merge");
+            return 2;
+        }
+    }
+    match scene_diff::diff(&a, &merged.scene) {
+        Ok(changes) => print!("# what the merge does to A\n{}", scene_diff::render(&changes)),
+        Err(e) => {
+            eprintln!("--diff --base: {e}");
+            return 2;
+        }
+    }
+    print!("{}", scene_diff::render_conflicts(&merged.conflicts));
+    if let Some(out) = &args.merged {
+        if let Err(e) = merged.scene.save(out) {
+            eprintln!("--merged: {e}");
+            return 2;
+        }
+        println!("# wrote {}", out.display());
+    }
+    i32::from(!merged.conflicts.is_empty())
+}
+
 fn main() {
     // Initialize logging
     env_logger::init();
@@ -2620,6 +2705,11 @@ fn main() {
     if let Some(path) = &args.stats {
         stats::print(path);
         return;
+    }
+
+    // --diff: what changed between two scenes, or a three-way merge
+    if !args.diff.is_empty() {
+        std::process::exit(run_diff(&args));
     }
 
     // --fit: make a scene out of a picture. Pure CPU — no device, no scene to

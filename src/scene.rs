@@ -1866,8 +1866,20 @@ impl Scene {
         let content = source.text;
 
         let (content, applied) = crate::set::apply_recording(&content, overrides)?;
+        Self::parse_at(&content, path.as_ref(), from_png).map(|scene| (scene, applied))
+    }
 
-        let scene_file: SceneFile = toml::from_str(&content)
+    /// A scene from TOML text that never touched a file: a proposal's option,
+    /// a three-way merge (`scene_diff`). `file =` references resolve against
+    /// `base_dir`, as they would for a file saved there.
+    pub fn from_toml_str(content: &str, base_dir: &Path) -> Result<Self, String> {
+        Self::parse_at(content, &base_dir.join("scene.toml"), false)
+    }
+
+    /// The loader proper. `path` is only where `file =` references resolve
+    /// from and what errors name; the text is already in hand.
+    fn parse_at(content: &str, path: &Path, from_png: bool) -> Result<Self, String> {
+        let scene_file: SceneFile = toml::from_str(content)
             .map_err(|e| format!("Failed to parse scene file: {}", e))?;
 
         let global_speed = scene_file.meta.color_speed as f32;
@@ -2133,7 +2145,7 @@ impl Scene {
 
         // Subscenes are appended after the scene's own maps, one layer each,
         // so the transform list stays grouped by layer.
-        let base_dir = path.as_ref().parent().map(Path::to_path_buf).unwrap_or_default();
+        let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         // For a render that is the PNG's directory, which is only right if
         // the referenced scenes travelled with it — so say where it looked.
         let (subscenes, sub_maps, sub_names, sub_colors) =
@@ -2142,7 +2154,7 @@ impl Scene {
                     format!(
                         "{} (this scene came from the PNG {}, so `file =` is looked up beside it)",
                         e,
-                        path.as_ref().display()
+                        path.display()
                     )
                 } else {
                     e
@@ -2210,7 +2222,7 @@ impl Scene {
         };
         // Subscene colormaps are resolved here, from their own maps' colours.
         scene.regenerate_colormap();
-        Ok((scene, applied))
+        Ok(scene)
     }
 
     /// The gradient this scene actually renders through, whichever mode it is

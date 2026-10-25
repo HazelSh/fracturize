@@ -1,7 +1,8 @@
 # Agent collaboration — plan
 
 *Status: plan, 2026-10-24, revised 2026-10-25 (§4 rewritten, §7–§8 redone,
-§10 updated). Phase 1 started. Written by Claude Opus 5.5 from Hazel's brief and
+§10 updated). Phase 1: the diff and the three-way merge are built
+(`src/scene_diff.rs`, `--diff`); the GUI-callable recorded render is not. Written by Claude Opus 5.5 from Hazel's brief and
 two rounds of answers (§10).*
 
 *One collaborative flow for both of the project's users. Either one, human or
