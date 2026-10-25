@@ -413,6 +413,7 @@ pub(super) fn finish(
         root_share: 1.0,
         root_visible: true,
         xaos_matrix_layers: Vec::new(),
+            colours_left_out: Vec::new(),
         name: format!("random-{}", crate::app::unix_timestamp()),
         author: "fracturize random flame".to_string(),
         // Scale the dot size with the attractor: the same point size that

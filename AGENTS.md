@@ -1652,6 +1652,7 @@ rotation = [0, 0, 0]           # Euler degrees (XYZ)
                                # tools/lsystem_to_ifs.py emits it too.
 color = [1.0, 0.2, 0.2]        # contributes to the cyclic colormap. Optional:
                                # omitted, maps take hues spaced by index
+                               # and stay omitted on save (see "Colour")
                                # (palette mode never renders it anyway)
 weight = 1.0                   # selection probability
 color_value = 0.25             # optional explicit colormap index (0-1)
@@ -2059,6 +2060,19 @@ a flame.
 `k/N`, so *adding a transform moves every other transform's colour*. Author a
 scene you like with four maps, add a fifth, and all five have shifted. A
 palette doesn't depend on the transform count at all.
+
+**Implied colours stay implied.** A transform whose file leaves out `color`
+(or `color_value`) takes the one its position gives, and saving no longer
+writes that value down: it is left out again, and re-spaced when a map is
+added or removed beside it (`Scene::implied_colours`). So a scene that never
+chose its colours keeps not choosing them, a small model can write a valid
+scene without inventing RGB triples, and a diff of adding a transform is one
+line. Implied needs both halves: the file left it out *and* the value is still
+the positional one, so any edit makes it authored without anything having to
+remember to say so, and an authored `color_value = 0.5` that happens to sit in
+the middle stays authored. A fresh map (Shift+A) in a layer whose colours are
+all implied is implied too; otherwise it is the usual pale grey. Subscene maps
+are always written out, as before.
 
 `Scene::color_mode` selects the source; `Scene::regenerate_colormap` resolves
 it. Call it after **any** colour edit and after adding or removing a transform.
@@ -3594,9 +3608,9 @@ Three things it depends on:
 - **Transforms and subscenes are matched by name**, and by position where they
   are unnamed or share a name, which goes wrong as soon as one is inserted
   before them.
-- **A transform without a `color` takes a hue from its index**, so adding one
-  moves the others' colours, and the diff says so. That is the transform ring's
-  known defect (see "Colour"), reported honestly, not noise.
+- **Colours a file left out stay out** (see "Colour"), so adding a transform
+  to such a scene is one `+ transform` line. Colours that *are* written down
+  don't move when a transform is added, so they don't show up either.
 
 ### Reading a picture: `--stats`
 

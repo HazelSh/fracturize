@@ -659,6 +659,21 @@ variations = { swirl = 0.3, linear = 0.7 }
         assert_eq!(diff(&b, &a).unwrap(), vec![Change::Removed { kind: "transform".into(), id: "c".into() }]);
     }
 
+    /// A scene that leaves its colours to their positions keeps leaving
+    /// them, so adding a map is that map and nothing else.
+    #[test]
+    fn adding_to_an_auto_coloured_scene_is_one_line() {
+        let auto = TWO.replace("color = [1.0, 0.2, 0.2]\ncolor_value = 0.0\n", "")
+            .replace("color = [0.2, 0.2, 1.0]\ncolor_value = 0.5\n", "");
+        assert!(!auto.contains("color"));
+        let a = scene(&auto);
+        let mut b = a.clone();
+        let mut spec = b.transforms[0].clone();
+        spec.matrix.w_axis.y = 0.5;
+        b.insert_transform(2, spec, Some("c".into()), None, None);
+        assert_eq!(diff(&a, &b).unwrap(), vec![Change::Added { kind: "transform".into(), id: "c".into() }]);
+    }
+
     #[test]
     fn merge_takes_each_sides_disjoint_edits() {
         let base = scene(TWO);

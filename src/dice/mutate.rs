@@ -362,7 +362,7 @@ fn add(
         }
         spec.color_value = rng.r#gen();
         let color = roll::hsv_to_rgb(rng.gen_range(0.0..360.0), rng.gen_range(0.6..1.0), rng.gen_range(0.7..1.0));
-        scene.insert_transform(n, spec, None, color, None);
+        scene.insert_transform(n, spec, None, Some(color), None);
         log.push(format!("new map T{}", n));
     } else {
         // Duplicate with a translate nudge
@@ -371,7 +371,7 @@ fn add(
         spec.matrix.w_axis += d.extend(0.0);
         let name = scene.transform_names[i].as_ref().map(|s| format!("{} mut", s));
         let color = scene.colors[i];
-        scene.insert_transform(n, spec, name, color, Some(i));
+        scene.insert_transform(n, spec, name, Some(color), Some(i));
         log.push(format!("duplicate T{} -> T{}", i, n));
     }
 }

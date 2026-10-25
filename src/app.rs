@@ -5103,6 +5103,18 @@ impl App {
         Some(self.selected_transform.unwrap_or(0).min(n - 1))
     }
 
+    /// Whether every map in the layer the Transforms window shows still has
+    /// the colour and colour index its position implies.
+    fn layer_colours_implied(&self) -> bool {
+        let layer = self.current_layer() as u16;
+        self.scene
+            .implied_colours()
+            .iter()
+            .zip(&self.scene.transforms)
+            .filter(|(_, t)| t.layer == layer)
+            .all(|(&(c, i), _)| c && i)
+    }
+
     /// Add a transform: a nudged copy of the selection, or (fresh) a small
     /// default one. Rebuilds the GPU pipelines for the new transform count.
     pub fn add_transform(&mut self, fresh: bool) {
@@ -5134,7 +5146,10 @@ impl App {
                     xaos: Default::default(),
                 },
                 None,
-                Vec3::splat(0.9),
+                // In a layer that never chose its colours, the new map doesn't
+                // either: it takes the hue its position implies, and the rest
+                // re-space round it. Otherwise it is the usual pale grey.
+                (!self.layer_colours_implied()).then_some(Vec3::splat(0.9)),
             )
         } else {
             let idx = self.selection().unwrap();
@@ -5144,7 +5159,7 @@ impl App {
             let name = self.scene.transform_names[idx]
                 .as_ref()
                 .map(|n| format!("{} copy", n));
-            (spec, name, self.scene.colors[idx])
+            (spec, name, Some(self.scene.colors[idx]))
         };
 
         // At the end of its own layer's run, so the list stays grouped by
@@ -5695,7 +5710,7 @@ impl App {
         let name = Some(format!("{} link", self.short_name(after)));
         let color = self.scene.colors.get(after).copied().unwrap_or(Vec3::ONE);
         let at = self.scene.transforms.iter().rposition(|t| t.layer <= layer).map_or(0, |i| i + 1);
-        self.scene.insert_transform(at, spec, name, color, None);
+        self.scene.insert_transform(at, spec, name, Some(color), None);
         self.transform_enabled.insert(at, true);
         let after = if after >= at { after + 1 } else { after };
         let pos = self.scene.layer_position(at);

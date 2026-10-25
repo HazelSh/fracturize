@@ -328,6 +328,7 @@ mod tests {
             root_share: 1.0,
             root_visible: true,
             xaos_matrix_layers: Vec::new(),
+            colours_left_out: Vec::new(),
             name: "Test".to_string(),
             author: "Test".to_string(),
             point_size: 0.002,

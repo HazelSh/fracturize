@@ -563,6 +563,18 @@ pub fn default_transform_color(i: usize, n: usize) -> Vec3 {
     crate::palette::random::hsv_to_linear(hue, 0.65, 0.95)
 }
 
+/// The colour index a transform gets when its file doesn't give one: spread
+/// evenly from 0 to 1 by position, 0.5 for a lone map.
+pub fn default_color_value(i: usize, n: usize) -> f32 {
+    if n <= 1 { 0.5 } else { i as f32 / (n - 1) as f32 }
+}
+
+/// Whether a map's colour and colour index equal what map `i` of `n` gets
+/// when its file says nothing. Half of [`Scene::implied_colours`].
+pub fn implied_colour(i: usize, n: usize, color: Vec3, color_value: f32) -> (bool, bool) {
+    (color == default_transform_color(i, n), color_value == default_color_value(i, n))
+}
+
 fn build_transforms(
     defs: &[TransformDef],
     symmetries: &[SymmetryDef],
@@ -613,13 +625,8 @@ fn build_transforms(
             .matrix();
 
             // Color value: use explicit if provided, otherwise distribute evenly
-            let color_value = t.color_value.map(|v| v as f32).unwrap_or_else(|| {
-                if num_transforms == 1 {
-                    0.5
-                } else {
-                    i as f32 / (num_transforms - 1) as f32
-                }
-            });
+            let color_value =
+                t.color_value.map(|v| v as f32).unwrap_or_else(|| default_color_value(i, num_transforms));
 
             // Placeholder; resolve_color_speeds computes the effective value
             let speed = t.color_speed.map(|v| v as f32).unwrap_or(default_color_speed() as f32);
@@ -1109,7 +1116,7 @@ pub(crate) fn maps_toml(
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                transform_def(t, names.get(i).cloned().flatten(), colors.get(i).copied(), names)
+                transform_def(t, names.get(i).cloned().flatten(), colors.get(i).copied(), names, (false, false))
             })
             .collect(),
     };
@@ -1297,7 +1304,7 @@ pub struct TransformDef {
     /// Linear RGB. Optional because palette mode never renders it: omitted,
     /// a map takes a hue spaced around the wheel by its index (see
     /// [`default_transform_color`]), which is what the transform ring and
-    /// `mix` then use. Always written on save.
+    /// `mix` then use. Written on save only when it isn't that colour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f64; 3]>,
     #[serde(default = "default_weight")]
@@ -1689,6 +1696,11 @@ pub struct Scene {
     pub transform_names: Vec<Option<String>>,
     /// Per-transform gradient color (source data for `ColorMode::Transforms`)
     pub colors: Vec<Vec3>,
+    /// Per transform: did its file leave out `color`, and `color_value`?
+    /// Half of what makes a colour implied; see [`Scene::implied_colours`].
+    /// Shorter than `transforms` (empty, for a scene not read from a file)
+    /// means explicit, so a scene built in code writes everything.
+    pub colours_left_out: Vec<(bool, bool)>,
     /// The scene's own gradient, if it has one. Kept even when
     /// `color_mode` is `Transforms`, so switching back and forth — and
     /// saving in between — doesn't throw the palette away.
@@ -1836,6 +1848,7 @@ impl Scene {
             root_share: 1.0,
             root_visible: true,
             xaos_matrix_layers: Vec::new(),
+            colours_left_out: Vec::new(),
         }
     }
 
@@ -2213,6 +2226,11 @@ impl Scene {
             subscenes,
             root_share: scene_file.meta.share.map(|v| v as f32).unwrap_or(1.0).max(0.0),
             root_visible,
+            colours_left_out: scene_file
+                .transforms
+                .iter()
+                .map(|t| (t.color.is_none(), t.color_value.is_none()))
+                .collect(),
             xaos_matrix_layers: std::iter::once(scene_file.xaos.is_some())
                 .chain(scene_file.subscenes.iter().map(|d| d.xaos.is_some()))
                 .enumerate()
@@ -2436,11 +2454,19 @@ impl Scene {
         // The top level holds the scene's own maps only; each subscene's are
         // written inside its own block.
         let (root_specs, root_names, root_colors) = self.layer_maps(0);
+        let root_implied: Vec<(bool, bool)> = self
+            .implied_colours()
+            .into_iter()
+            .zip(&self.transforms)
+            .filter(|(_, t)| t.layer == 0)
+            .map(|(f, _)| f)
+            .collect();
         let transforms: Vec<TransformDef> = root_specs
             .iter()
             .zip(&root_names)
             .zip(&root_colors)
-            .map(|((spec, name), color)| transform_def(spec, name.clone(), Some(*color), &root_names))
+            .zip(root_implied)
+            .map(|(((spec, name), color), implied)| transform_def(spec, name.clone(), Some(*color), &root_names, implied))
             .collect();
         // The form the file used: one `[xaos]` matrix, or a row per map.
         let matrix_form = self.xaos_matrix_layers.contains(&0) && crate::xaos::layer_has_xaos(&root_specs);
@@ -2587,15 +2613,22 @@ impl Scene {
     /// a clone of the original's, for a duplicate — renumbered here.
     ///
     /// The one place a map is added to a scene, so the remap can't be skipped.
+    ///
+    /// `color: None` gives the new map the colour and colour index its
+    /// position implies, and either way the maps beside it whose colours were
+    /// implied are re-spaced for the new count (see [`implied_colour`]).
     pub fn insert_transform(
         &mut self,
         at: usize,
         mut spec: TransformSpec,
         name: Option<String>,
-        color: Vec3,
+        color: Option<Vec3>,
         copy_of: Option<usize>,
     ) {
         let layer = spec.layer;
+        let mut implied = self.implied_colours();
+        implied.insert(at, (color.is_none(), color.is_none()));
+        let color = color.unwrap_or(Vec3::ONE);
         let pos = self.transforms[..at].iter().filter(|t| t.layer == layer).count();
         crate::xaos::insert_column(&mut self.transforms, layer, pos);
         crate::xaos::shift_row(&mut spec.xaos, pos);
@@ -2609,6 +2642,56 @@ impl Scene {
                 crate::xaos::copy_column(&mut self.transforms, layer, src_pos, pos);
             }
         }
+        self.respace_implied(&implied);
+    }
+
+    /// Which maps' colour and colour index are still **implied**: left out of
+    /// the file (or added with none), *and* still the value their position
+    /// gives. Implied ones are saved without the key and re-spaced when a map
+    /// is added or removed beside them, so a scene that never chose its
+    /// colours keeps not choosing them, and the diff of adding a transform is
+    /// the transform rather than every other colour moving.
+    ///
+    /// Both halves are needed. The flag alone could lose an edit to any code
+    /// that sets a colour and forgets to clear it; the value test does not
+    /// let that happen, because an edit moves the value. The value test alone
+    /// would take an authored `color_value = 0.5` for the implied one whenever
+    /// it is the middle map, and re-space it on the next add.
+    pub fn implied_colours(&self) -> Vec<(bool, bool)> {
+        let counts = self.layer_counts();
+        (0..self.transforms.len())
+            .map(|i| {
+                let (colour_out, index_out) = self.colours_left_out.get(i).copied().unwrap_or((false, false));
+                let n = counts[self.transforms[i].layer as usize];
+                let c = self.colors.get(i).copied().unwrap_or(Vec3::ONE);
+                let (colour, index) = implied_colour(self.layer_position(i), n, c, self.transforms[i].color_value);
+                (colour_out && colour, index_out && index)
+            })
+            .collect()
+    }
+
+    fn layer_counts(&self) -> Vec<usize> {
+        let mut counts = vec![0; self.transforms.iter().map(|t| t.layer as usize + 1).max().unwrap_or(1)];
+        for t in &self.transforms {
+            counts[t.layer as usize] += 1;
+        }
+        counts
+    }
+
+    /// Give every map flagged in `implied` the colour (and index) its current
+    /// position implies. Called after a map is added or removed.
+    fn respace_implied(&mut self, implied: &[(bool, bool)]) {
+        self.colours_left_out = implied.to_vec();
+        let counts = self.layer_counts();
+        for (i, &(colour, index)) in implied.iter().enumerate() {
+            let (pos, n) = (self.layer_position(i), counts[self.transforms[i].layer as usize]);
+            if colour {
+                self.colors[i] = default_transform_color(pos, n);
+            }
+            if index {
+                self.transforms[i].color_value = default_color_value(pos, n);
+            }
+        }
     }
 
     /// Remove map `idx` and its name and colour, dropping every xaos edge
@@ -2616,10 +2699,13 @@ impl Scene {
     pub fn remove_transform(&mut self, idx: usize) {
         let layer = self.transforms[idx].layer;
         let pos = self.layer_position(idx);
+        let mut implied = self.implied_colours();
+        implied.remove(idx);
         self.transforms.remove(idx);
         self.transform_names.remove(idx);
         self.colors.remove(idx);
         crate::xaos::remove_column(&mut self.transforms, layer, pos);
+        self.respace_implied(&implied);
     }
 
     pub fn layer_maps(&self, k: usize) -> (Vec<TransformSpec>, Vec<Option<String>>, Vec<Vec3>) {
@@ -2697,7 +2783,7 @@ impl Scene {
                 def.transforms = specs
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| transform_def(t, names[i].clone(), Some(colors[i]), &names))
+                    .map(|(i, t)| transform_def(t, names[i].clone(), Some(colors[i]), &names, (false, false)))
                     .collect();
                 if self.xaos_matrix_layers.contains(&(k as u16)) {
                     def.xaos = xaos_matrix_def(&specs, &names);
@@ -2744,6 +2830,7 @@ impl Scene {
             self.transform_names.get(i).cloned().flatten(),
             self.colors.get(i).copied(),
             &self.layer_maps(spec.layer as usize).1,
+            (false, false),
         );
         let text = toml::to_string(&One { transform: [&def] })
             .map_err(|e| format!("Failed to serialize transform: {}", e))?;
@@ -2811,12 +2898,16 @@ impl Scene {
 /// matrix, `rotvec` where they don't, variations only when not pure linear.
 /// `names` are the names of every map in `spec`'s layer, which its xaos
 /// row is keyed by.
+/// `implied` says which of the map's colour and colour index to leave out,
+/// because its position implies them ([`Scene::implied_colours`]).
 fn transform_def(
     spec: &TransformSpec,
     name: Option<String>,
     color: Option<Vec3>,
     names: &[Option<String>],
+    implied: (bool, bool),
 ) -> TransformDef {
+    let (colour_implied, index_implied) = implied;
     let trs = crate::rot::Trs::of(spec.matrix);
     let (scale, trans) = (trs.scale, trs.translation);
     // Degrees while they reproduce the matrix, which is nearly
@@ -2888,9 +2979,9 @@ fn transform_def(
                     .as_rotation_vector(),
             )
         }),
-        color: Some(color.to_array().map(tidy)),
+        color: (!colour_implied).then(|| color.to_array().map(tidy)),
         weight: tidy(spec.weight),
-        color_value: Some(tidy(spec.color_value)),
+        color_value: (!index_implied).then(|| tidy(spec.color_value)),
         color_speed: spec.explicit_color_speed.map(tidy),
         variations: if is_pure_linear || variations.is_empty() {
             None
@@ -3444,7 +3535,7 @@ fn merge_scene_into_document(
         .map(|a| a.len());
     if existing_len == Some(file.transforms.len()) {
         let arr = doc.get_mut("transform")?.as_array_of_tables_mut()?;
-        for (i, (t, def)) in arr.iter_mut().zip(&file.transforms).enumerate() {
+        for (t, def) in arr.iter_mut().zip(&file.transforms) {
             match &def.name {
                 Some(n) => set_str(t, "name", n),
                 None => {
@@ -3475,16 +3566,20 @@ fn merge_scene_into_document(
                     set_arr3(t, "rotation", def.rotation, Some([0.0; 3]));
                 }
             }
-            if let Some(c) = def.color {
-                set_arr3(t, "color", c, None);
+            // Absent from the def means implied by position, so a key the
+            // file has goes too.
+            match def.color {
+                Some(c) => set_arr3(t, "color", c, None),
+                None => {
+                    t.remove("color");
+                }
             }
             set_f64(t, "weight", def.weight, Some(1.0));
-            if let Some(cv) = def.color_value {
-                // The loader auto-assigns i/(n-1); don't add an explicit key
-                // when the value still matches that
-                let n = file.transforms.len();
-                let auto = if n <= 1 { 0.5 } else { i as f64 / (n - 1) as f64 };
-                set_f64(t, "color_value", cv, Some(tidy(auto as f32)));
+            match def.color_value {
+                Some(cv) => set_f64(t, "color_value", cv, None),
+                None => {
+                    t.remove("color_value");
+                }
             }
             match def.color_speed {
                 Some(cs) => set_f64(t, "color_speed", cs, None),
@@ -3639,7 +3734,8 @@ mod tests {
         assert_eq!(scene.colors.len(), 2);
         assert!(scene.colors[0].distance(scene.colors[1]) > 0.1, "{:?}", scene.colors);
         scene.save(&p).unwrap();
-        assert!(std::fs::read_to_string(&p).unwrap().contains("color = ["));
+        // Still implied, so still left out: see `implied_colours`.
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("color = ["));
         let back = super::Scene::load(&p).unwrap();
         for (a, b) in scene.colors.iter().zip(&back.colors) {
             assert!(a.distance(*b) < 1e-3, "{a} came back as {b}");
@@ -5700,7 +5796,7 @@ matrix = [
         let mut s = load(&scene("xaos = { c = 0 }", "xaos = { b = 3 }", "")).unwrap();
         // Duplicate b to the end: a still cuts c, and nothing yet cuts the copy.
         let copy = s.transforms[1].clone();
-        s.insert_transform(3, copy, Some("b2".into()), Vec3::ONE, Some(1));
+        s.insert_transform(3, copy, Some("b2".into()), Some(Vec3::ONE), Some(1));
         assert_eq!(s.transforms[0].xaos.dense(4), vec![1.0, 1.0, 0.0, 1.0]);
         // The copy goes where b goes, and b treats it as itself.
         assert_eq!(s.transforms[3].xaos.dense(4), vec![1.0, 3.0, 1.0, 3.0]);
@@ -5733,5 +5829,88 @@ matrix = [
         assert!(e.contains("coupling between subscenes"), "{e}");
         let back = load(&s.to_toml_string().unwrap()).unwrap();
         assert_eq!(back.transforms[3].xaos, s.transforms[3].xaos);
+    }
+}
+
+#[cfg(test)]
+mod implied_colour_tests {
+    use super::*;
+
+    const AUTO: &str = r#"
+[meta]
+name = "auto"
+
+[[transform]]
+name = "a"
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+
+[[transform]]
+name = "b"
+translation = [-0.5, 0.0, 0.0]
+scale = 0.5
+"#;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("fracturize-implied-{}-{name}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn fresh() -> TransformSpec {
+        let mut spec = Scene::from_toml_str(AUTO, &tmp("spec")).unwrap().transforms[0].clone();
+        spec.matrix.w_axis.y = 0.7;
+        spec
+    }
+
+    fn all_implied(s: &Scene) -> bool {
+        s.implied_colours().iter().all(|&(c, i)| c && i)
+    }
+
+    #[test]
+    fn colours_a_file_left_out_stay_out() {
+        let s = Scene::from_toml_str(AUTO, &tmp("out")).unwrap();
+        assert!(all_implied(&s));
+        let text = s.to_toml_string().unwrap();
+        assert!(!text.contains("color =") && !text.contains("color_value"), "{text}");
+    }
+
+    #[test]
+    fn adding_and_removing_respaces_implied_colours() {
+        let mut s = Scene::from_toml_str(AUTO, &tmp("respace")).unwrap();
+        s.insert_transform(2, fresh(), Some("c".into()), None, None);
+        assert!(all_implied(&s));
+        assert_eq!(s.colors[1], default_transform_color(1, 3));
+        assert_eq!(s.transforms[1].color_value, default_color_value(1, 3));
+        let text = s.to_toml_string().unwrap();
+        assert!(!text.contains("color =") && !text.contains("color_value"), "{text}");
+        s.remove_transform(0);
+        assert!(all_implied(&s));
+        assert_eq!(s.colors[0], default_transform_color(0, 2));
+    }
+
+    #[test]
+    fn a_chosen_colour_is_written_and_keeps_its_value() {
+        let mut s = Scene::from_toml_str(AUTO, &tmp("chosen")).unwrap();
+        s.colors[0] = Vec3::new(0.9, 0.1, 0.1);
+        s.insert_transform(2, fresh(), Some("c".into()), Some(Vec3::splat(0.9)), None);
+        assert_eq!(s.colors[0], Vec3::new(0.9, 0.1, 0.1));
+        assert_eq!(s.colors[1], default_transform_color(1, 3), "the implied one still re-spaces");
+        let text = s.to_toml_string().unwrap();
+        assert_eq!(text.matches("color = ").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn saving_in_place_drops_a_colour_that_became_implied() {
+        let d = tmp("inplace");
+        let p = d.join("s.toml");
+        fs::write(&p, AUTO).unwrap();
+        let mut s = Scene::load(&p).unwrap();
+        s.insert_transform(2, fresh(), Some("c".into()), None, None);
+        s.save(&p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("color =") && !text.contains("color_value"), "{text}");
+        let back = Scene::load(&p).unwrap();
+        assert_eq!(back.colors, s.colors);
     }
 }

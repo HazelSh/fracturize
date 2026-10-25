@@ -2562,6 +2562,7 @@ fn default_scene() -> Scene {
         root_share: 1.0,
         root_visible: true,
         xaos_matrix_layers: Vec::new(),
+            colours_left_out: Vec::new(),
         name: "Default Sierpinski".to_string(),
         author: "Claude Opus 4.5 (Claude Code 2.0.76)".to_string(),
         point_size: 0.002,
