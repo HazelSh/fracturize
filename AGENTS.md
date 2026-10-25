@@ -22,6 +22,28 @@ the similarity dimension), which variations are actually 3D, the traps, inherite
 Apophysis-era lore and what of it survives here. It has a discovery log at the end;
 add to it.
 
+**Planning UI or workflow? Read `USERS.md`.** It names the people Fracturize is
+for (Rook, Pip, Jay, Theo, Remy, Atlas, Mote) and the ones it isn't (Abe, Silk,
+Socket), with their goals, failure modes and gaps. Plans say who they serve and
+who they cost by those names.
+
+### The other docs
+
+| File | What it is |
+|------|------------|
+| `USERS.md` | Personas and anti-personas: who to plan for |
+| `CRAFT.md` | Authoring scenes as art; the discovery log |
+| `ADDING-A-SCENE-FEATURE.md` | Checklist for every place a scene feature reaches |
+| `UI-REVIEW-PLAN.md` | The GUI read as a stranger would; a worklist |
+| `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
+| `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
+| `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
+| `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
+| `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
+| `NOTES-infinite-zoom.md` | Why `[zoom]` works the way it does, and the dead ends |
+| `LIKENESS-PLAN.md`, `FIT-OPTIMIZER-PLAN.md`, `IFS-INVERSE-BACKGROUND.md` | Fitting a scene to a picture: plan, solver, background theory |
+| `AUTHORING-BRAINSTORM.md`, `XAOS-AND-BEYOND-BRAINSTORM.md` | Brainstorms: proposals, not decisions |
+
 ## Architecture
 
 ```
