@@ -1,0 +1,109 @@
+# Indra's pearls in three dimensions — the limit set of a Schottky-type group.
+#
+# Seven balls with disjoint interiors: six of radius 1/sqrt 2 on the
+# octahedron's axes at distance 1, each touching its four neighbours, and a
+# core of radius 1 - 1/sqrt 2 at the origin touching all six. Each map is the
+# inversion in one ball (affine to the unit sphere, `spherical`, post-affine
+# back), so the walk is the group's random walk and the picture its limit set:
+# every ball holds the images of the other six, each of those the images of
+# the rest, down forever. Where balls touch the inversions compose to
+# parabolics, which is what joins the dust into lace.
+#
+# Balls with disjoint interiors always generate a discrete group, and cutting
+# each map's self-loop (inversions are involutions) makes every walk a reduced
+# word, unique: no relation is wasting points. Compare apollonian_spheres,
+# whose balls overlap and whose words are not unique.
+#
+# The core is what makes it 3D. Without it, all six balls are orthogonal to
+# the sphere of radius 1/sqrt 2, every inversion preserves that sphere, and the
+# limit set is a gasket drawn on its surface: a shell, nothing inside. With it
+# the shell breaks into star-shaped shards and the core's images (cream) sit
+# behind them, visible through the gaps from every side.
+#
+#   fracturize -s scenes/indras_pearls.toml --splat
+#   fracturize -s scenes/indras_pearls.toml --splat --orbit-grid 2x2 \
+#     -r renders/pearls.png --width 700 --height 500
+
+[meta]
+name = "Indra's Pearls"
+author = "Claude Opus 5.5"
+point_size = 0.0015
+point_count = 6_000_000
+color_mode = "mix"
+color_speed = 0.85
+background = [0.008, 0.008, 0.014]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.1
+yaw = 0.5
+pitch = 0.45
+
+[[transform]]
+name = "px"
+translation = [-1.414214, -0.000000, -0.000000]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_translation = [1.0, 0.0, 0.0]
+post_scale = 0.707107
+color = [1.0, 0.42, 0.2]
+xaos = { px = 0 }
+
+[[transform]]
+name = "nx"
+translation = [1.414214, -0.000000, -0.000000]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_translation = [-1.0, 0.0, 0.0]
+post_scale = 0.707107
+color = [1.0, 0.75, 0.3]
+xaos = { nx = 0 }
+
+[[transform]]
+name = "py"
+translation = [-0.000000, -1.414214, -0.000000]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_translation = [0.0, 1.0, 0.0]
+post_scale = 0.707107
+color = [0.3, 0.9, 0.5]
+xaos = { py = 0 }
+
+[[transform]]
+name = "ny"
+translation = [-0.000000, 1.414214, -0.000000]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_translation = [0.0, -1.0, 0.0]
+post_scale = 0.707107
+color = [0.2, 0.75, 0.9]
+xaos = { ny = 0 }
+
+[[transform]]
+name = "pz"
+translation = [-0.000000, -0.000000, -1.414214]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_translation = [0.0, 0.0, 1.0]
+post_scale = 0.707107
+color = [0.55, 0.4, 1.0]
+xaos = { pz = 0 }
+
+[[transform]]
+name = "nz"
+translation = [-0.000000, -0.000000, 1.414214]
+scale = 1.414214
+variations = { spherical = 1.0 }
+post_translation = [0.0, 0.0, -1.0]
+post_scale = 0.707107
+color = [0.95, 0.35, 0.7]
+xaos = { nz = 0 }
+
+[[transform]]
+name = "core"
+translation = [0.0, 0.0, 0.0]
+scale = 3.414214
+variations = { spherical = 1.0 }
+post_scale = 0.292893
+color = [1.0, 0.95, 0.8]
+xaos = { core = 0 }
