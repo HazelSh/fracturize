@@ -1102,7 +1102,8 @@ the roll.
 
 `src/dice/` is one generator. A **profile** (`RandomSettings`) is one list of
 the **parts** of a flame — each transform's position, turn, size, weight and
-variations; how many transforms; the symmetry group; the colours (each
+variations; how many transforms; the symmetry group; which map may follow
+which (xaos); the colours (each
 transform's, the colour source, the gradient); where each sits on the
 gradient; the background — each **on or off**, with the ranges it is drawn
 from. **A part's odds are its only state**: 0 is off, anything above is on,
@@ -1162,8 +1163,9 @@ and look too — it's the same flame, recoloured.
 `src/dice/profiles/` so they exist wherever the app is started from:
 `default` (the shipped settings: every part on, bounded variations, no
 symmetry), `anything` (every variation, symmetry now and then, every part
-may mutate), `no-symmetry` (anything's range, no group ever drawn; xaos isn't
-a part yet, so none either), `colour-only`, `no-colour`, `symmetric`. Then
+may mutate, xaos about one roll in three), `no-symmetry` (anything's range,
+no group and no xaos ever drawn), `colour-only`, `no-colour`, `symmetric`,
+`xaos-fun` (six rolls in seven get a graph, under a dimension bound). Then
 `~/.config/fracturize/dice/<name>.toml` (the person's own) and
 `scenes/dice/<name>.toml` (shared, relative to where the app runs). A saved
 profile can't take a built-in's name. The file reads like a scene file:
@@ -1204,7 +1206,7 @@ file with a `[random]` table — prefs.toml.
 the Random flames list, in the Mutate window, and as Explore → Dice profile —
 all the same picker (`ui::random_settings::profile_picker`), built-ins under
 their own heading, each one's description on hover, a `*` while edited. The
-Random settings window edits it in seven folding sections, **each one table
+Random settings window edits it in eight folding sections, **each one table
 holding one kind of value** (`ui::table`, `egui_extras::TableBuilder` in the
 house style: hinted column headers, strong stripes and faint column rules —
 you read a table along its rows — exact widths with the name column taking
@@ -1213,9 +1215,10 @@ line up from one table to the next; a part's tick and its odds are one
 state, ticking on sets the least odds and dragging the odds to 0 unticks):
 **Parts** (part · odds · share of a mutation's changes · re-roll, grouped
 Shape / Structure / Colour), **Ranges** (setting · low · high), **Chances**
-(setting · chance, as a percentage), **Symmetry groups**, **Variations**
+(setting · chance, as a percentage), **Symmetry groups**, **Xaos** (none /
+preset / random graph · odds · share, then the presets), **Variations**
 (variation · low · high weight), **Quality check** (bound · low · high, then
-the try budget) and **Mutation step**; Roll one and Mutate at the foot. A
+the least walk share under xaos and the try budget) and **Mutation step**; Roll one and Mutate at the foot. A
 range or chance row greys while the part it draws is off. They used to share
 one grid, chances and low/high pairs in the same unruled columns, and read as
 a scatter of fields.
@@ -1249,9 +1252,41 @@ fracturize -s scenes/koru.toml -r renders/koru-mut.png --mutations 8 \
   --random-config colour-only --effort tiny --width 320 --height 180
 ```
 
-Not yet (FEATURE-PLANS.md Track A, items 3–5): xaos and infinite zoom as
-parts, and the 3×3 / 5×5 mutation grid, which is this generator with the
-Random flames list's model and a grid layout.
+**Xaos is a part** (`[parts] xaos`, `[ranges.xaos]`, `XaosSettings`). A roll
+draws one of three kinds of graph by odds — **none**, a **preset**, or a
+**random** graph — and `default` has odds only of none and *draws no die
+for it*, which is what keeps every recorded `default` seed rolling the same
+flame. Four things it rests on:
+
+- **Only some presets can be rolled, and only at some sizes.** `cycle` never:
+  one exit per map makes the walk a fixed sequence and the picture collapses
+  to n dots. `no-self-loops` needs three maps (with two it is a strict
+  alternation, which collapses the same way); `blocks:N` needs two maps a
+  block. A preset that doesn't fit isn't drawn.
+- **A random graph is strongly connected by construction**: a cycle through
+  every map in random order is kept, and edges off it are cut at a share drawn
+  from `cut`; optionally every self-loop, and a few kept edges weighted
+  (log-uniform `multiplier`). At least one map always keeps a choice.
+- **The gate checks the walk**: `Reject::Xaos` when a map's walk share falls
+  under `min_share`, or under its share of the weights where that is smaller
+  — it is for what the graph takes away. Dimension under xaos is
+  Mauldin–Williams (as `similarity_dimension` already was), and **it is
+  steered**: no closed form, but it rises with a common scale factor, so
+  `gate::steer_under_xaos` bisects for it. Cuts cost half a dimension or more,
+  which is why `xaos-fun` turns a dimension bound on — without one a third of
+  its rolls thinned to dust.
+- **A mutation** of xaos cuts, restores or reweights one edge out of a map
+  (never its last exit), or re-rolls the whole layer's graph — which may draw
+  none, clearing it. On a zoom scene it never leaves a map that can't be
+  followed by the zoom map, which would not load.
+
+A profile saved before xaos was a part kept the base's rows exactly when the
+transform count was off; read without an `xaos` key, it gets xaos off where
+`count` is off, so it does the same (`profile::migrate`).
+
+Not yet (FEATURE-PLANS.md Track A, items 3 and 5): infinite zoom as a part,
+and the 3×3 / 5×5 mutation grid, which is this generator with the Random
+flames list's model and a grid layout.
 
 ## The scene browser
 
@@ -2024,8 +2059,8 @@ methods (`set_xaos_edge(s)`, `set_xaos_rest`, `set_xaos_probability`,
   up to 12. `ui::xaos::overlay_edges` is the one geometry the painting and the
   picking both use. Viewport input reaches it through `app.rs`, like the gizmos.
 
-**Not done yet** (plan §6, §8): random-flame and mutation knobs for xaos;
-coupling between subscenes; "hold shares" (re-solve weights so a xaos edit
+Random flames and mutation draw xaos too (see "The dice"). **Not done yet**
+(plan §8): coupling between subscenes; "hold shares" (re-solve weights so a xaos edit
 leaves walk shares put). And a GUI trap worth knowing: **U+2192 `→` is in
 none of the app's text fonts** and renders as tofu; strings use Phosphor's
 arrow-right (`\u{E06C}`, `icons::ARROW`).

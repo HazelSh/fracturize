@@ -19,7 +19,7 @@ use glam::{Mat4, Quat, Vec3};
 use rand::Rng;
 
 use super::gate::rescale;
-use super::settings::{RandomSettings, SymmetrySettings};
+use super::settings::{RandomSettings, SymmetrySettings, XaosSettings};
 use crate::path::CameraPath;
 use crate::scene::{generate_colormap, resolve_color_speeds, Scene, TransformSpec, NUM_VARIATIONS};
 
@@ -93,10 +93,6 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
         if !p.weight.on() {
             t.weight = b.weight;
         }
-        if !p.count.on() {
-            // The same transforms, so the same transitions between them.
-            t.xaos = b.xaos.clone();
-        }
     }
 
     // An IFS only converges if it contracts on average. Rescale everything if
@@ -116,6 +112,21 @@ pub(super) fn build_candidate(settings: &RandomSettings, base: &Scene, rng: &mut
     } else {
         for (t, b) in transforms.iter_mut().zip(&base.transforms) {
             t.symmetry = b.symmetry.clone();
+        }
+    }
+
+    // Which map may follow which. Kept, it is the base's rows, less any edge
+    // to a map this roll doesn't have.
+    if p.xaos.on() {
+        if let Some(rows) = random_xaos(&settings.xaos, n, rng) {
+            for (t, row) in transforms.iter_mut().zip(rows.rows) {
+                t.xaos = row;
+            }
+        }
+    } else {
+        for (t, b) in transforms.iter_mut().zip(&base.transforms) {
+            t.xaos = b.xaos.clone();
+            t.xaos.exceptions.retain(|e| (e.0 as usize) < n);
         }
     }
 
@@ -243,6 +254,103 @@ fn apply_symmetry(
         }
         t.symmetry = Some(sym.clone());
     }
+}
+
+/// A layer's transition graph, drawn: one row per map, and what it is in a
+/// few words, for a mutation's log.
+pub(super) struct Graph {
+    pub rows: Vec<crate::xaos::Xaos>,
+    pub label: String,
+}
+
+/// A transition graph for `n` maps, drawn the way the xaos settings say:
+/// `None` for no xaos. Draws nothing at all when the settings can't give one
+/// (`XaosSettings::draws`), which is what keeps `default`'s seeds.
+pub(super) fn random_xaos(s: &XaosSettings, n: usize, rng: &mut impl Rng) -> Option<Graph> {
+    use crate::xaos::Preset;
+    if !s.draws() {
+        return None;
+    }
+    let total = s.off + s.preset + s.random;
+    let r = rng.r#gen::<f32>() * total;
+    if r < s.off || n < 2 {
+        return None;
+    }
+    if r < s.off + s.preset {
+        // Only the presets that leave something to draw at this many maps.
+        let mut presets = Vec::new();
+        if s.no_self_loops && n >= 3 {
+            presets.push(Preset::NoSelfLoops);
+        }
+        if s.blocks && n >= 4 {
+            presets.push(Preset::Blocks(rng.gen_range(2..=n / 2)));
+        }
+        if presets.is_empty() {
+            return None;
+        }
+        let preset = presets[rng.gen_range(0..presets.len())];
+        return Some(Graph { rows: preset.rows(n), label: preset.name() });
+    }
+
+    // A random graph: a cycle through every map in random order, kept, and
+    // a share of the other edges cut.
+    let order = choose(rng, &(0..n).collect::<Vec<_>>(), n);
+    let mut kept = vec![vec![false; n]; n];
+    for k in 0..n {
+        kept[order[k]][order[(k + 1) % n]] = true;
+    }
+    let [lo, hi] = s.cut;
+    let cut = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
+    let no_self = n >= 3 && rng.r#gen::<f32>() < s.self_loops;
+    let mut grid = vec![vec![1.0f32; n]; n];
+    let mut cuts = 0;
+    for i in 0..n {
+        for j in 0..n {
+            if !kept[i][j] && ((no_self && i == j) || rng.r#gen::<f32>() < cut) {
+                grid[i][j] = 0.0;
+                cuts += 1;
+            }
+        }
+    }
+    // One exit everywhere makes the walk deterministic: a handful of dots.
+    // So at least one map keeps a choice.
+    if grid.iter().all(|row| row.iter().filter(|&&x| x > 0.0).count() < 2) {
+        let open: Vec<(usize, usize)> = (0..n)
+            .flat_map(|i| (0..n).map(move |j| (i, j)))
+            .filter(|&(i, j)| grid[i][j] == 0.0 && !(no_self && i == j))
+            .collect();
+        if let Some(&(i, j)) = open.get(rng.gen_range(0..open.len().max(1))) {
+            grid[i][j] = 1.0;
+            cuts -= 1;
+        }
+    }
+    let [mlo, mhi] = s.multiplier;
+    let mut weighted = 0;
+    for row in grid.iter_mut() {
+        for x in row.iter_mut().filter(|x| **x > 0.0) {
+            if rng.r#gen::<f32>() < s.weighted {
+                *x = if mhi > mlo { rng.gen_range(mlo.ln()..=mhi.ln()).exp() } else { mlo };
+                weighted += 1;
+            }
+        }
+    }
+    let mut label = format!("random, {cuts} of {} edges cut", n * n);
+    if weighted > 0 {
+        label += &format!(", {weighted} weighted");
+    }
+    Some(Graph { rows: grid.iter().map(|row| row_from_dense(row)).collect(), label })
+}
+
+/// A row from every target's multiplier: the rest is whichever of 0 and 1 is
+/// commoner, so a row lists as few exceptions as it can.
+pub(super) fn row_from_dense(row: &[f32]) -> crate::xaos::Xaos {
+    let zeros = row.iter().filter(|&&x| x == 0.0).count();
+    let mut x = crate::xaos::Xaos::default();
+    x.set_rest(if zeros * 2 > row.len() { 0.0 } else { 1.0 });
+    for (j, &v) in row.iter().enumerate() {
+        x.set(j, v);
+    }
+    x
 }
 
 /// How much a motif shrinks on joining `sym` (see [`apply_symmetry`]).
@@ -963,4 +1071,68 @@ mod tests {
         );
     }
 
+
+    /// Every random xaos graph keeps its cycle, so every map gets a real
+    /// share of the walk and no map is a dead end; every preset drawn fits
+    /// the map count; and the default draws none, and no die for it.
+    #[test]
+    fn xaos_graphs_are_connected_and_fit() {
+        use crate::dice::XaosSettings;
+        let fun = XaosSettings { off: 0.0, preset: 1.0, random: 2.0, weighted: 0.3, ..Default::default() };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let mut kinds = std::collections::BTreeSet::new();
+        for k in 0..400 {
+            let n = 2 + k % 7;
+            let Some(g) = random_xaos(&fun, n, &mut rng) else { continue };
+            kinds.insert(g.label.split([',', ':']).next().unwrap().to_string());
+            assert_eq!(g.rows.len(), n);
+            let mut maps: Vec<TransformSpec> = (0..n).map(|_| random_transform(&RandomSettings::default(), &mut rng)).collect();
+            for (t, row) in maps.iter_mut().zip(&g.rows) {
+                t.xaos = row.clone();
+            }
+            let chain = crate::xaos::Chain::build(&maps, &[]).unwrap();
+            assert!(chain.dead.is_empty(), "{}: a dead end", g.label);
+            assert!(
+                (0..n).any(|i| (0..n).filter(|&j| chain.allowed(i, j)).count() >= 2),
+                "{}: every map has one exit, so the walk is a fixed sequence",
+                g.label
+            );
+            if g.label.starts_with("random") {
+                assert!(chain.shares().iter().all(|&s| s > 1e-6), "{}: a map shut out", g.label);
+            }
+            if g.label == "no-self-loops" {
+                assert!(n >= 3);
+            }
+            if let Some(b) = g.label.strip_prefix("blocks:") {
+                assert!(b.parse::<usize>().unwrap() * 2 <= n, "{} over {n} maps leaves a block of one", g.label);
+            }
+        }
+        assert_eq!(kinds.into_iter().collect::<Vec<_>>(), ["blocks", "no-self-loops", "random"]);
+
+        // The default draws nothing: the rng is where it was.
+        let mut a = rand::rngs::StdRng::seed_from_u64(5);
+        let b = a.clone();
+        assert!(random_xaos(&XaosSettings::default(), 5, &mut a).is_none());
+        assert_eq!(a, b, "the default spent a die on xaos");
+    }
+
+    /// Off, a roll keeps the base's rows — less any edge to a map it doesn't
+    /// have — and on with odds only of none, it clears them.
+    #[test]
+    fn a_roll_keeps_or_clears_the_bases_xaos() {
+        let mut base = Scene::blank();
+        let extra = base.transforms[0].clone();
+        base.insert_transform(2, extra, None, None, None);
+        base.transforms[0].xaos.set(1, 0.0);
+        base.transforms[1].xaos.set(2, 0.0);
+        let mut keep = RandomSettings::default();
+        keep.parts.xaos.set_on(false);
+        keep.transforms = [2, 2];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let c = build_candidate(&keep, &base, &mut rng);
+        assert_eq!(c.transforms[0].xaos.get(1), 0.0, "kept");
+        assert!(c.transforms[1].xaos.is_default(), "the edge to a map the roll lacks is dropped");
+        let c = build_candidate(&RandomSettings::default(), &base, &mut rng);
+        assert!(c.transforms.iter().all(|t| t.xaos.is_default()));
+    }
 }

@@ -1,0 +1,39 @@
+# Mostly xaos: which map may follow which, rolled. Six rolls in seven get a
+# graph — a random one most often, a preset (no self-loops, or the maps split
+# into closed groups) now and then — and a mutation often cuts, restores or
+# reweights one edge, or rolls the whole graph again.
+#
+# Only cuts change the shape: they remove every point whose address has that
+# pair in it, so arches, gaps and missing branches. A random graph keeps a
+# cycle through every map and cuts only edges off it, so nothing is shut out;
+# the quality check throws away any flame where a map is starved of the walk.
+# Three to six transforms, because a graph over two has almost nothing to cut.
+# And a dimension bound: cuts take material away, half a dimension or more,
+# so without one a fair share of rolls thin out to dust. It is met by
+# resizing the transforms after the graph is drawn.
+#
+#   fracturize --random-sheet 9 --random-config xaos-fun -r renders/xaos.png \
+#     --effort tiny --width 320 --height 180
+
+[meta]
+name = "xaos-fun"
+description = "Most flames say which map may follow which"
+author = "Claude Opus 5.5"
+
+[parts]
+xaos = { odds = 0.35, reroll = 0.3 }
+
+[ranges]
+transforms = [3, 6]
+attempts = 120
+dimension = { on = true, range = [1.3, 2.3] }
+
+[ranges.xaos]
+off = 0.15
+preset = 0.25
+random = 0.6
+cut = [0.25, 0.55]
+weighted = 0.2
+
+[mutation]
+changes = [1, 3]

@@ -3,7 +3,8 @@
 //! One call to [`mutate`] makes a handful of changes (the profile's
 //! `mutation.changes`), each to a part the profile has on, picked by the
 //! parts' odds — a map's place, turn, size, weight, variation blend or colour,
-//! a map added or removed, the background, the symmetry group — and returns
+//! a map added or removed, the background, the symmetry group, an edge of the
+//! xaos graph or the whole graph — and returns
 //! human- and LLM-readable descriptions of what changed. A part that's off is
 //! never touched, which is exactly what it means to a roll too.
 //!
@@ -78,6 +79,13 @@ mod part {
     pub const COLOR: usize = 7;
     pub const COLOR_VALUE: usize = 8;
     pub const BACKGROUND: usize = 9;
+    pub const XAOS: usize = 10;
+}
+
+/// Scene indices of the maps in map `i`'s layer, in layer order.
+fn layer_of(scene: &Scene, i: usize) -> Vec<usize> {
+    let layer = scene.transforms[i].layer;
+    (0..scene.transforms.len()).filter(|&j| scene.transforms[j].layer == layer).collect()
 }
 
 /// Maps in map `i`'s layer.
@@ -108,6 +116,12 @@ fn applicable(k: usize, scene: &Scene, i: usize, settings: &RandomSettings, touc
         part::COUNT => can_add(scene, i, settings) || can_remove(scene, i, settings, touched),
         part::SYMMETRY => {
             settings.symmetry.any_kind() || scene.transforms.iter().any(|t| t.symmetry.is_some())
+        }
+        // A graph needs two maps, and something to change: xaos the profile
+        // may draw, or xaos already there.
+        part::XAOS => {
+            let idx = layer_of(scene, i);
+            idx.len() >= 2 && (settings.xaos.draws() || idx.iter().any(|&j| !scene.transforms[j].xaos.is_default()))
         }
         _ => true,
     }
@@ -166,6 +180,7 @@ fn apply_one(
         }
         part::BACKGROUND => background(scene, reroll, strength, rng, log),
         part::SYMMETRY => symmetry(scene, i, reroll, settings, strength, rng, log),
+        part::XAOS => xaos(scene, i, reroll, settings, strength, rng, log),
         _ => unreachable!("a part with no operator"),
     }
     if k != part::BACKGROUND {
@@ -451,6 +466,97 @@ fn symmetry(
     log.push(line);
 }
 
+/// Map `i`'s layer's transition graph: re-rolled whole, the way a fresh roll
+/// draws one (which may be none at all), or nudged — one edge out of map `i`
+/// cut, restored, or its multiplier scaled in log space. A layer with no xaos
+/// is nudged by one cut, the smallest step into it.
+///
+/// Never cuts a map's last exit, and never leaves an infinite-zoom scene
+/// with a map that may not be followed by the zoom map, which would not load.
+fn xaos(
+    scene: &mut Scene,
+    i: usize,
+    reroll: bool,
+    settings: &RandomSettings,
+    strength: f32,
+    rng: &mut impl Rng,
+    log: &mut Vec<String>,
+) {
+    let idx = layer_of(scene, i);
+    let n = idx.len();
+    let before: Vec<_> = idx.iter().map(|&j| scene.transforms[j].xaos.clone()).collect();
+    let had = before.iter().any(|x| !x.is_default());
+
+    let line = if reroll && settings.xaos.draws() {
+        match roll::random_xaos(&settings.xaos, n, rng) {
+            Some(graph) => {
+                for (&j, row) in idx.iter().zip(graph.rows) {
+                    scene.transforms[j].xaos = row;
+                }
+                format!("xaos -> {}", graph.label)
+            }
+            None if had => {
+                for &j in &idx {
+                    scene.transforms[j].xaos = Default::default();
+                }
+                "xaos cleared".to_string()
+            }
+            None => return,
+        }
+    } else {
+        if !had && !settings.xaos.draws() {
+            return;
+        }
+        let row = scene.transforms[i].xaos.dense(n);
+        let open: Vec<usize> = (0..n).filter(|&j| row[j] > 0.0).collect();
+        let shut: Vec<usize> = (0..n).filter(|&j| row[j] == 0.0).collect();
+        // What can be done to this row: a cut needs another exit left, and
+        // a layer that has no xaos yet only takes a cut.
+        let mut ops = Vec::new();
+        if open.len() >= 2 {
+            ops.push(0);
+        }
+        if had && !shut.is_empty() {
+            ops.push(1);
+        }
+        if had && !open.is_empty() {
+            ops.push(2);
+        }
+        let Some(&op) = ops.get(rng.gen_range(0..ops.len().max(1))) else { return };
+        let xaos = &mut scene.transforms[i].xaos;
+        match op {
+            0 => {
+                let j = open[rng.gen_range(0..open.len())];
+                xaos.set(j, 0.0);
+                format!("xaos T{}>T{} cut", i, idx[j])
+            }
+            1 => {
+                let j = shut[rng.gen_range(0..shut.len())];
+                xaos.set(j, 1.0);
+                format!("xaos T{}>T{} restored", i, idx[j])
+            }
+            _ => {
+                let j = open[rng.gen_range(0..open.len())];
+                let step = rng.gen_range(0.3f32..1.0) * strength * if rng.r#gen::<bool>() { 1.0 } else { -1.0 };
+                let [lo, hi] = super::settings::MULTIPLIER_LIMITS;
+                let x = (row[j] * 3f32.powf(step)).clamp(lo, hi);
+                xaos.set(j, x);
+                format!("xaos T{}>T{} x{:.2} -> x{:.2}", i, idx[j], row[j], x)
+            }
+        }
+    };
+
+    if let Some(z) = scene.zoom.as_ref().map(|z| z.map) {
+        if crate::xaos::zoom_conflict(&scene.transforms, &[], z).is_some() {
+            for (&j, row) in idx.iter().zip(before) {
+                scene.transforms[j].xaos = row;
+            }
+            return;
+        }
+    }
+    log.push(line);
+}
+
 /// Rotate a color's hue by `deg` degrees, preserving saturation/value
 fn rotate_hue(c: Vec3, deg: f32) -> Vec3 {
     // Minimal RGB<->HSV roundtrip (matches app.rs helpers)
@@ -706,5 +812,39 @@ color = [0.2, 0.2, 1.0]
         }
         assert!(found >= 10, "only {found} of 12 mutations passed");
         std::fs::remove_dir_all(std::env::temp_dir().join("fracturize_mutate_gated")).ok();
+    }
+
+    /// A xaos mutation never leaves a dead end, and in a zoom scene never
+    /// cuts the zoom map off from a map that fires — that scene wouldn't load.
+    #[test]
+    fn xaos_mutations_keep_the_graph_walkable() {
+        use crate::dice::RandomSettings;
+        let mut settings = RandomSettings::default();
+        settings.parts = only(super::part::XAOS, 0.3);
+        settings.xaos.random = 1.0;
+        settings.xaos.preset = 1.0;
+        let mut changed = 0;
+        for seed in 0..60 {
+            let mut scene = test_scene("xaos-mutate");
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let log = mutate(&mut scene, &settings, 1.0, &mut rng);
+            if log.iter().any(|l| l.starts_with("xaos")) {
+                changed += 1;
+            }
+            let chain = crate::xaos::Chain::build(&scene.transforms, &[]).unwrap();
+            assert!(chain.dead.is_empty(), "seed {seed}: a dead end after {log:?}");
+        }
+        assert!(changed > 40, "only {changed}/60 mutations touched the graph");
+
+        // In a zoom scene, every map keeps the zoom map as an exit.
+        let mut scene = test_scene("xaos-mutate-zoom");
+        if scene.transforms.len() >= 2 {
+            scene.zoom = Some(crate::renorm::ZoomSpec { map: 0, ..Default::default() });
+            for seed in 0..60 {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                mutate(&mut scene, &settings, 1.0, &mut rng);
+                assert!(crate::xaos::zoom_conflict(&scene.transforms, &[], 0).is_none(), "seed {seed}");
+            }
+        }
     }
 }

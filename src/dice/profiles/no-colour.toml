@@ -17,6 +17,7 @@ author = "Claude Opus 5.5"
 
 [parts]
 count = { odds = 0.0 }
+xaos = { odds = 0.0 }      # kept, as the transforms are
 color = { odds = 0.0 }
 color_value = { odds = 0.0 }
 background = { odds = 0.0 }

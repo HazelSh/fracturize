@@ -420,6 +420,9 @@ Subscenes, per layer (the same picker the Transforms rail has).
 
 ## 6. Random flames and mutation (after the editor)
 
+**Built** 2026-10-25 as a dice part — see FEATURE-PLANS.md Track A §4 and
+AGENTS.md "The dice". The plan as written, less `cycle` as a rollable preset.
+
 This follows BS §1.8:
 
 - **Generator knobs:** sparsity, no-self-loop chance, and preset.

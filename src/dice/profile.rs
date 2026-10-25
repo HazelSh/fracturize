@@ -23,6 +23,10 @@
 //! [ranges.symmetry]
 //! chance = 0.3
 //!
+//! [ranges.xaos]              # odds of no xaos, a preset, a random graph
+//! off = 0.5
+//! random = 0.5
+//!
 //! [mutation]                 # how big a step a mutation takes
 //! strength = 0.7
 //! ```
@@ -64,6 +68,7 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("colour-only", include_str!("profiles/colour-only.toml")),
     ("no-colour", include_str!("profiles/no-colour.toml")),
     ("symmetric", include_str!("profiles/symmetric.toml")),
+    ("xaos-fun", include_str!("profiles/xaos-fun.toml")),
 ];
 
 fn builtin_text(name: &str) -> Option<&'static str> {
@@ -102,7 +107,7 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
     let mut warnings = Vec::new();
     let mut meta = Meta::default();
     let is_profile = top.get("random").is_none() && SECTIONS.iter().any(|k| top.get(*k).is_some_and(toml::Value::is_table));
-    let (table, prefix) = if let Some(t) = top.get("random") {
+    let (mut table, prefix) = if let Some(t) = top.get("random") {
         // prefs.toml: everything else in it is other preferences.
         let toml::Value::Table(t) = t else { return Err("[random] is not a table".into()) };
         (t.clone(), "random.")
@@ -139,6 +144,7 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
     // Laid over the shipped defaults at every depth, so a key left out — even
     // one inside an entry, like a part's `reroll` — is the shipped value and
     // not the type's zero.
+    migrate(&mut table);
     let mut full = match toml::Value::try_from(RandomSettings::default()) {
         Ok(toml::Value::Table(t)) => t,
         _ => toml::Table::new(),
@@ -162,6 +168,28 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
         warnings.extend(found);
     }
     Ok(Loaded { settings, meta, warnings })
+}
+
+/// A profile from before xaos was a part kept the base's transitions exactly
+/// when the transform count was off. Read with no `xaos` part, it gets the
+/// same: off where the count is off. Without this, a saved mask like
+/// `colour-only` would come back with xaos on, and its rolls would clear a
+/// scene's xaos instead of keeping it.
+fn migrate(table: &mut toml::Table) {
+    let Some(toml::Value::Table(parts)) = table.get_mut("parts") else { return };
+    if parts.contains_key("xaos") {
+        return;
+    }
+    let count_off = parts
+        .get("count")
+        .and_then(|c| c.get("odds"))
+        .and_then(|o| o.as_float().or_else(|| o.as_integer().map(|i| i as f64)))
+        .is_some_and(|o| o <= 0.0);
+    if count_off {
+        let mut off = toml::Table::new();
+        off.insert("odds".into(), toml::Value::Float(0.0));
+        parts.insert("xaos".into(), toml::Value::Table(off));
+    }
 }
 
 /// `given` written over `base`, table by table.
@@ -246,6 +274,22 @@ const NOTES: &[(&str, &str)] = &[
     ("ranges.attempts", "candidates tried before giving up"),
     ("ranges.variations", "Which variations may be drawn, and their weight ranges (magnitudes)."),
     ("ranges.symmetry", "Which symmetry groups, and the chance a roll takes one."),
+    (
+        "ranges.xaos",
+        "Which map may follow which. off / preset / random are odds against each\n\
+         other: no xaos, one of the enabled presets, or a random graph that keeps\n\
+         a cycle through every map and cuts edges off it.",
+    ),
+    ("ranges.xaos.off", "odds of no xaos"),
+    ("ranges.xaos.preset", "odds of a preset"),
+    ("ranges.xaos.random", "odds of a random graph"),
+    ("ranges.xaos.no_self_loops", "preset: no map follows itself (3+ transforms)"),
+    ("ranges.xaos.blocks", "preset: closed groups of maps (4+ transforms)"),
+    ("ranges.xaos.cut", "random: share of the edges off the cycle that are cut"),
+    ("ranges.xaos.self_loops", "random: chance every self-loop is cut"),
+    ("ranges.xaos.weighted", "random: chance a kept edge gets a multiplier"),
+    ("ranges.xaos.multiplier", "random: the multiplier's range, log-uniform"),
+    ("ranges.xaos.min_share", "quality check: least walk share a map may get"),
     ("mutation", "How big a step a mutation takes. A roll draws every part that's on,\nso none of this applies to it."),
     ("mutation.strength", "scales every nudge; 1 is a noticeable step"),
     ("mutation.changes", "parts changed per mutation"),
@@ -275,6 +319,7 @@ fn fresh_document(settings: &RandomSettings, meta: &Meta) -> toml_edit::Document
     let mutation = all.remove("mutation");
     let variations = all.remove("variations");
     let symmetry = all.remove("symmetry");
+    let xaos = all.remove("xaos");
 
     let mut doc = DocumentMut::new();
     doc.decor_mut().set_prefix(HEADER);
@@ -318,7 +363,8 @@ fn fresh_document(settings: &RandomSettings, meta: &Meta) -> toml_edit::Document
     };
 
     // The parts first: they are what a profile is.
-    let mut parts = lines("parts", parts, &super::settings::Parts::NAMES);
+    use super::settings::Parts;
+    let mut parts = lines("parts", parts, &Parts::ORDER.map(|k| Parts::NAMES[k]));
     parts.set_position(1);
     doc["parts"] = Item::Table(parts);
 
@@ -345,11 +391,21 @@ fn fresh_document(settings: &RandomSettings, meta: &Meta) -> toml_edit::Document
     };
     sym.set_position(4);
     ranges["symmetry"] = Item::Table(sym);
+    let order = [
+        "off", "preset", "random", "no_self_loops", "blocks", "cut", "self_loops", "weighted", "multiplier",
+        "min_share",
+    ];
+    let mut x = match xaos {
+        Some(toml::Value::Table(t)) => section("ranges.xaos", &t, &order),
+        _ => Table::new(),
+    };
+    x.set_position(5);
+    ranges["xaos"] = Item::Table(x);
     doc["ranges"] = Item::Table(ranges);
 
     if let Some(toml::Value::Table(mt)) = mutation {
         let mut mutation = section("mutation", &mt, &["strength", "changes", "backoff", "steer_dimension"]);
-        mutation.set_position(5);
+        mutation.set_position(6);
         doc["mutation"] = Item::Table(mutation);
     }
     doc
@@ -769,5 +825,34 @@ mod tests {
         assert_eq!(entry.path.as_deref(), Some(file.as_path()));
         assert_eq!(loaded.settings.transforms, [3, 3]);
         assert!(resolve("/no/such/profile.toml").is_err());
+    }
+
+    /// A profile saved before xaos was a part kept the base's transitions
+    /// exactly when the count was off, and reads back that way.
+    #[test]
+    fn a_profile_from_before_xaos_keeps_what_it_kept() {
+        let mask = parse("[parts]\ncount = { odds = 0.0 }\ncolor = { odds = 0.2 }\n").unwrap();
+        assert!(!mask.settings.parts.xaos.on(), "count off: xaos kept, as it always was");
+        let form = parse("[parts]\ncolor = { odds = 0.2 }\n").unwrap();
+        assert!(form.settings.parts.xaos.on());
+        let said = parse("[parts]\ncount = { odds = 0.0 }\nxaos = { odds = 0.3 }\n").unwrap();
+        assert_eq!(said.settings.parts.xaos.odds, 0.3, "a file that says, says");
+        let prefs = parse("[random.parts]\ncount = { odds = 0 }\n").unwrap();
+        assert!(!prefs.settings.parts.xaos.on(), "prefs.toml too");
+    }
+
+    /// `xaos-fun` rolls xaos most of the time, and every graph it rolls passes.
+    #[test]
+    fn xaos_fun_rolls_xaos() {
+        let s = load(&Entry::builtin("xaos-fun")).unwrap().settings;
+        let mut with = 0;
+        for seed in 0..20 {
+            if let Ok(r) = crate::dice::roll_seeded(&s, &crate::scene::Scene::blank(), seed) {
+                if crate::xaos::layer_has_xaos(&r.scene.transforms) {
+                    with += 1;
+                }
+            }
+        }
+        assert!(with >= 12, "only {with}/20 xaos-fun rolls have xaos");
     }
 }

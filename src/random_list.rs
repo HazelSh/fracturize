@@ -252,6 +252,7 @@ impl RandomList {
         self.rejected.shape += r.shape;
         self.rejected.dimension += r.dimension;
         self.rejected.lacunarity += r.lacunarity;
+        self.rejected.xaos += r.xaos;
     }
 
     fn submit(&mut self) {

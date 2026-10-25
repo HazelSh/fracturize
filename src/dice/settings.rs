@@ -112,6 +112,74 @@ impl SymmetrySettings {
     }
 }
 
+/// Whether, and how, a rolled flame says which map may follow which
+/// (`crate::xaos`).
+///
+/// A roll draws one of three kinds of graph, by these odds: **none**, a
+/// **preset** from the enabled ones, or a **random** graph. Off by default —
+/// `default` rolls no xaos at all and draws nothing for it, so every recorded
+/// seed still rolls what it always did.
+///
+/// Only cuts change a flame's shape; a multiplier other than 0 only moves
+/// density, like a weight. So a random graph is mostly cuts, and always
+/// **strongly connected**: it keeps a random cycle through every map and cuts
+/// only edges off it, so no map is shut out and none is a trap. `cycle` is not
+/// among the presets on purpose: one exit per map makes the walk
+/// deterministic, and the picture collapses to as many dots as there are maps.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct XaosSettings {
+    /// Odds of no xaos, against `preset` and `random`.
+    pub off: f32,
+    /// Odds of a preset from the enabled ones.
+    pub preset: f32,
+    /// Odds of a random graph.
+    pub random: f32,
+    /// The `no-self-loops` preset: no map follows itself. Needs three maps;
+    /// with two it is a strict alternation, which collapses.
+    pub no_self_loops: bool,
+    /// The `blocks:N` preset: the maps split into closed groups, each its own
+    /// attractor, dealt walkers by chance. Needs two maps a block.
+    pub blocks: bool,
+    /// Random graphs: the share of edges off the kept cycle that are cut.
+    pub cut: [f32; 2],
+    /// Random graphs: chance every self-loop is cut (with three maps or more).
+    pub self_loops: f32,
+    /// Random graphs: chance a kept edge gets a multiplier other than 1.
+    pub weighted: f32,
+    /// The range such a multiplier is drawn from, log-uniformly.
+    pub multiplier: [f32; 2],
+    /// The quality check: least share of the walk a map may get under xaos,
+    /// or its share of the weights if that is less already. Below it the map
+    /// is starved, and draws next to nothing.
+    pub min_share: f32,
+}
+
+impl Default for XaosSettings {
+    fn default() -> Self {
+        Self {
+            off: 1.0,
+            preset: 0.0,
+            random: 0.0,
+            no_self_loops: true,
+            blocks: true,
+            cut: [0.2, 0.5],
+            self_loops: 0.3,
+            weighted: 0.15,
+            multiplier: [0.3, 3.0],
+            min_share: 0.02,
+        }
+    }
+}
+
+impl XaosSettings {
+    /// Whether a roll can draw any xaos at all. With none, a roll draws
+    /// nothing for it — not even the die that would say "none".
+    pub fn draws(&self) -> bool {
+        self.preset > 0.0 || self.random > 0.0
+    }
+}
+
 /// A bound that can be switched off without forgetting its range.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
@@ -227,11 +295,16 @@ pub struct Parts {
     pub color_value: Part,
     /// The background, drawn from the flame's colours.
     pub background: Part,
+    /// Which map may follow which (xaos), from the xaos settings. Last in the
+    /// list only because it came last: a mutation picks a part by walking
+    /// the list, so putting it anywhere else would change what every
+    /// recorded mutation seed picks. Shown and written with the structure.
+    pub xaos: Part,
 }
 
 impl Parts {
     /// The parts by name, in the order they're written and shown.
-    pub const NAMES: [&'static str; 10] = [
+    pub const NAMES: [&'static str; 11] = [
         "translate",
         "rotate",
         "scale",
@@ -242,13 +315,18 @@ impl Parts {
         "color",
         "color_value",
         "background",
+        "xaos",
     ];
 
     /// The parts that make the form — what the gate measures and the camera
     /// frames. Indices into [`Self::NAMES`]; the rest are colour.
-    pub const FORM: [usize; 7] = [0, 1, 2, 3, 4, 5, 6];
+    pub const FORM: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 10];
 
-    pub fn all(&self) -> [Part; 10] {
+    /// The order parts are written in a file and shown in a list: the
+    /// structure together, then the colour.
+    pub const ORDER: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 10, 7, 8, 9];
+
+    pub fn all(&self) -> [Part; 11] {
         [
             self.translate,
             self.rotate,
@@ -260,10 +338,11 @@ impl Parts {
             self.color,
             self.color_value,
             self.background,
+            self.xaos,
         ]
     }
 
-    pub fn all_mut(&mut self) -> [&mut Part; 10] {
+    pub fn all_mut(&mut self) -> [&mut Part; 11] {
         [
             &mut self.translate,
             &mut self.rotate,
@@ -275,6 +354,7 @@ impl Parts {
             &mut self.color,
             &mut self.color_value,
             &mut self.background,
+            &mut self.xaos,
         ]
     }
 
@@ -298,7 +378,7 @@ impl Default for Parts {
     /// is a useful kind of change. The background and the symmetry group are
     /// at the least odds: a roll draws them, and a mutation all but never
     /// changes the ground or the group — a bigger step than the rest, and one
-    /// to ask for.
+    /// to ask for. So is xaos, whose settings here draw none.
     fn default() -> Self {
         Self {
             translate: Part::new(0.18, 0.0),
@@ -311,6 +391,7 @@ impl Default for Parts {
             color: Part::new(0.09, 0.1),
             color_value: Part::new(0.05, 0.0),
             background: Part::new(MIN_ODDS, 0.5),
+            xaos: Part::new(MIN_ODDS, 0.5),
         }
     }
 }
@@ -378,6 +459,8 @@ pub struct RandomSettings {
     pub variations: BTreeMap<String, VariationRange>,
     /// Which symmetry groups, and how often a roll takes one.
     pub symmetry: SymmetrySettings,
+    /// Whether a roll says which map may follow which, and how.
+    pub xaos: XaosSettings,
     /// Bound on the similarity dimension of the maps' affine parts. Steered:
     /// see the module docs.
     pub dimension: Bound,
@@ -411,6 +494,7 @@ impl Default for RandomSettings {
             negative: 0.15,
             variations,
             symmetry: SymmetrySettings::default(),
+            xaos: XaosSettings::default(),
             dimension: Bound::off([1.5, 2.5]),
             // p10-p75 of default rolls (`random_flame_study`): on, it keeps
             // most of what the dice make and trims the smooth and the sparse.
@@ -430,6 +514,10 @@ pub const LACUNARITY_LIMITS: [f32; 2] = [0.1, 1000.0];
 pub const MAX_ATTEMPTS: u32 = 1000;
 pub const STRENGTH_LIMITS: [f32; 2] = [0.1, 3.0];
 pub const MAX_CHANGES: u32 = 8;
+/// A rolled xaos multiplier's outer limits.
+pub const MULTIPLIER_LIMITS: [f32; 2] = [0.05, 20.0];
+/// The most the xaos walk-share floor can ask of every map.
+pub const MAX_MIN_SHARE: f32 = 0.2;
 /// Past this a part's odds stop meaning anything the others can answer.
 pub const ODDS_LIMIT: f32 = 10.0;
 /// The least odds a part that's on can have: rolled, and all but never
@@ -466,6 +554,18 @@ impl RandomSettings {
         sym.free = ordered(sym.free, 0, MAX_TRANSFORMS);
         sym.mirror = sym.mirror.clamp(0.0, 1.0);
         sym.orbit_color = sym.orbit_color.clamp(0.0, 1.0);
+        let x = &mut self.xaos;
+        for v in [&mut x.off, &mut x.preset, &mut x.random] {
+            *v = if v.is_finite() { v.clamp(0.0, ODDS_LIMIT) } else { 0.0 };
+        }
+        if x.off + x.preset + x.random <= 0.0 {
+            x.off = 1.0;
+        }
+        x.cut = ordered(x.cut, 0.0, 1.0);
+        x.self_loops = x.self_loops.clamp(0.0, 1.0);
+        x.weighted = x.weighted.clamp(0.0, 1.0);
+        x.multiplier = ordered(x.multiplier, MULTIPLIER_LIMITS[0], MULTIPLIER_LIMITS[1]);
+        x.min_share = if x.min_share.is_finite() { x.min_share.clamp(0.0, MAX_MIN_SHARE) } else { 0.0 };
         self.dimension.range = ordered(self.dimension.range, DIMENSION_LIMITS[0], DIMENSION_LIMITS[1]);
         self.lacunarity.range =
             ordered(self.lacunarity.range, LACUNARITY_LIMITS[0], LACUNARITY_LIMITS[1]);

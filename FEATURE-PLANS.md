@@ -106,6 +106,15 @@ profile switch, since for a "keep d where it was" workflow it's exactly right.
 
 ### 4. Xaos in the profile
 
+**Built** (2026-10-25; AGENTS.md "The dice"). A part, `xaos`, drawn as one of
+none / a preset / a random graph by odds; `default` draws none and no die for
+it, so its seeds hold; the new built-in `xaos-fun` rolls it six times in
+seven. Differences from the plan below: `cycle` can't be rolled (one exit a
+map collapses the picture to dots), `no-self-loops` needs 3 maps and
+`blocks:N` 2 a block; the dimension *is* steered under xaos, by bisection;
+the starvation floor is relative to a map's own weight share. Linked map as a
+mutation is left for the count part.
+
 XAOS-PLAN.md §6, as profile settings:
 
 - **Fresh:** chance of xaos; sparsity; no-self-loop chance; preset odds.

@@ -25,7 +25,7 @@
 use crate::app::App;
 use crate::dice::{
     Bound, Part, Parts, RandomSettings, DIMENSION_LIMITS, LACUNARITY_LIMITS, MAX_ATTEMPTS, MAX_CHANGES,
-    MAX_TRANSFORMS, MIN_ODDS, ODDS_LIMIT, SCALE_LIMITS, STRENGTH_LIMITS, WEIGHT_LIMIT,
+    MAX_MIN_SHARE, MAX_TRANSFORMS, MIN_ODDS, MULTIPLIER_LIMITS, ODDS_LIMIT, SCALE_LIMITS, STRENGTH_LIMITS, WEIGHT_LIMIT,
 };
 use crate::scene::{NUM_VARIATIONS, VARIATION_NAMES};
 
@@ -253,7 +253,7 @@ fn profile_bar(ui: &mut egui::Ui, app: &mut App, s: &RandomSettings) -> Option<P
 /// The parts, grouped the way people think of a flame: its shape, how it's
 /// put together, its colour. Indices into [`Parts::NAMES`]. The colour group
 /// is exactly what `colour-only` changes and `no-colour` leaves alone.
-const PART_GROUPS: [(&str, &[usize]); 3] = [("Shape", &[0, 1, 2, 3, 4]), ("Structure", &[5, 6]), ("Colour", &[7, 8, 9])];
+const PART_GROUPS: [(&str, &[usize]); 3] = [("Shape", &[0, 1, 2, 3, 4]), ("Structure", &[5, 6, 10]), ("Colour", &[7, 8, 9])];
 
 /// Indices into [`Parts::NAMES`] of the parts the range and chance rows serve,
 /// so each row greys while its part is off — nothing about drawing a part
@@ -263,6 +263,7 @@ mod part {
     pub const VARIATIONS: usize = 4;
     pub const COUNT: usize = 5;
     pub const SYMMETRY: usize = 6;
+    pub const XAOS: usize = 10;
 }
 
 /// Every section of the window, each one table holding one kind of value:
@@ -274,6 +275,7 @@ fn sections(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings, 
     section(ui, "Ranges", |ui| ranges(ui, st, s));
     section(ui, "Chances", |ui| chances(ui, st, s));
     section(ui, "Symmetry groups", |ui| groups(ui, st, s));
+    section(ui, "Xaos", |ui| xaos(ui, st, s));
     let on = s.variations.values().filter(|v| v.enabled).count();
     let title = format!("Variations ({on} of {})", s.variations.len());
     section(ui, &title, |ui| variations(ui, st, s));
@@ -497,6 +499,7 @@ fn ranges(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
     caption(ui, "What each part is drawn between, by a roll and a mutation's re-roll alike.");
     let on = |k: usize| s.parts.all()[k].on();
     let (size, vars, count, sym) = (on(part::SCALE), on(part::VARIATIONS), on(part::COUNT), on(part::SYMMETRY));
+    let random_graph = on(part::XAOS) && s.xaos.random > 0.0;
     let repeat = sym && s.symmetry.repeat;
     let folds = sym && (s.symmetry.cyclic || s.symmetry.dihedral);
     table::show(ui, st, "fracturize_dice_ranges", &LOW_HIGH, |body, st| {
@@ -544,6 +547,18 @@ fn ranges(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
             name_cell(&mut row, st, sym, "outside the group", tip);
             count_cells(&mut row, st, sym, &mut s.symmetry.free, 0, MAX_TRANSFORMS, tip, "drag: transforms outside the group");
         });
+        body.row(h, |mut row| {
+            let tip = "In a random xaos graph, the share of the edges off its kept cycle that are cut. \
+                       Cuts are what change the shape: each removes every point that came by that edge.";
+            name_cell(&mut row, st, random_graph, "xaos edges cut", tip);
+            float_cells(&mut row, st, random_graph, &mut s.xaos.cut, [0.0, 1.0], 0.005, 2, tip, "drag: share of edges cut");
+        });
+        body.row(h, |mut row| {
+            let tip = "In a random xaos graph, what a weighted edge's multiplier is drawn between, \
+                       evenly on a log scale. A multiplier only moves density, never shape.";
+            name_cell(&mut row, st, random_graph, "xaos edge multiplier", tip);
+            float_cells(&mut row, st, random_graph, &mut s.xaos.multiplier, MULTIPLIER_LIMITS, 0.01, 2, tip, "drag: multiplier range");
+        });
         table::group_row(body, "Mutation");
         body.row(h, |mut row| {
             let tip = "How many parts one mutation changes, each picked by the parts' odds";
@@ -557,6 +572,7 @@ fn chances(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
     caption(ui, "How often a roll draws each of these.");
     let on = |k: usize| s.parts.all()[k].on();
     let (size, vars, sym) = (on(part::SCALE), on(part::VARIATIONS), on(part::SYMMETRY));
+    let random_graph = on(part::XAOS) && s.xaos.random > 0.0;
     let cols = [
         Col::name("Setting", "What the chance is of. A row greys while the part it draws is off."),
         Col::new("Chance", "How often a roll draws it", 60.0),
@@ -593,7 +609,114 @@ fn chances(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
             "Chance the colour is offset by which copy was drawn: an interference pattern through \
              the form, rather than every copy alike",
         );
+        chance_row(
+            body,
+            random_graph,
+            "no self-loops (xaos)",
+            &mut s.xaos.self_loops,
+            "Chance a random xaos graph cuts every self-loop, so no transform follows itself. \
+             Only with three transforms or more.",
+        );
+        chance_row(
+            body,
+            random_graph,
+            "a weighted edge (xaos)",
+            &mut s.xaos.weighted,
+            "Chance each kept edge of a random xaos graph gets a multiplier other than 1, from \
+             its range in Ranges",
+        );
     });
+}
+
+/// Which kind of xaos graph a roll draws, and which presets it may.
+fn xaos(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
+    caption(ui, "Which transform may follow which. A roll draws one of these, by their odds.");
+    let on = s.parts.all()[part::XAOS].on();
+    let x = &mut s.xaos;
+    let total = x.off + x.preset + x.random;
+    let cols = [
+        Col::name("Graph", "The kinds of graph a roll draws"),
+        Col::new("Odds", "How often a roll draws it, against the other two", 64.0),
+        Col::new("Share", "Its share of rolls, from the odds", 48.0),
+    ];
+    let rows: [(&mut f32, &str, &str); 3] = [
+        (&mut x.off, "none", "No xaos: any transform may follow any other, as usual"),
+        (
+            &mut x.preset,
+            "a preset",
+            "One of the presets ticked below that fits the flame's transform count",
+        ),
+        (
+            &mut x.random,
+            "a random graph",
+            "A cycle through every transform, kept, and a share of the other edges cut \
+             (Ranges and Chances say how many). Nothing is shut out and nothing is a trap.",
+        ),
+    ];
+    table::show(ui, st, "fracturize_dice_xaos", &cols, |body, st| {
+        let h = table::row_height(body.ui_mut());
+        for (v, name, tip) in rows {
+            body.row(h, |mut row| {
+                name_cell(&mut row, st, on, name, tip);
+                row.col(|ui| {
+                    ui.add_enabled_ui(on, |ui| {
+                        let dv = num::Drag::new(v).range(0.0..=ODDS_LIMIT).speed(0.005);
+                        hinted(num::drag(ui, 5, 2, dv), st, tip, "drag: odds against the other kinds");
+                    });
+                });
+                row.col(|ui| {
+                    let text = if total > 0.0 { format!("{}%", num::fixed(100.0 * *v / total, 0)) } else { String::new() };
+                    num::small_cell(ui, &text, 4);
+                });
+            });
+        }
+    });
+
+    let cols = [
+        Col::name("Preset", "The patterns a roll may draw as its preset"),
+        Col::new("Needs", "Transforms it needs to leave something to draw", 70.0),
+        Col::tick("On", "Ticked, a roll may draw this preset"),
+    ];
+    let presets: [(&mut bool, &str, &str, &str); 2] = [
+        (
+            &mut x.no_self_loops,
+            "no self-loops",
+            "3+",
+            "No transform follows itself. With two it would be a strict alternation, which \
+             collapses to two dots.",
+        ),
+        (
+            &mut x.blocks,
+            "blocks",
+            "4+",
+            "The transforms split into closed groups, two or more each: separate attractors \
+             side by side, sharing the walkers by chance.",
+        ),
+    ];
+    table::show(ui, st, "fracturize_dice_xaos_presets", &cols, |body, st| {
+        let h = table::row_height(body.ui_mut());
+        for (flag, name, needs, tip) in presets {
+            body.row(h, |mut row| {
+                name_cell(&mut row, st, on, name, tip);
+                row.col(|ui| {
+                    ui.add_enabled_ui(on, |ui| {
+                        ui.label(egui::RichText::new(needs).weak());
+                    });
+                });
+                row.col(|ui| {
+                    ui.add_enabled_ui(on, |ui| {
+                        let resp = table::tick(ui, flag);
+                        hinted(resp, st, tip, "click: roll this preset");
+                    });
+                });
+            });
+        }
+    });
+    caption(
+        ui,
+        "The cycle preset is never rolled: one way out of every transform makes the walk a fixed \
+         sequence, and the picture a handful of dots.",
+    );
 }
 
 fn groups(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
@@ -709,6 +832,7 @@ fn part_label(name: &str) -> &'static str {
         "variations" => "variations",
         "count" => "transform count",
         "symmetry" => "symmetry group",
+        "xaos" => "xaos",
         "color" => "colours",
         "color_value" => "place on gradient",
         "background" => "background",
@@ -725,6 +849,7 @@ fn part_tip(name: &str) -> &'static str {
         "variations" => "Each transform's variations, from the Variations list.",
         "count" => "How many transforms: a roll draws it from its range, a mutation adds or removes one within it.",
         "symmetry" => "The symmetry group, from the Symmetry groups list. A roll with no chance of one draws none.",
+        "xaos" => "Which transform may follow which, from the Xaos section. A roll with odds only of none draws none.",
         "color" => "The colours: each transform's, the colour source and the gradient.",
         "color_value" => "Where each transform sits on the gradient.",
         "background" => "The background colour, drawn from the flame's own colours.",
@@ -801,6 +926,16 @@ fn bounds(
         );
     });
 
+    ui.horizontal(|ui| {
+        ui.label("least walk share under xaos");
+        let tip = "Under xaos a transform can be starved of the walk and draw next to nothing. A flame \
+                   is thrown away if any transform gets less than this share of the points — or less \
+                   than its share of the weights, where that is smaller already.";
+        ui.add_enabled_ui(s.parts.all()[part::XAOS].on(), |ui| {
+            percent(ui, st, &mut s.xaos.min_share, tip, "drag: least walk share");
+            s.xaos.min_share = s.xaos.min_share.min(MAX_MIN_SHARE);
+        });
+    });
     ui.horizontal(|ui| {
         ui.label("tries");
         let resp = num::drag(ui, 5, 0, num::Drag::new(&mut s.attempts).range(1..=MAX_ATTEMPTS).speed(1.0));

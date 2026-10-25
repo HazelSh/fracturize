@@ -3,8 +3,8 @@
 # always draws "no group" (off would keep the scene's own), and a mutation
 # never picks it, so a scene that has a group keeps it when mutated.
 #
-# Xaos isn't something the dice make yet, so there's none here either. When
-# it becomes a part, this profile turns it off by name.
+# Xaos the same way: on, with odds only of none, so a roll draws a flame where
+# any map may follow any other, and a mutation never picks it.
 #
 #   fracturize --random-sheet 9 --random-config no-symmetry -r renders/asym.png \
 #     --effort tiny --width 320 --height 180
@@ -16,6 +16,7 @@ author = "Claude Opus 5.5"
 
 [parts]
 symmetry = { odds = 0.0001 }  # on, but a mutation all but never picks it
+xaos = { odds = 0.0001 }      # the same
 background = { odds = 0.05 }
 
 [ranges]
@@ -51,6 +52,11 @@ bulb = { enabled = true }
 
 [ranges.symmetry]
 chance = 0.0
+
+[ranges.xaos]
+off = 1.0
+preset = 0.0
+random = 0.0
 
 [mutation]
 changes = [1, 4]

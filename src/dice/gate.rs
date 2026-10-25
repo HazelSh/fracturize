@@ -9,8 +9,9 @@
 //! the profile's bounds (plenty of good ones do) could never be mutated at all,
 //! because every child of it would be rejected.
 //!
-//! The checks run cheapest first — dimension (analytic), shape (a short chaos
-//! walk), lacunarity (a longer one) — and stop at the first that fails.
+//! The checks run cheapest first — dimension (analytic), the walk's shares
+//! under xaos (a Markov chain, no walk), shape (a short chaos walk),
+//! lacunarity (a longer one) — and stop at the first that fails.
 
 use std::borrow::Cow;
 
@@ -57,6 +58,8 @@ pub enum Reject {
     Dimension,
     /// Lacunarity out of bounds.
     Lacunarity,
+    /// Under xaos, a map starved of the walk: it draws next to nothing.
+    Xaos,
 }
 
 /// One layer's faults: how far past each limit it is.
@@ -74,6 +77,9 @@ pub struct Faults {
     /// Occupancy over the ceiling.
     pub solid: f32,
     pub lacunarity: f32,
+    /// Under xaos, how far the most starved map's walk share falls short of
+    /// its floor, as a fraction of the floor.
+    pub starved: f32,
 }
 
 impl Faults {
@@ -119,6 +125,26 @@ impl AttractorStats {
     pub fn acceptable(&self) -> bool {
         shape_faults(Some(self)).shape().iter().all(|&v| v == 0.0)
     }
+}
+
+/// How starved the most starved map of a layer is (see [`Faults::starved`]):
+/// 0 without xaos, where the walk is the weights. A map's floor is the
+/// profile's least share, or its share of the weights if that is already less
+/// — the check is for what the graph takes away, not what the weights do.
+fn starved(maps: &[TransformSpec], min_share: f32) -> f32 {
+    if min_share <= 0.0 || !crate::xaos::layer_has_xaos(maps) {
+        return 0.0;
+    }
+    let Some(chain) = crate::xaos::Chain::build(maps, &[]) else { return 0.0 };
+    let shares = chain.shares();
+    let mut worst = 0.0f32;
+    for (start, share) in chain.start.iter().zip(shares) {
+        let floor = (min_share as f64).min(*start);
+        if floor > 0.0 && share < floor {
+            worst = worst.max(((floor - share) / floor) as f32);
+        }
+    }
+    fault(worst > 0.0, worst)
 }
 
 /// Whether `child` is worse than `base` allows.
@@ -171,6 +197,7 @@ impl<'a> Gate<'a> {
                 Faults {
                     dimension: settings.dimension.excess(similarity_dimension(maps), false),
                     lacunarity: settings.lacunarity.excess(lacunarity(maps), true),
+                    starved: starved(maps, settings.xaos.min_share),
                     ..shape_faults(stats.as_ref())
                 }
             })
@@ -192,6 +219,11 @@ impl<'a> Gate<'a> {
                 if worse(s.dimension.excess(d, false), self.base(k).dimension) {
                     return Err(Reject::Dimension);
                 }
+            }
+        }
+        for (k, maps) in layers.iter().enumerate() {
+            if worse(starved(maps, s.xaos.min_share), self.base(k).starved) {
+                return Err(Reject::Xaos);
             }
         }
         let stats: Vec<_> = layers.iter().map(|m| measure(m)).collect();
@@ -250,6 +282,9 @@ pub fn steer_dimension(
     }
     let [lo, hi] = settings.dimension.range;
     let target = if hi > lo { rng.gen_range(lo..=hi) } else { lo };
+    if crate::xaos::layer_has_xaos(transforms) {
+        return steer_under_xaos(transforms, target, lo, hi);
+    }
     // The effective map set, as `similarity_dimension` counts it: a motif
     // contributes one contraction per element of its group (all the motif's
     // size for a group, tapering for a repeat). Scaling every map by `k`
@@ -279,6 +314,47 @@ pub fn steer_dimension(
     let d = similarity_dimension(transforms);
     // Bisection inside `similarity_dimension` lands within its tolerance of
     // the target, which can sit a hair outside a bound placed at the target.
+    let slack = 1e-3;
+    match d {
+        Some(v) if v >= lo - slack && v <= hi + slack => Ok(Some(v.clamp(lo, hi))),
+        _ => Err(()),
+    }
+}
+
+/// [`steer_dimension`] for a layer with xaos. The Mauldin–Williams dimension
+/// has no closed form in the scale, but it rises with it — every entry of the
+/// matrix whose spectral radius sets it grows — so one factor `k` on every
+/// map is found by bisection instead.
+fn steer_under_xaos(transforms: &mut [TransformSpec], target: f32, lo: f32, hi: f32) -> Result<Option<f32>, ()> {
+    let chain = crate::xaos::Chain::build(transforms, &[]).ok_or(())?;
+    let widest = transforms
+        .iter()
+        .map(|t| t.matrix.to_scale_rotation_translation().0.abs().max_element())
+        .fold(0.0f32, f32::max);
+    if !(widest > 0.0 && widest.is_finite()) {
+        return Err(());
+    }
+    let dimension_at = |k: f32| {
+        let mut maps = transforms.to_vec();
+        rescale(&mut maps, k);
+        let c: Vec<Vec<f32>> = maps.iter().map(crate::scene::copy_contractions).collect();
+        chain.dimension(&c)
+    };
+    // Between a scale that leaves the widest axis barely contracting and a
+    // thousandth of it, in log space.
+    let (mut a, mut b) = ((MAX_AXIS_SCALE / widest * 1e-3).ln(), (MAX_AXIS_SCALE / widest).ln());
+    if dimension_at(b.exp()).is_none_or(|d| d < target) {
+        return Err(());
+    }
+    for _ in 0..40 {
+        let m = 0.5 * (a + b);
+        match dimension_at(m.exp()) {
+            Some(d) if d >= target => b = m,
+            _ => a = m,
+        }
+    }
+    rescale(transforms, b.exp());
+    let d = similarity_dimension(transforms);
     let slack = 1e-3;
     match d {
         Some(v) if v >= lo - slack && v <= hi + slack => Ok(Some(v.clamp(lo, hi))),
@@ -330,5 +406,52 @@ mod tests {
             Gate::relative_to(&settings, &parent).judge(&layers(&child), false).err(),
             Some(Reject::Dimension)
         );
+    }
+
+    /// Under xaos there's no closed form, but the bisection still lands the
+    /// Mauldin–Williams dimension inside the bound.
+    #[test]
+    fn the_dimension_is_steered_under_xaos_too() {
+        use rand::SeedableRng;
+        let mut settings = RandomSettings::default();
+        settings.dimension = Bound { on: true, range: [1.4, 1.6] };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let mut maps: Vec<TransformSpec> =
+            (0..4).map(|_| crate::dice::roll::random_transform(&settings, &mut rng)).collect();
+        maps[0].xaos.set(1, 0.0);
+        maps[1].xaos.set(1, 0.0);
+        maps[2].xaos.set(0, 0.0);
+        let before = similarity_dimension(&maps);
+        let d = steer_dimension(&mut maps, &settings, &mut rng).expect("steered").unwrap();
+        assert!((1.4..=1.6).contains(&d), "{before:?} steered to {d}");
+        let after = similarity_dimension(&maps).unwrap();
+        assert!((after - d).abs() < 2e-3, "reported {d}, measures {after}");
+    }
+
+    /// A map the graph starves fails the gate; the same map starved by its
+    /// own weight does not.
+    #[test]
+    fn a_starved_map_is_rejected() {
+        let mut rng = rand::thread_rng();
+        let settings = RandomSettings::default();
+        let mut maps: Vec<TransformSpec> =
+            (0..3).map(|_| crate::dice::roll::random_transform(&settings, &mut rng)).collect();
+        for t in &mut maps {
+            t.weight = 1.0;
+        }
+        assert_eq!(starved(&maps, 0.05), 0.0, "no xaos, nothing to starve");
+        // Every way into map 2 all but cut.
+        maps[0].xaos.set(2, 0.001);
+        maps[1].xaos.set(2, 0.001);
+        maps[2].xaos.set(2, 0.001);
+        assert!(starved(&maps, 0.05) > 0.0);
+        // Its weight starving it is the weights' business.
+        let mut light = maps.clone();
+        for t in &mut light {
+            t.xaos = Default::default();
+        }
+        light[0].xaos.set(1, 0.5);
+        light[2].weight = 0.01;
+        assert_eq!(starved(&light, 0.05), 0.0);
     }
 }

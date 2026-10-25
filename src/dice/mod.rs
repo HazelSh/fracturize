@@ -2,7 +2,8 @@
 //!
 //! **One profile, one list of parts.** A profile ([`RandomSettings`]) says
 //! which parts of a flame the dice may make — each transform's position, turn,
-//! size, weight and variations, how many transforms, the symmetry group, the
+//! size, weight and variations, how many transforms, the symmetry group, which
+//! map may follow which (xaos), the
 //! colours, where each sits on the gradient, the background — and the ranges
 //! each is drawn from. Both actions read the same list the same way:
 //!
@@ -39,6 +40,9 @@
 //!   keeps the maps' relative sizes and costs nothing. Only a rescale that
 //!   would stop a map contracting is a rejection. A mutation steers only when
 //!   its profile asks (`mutation.steer_dimension`): it resizes every map.
+//!   Under xaos the dimension is Mauldin–Williams and has no closed form in
+//!   the scale, so the factor is found by bisection instead — it still rises
+//!   with the scale.
 //! - **Lacunarity is rejected.** It is measured by a chaos walk, and nothing
 //!   predicts it from the parameters, so a candidate outside the bound is
 //!   thrown away and another drawn.
@@ -82,11 +86,13 @@ pub struct Rejections {
     pub dimension: u32,
     /// Lacunarity outside its bound.
     pub lacunarity: u32,
+    /// Under xaos, a map the walk starves.
+    pub xaos: u32,
 }
 
 impl Rejections {
     pub fn total(&self) -> u32 {
-        self.shape + self.dimension + self.lacunarity
+        self.shape + self.dimension + self.lacunarity + self.xaos
     }
 
     fn count(&mut self, why: Reject) {
@@ -94,6 +100,7 @@ impl Rejections {
             Reject::Shape => self.shape += 1,
             Reject::Dimension => self.dimension += 1,
             Reject::Lacunarity => self.lacunarity += 1,
+            Reject::Xaos => self.xaos += 1,
         }
     }
 
@@ -103,6 +110,7 @@ impl Rejections {
             (self.lacunarity, "lacunarity"),
             (self.dimension, "dimension"),
             (self.shape, "shape"),
+            (self.xaos, "starved by xaos"),
         ];
         parts.sort_by(|a, b| b.0.cmp(&a.0));
         parts

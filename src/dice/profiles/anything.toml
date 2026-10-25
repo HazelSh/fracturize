@@ -17,6 +17,7 @@ author = "Claude Opus 5.5"
 [parts]
 symmetry = { odds = 0.05 }
 background = { odds = 0.05 }
+xaos = { odds = 0.05 }
 
 [ranges]
 transforms = [2, 8]
@@ -53,6 +54,11 @@ bulb = { enabled = true }
 chance = 0.3
 repeat = true
 free = [1, 3]
+
+[ranges.xaos]
+off = 0.7
+preset = 0.15
+random = 0.15
 
 [mutation]
 changes = [1, 4]

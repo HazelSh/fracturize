@@ -20,6 +20,7 @@ weight = { odds = 0.0 }
 variations = { odds = 0.0 }
 count = { odds = 0.0 }
 symmetry = { odds = 0.0 }
+xaos = { odds = 0.0 }
 color = { odds = 0.5, reroll = 0.2 }
 color_value = { odds = 0.3, reroll = 0.1 }
 background = { odds = 0.2, reroll = 0.4 }
