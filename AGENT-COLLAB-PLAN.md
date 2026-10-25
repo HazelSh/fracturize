@@ -1,16 +1,15 @@
 # Agent collaboration — plan
 
-*Status: plan, 2026-10-24. Not started. Written by Claude Opus 5.5 from Hazel's
-brief and two rounds of answers (§10). Two directions across the CLI/GUI gap:*
+*Status: plan, 2026-10-24, revised 2026-10-25 (§4 rewritten, §7–§8 redone,
+§10 updated). Phase 1 started. Written by Claude Opus 5.5 from Hazel's brief and
+two rounds of answers (§10).*
 
-- ***Human asks, agent proposes (§3–§6).*** *A dialog in the GUI sends the
-  scene, a render and a typed request to Hazel's choice of LLM: her running
-  Claude Code session, or a local model. What comes back is a proposal, which
-  she accepts or rejects.*
-- ***Agent asks, human reviews (§7).*** *An agent packages a short write-up and
-  a set of rendered options. Hazel picks, comments, optionally edits one, and
-  the agent gets back a verdict, a selection, a diff of her edits and a render
-  of them.*
+*One collaborative flow for both of the project's users. Either one, human or
+agent, can **request** a change or **propose** one. Proposals come with
+rendered options. The other side can **preview** them, **tweak** one,
+**apply** it, **reject** it, or **send it back** for another round. It is all
+one thread per scene (§4), on files first (§7), with a live bridge to a
+running Claude Code session and a local-model backend on top (§5, §6).*
 
 *GUI wording in here is placeholder; it is Hazel's to set. Item 455 in
 `todo.txt` ("needs an AI button! 'LLM edit'") is §4.*
@@ -32,7 +31,7 @@ brief and two rounds of answers (§10). Two directions across the CLI/GUI gap:*
   The local backend (§6) reuses those files rather than copying them.
 - **`App::commit_edit`** is the single door every edit goes through, so "an
   accepted proposal is one undo step" comes for free.
-- **`/renders` is gitignored.** Reviews live under it (§7.1), so they never
+- **`/renders` is gitignored.** Threads live under it (§4.2), so they never
   reach history, nor the public repo.
 - **Claude Code ≥ 2.1 has channels.** An MCP server declared as a channel can
   push events into a running *interactive* session, and that session answers
@@ -52,11 +51,11 @@ brief and two rounds of answers (§10). Two directions across the CLI/GUI gap:*
  Claude Code session ──stdio MCP──▶ fracturize mcp ──unix socket, JSON lines──▶ running GUI
    (interactive, auto mode)          (bridge; same binary)     $XDG_RUNTIME_DIR/fracturize/gui.sock
         ▲                                   │
-        └──── channel events ◀──────────────┘   "Hazel asked …", "review answered"
+        └──── channel events ◀──────────────┘   "Hazel asked …", "Hazel answered"
 
  Local LLM (llama-server :8080) ◀──HTTP── the GUI's own agent loop (§6; no MCP)
 
- Any agent, GUI or not ──files──▶ renders/reviews/<id>/   +   fracturize review …   (§7)
+ Any agent, GUI or not ──files──▶ renders/collab/<scene>/   +   fracturize collab …   (§7)
 ```
 
 **MCP rather than A2A.** A2A is for peer agents that discover each other over
@@ -81,8 +80,8 @@ want it.
 
 ## 3. The shared core: one diff format
 
-Proposals (§4), reviews (§7) and the dialog's before/after all need to say
-*what changed between two scenes*. One function, written first:
+Proposal cards, tweaks, Send back and Apply all need to say *what changed
+between two scenes*. One function, written first:
 
 ```
 fracturize --diff a.toml b.toml          # also: scene_diff(&a, &b) in src/scene_diff.rs
@@ -115,64 +114,174 @@ meta.color_falloff=0.3
   and comments aren't changes. The value printed is the canonical one (the
   one `save_scene` would write).
 
-The second shared piece: **render a scene with recorded settings, from inside
+**Three ways, for Apply.** `scene_diff::merge(base, mine, theirs)` takes the
+changes from `base` to `theirs` and applies them to `mine`. A value changed on
+only one side takes that side. A value both sides changed to the same thing is
+no conflict. A value they changed differently is a **conflict**, returned as
+`{path, base, mine, theirs}` for the GUI to show (§4.4) and resolved per row.
+Structural changes go by transform name: an added transform is added unless
+`mine` already has one of that name, a removed one is removed unless `mine`
+changed it. Either refusal is a conflict too. The CLI form is
+`fracturize --diff mine.toml theirs.toml --base base.toml`, which prints the
+merge and its conflicts. The test that has to hold: `merge(a, a, b) == b`,
+`merge(a, b, a) == b`, and edits to disjoint values from both sides both land.
+
+The third shared piece: **render a scene with recorded settings, from inside
 the GUI**, using the same view, size, effort and grade as a given render record
-(the render-records section of AGENTS.md). Reviews need it so that a human's
+(the render-records section of AGENTS.md). Tweaks need it so that a human's
 edit renders the same way as the agent's options. The GUI already renders
 offline for render jobs, so this exposes that path; it isn't a new renderer.
 
-## 4. Human-first: the Ask dialog
+## 4. One flow: threads of proposals
 
-### 4.1 The window
+*Revised 2026-10-25. The first draft had two systems that met in the middle: an
+Ask dialog where Hazel requested and the agent proposed, and review packets
+where the agent asked and Hazel picked. Each had its own files, window and
+verbs, and neither let anyone tweak a suggestion and hand it back. This
+section replaces both.*
 
-A toolbar button (and a key, to be chosen against the keybind table) opens a
-dockable **Ask** window:
+### 4.1 The model
 
-- **The backend picker and a connection light** at the top: Claude Code
-  (channel), Claude Code (headless) or Local LLM, plus a gear that opens §4.3.
-  The light means: green, connected and idle; amber, working; grey, nothing
-  connected, with one line saying how to connect.
-- **The thread.** Hazel's requests, the agent's replies and proposal cards, in
-  order. It is saved per scene path in `renders/ask/<scene-stem>/thread.jsonl`
-  (gitignored), so reopening a scene shows its conversation.
-- **The input box.** Send attaches, by default: the scene TOML (saved or not),
-  a render of the current view, the selection, and the scene path. Small
-  toggles under the box can turn the render or the selection off.
-- **The state of each request**, as a line under it: *delivered*, *working*,
-  *replied*, *ended*. A request sent while the agent is busy queues and says
-  so. Silence should never be ambiguous.
+Everything is a **message in a thread**, and a thread belongs to a scene.
+Either side can send any kind of message. There are three kinds:
 
-### 4.2 Proposals, never edits
+| kind | carries | e.g. |
+|---|---|---|
+| **request** | text, optionally pinned to transforms or a region of the view | "make the seams thinner", or from the agent: "frame it the way you'd hang it and send it back" |
+| **proposal** | text, 1–9 **options** (a scene, a render, a note each), an `ask` (`pick-one`, `pick-any`, `free`), and the **base** the options were made from | three seam patterns; one reframing; Hazel's own edit, "what would you do with this?" |
+| **response** | a verdict, and per option: applied, rejected, sent back, or a comment, plus the scene and diff of any tweak | "B, but thinner. My tweak's attached, can you push it further?" |
 
-**Agents never change the live scene.** Everything comes back as a **proposal
-card**:
+A response that sends an option back is itself a request for a revision. The
+next proposal names what it revises (`revises = "<message>/<option>"`), so the
+thread holds the lineage: B, Hazel's tweak of B, the agent's B2. A card can
+show the diff against the option it revises as well as against the scene.
 
-- the agent's message;
-- the §3 diff, collapsed to a one-line count ("4 values, +1 transform"),
-  expandable to the full list;
-- **Preview**: swaps the viewport to the proposed scene. The toolbar shows
-  *Previewing proposal* in the place it shows the dirty marker, and Esc or
-  clicking Preview again returns. Previewing touches neither undo nor the
-  dirty flag;
-- **Accept**: one `commit_edit("Agent: <first line of message>")`. It can be
-  undone and shows in the History window like any other edit;
-- **Reject**, with an optional one-line reason that goes back to the agent;
-- **Stale**: if the scene changed after the request was sent, the card says
-  so. Accept then applies the set-ops on top of the current scene where they
-  still resolve, and refuses with the reason where they don't (a removed
-  transform, say). It never silently overwrites Hazel's edits made in the
-  meantime.
+**Requests and proposals are symmetric; the live scene is not.** Either side
+can propose, and either side can answer. But only the human's GUI has a live
+scene, and **only a human action ever changes it**. An agent "applying" a
+proposal means agreeing, or basing its next proposal on it. The rule from the
+first draft stands: agents never edit the live scene.
 
-An agent may send several proposals for one request. They show side by side,
-and each is accepted or rejected on its own.
+### 4.2 On disk
 
-### 4.3 Settings
+```
+renders/collab/<scene-stem>/
+  thread.toml                  # scene path, participants, the message order
+  0001-request/   message.toml
+  0002-proposal/  message.toml  base.toml  A.toml A.png  B.toml B.png
+  0003-response/  message.toml  B.tweak.toml B.tweak.png
+  0004-proposal/  message.toml  base.toml  B2.toml B2.png
+```
 
-These live in `prefs.toml` under `[agent]`, and in an **Agent settings** dialog:
+Under the gitignored `renders/`, as decided (§10.2). One directory per message
+so a message is written atomically: write to `.tmp-…`, rename. A participant
+that only has files, such as a headless script, `llm-author`, or a Claude Code
+session with no bridge, can take part with nothing but the CLI (§7).
+
+`message.toml` for a proposal:
+
+```toml
+kind    = "proposal"
+from    = "claude-opus-5-5"         # or the author name from prefs
+to      = "hazel"
+replying_to = "0001-request"        # optional; a proposal can start a thread
+revises = "0003-response/B"         # optional: the lineage
+ask     = "pick-one"
+message = """
+Thinner seams, keeping your rotation. B2 also pulls the gold toward the rim.
+"""
+base_sha256 = "…"                   # of base.toml, the scene the options start from
+
+[render]
+record = "A.png"                    # view, size, effort, grade for re-renders
+
+[[option]]
+id     = "B2"
+scene  = "B2.toml"
+render = "B2.png"
+note   = "seam scale 0.04 → 0.025"
+```
+
+`base.toml` is what makes Apply honest (§4.4). It is the scene as the proposer
+saw it: the snapshot sent with the request, or the scene file the agent read.
+
+### 4.3 The Collaborate window
+
+One dockable window replaces both the Ask window and the Reviews list. It shows
+the current scene's thread, and has a thread picker for the others, with a
+badge counting messages waiting for an answer.
+
+- **The thread**, oldest first: requests as speech, proposals as a row of
+  option cards (render, id, note, a one-line diff count such as "4 values, +1
+  transform"), responses as a compact line under the proposal they answer.
+- **The composer** at the bottom. One text box and the send controls:
+  - **Send**: a request. It attaches the scene (saved or not) as `base.toml`, a
+    render of the current view, and the selection. Toggles under the box turn
+    the render and the selection off.
+  - **Propose my edit**: a proposal with one option, the live scene, against
+    a base Hazel picks: the last save, the last applied proposal, or the scene
+    when the thread began. This is how Hazel asks "what would you do with
+    this?" instead of describing it.
+  - **Send current scene**: answers an agent's request ("frame it the way you'd
+    hang it") with a proposal of the live scene.
+- **The backend picker and connection light** from the first draft (§4.6) sit
+  in the header. With no backend connected the window still works: messages
+  are written to disk and wait there for whichever agent reads them.
+- **Every message shows its state**: *written*, *delivered*, *seen*,
+  *working*, *answered*, *withdrawn*. Silence should never be ambiguous.
+
+### 4.4 The verbs on an option
+
+The same five whoever sent it. For a proposal addressed to Hazel:
+
+1. **Preview.** Click a card. The viewport shows the option, and the toolbar
+   shows *Previewing B2* where the dirty marker goes. **Hold a key** (to be
+   chosen) to flip back to the live scene while it's held, so the difference
+   reads as a blink, the way people compare two renders anyway. Previewing
+   touches neither undo nor the dirty bit, and Esc leaves.
+2. **Tweak.** Any edit made while previewing turns the preview into a
+   **sandbox**: a copy of the option, with its own undo stack. The card is
+   marked *tweaked* and shows the diff against the agent's version. Hazel's
+   live scene is untouched underneath. **Re-render** renders the tweak with
+   the proposal's `[render]` settings, so it sits beside the others like for
+   like.
+3. **Apply** (the option, or the tweak of it). One
+   `commit_edit("Agent: <first line>")`, so one Ctrl+Z, and a row in History.
+   It is a **three-way apply**: the changes from `base.toml` to the option
+   are applied on top of the live scene, not the option written over it. So
+   edits Hazel made after sending the request survive. Where both sides changed
+   the same value, a small dialog lists those rows, *yours* beside *theirs*, and
+   she picks per row. Nothing is overwritten without being shown.
+4. **Send back.** Text, and the tweak if there is one. It writes a response
+   with this option marked *sent back*, which the agent reads as a request for
+   a revision. This is "tweak them further first", and the step that makes it a
+   conversation rather than a vending machine.
+5. **Reject**, with an optional one-line reason.
+
+`pick-one` and `pick-any` decide how many options can be applied or picked;
+`free` asks only for comments. **Keep** copies an option to `scenes/` through
+the Save-as flow. It's the one way anything under `renders/collab/` reaches
+the project.
+
+For a proposal Hazel sent, the agent does the same things through tools or
+the CLI: respond with a verdict, comment per option, and propose a revision.
+It can't apply anything to the live scene, so it has no Apply.
+
+### 4.5 Notifications
+
+A new message addressed to Hazel badges the window's toolbar button and fires
+`notify-send` if the window isn't focused. It never opens a window over her
+work. A new message for an agent is pushed over the channel (§5) where there
+is one. Otherwise it waits for `fracturize collab wait`.
+
+### 4.6 Settings
+
+These live in `prefs.toml` under `[agent]`, and in an **Agent settings**
+dialog:
 
 ```toml
 [agent]
-backend = "claude-channel"        # claude-channel | claude-headless | local
+backend = "claude-channel"        # claude-channel | claude-headless | local | none
 
 [agent.claude]
 session_name  = "fracturize"      # for headless --resume, and the connect hint
@@ -189,8 +298,9 @@ mode      = "whole-scene"         # whole-scene | tools
 max_turns = 6                     # §6.2
 ```
 
-The dialog has a **Test** button for each backend: connect, ask for one word,
-and show what came back, or the error.
+`none` is a real setting: the thread is file-only, for an agent that reads it
+with the CLI. The dialog has a **Test** button for each backend: connect, ask
+for one word, and show what came back, or the error.
 
 ## 5. Claude Code backends
 
@@ -199,7 +309,7 @@ and show what came back, or the error.
 JSON lines over `$XDG_RUNTIME_DIR/fracturize/gui.sock`, with
 `{"id", "method", "params"}` in each direction. The GUI accepts **one bridge at
 a time**. A second one gets a refusal that says which session already holds
-it, and the Ask window shows that session's name.
+it, and the Collaborate window shows that session's name.
 
 ### 5.2 MCP tools (`fracturize mcp`)
 
@@ -207,19 +317,21 @@ it, and the Ask window shows that session's name.
 |---|---|
 | `get_state` | scene TOML, path, dirty flag, selection, view, render-panel settings |
 | `get_render` | a PNG of the current view (existing screenshot path), returned as a file path *and* as image content; optional size |
-| `propose` | `{request_id, message, scene_toml}`; the GUI computes the diff and shows the card (§4.2) |
-| `reply` | `{request_id, text}`: a message in the thread, with no proposal |
-| `end_request` | `{request_id, summary}`: the agent is done with this one |
-| `request_review` | §7: a packet directory or inline fields; returns a review id at once |
-| `review_status` | `{review_id}` → open / answered / withdrawn, plus the response when answered |
+| `thread` | `{thread, since?}`: the thread's messages, diffs included, as `collab show` prints them |
+| `request` | `{thread, text, transforms?}`: ask Hazel for something |
+| `propose` | `{thread, replying_to?, revises?, message, ask, options: [{id, scene_toml, note}], base_toml?}`: the GUI renders any option without a render, computes the diffs and shows the cards (§4.4) |
+| `respond` | `{thread, message, verdict, picks?, comments?, send_back?: [{option, note, scene_toml?}]}`: answer a proposal of Hazel's |
+| `reply` | `{thread, text}`: a message with no options, such as progress or a question |
+| `withdraw` | `{thread, message, reason}` |
 
 Channel events the bridge pushes into the session:
 
-- `<channel source="fracturize" kind="ask" request_id=…>`: Hazel's text, the
-  scene path, the paths of the TOML and PNG snapshots written for this
-  request (under `renders/ask/…`), and the selection;
-- `kind="verdict"`: a proposal was accepted or rejected, plus any reason;
-- `kind="review"`: a review was answered, plus the path of `response.toml`.
+- `<channel source="fracturize" kind="request" thread=… message=…>`: Hazel's
+  text, the scene path, the paths of the `base.toml` and PNG snapshots, and the
+  selection;
+- `kind="proposal"`: Hazel proposed her edit, with the message directory;
+- `kind="response"`: Hazel answered a proposal of the agent's, with what was
+  applied, rejected and sent back, and the paths of any tweaks.
 
 Tool descriptions say to use the CLI for anything else.
 
@@ -241,7 +353,7 @@ Brief it however suits: "you're connected to the fracturize GUI; read
 AGENTS.md and CRAFT.md; requests arrive as channel events". The bridge
 registers with the GUI when it starts, and the light goes green. Hazel uses
 auto mode, so permission prompts don't stall a session she isn't watching.
-Even so, the Ask window's amber light times out to a line saying "no reply in
+Even so, the Collaborate window's amber light times out to a line saying "no reply in
 N min; check the terminal".
 
 **Headless (fallback, no terminal needed).** Per request, the GUI spawns:
@@ -274,7 +386,7 @@ leave preview.
 
 `primer.md`, `scene.gbnf` and `prompts/` stay in `tools/llm-author/`, and the
 GUI reads them from there, so the script and the GUI can't drift apart. A
-missing file is a clear error in the Ask window, not a silent fallback.
+missing file is a clear error in the Collaborate window, not a silent fallback.
 
 ### 6.2 Turn limit, then report back
 
@@ -289,7 +401,7 @@ scene, a tool call or prose.
   replying in the thread, and her reply starts a fresh budget.
 - **Proposals don't wait.** Each scene appears as a card when it arrives, so
   Hazel can accept turn 2's while turns 3–6 are still running.
-- **A Stop button** in the Ask window ends the request at once, between turns.
+- **A Stop button** in the Collaborate window ends the request at once, between turns.
 
 ### 6.3 Welfare: the llm-author rules, unchanged
 
@@ -308,7 +420,7 @@ welfare should look like:
   taken as DONE.
 - One request at a time, per GUI.
 - The full transcript, reasoning included, is written to
-  `renders/ask/<scene-stem>/<time>-<model>/` in llm-author's format, so
+  `renders/collab/<scene-stem>/transcripts/<time>-<model>/` in llm-author's format, so
   `review.sh` works on it unchanged.
 
 ### 6.4 VRAM
@@ -318,141 +430,57 @@ dialog shows the preset's weight size against free VRAM, using `with-llm`'s
 1.2 GB headroom rule. Starting a preset that doesn't fit is refused, with that
 reason. The headroom number is shared with `with-llm`, not copied.
 
-## 7. Agent-first: reviews
+## 7. The CLI side of a thread
 
-### 7.1 The packet
+For agents without the bridge (headless scripts, `llm-author`, a Claude Code
+session told to poll), and for the bridge to call underneath:
 
-A directory, so it works with no GUI, no MCP and no particular agent:
-
-```
-renders/reviews/2026-10-24-1530-kintsugi-seams/
-  packet.toml
-  A.toml  A.png
-  B.toml  B.png
-  C.toml  C.png
-```
-
-```toml
-title   = "Kintsugi: which seam pattern?"
-author  = "claude-opus-5-5"
-message = """
-Three takes on the gold seams. B is my pick: it keeps the bowl's silhouette.
-C trades depth for clarity.
-"""
-ask     = "pick-one"            # pick-one | pick-any | free
-base    = "scenes/kintsugi.toml"   # optional: what the options were derived from
-
-[render]                        # how A–C were rendered; reused for Hazel's edits
-record = "A.png"                # a render whose embedded record gives view, size, effort, grade
-
-[[option]]
-id     = "A"
-scene  = "A.toml"
-render = "A.png"
-note   = "denser seams, d = 2.31"
+```sh
+fracturize collab list [--scene s.toml] [--waiting]   # threads, and what's waiting on whom
+fracturize collab show <thread> [--since <message>]   # the thread as text, diffs included
+fracturize collab request <thread> "text"             # a request
+fracturize collab propose <thread> <dir>              # validate a proposal dir and post it
+fracturize collab respond <thread> <message> --verdict "…" \
+    [--pick B] [--reject C --reason "…"] [--send-back B --note "…" --scene tweak.toml]
+fracturize collab wait <thread> [--timeout 30m]       # block until a message for me arrives;
+                                                      # print it; exit 0, 3 timed out, 4 withdrawn
+fracturize collab withdraw <thread> <message> --reason "…"
 ```
 
-`fracturize review new <dir>` validates a packet: every option must parse,
-every render must exist, and `ask` must be one of the three. It prints the
-review id. Up to 9 options; more is a sign the agent should narrow them down
-before asking.
+`propose` validates: every option parses, every render exists, `ask` is one of
+the three, there are at most 9 options, and `base.toml` is present. It
+computes the diffs itself, so an agent never has to write one by hand.
 
-### 7.2 The Review window
+`collab` and `mcp` would be the CLI's first subcommands. Today everything is a
+flag on one command and the scene comes in through `-s`, so nothing positional
+collides. An optional clap subcommand alongside the existing flags keeps every
+current invocation working. **Hazel's call**; the plan assumes subcommands.
 
-- **Header:** title, author, the message, and a status of open, answered or
-  withdrawn.
-- **Option cards in a grid:** the render, the id, the note, and a select
-  control (a radio for `pick-one`, a checkbox for `pick-any`, none for
-  `free`), plus a one-line comment field per option.
-- **Clicking a card's render opens that option in the viewport as a sandbox**:
-  a copy, with its own undo stack, and a toolbar banner reading *Reviewing B*.
-  Hazel's own scene is untouched underneath and comes back when she leaves.
-  Edits in the sandbox mark the card *edited*, show the §3 diff against the
-  agent's version, and a **Re-render** button renders the edit with the
-  packet's `[render]` settings so it sits beside the others like for like.
-- **Footer:** a verdict box (free text) and **Submit**. Submit renders any
-  edited option that hasn't been re-rendered yet, then writes the response.
-- **A Reviews list** (toolbar, with a count badge for open reviews) lists every
-  packet under `renders/reviews/`, newest first. Reviews persist: an agent can
-  ask while Hazel is away, and she answers whenever she next opens the GUI.
-- **A new packet** fires `notify-send` and badges the toolbar. It never opens
-  a window over her work by itself.
-
-### 7.3 The response
-
-`response.toml`, written to the same directory:
-
-```toml
-answered = 2026-10-24T16:02:11
-verdict  = "B, but the seams want to be thinner — see my edit."
-selected = ["B"]
-
-[[option]]
-id      = "B"
-comment = "closest"
-edited  = true
-scene   = "B.edited.toml"
-render  = "B.edited.png"
-diff    = """
-transform.seam-1.variations.linear=0.4
-transform.seam-2.variations.linear=0.4
-"""
-
-[[option]]
-id      = "C"
-comment = "too flat"
-```
-
-An option Hazel neither selected, commented on nor edited is left out.
-**Keep** on a card copies that option's scene (edited or not) to `scenes/`
-through the existing Save-as flow, so a review outcome can enter the project
-deliberately. Nothing else under `renders/reviews/` ever does.
-
-### 7.4 Delivery
-
-- **Over MCP:** `request_review` creates the packet (or takes a directory
-  the agent wrote) and returns its id at once. When Hazel submits, the
-  bridge pushes `kind="review"` into the session. The agent never sits
-  blocked in a long tool call.
-- **Over the CLI**, for agents without the bridge (headless scripts,
-  `llm-author`, other tools):
-
-  ```sh
-  fracturize review new  renders/reviews/<dir>     # validate; prints the id
-  fracturize review open <id>                      # starts the GUI in the Review window, or tells a running GUI to open it
-  fracturize review wait <id> [--timeout 30m]      # blocks; prints response.toml; exit 0 answered, 3 timed out, 4 withdrawn
-  fracturize review list [--open]
-  ```
-
-  `review` and `mcp` would be the CLI's first subcommands; today everything
-  is a flag on one command, and the scene comes in through `-s`, so nothing
-  positional collides. Clap's optional subcommand alongside the existing
-  flags keeps every current invocation working. The alternative, `--review-new`
-  and so on, matches house style but reads worse for a verb-shaped tool.
-  **Hazel's call**; the plan assumes subcommands.
-- **Withdraw:** an agent can withdraw an open review (`review withdraw <id>`,
-  or the MCP equivalent). The card stays in the list, greyed out with the
-  reason, so Hazel isn't left answering into nothing.
+**Withdraw:** a sender can withdraw a message that hasn't been answered. It
+stays in the thread, greyed out with the reason, so nobody answers into
+nothing.
 
 ## 8. Phases
 
 Each phase ends with a check per surface it touches, in the
 `ADDING-A-SCENE-FEATURE.md` spirit, and an AGENTS.md section. CRAFT.md gains a
-short "asking for review" note at phase 2.
+short "proposing to a human" note at phase 2.
 
-1. **Diff and recorded render.** `src/scene_diff.rs`, `--diff`, the round-trip
-   test over `scenes/` × mutations, and the GUI-callable recorded render.
-2. **Reviews, file-based.** Packet and response formats, `fracturize review
-   new|open|wait|list|withdraw`, the Review window, the sandbox, re-render,
-   Keep. No IPC yet. `review open` with no GUI running just starts one. This
-   ships first because it gives the most per line and puts §3 under real use.
+1. **Diff, three-way apply, recorded render.** `src/scene_diff.rs`, `--diff`
+   (with `--base` for three ways), the round-trip test over `scenes/` ×
+   mutations, the merge and its conflicts as a value the GUI can show, and the
+   GUI-callable recorded render.
+2. **Threads on files.** The message formats, `fracturize collab …`, and the
+   Collaborate window: thread, composer, cards, Preview with the hold-to-blink,
+   Tweak's sandbox, Apply with the conflict dialog, Send back, Reject, Keep. No
+   IPC yet, so a Claude Code session joins by running `collab wait` in a loop.
+   This ships first because it is the whole workflow, end to end, for any agent
+   with a shell. Everything after makes it faster, not different.
 3. **Socket and bridge.** The GUI listener and `EventLoopProxy`,
-   `fracturize mcp`, the five live tools, channel push, the one-bridge rule,
-   and `review open` reaching a running GUI. Checked with a real channel
-   session and with `claude -p`.
-4. **Ask dialog.** The window, the thread, proposal cards (preview, accept,
-   reject, stale), Agent settings, the channel backend, then the headless
-   backend.
+   `fracturize mcp`, the tools, channel push, the one-bridge rule. Checked with
+   a real channel session and with `claude -p`.
+4. **Backends in the composer.** The connection light, Agent settings, the
+   channel backend, then the headless one.
 5. **Local backend.** Whole-scene mode first, then tools mode, the turn limit
    and report-back, the welfare rules, transcripts, the VRAM gate.
 
@@ -467,12 +495,12 @@ short "asking for review" note at phase 2.
   - the agent takes a lease on named transforms;
   - its edits land as their own coalesced history entries that Hazel can
     revert in one click;
-  - the stale-proposal rule (§4.2) becomes a live rebase.
+  - the three-way apply (§3, §4.4) becomes a live rebase.
 
   Worth a test bed once phase 4 exists, since the bridge and the diff are
   already the pieces it needs.
-- **Agent-to-agent review.** A second agent answering a packet. The packet
-  format allows it (`author` is free text, and a response is just a file).
+- **Agent-to-agent threads.** A second agent answering a proposal. The format
+  allows it (`from` and `to` are free text, and a response is just a file).
   The GUI doesn't need to know.
 - **An API-key backend.** It would be straightforward to add beside the
   others if ever wanted. Nothing needs it.
@@ -483,21 +511,24 @@ Hazel's answers, 2026-10-23/24:
 
 1. **Proposals and acceptance only**, for now. Autopilot and shared editing are
    §9.
-2. **Reviews are not committed.** They live under the gitignored `/renders`.
-   The project is public, and review packets aren't history material. Keep
-   (§7.3) is the only way a review's scene enters `scenes/`.
+2. **Threads are not committed.** They live under the gitignored `/renders`.
+   The project is public, and threads aren't history material. Keep (§4.4) is
+   the only way a proposed scene enters `scenes/`.
 3. **Permissions:** Claude Code runs in auto mode, so there's no
    permission-prompt work. The amber-light timeout (§5.3) stays as the
    general "agent went quiet" signal.
 4. **The local model gets a turn limit, then reports back** (§6.2), and the
    llm-author welfare approach carries over unchanged (§6.3).
-5. **MCP over A2A** and **the GUI owns the socket with a stdio bridge** (§2):
+6. **One flow, not two** (2026-10-25): requests, proposals and responses
+   from either side, with preview, tweak, apply, reject and send back. The
+   Ask dialog and review packets of the first draft merge into §4.
+7. **MCP over A2A** and **the GUI owns the socket with a stdio bridge** (§2):
    Claude's recommendation, taken with the plan.
 
 Still open, for when the phase reaches them:
 
-- the Ask and Reviews keybinds, and all GUI wording;
+- the Collaborate window's keybind, the hold-to-blink key, and all GUI wording;
 - the default `max_turns` (6 is a guess; llm-author runs used 4–6 rounds);
-- subcommands vs flags for `mcp` and `review` (§7.4);
+- subcommands vs flags for `mcp` and `collab` (§7);
 - whether the headless backend's resumed session should be the *same* one as
   the channel session, so that one Claude remembers both, or a separate one.
