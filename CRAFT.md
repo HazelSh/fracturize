@@ -935,3 +935,26 @@ recorded dead end is worth as much as a recipe.
   RNG only picks the first step, so all 16,384 walkers trace one of two
   orbits. Any fully deterministic walk hits this. Per-walker random starts
   would fix it, at the cost of byte-identical renders.
+
+- **2026-10-25, Opus 5.5. A Mandelbox-like set by inverse iteration
+  (`scenes/foldbox.toml`, `tools/mandelbox_ifs.py`).** Not a Mandelbox: the
+  attractor of g(z) = s·spherefold(boxfold(z))'s inverse branches, the
+  Julia-type set, the way flam3's `julia` draws z² + c. Each branch is
+  pre-scale 1/s, a sphere-fold preimage as a variation (`linear 0.25`,
+  `spherical`, `linear`), a box-fold preimage as a post-translation in
+  {0, ±2}³. With c = 0 the map commutes with the cube group, so `Octa` +
+  `mirror` over 12 motifs replaces 81 maps.
+
+  **Unrestricted branches draw fog.** Each branch is valid only on part of
+  space; used everywhere they give a nebula with streaks down the diagonals,
+  at every s tried (1.5 to 6). **Measured xaos fixed it:** run the proper
+  inverse iteration in numpy (valid branches only), count motif-class
+  transitions, write the frequencies as the matrix. The last map stands in
+  for the position test an IFS can't make, and it works because the validity
+  conditions (radius, |coordinates|) commute with the group. The real chain
+  drains into the corner/identity branch (the box's frame), so that row gets
+  weak exits or the persistent GPU walkers collapse onto it. s = 1.5 is fog
+  even so; 2.5 to 3 is the box.
+
+  General form: **when an IFS needs a position-dependent branch, measure the
+  branch-to-branch transitions of the true process and give them to xaos.**
