@@ -305,10 +305,11 @@ fn parts(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
     );
     let total: f32 = s.parts.all().iter().map(|p| p.odds).sum();
     let cols = [
-        Col::new("Part", "What the dice may change. Ticked, a roll draws it anew; unticked, the scene's own is kept, by a roll and a mutation alike.", 150.0),
-        Col::new("Odds", "How often a mutation picks this part, against the others. 0 is off; ticking a part on starts it at the least, 0.0001.", 64.0),
-        Col::new("Share", "This part's share of a mutation's changes, from the odds", 52.0),
-        Col::new("Re-roll", "Chance a mutation replaces the part outright, drawn the way a roll draws it, rather than nudging what's there", 60.0),
+        Col::name("Part", "What the dice may change"),
+        Col::new("Odds", "How often a mutation picks this part, against the others. 0 is off; dragging up from 0 switches it on.", 64.0),
+        Col::new("Share", "This part's share of a mutation's changes, from the odds", 48.0),
+        Col::new("Re-roll", "Chance a mutation replaces the part outright, drawn the way a roll draws it, rather than nudging what's there", 58.0),
+        Col::tick("On", "Ticked, a roll draws this part anew and a mutation may change it. Unticked (odds 0), both keep the scene's own. Ticking it on starts its odds at the least, 0.0001."),
     ];
     table::show(ui, st, "fracturize_dice_parts", &cols, |body, st| {
         let h = table::row_height(body.ui_mut());
@@ -318,18 +319,7 @@ fn parts(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
                 let name = Parts::NAMES[k];
                 let part = &mut *s.parts.all_mut()[k];
                 body.row(h, |mut row| {
-                    row.col(|ui| {
-                        let mut on = part.on();
-                        let resp = ui.checkbox(&mut on, part_label(name));
-                        if resp.changed() {
-                            part.set_on(on);
-                        }
-                        let tip = format!(
-                            "{} Unticked, the dice keep the scene's own, in a roll and a mutation alike.",
-                            part_tip(name)
-                        );
-                        hinted(resp, st, &tip, if part.on() { "click: keep this as it is" } else { "click: let the dice change this" });
-                    });
+                    name_cell(&mut row, st, part.on(), part_label(name), part_tip(name));
                     row.col(|ui| odds(ui, st, part));
                     row.col(|ui| {
                         let text = match part.odds {
@@ -350,6 +340,21 @@ fn parts(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
                                 "drag: chance of a re-roll",
                             );
                         });
+                    });
+                    // The switch and the odds are one state: ticking sets the
+                    // least odds or none, and odds dragged to 0 untick it.
+                    row.col(|ui| {
+                        let mut on = part.on();
+                        let resp = table::tick(ui, &mut on);
+                        if resp.changed() {
+                            part.set_on(on);
+                        }
+                        let tip = format!(
+                            "{} Unticked, the dice keep the scene's own, in a roll and a mutation alike; \
+                             ticked, it starts at the least odds.",
+                            part_tip(name)
+                        );
+                        hinted(resp, st, &tip, if part.on() { "click: keep this as it is" } else { "click: let the dice change this" });
                     });
                 });
             }
@@ -483,7 +488,7 @@ fn name_cell(row: &mut egui_extras::TableRow<'_, '_>, st: &mut super::UiState, o
 }
 
 const LOW_HIGH: [Col<'static>; 3] = [
-    Col::new("Setting", "What the range is for. A row greys while the part it draws is off.", 170.0),
+    Col::name("Setting", "What the range is for. A row greys while the part it draws is off."),
     Col::new("Low", "The least the dice draw", 60.0),
     Col::new("High", "The most the dice draw", 60.0),
 ];
@@ -553,7 +558,7 @@ fn chances(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
     let on = |k: usize| s.parts.all()[k].on();
     let (size, vars, sym) = (on(part::SCALE), on(part::VARIATIONS), on(part::SYMMETRY));
     let cols = [
-        Col::new("Setting", "What the chance is of. A row greys while the part it draws is off.", 170.0),
+        Col::name("Setting", "What the chance is of. A row greys while the part it draws is off."),
         Col::new("Chance", "How often a roll draws it", 60.0),
     ];
     table::show(ui, st, "fracturize_dice_chances", &cols, |body, st| {
@@ -595,8 +600,9 @@ fn groups(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
     caption(ui, "Which kinds a roll may draw when it gives a flame a group.");
     let on = s.parts.all()[part::SYMMETRY].on();
     let cols = [
-        Col::new("Group", "Ticked, a roll may draw it", 170.0),
-        Col::new("Copies", "How many copies of a transform it makes", 60.0),
+        Col::name("Group", "The kinds of symmetry group"),
+        Col::new("Copies", "How many copies of a transform it makes", 70.0),
+        Col::tick("On", "Ticked, a roll may draw this kind"),
     ];
     let sym = &mut s.symmetry;
     let rows: [(&mut bool, &str, &str, &str); 6] = [
@@ -616,15 +622,16 @@ fn groups(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
         let h = table::row_height(body.ui_mut());
         for (flag, name, copies, tip) in rows {
             body.row(h, |mut row| {
+                name_cell(&mut row, st, on, name, tip);
                 row.col(|ui| {
                     ui.add_enabled_ui(on, |ui| {
-                        let resp = ui.checkbox(flag, name);
-                        hinted(resp, st, tip, "click: roll this kind of symmetry");
+                        ui.label(egui::RichText::new(copies).weak());
                     });
                 });
                 row.col(|ui| {
                     ui.add_enabled_ui(on, |ui| {
-                        ui.label(egui::RichText::new(copies).weak());
+                        let resp = table::tick(ui, flag);
+                        hinted(resp, st, tip, "click: roll this kind of symmetry");
                     });
                 });
             });
@@ -663,18 +670,22 @@ fn variations(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings
         });
     });
     let cols = [
-        Col::new("Variation", "Ticked, a roll or a mutation may bring it in", 170.0),
+        Col::name("Variation", "The variations a transform can carry"),
         Col::new("Low", "Its least weight, as a magnitude. Linear takes up what's left of 1.", 60.0),
         Col::new("High", "Its greatest weight, as a magnitude", 60.0),
+        Col::tick("On", "Ticked, a roll or a mutation may bring it in"),
     ];
     table::show(ui, st, "fracturize_dice_variations", &cols, |body, st| {
         let h = table::row_height(body.ui_mut());
         for name in VARIATION_NAMES.iter().skip(1) {
             let Some(v) = s.variations.get_mut(*name) else { continue };
             body.row(h, |mut row| {
+                name_cell(&mut row, st, on && v.enabled, name, &variation_tip(name));
+                let tip = "This variation's weight when it is drawn, as a magnitude";
+                float_cells(&mut row, st, on && v.enabled, &mut v.weight, [0.0, WEIGHT_LIMIT], 0.005, 2, tip, "drag: weight range");
                 row.col(|ui| {
                     ui.add_enabled_ui(on, |ui| {
-                        let resp = ui.checkbox(&mut v.enabled, *name);
+                        let resp = table::tick(ui, &mut v.enabled);
                         hinted(
                             resp,
                             st,
@@ -683,8 +694,6 @@ fn variations(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings
                         );
                     });
                 });
-                let tip = "This variation's weight when it is drawn, as a magnitude";
-                float_cells(&mut row, st, on && v.enabled, &mut v.weight, [0.0, WEIGHT_LIMIT], 0.005, 2, tip, "drag: weight range");
             });
         }
     });
@@ -741,9 +750,10 @@ fn bounds(
 ) {
     caption(ui, "Every roll and mutation passes these before you see it.");
     let cols = [
-        Col::new("Bound", "Ticked, a result must land inside the range", 170.0),
+        Col::name("Bound", "What's measured"),
         Col::new("Low", "The least it may be", 60.0),
         Col::new("High", "The most it may be", 60.0),
+        Col::tick("On", "Ticked, a result must land inside the range"),
     ];
     let bound_row = |body: &mut egui_extras::TableBody<'_>,
                          st: &mut super::UiState,
@@ -755,12 +765,13 @@ fn bounds(
                          tip: &str| {
         let h = table::row_height(body.ui_mut());
         body.row(h, |mut row| {
-            row.col(|ui| {
-                let resp = ui.checkbox(&mut b.on, name);
-                hinted(resp, st, tip, if b.on { "click: stop bounding this" } else { "click: bound this" });
-            });
+            name_cell(&mut row, st, b.on, name, tip);
             let on = b.on;
             float_cells(&mut row, st, on, &mut b.range, limits, speed, decimals, tip, "drag: bound range");
+            row.col(|ui| {
+                let resp = table::tick(ui, &mut b.on);
+                hinted(resp, st, tip, if b.on { "click: stop bounding this" } else { "click: bound this" });
+            });
         });
     };
     table::show(ui, st, "fracturize_dice_bounds", &cols, |body, st| {
@@ -825,7 +836,7 @@ fn bounds(
 fn mutation(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings) {
     let m = &mut s.mutation;
     let cols = [
-        Col::new("Setting", "How a mutation steps. A roll draws every part that's on, so none of this applies to it.", 170.0),
+        Col::name("Setting", "How a mutation steps. A roll draws every part that's on, so none of this applies to it."),
         Col::new("Value", "", 60.0),
     ];
     table::show(ui, st, "fracturize_dice_mutation", &cols, |body, st| {
