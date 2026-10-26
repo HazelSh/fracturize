@@ -3553,6 +3553,10 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     }
     // Fold depth the point buffer has been carried to; see the wrap below.
     let mut carried: Option<i32> = None;
+    // The track a refused frame was blamed on, while that lasts, and the last
+    // frame's scene that the loader took.
+    let mut invalid: Option<String> = None;
+    let mut last_good: Option<Scene> = None;
     let mut rendered = 0u32;
     let mut outcome = Outcome::Complete;
     for i in 0..frames {
@@ -3590,7 +3594,25 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         // background are baked into them.
         let frame_scene = match &animator {
             Some(a) if i > 0 => {
-                let mut f = a.at(time)?;
+                // A frame the loader refuses holds the last one that worked,
+                // and says so once per stretch, naming the track.
+                let mut f = match a.at(time) {
+                    Ok(f) => {
+                        invalid = None;
+                        f
+                    }
+                    Err(e) => {
+                        let who = a.culprit(time).unwrap_or_else(|| "a track".to_string());
+                        if invalid.as_deref() != Some(who.as_str()) {
+                            eprintln!(
+                                "warning: from {time:.2}s, track '{who}' has taken a value the scene \
+                                 can't use; holding the last frame that worked ({e})"
+                            );
+                            invalid = Some(who);
+                        }
+                        last_good.clone().unwrap_or_else(|| first.clone())
+                    }
+                };
                 if let Some(v) = view.as_ref().and_then(|v| v.color_falloff) {
                     f.color_falloff = v;
                     f.resolve_all_color_speeds(v);
@@ -3616,6 +3638,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
                 target = TileTarget::new(
                     &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
                 );
+                last_good = Some(f.clone());
                 Some(f)
             }
             _ => None,

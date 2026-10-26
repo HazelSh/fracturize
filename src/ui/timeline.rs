@@ -8,12 +8,24 @@
 //! small. Click a row to select its track, a diamond to select its key; drag a
 //! diamond to retime it. The eye mutes a track; right-click a row for its menu.
 //!
+//! Only the ruler scrubs. A press on a row selects it and moves nothing else,
+//! so choosing a track never shifts the camera.
+//!
+//! The camera row's link attaches the camera to the timeline or detaches it.
+//! Attached, it flies its path on the clock, playing and scrubbing; detached,
+//! it stays where you put it while the tracks play. Taking the camera in the
+//! viewport detaches it; O attaches it and plays; the Timeline's own Play
+//! leaves it as it is.
+//!
 //! The column on the right edits what is selected: a keyed track's
 //! interpolation and extrapolation, the selected key's time and value, "key at
-//! the playhead", a cycle's or a rate's numbers — and, at its foot, a new track
-//! from any `-S` path, starting with one key at the playhead holding the
-//! scene's value there, so adding one changes nothing until it is keyed again.
-//! Every one of those is an ordinary undoable edit; scrubbing isn't.
+//! the playhead", a cycle's or a rate's numbers; for the camera, attach, its
+//! path's duration and loop, and a keypoint at the current framing. At its
+//! foot, "Animate a parameter…" opens the scene's parameters as a tree to
+//! browse or search (`ui::param_picker`); the new track starts with one key at
+//! the playhead holding the scene's value there, so adding one changes nothing
+//! until it is keyed again. Rows are named the same way; the `-S` path is only
+//! in tooltips. Every edit is undoable; scrubbing and attaching aren't edits.
 //!
 //! **No auto-key.** Editing a tracked value in the inspector edits the scene's
 //! own value — which a rate or cycle moves about, and which keys override.
@@ -90,8 +102,9 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            "Play or pause the timeline: the camera's path and every track together \
-             (O, Z or Space)",
+            "Play or pause the timeline. Every track plays; the camera follows only if it \
+             is attached (the link on the camera row). O, Z or Space fly the camera \
+             instead: they attach it and play.",
             if playing { "click: pause" } else { "click: play from the playhead" },
         );
         if resp.clicked() {
@@ -131,15 +144,19 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
             app.loop_playback = looping;
         }
 
-        if let Some(e) = app.track_error() {
+        if let Some(who) = app.track_invalid() {
+            ui.label(
+                egui::RichText::new(format!("{} {who} has taken a value the scene can't use; holding the last good frame", icons::X))
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+            );
+        } else if let Some(e) = app.track_error() {
             ui.label(egui::RichText::new(format!("{} {e}", icons::X)).small().color(ui.visuals().warn_fg_color));
         } else if !has_tracks {
             ui.label(
-                egui::RichText::new(
-                    "No tracks: add [[track]] tables to the scene file to animate any -S path",
-                )
-                .small()
-                .weak(),
+                egui::RichText::new("No tracks yet: \"Animate a parameter\" on the right starts one")
+                    .small()
+                    .weak(),
             );
         }
     });
@@ -200,7 +217,9 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         t += step;
     }
 
-    // Rows: the camera, then each track.
+    // Rows: the camera, then each track, named as the parameter picker names
+    // them — the -S path only where the scene no longer has the parameter.
+    let names = track_names(app);
     let mut hovered_row = None;
     let pointer = ui.ctx().pointer_hover_pos();
     for row in 0..row_count {
@@ -213,7 +232,11 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         if pointer.is_some_and(|p| row_rect.contains(p)) {
             hovered_row = Some(row);
         }
-        let selected = row > 0 && app.ui_state.timeline_track == Some(row - 1);
+        let selected = if row == 0 {
+            app.ui_state.timeline_camera
+        } else {
+            app.ui_state.timeline_track == Some(row - 1)
+        };
         if selected {
             painter.rect_filled(row_rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.35));
         }
@@ -221,7 +244,7 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
             draw_camera_row(&painter, app, row_rect, lane_row, &x_of, &visuals);
         } else {
             let key = if selected { app.ui_state.timeline_key } else { None };
-            draw_track_row(&painter, &app.scene.tracks[row - 1], row_rect, lane_row, (t0, t1), &x_of, &visuals, key);
+            draw_track_row(&painter, &app.scene.tracks[row - 1], &names[row - 1], row_rect, lane_row, (t0, t1), &x_of, &visuals, key);
         }
     }
 
@@ -232,10 +255,10 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         egui::Stroke::new(1.5, visuals.selection.stroke.color),
     );
 
-    // A press picks what the drag will do: take the diamond under it (and
-    // select its track and key), or, anywhere else on the lanes, scrub. On a
-    // track's row it selects that track either way, and in the label column it
-    // only selects.
+    // A press on the ruler scrubs, and only there: the playhead is the
+    // ruler's. A press on a row selects it — a track's, and the diamond under
+    // the pointer, which a drag then retimes; or the camera's — and moves
+    // nothing else, so picking a track never shifts the camera.
     let row_at = |y: f32| -> Option<usize> {
         let r = ((y - rect.top() - RULER_H) / ROW_H).floor();
         (r >= 0.0 && (r as usize) < row_count).then_some(r as usize)
@@ -246,8 +269,14 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         let origin = ui.input(|i| i.pointer.press_origin());
         if let Some(p) = origin.or(resp.interact_pointer_pos()) {
             app.ui_state.timeline_drag_key = None;
+            if row_at(p.y) == Some(0) {
+                app.ui_state.timeline_camera = true;
+                app.ui_state.timeline_track = None;
+                app.ui_state.timeline_key = None;
+            }
             if let Some(r) = row_at(p.y).filter(|&r| r > 0) {
                 let i = r - 1;
+                app.ui_state.timeline_camera = false;
                 if app.ui_state.timeline_track != Some(i) {
                     app.ui_state.timeline_key = None;
                 }
@@ -269,12 +298,15 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
             }
         }
     }
+    let on_ruler = ui
+        .input(|i| i.pointer.press_origin())
+        .is_some_and(|o| o.y < rect.top() + RULER_H && o.x >= lane.left());
     if let Some(p) = resp.interact_pointer_pos() {
         if resp.dragged() || resp.clicked() {
             match app.ui_state.timeline_drag_key {
                 Some((i, k)) if resp.dragged() => app.set_key_time(i, k, t_of(p.x)),
                 Some(_) => {}
-                None if p.x >= lane.left() => app.scrub_to(t_of(p.x)),
+                None if on_ruler => app.scrub_to(t_of(p.x)),
                 None => {}
             }
         }
@@ -283,24 +315,46 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         app.ui_state.timeline_drag_key = None;
     }
     let row_hint = match hovered_row {
-        Some(0) => "the camera's path on the timeline · drag: scrub".to_string(),
-        Some(r) => format!(
-            "{} · click: select · drag a diamond: retime it · drag elsewhere: scrub · right-click: menu",
-            app.scene.tracks[r - 1].target
-        ),
+        Some(0) => "the camera's path · click: select · link: attach or detach the camera".to_string(),
+        Some(r) => format!("{} · click: select · drag a diamond: retime it · right-click: menu", names[r - 1]),
         None => "drag: scrub the playhead".to_string(),
     };
     let tooltip = match hovered_row {
         Some(0) => camera_description(app),
-        Some(r) => track_description(&app.scene.tracks[r - 1]),
-        None => "The ruler, in seconds. Drag to scrub: the scene and the camera follow the \
-                 playhead. Scrubbing isn't an edit."
+        Some(r) => format!("{}\n{}", names[r - 1], track_description(&app.scene.tracks[r - 1])),
+        None => "The ruler, in seconds. Drag along it to scrub: the tracks follow the \
+                 playhead, and so does the camera if it is attached. Scrubbing isn't an edit."
             .to_string(),
     };
     let resp = hinted(resp, &mut app.ui_state, tooltip, &row_hint);
 
-    // Per-row controls in the label column: the mute eye. Drawn as real
-    // widgets over the painted rows so each gets its own hint.
+    // Per-row controls in the label column, drawn as real widgets over the
+    // painted rows so each gets its own hint: the camera's attach link, and
+    // each track's mute eye.
+    {
+        let link_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 2.0, rect.top() + RULER_H + 1.0),
+            egui::vec2(20.0, ROW_H - 2.0),
+        );
+        let attached = app.camera_attached();
+        let link = ui.put(link_rect, egui::Button::new(if attached { icons::ATTACHED } else { icons::DETACHED }).frame(false));
+        let link = hinted(
+            link,
+            &mut app.ui_state,
+            if attached {
+                "Attached: the camera follows the timeline, playing and scrubbing. Click to \
+                 detach it and keep the framing you have."
+            } else {
+                "Detached: the camera is yours, and playing or scrubbing leaves it where it \
+                 is. Click to attach it to its path on the timeline. (Taking the camera in \
+                 the viewport detaches it.)"
+            },
+            "click: attach / detach the camera",
+        );
+        if link.clicked() {
+            app.set_camera_attached(!attached);
+        }
+    }
     for i in 0..app.scene.tracks.len() {
         let top = rect.top() + RULER_H + (i + 1) as f32 * ROW_H;
         let eye_rect = egui::Rect::from_min_size(egui::pos2(rect.left() + 2.0, top + 1.0), egui::vec2(20.0, ROW_H - 2.0));
@@ -336,7 +390,7 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
             return;
         };
         let muted = track.mute;
-        ui.label(egui::RichText::new(track.target.clone()).monospace().small());
+        ui.label(egui::RichText::new(names.get(i).cloned().unwrap_or_default()).small().strong());
         let resp = ui.button(if muted { (icons::EYE, "Unmute") } else { (icons::EYE_SLASH, "Mute") });
         let resp = hinted(resp, &mut app.ui_state, "Mute or unmute this track", "click: mute / unmute");
         if resp.clicked() {
@@ -369,12 +423,13 @@ fn draw_camera_row(
     x_of: &dyn Fn(f64) -> f32,
     visuals: &egui::Visuals,
 ) {
+    let attached = app.camera_attached();
     painter.text(
         egui::pos2(row.left() + 24.0, row.center().y),
         egui::Align2::LEFT_CENTER,
-        format!("{} camera", icons::VIDEO_CAMERA),
+        if attached { "camera".to_string() } else { "camera (detached)".to_string() },
         egui::FontId::proportional(13.0),
-        visuals.text_color(),
+        if attached { visuals.text_color() } else { visuals.weak_text_color() },
     );
     if app.path_is_default() {
         painter.text(
@@ -387,6 +442,7 @@ fn draw_camera_row(
         return;
     }
     let colour = visuals.widgets.active.fg_stroke.color;
+    let colour = if attached { colour } else { colour.gamma_multiply(0.4) };
     for t in camera_key_times(app, lane, x_of) {
         diamond(painter, egui::pos2(x_of(t), lane.center().y), colour);
     }
@@ -435,9 +491,11 @@ fn camera_key_times(app: &App, lane: egui::Rect, x_of: &dyn Fn(f64) -> f32) -> V
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_track_row(
     painter: &egui::Painter,
     track: &Track,
+    name: &str,
     row: egui::Rect,
     lane: egui::Rect,
     (t0, t1): (f64, f64),
@@ -446,14 +504,14 @@ fn draw_track_row(
     selected_key: Option<usize>,
 ) {
     let text = if track.mute { visuals.weak_text_color() } else { visuals.text_color() };
-    // The target, shortened from the left: the end of a path is the part that
-    // says what moves.
-    let label = shorten_left(&track.target, 28);
+    // Shortened from the left: the end of a name is the part that says what
+    // moves.
+    let label = shorten_left(name, 30);
     painter.text(
         egui::pos2(row.left() + 24.0, row.center().y),
         egui::Align2::LEFT_CENTER,
         label,
-        egui::FontId::monospace(11.0),
+        egui::FontId::proportional(12.0),
         text,
     );
     let colour = class_colour(track);
@@ -581,11 +639,11 @@ fn track_description(t: &Track) -> String {
         }
     };
     format!(
-        "{}\n\n{}.\n{}.{}",
-        t.target,
+        "\n{}.\n{}.{}\n\n(-S {})",
         what,
         cost,
-        if t.mute { "\nMuted." } else { "" }
+        if t.mute { "\nMuted." } else { "" },
+        t.target,
     )
 }
 
@@ -594,6 +652,7 @@ fn track_description(t: &Track) -> String {
 fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
     match app.ui_state.timeline_track {
         Some(i) => draw_track_detail(ui, app, i),
+        None if app.ui_state.timeline_camera => draw_camera_detail(ui, app),
         None => {
             ui.label(
                 egui::RichText::new(
@@ -611,7 +670,9 @@ fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
 
 fn draw_track_detail(ui: &mut egui::Ui, app: &mut App, i: usize) {
     let track = app.scene.tracks[i].clone();
-    ui.label(egui::RichText::new(&track.target).monospace().strong());
+    let name = track_names(app).swap_remove(i);
+    let resp = ui.label(egui::RichText::new(name).strong());
+    hinted(resp, &mut app.ui_state, format!("-S {}", track.target), "the parameter this track animates");
     let mut source = track.source.clone();
     match &mut source {
         Source::Keys { keys, interpolate, extrapolate, .. } => {
@@ -776,53 +837,88 @@ fn draw_track_detail(ui: &mut egui::Ui, app: &mut App, i: usize) {
     }
 }
 
+fn draw_camera_detail(ui: &mut egui::Ui, app: &mut App) {
+    ui.label(egui::RichText::new("Camera").strong());
+    let attached = app.camera_attached();
+    let resp = ui.add(egui::Button::new(if attached {
+        (icons::ATTACHED, "Attached to the timeline")
+    } else {
+        (icons::DETACHED, "Detached")
+    }).selected(attached));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Attached, the camera flies its path on the timeline's clock, playing and \
+         scrubbing. Detached, it stays where you put it while the tracks play.",
+        "click: attach / detach the camera",
+    );
+    if resp.clicked() {
+        app.set_camera_attached(!attached);
+    }
+    let authored = !app.path_is_default() || app.scene.camera_path.is_some();
+    let flying_default = app.path_is_default();
+    super::camera_panel::draw_path_controls(ui, app, flying_default, authored);
+    let resp = ui.button((icons::PLUS, "Key the camera here (Y)"));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Add the current framing as the next keypoint of the camera's path. Two keys \
+         make a path of the scene's own instead of the default orbit; the Camera window \
+         lists and edits them.",
+        "click: add the framing as a camera keypoint",
+    );
+    if resp.clicked() {
+        app.add_path_key();
+    }
+}
+
 fn draw_new_track(ui: &mut egui::Ui, app: &mut App) {
-    ui.label(egui::RichText::new("New track").small().strong());
-    let mut text = std::mem::take(&mut app.ui_state.timeline_new_target);
-    let mut add = false;
-    ui.horizontal(|ui| {
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut text)
-                .hint_text("transform.<name>.weight")
-                .desired_width(DETAIL_W - 70.0)
-                .font(egui::TextStyle::Monospace),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Any path -S takes: meta.haze, palette.rotate, transform.<name>.rotation.y, \
-             transform.<name>.variations.swirl, transform.<a>.xaos.<b>, \
-             subscene.<name>.share. Not camera.*: the camera's path is its track.",
-            "type an -S path, then Enter or Add",
-        );
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            add = true;
-        }
-        let resp = ui.add_enabled(!text.trim().is_empty(), egui::Button::new((icons::PLUS, "Add")));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Start a keyed track on this path, with one key at the playhead holding the \
-             scene's value there",
-            "click: add the track",
-        );
-        if resp.clicked() {
-            add = true;
-        }
-    });
-    if add && !text.trim().is_empty() {
-        match app.add_track(&text) {
+    let params = app.param_catalogue();
+    let tracked: Vec<String> = app.scene.tracks.iter().map(|t| t.target.clone()).collect();
+    let taken = |p: &crate::params::Param| {
+        tracked.contains(&p.path).then(|| "Already animated: it has a row in the timeline.".to_string())
+    };
+    let chosen = super::param_picker::picker(
+        ui,
+        &mut app.ui_state,
+        "timeline_new_track",
+        "Animate a parameter…",
+        "Choose any value in the scene to animate: browse the tree, or type to search. \
+         The new track starts with one key at the playhead holding the value the scene \
+         has now, so nothing moves until you key it again.",
+        &params,
+        &taken,
+    );
+    if let Some(p) = chosen {
+        match app.add_track(&p.path, Some(p.value.clone())) {
             Ok(i) => {
                 app.ui_state.timeline_track = Some(i);
+                app.ui_state.timeline_camera = false;
                 app.ui_state.timeline_key = Some(0);
                 app.ui_state.timeline_new_error = None;
-                text.clear();
             }
             Err(e) => app.ui_state.timeline_new_error = Some(e),
         }
     }
-    app.ui_state.timeline_new_target = text;
     if let Some(e) = &app.ui_state.timeline_new_error {
         ui.label(egui::RichText::new(e).small().color(ui.visuals().warn_fg_color));
     }
+}
+
+/// Each track's parameter as people read it ("ocean › Rotation › z"), from
+/// the catalogue; the path itself where the scene doesn't have it any more.
+fn track_names(app: &mut App) -> Vec<String> {
+    let cat = app.param_catalogue();
+    app.scene
+        .tracks
+        .iter()
+        .map(|t| match cat.iter().find(|p| p.path == t.target) {
+            // The outermost group ("Transforms") is implied by the rest.
+            Some(p) => {
+                let crumbs = p.breadcrumb();
+                crumbs.split_once(" › ").filter(|_| p.group.len() > 1).map_or(crumbs.clone(), |(_, r)| r.to_string())
+            }
+            None => t.target.clone(),
+        })
+        .collect()
 }

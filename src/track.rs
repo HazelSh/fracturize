@@ -388,10 +388,17 @@ impl Track {
         }
     }
 
-    /// The value at `t` as the `-S` spec that applies it.
+    /// The value at `t` as the `-S` spec that applies it, brought into the
+    /// target's range (`params::range_of`): a spline overshoots and a cycle
+    /// swings past zero, and a negative xaos multiplier or share is refused
+    /// by the loader, a negative weight or point size drawn as nonsense.
     pub fn spec_at(&self, t: f64, base: Option<f64>) -> String {
         let integral = matches!(self.source, Source::Keys { integral: true, .. });
-        format!("{}={}", self.target, value_text(&self.sample(t, base), integral))
+        let value = match self.sample(t, base) {
+            KeyValue::Number(x) => KeyValue::Number(crate::params::clamp(&self.target, x)),
+            other => other,
+        };
+        format!("{}={}", self.target, value_text(&value, integral))
     }
 }
 
@@ -982,6 +989,19 @@ impl Animator {
         Ok(scene)
     }
 
+    /// Which track makes the scene at `t` one the loader refuses, when
+    /// [`at`](Self::at) fails: each is tried on its own. The name is what an
+    /// error should carry — the value changes every frame, the track doesn't,
+    /// so a message naming the value would be new every frame.
+    pub fn culprit(&self, t: f64) -> Option<String> {
+        self.tracks.iter().find_map(|(track, base)| {
+            let mut doc = self.doc.clone();
+            let bad = crate::set::apply_to_doc(&mut doc, &track.spec_at(t, *base)).is_err()
+                || Scene::from_toml_str(&doc.to_string(), &self.dir).is_err();
+            bad.then(|| track.target.clone())
+        })
+    }
+
     /// The highest class of anything that moves.
     pub fn class(&self) -> Option<Class> {
         self.tracks.iter().map(|(t, _)| t.class()).max()
@@ -1323,6 +1343,31 @@ amplitude = 0.25
         s.point_count = 1234;
         let frame = Animator::for_scene(&s).unwrap().unwrap().at(0.5).unwrap();
         assert_eq!(frame.point_count, 1234);
+    }
+
+    #[test]
+    fn a_track_is_kept_inside_what_the_scene_can_take() {
+        // A cycle about 0 would swing an xaos multiplier negative, which the
+        // loader refuses; the frame comes out at 0 instead.
+        let src = format!(
+            "{SCENE}\n[[track]]\ntarget = \"transform.a.xaos.b\"\nwave = \"sine\"\nperiod = 4.0\namplitude = 1.0\ncentre = 0.0\n"
+        );
+        let s = Scene::from_toml_str(&src, &std::env::temp_dir()).unwrap();
+        let anim = Animator::for_scene(&s).unwrap().unwrap();
+        assert!(anim.at(3.0).is_ok(), "the trough is clamped to 0");
+        assert!(anim.culprit(3.0).is_none());
+    }
+
+    #[test]
+    fn an_invalid_frame_is_blamed_on_its_track() {
+        let src = format!(
+            "{SCENE}\n[[track]]\ntarget = \"meta.color_mode\"\nkeys = [[0.0, \"transforms\"], [2.0, \"bogus\"]]\n"
+        );
+        let s = Scene::from_toml_str(&src, &std::env::temp_dir()).unwrap();
+        let anim = Animator::for_scene(&s).unwrap().unwrap();
+        assert!(anim.at(1.0).is_ok());
+        assert!(anim.at(3.0).is_err());
+        assert_eq!(anim.culprit(3.0).as_deref(), Some("meta.color_mode"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod history;
 mod indicators;
 mod offline;
 mod palette;
+mod params;
 mod path;
 mod prefs;
 mod trace;

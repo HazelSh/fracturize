@@ -33,6 +33,7 @@ pub mod gizmo_ring;
 pub mod labels;
 pub mod mutate;
 pub mod num;
+pub mod param_picker;
 pub mod radio;
 pub mod random_flames;
 pub mod random_settings;
@@ -141,8 +142,9 @@ pub struct UiState {
     /// The ruler's span, held still while a key is dragged.
     pub timeline_span: Option<(f64, f64)>,
     /// The Timeline's new-track field, and why the last add was refused.
-    pub timeline_new_target: String,
     pub timeline_new_error: Option<String>,
+    /// The Timeline's camera row is selected, rather than a track.
+    pub timeline_camera: bool,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -230,8 +232,8 @@ impl UiState {
             timeline_key: None,
             timeline_drag_key: None,
             timeline_span: None,
-            timeline_new_target: String::new(),
             timeline_new_error: None,
+            timeline_camera: false,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),

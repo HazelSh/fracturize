@@ -37,6 +37,7 @@ who they cost by those names.
 | `UI-REVIEW-PLAN.md` | The GUI read as a stranger would; a worklist |
 | `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
 | `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
+| `TIMELINE-PLAN.md` | Open questions on the timeline: auto-key, and moving the camera path into `[[track]]` form |
 | `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
 | `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
 | `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
@@ -95,12 +96,15 @@ src/
     browser.rs     # Scenes window (Ctrl+O / B): folder tree + places, thumbnail rows
     shortcuts.rs   # Controls window (H / F1): input prefs + the keybind table
     timeline.rs    # Timeline window: transport, ruler, camera row, track rows
+    param_picker.rs# Pick a scene parameter: browsable tree + search (reusable)
     labels.rs      # World-anchored transform name labels
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
   path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
   track.rs       # Tracks: -S paths over time (keys/rate/cycle), the shared
                  # Extrapolate fold, Animator (the scene at time t), classes
+  params.rs      # A scene's settable parameters as a named tree (each an -S
+                 # path checked on the scene), and their valid ranges
   video.rs       # Animation formats: Format (avif/mp4), RGBA->YUV, shared ISOBMFF muxer
   avif.rs        # AV1 backend for .avif (rav1e)
   h264.rs        # H.264 backend for .mp4 (openh264)
@@ -709,7 +713,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
-| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row, a row per track with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selected track — interpolation, extrapolation, key at playhead, the key's time and value, a cycle's or rate's numbers — and adds a track on any `-S` path. See "Tracks and the timeline" |
+| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -2851,9 +2855,36 @@ Things it rests on, each found the hard way:
 - `.avif`/`.mp4` render the timeline; the summary line says the class and
   whether it loops.
 
-**In the app**: the Timeline window (toolbar, film strip). The O/Z/Space
-transport plays camera and tracks together. Select a row, then edit it in the
-column on the right; drag a diamond to retime its key (the ruler holds still
+**In the app**: the Timeline window (toolbar, film strip).
+
+- **The transport is a clock, and the camera is attached to it or not.** The
+  camera row's link attaches it (it flies its path on the clock, playing and
+  scrubbing) or detaches it (it stays where you put it while the tracks play).
+  Taking the camera in the viewport detaches it. O/Z/Space and the toolbar's
+  Play *fly the camera*: attach and play. The Timeline's own Play runs the
+  clock and leaves the camera as it is. Attaching isn't an edit.
+- **Only the ruler scrubs.** A press on a row selects it and moves nothing
+  else, so picking a track never shifts the camera.
+- **People never type `-S` paths.** "Animate a parameter…" opens
+  `ui::param_picker` over `params::catalogue`: the scene's parameters as a
+  tree (Scene › Haze, Transforms › petal › Rotation › y, Subscenes › smoke ›
+  Share…) to browse with the mouse, or search by any words in any order, each
+  row showing its current value; already-animated ones greyed with the reason.
+  Every listed path is tried on the scene's own text first, so the tree never
+  offers something `-S` would refuse. Rows and the detail header use the same
+  names; the path is only in tooltips. The picker is generic — it returns a
+  `Param` and the caller decides what choosing means — and is there for any
+  other "point at a value in this scene" need.
+- **Values are clamped to what the scene can take** (`params::range_of`): a
+  spline overshoots and a cycle swings past zero, and the loader refuses a
+  negative xaos multiplier, share or subscene scale and draws nonsense from a
+  negative weight or point size. What still can't be used (a step key naming a
+  mode that doesn't exist) **holds the last good frame** and is reported **once
+  per stretch, naming the track** — the value changes every frame, so a message
+  carrying it was a new message, and a new log line, every frame. Offline
+  renders do the same, on stderr.
+
+Select a row, then edit it in the column on the right; drag a diamond to retime its key (the ruler holds still
 while you do — it pages by the playhead and its length follows the last key,
 and the two fed back into the drag); "Key at playhead" adds a key holding the
 curve's value there; a new track on any `-S` path starts with one key at the
@@ -2867,9 +2898,9 @@ its estimate charges a refill per frame when the attractor moves.
 
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
 keying from the inspector (and with it the auto-key question, which is
-Hazel's), zooming the ruler, the curve editor proper, views as camera keys (Hazel's decision),
+Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper, views as camera keys (Hazel's decision),
 moving `[[camera.path]]` into `[[track]]` form (a migration commit for
-Hazel), walkers carried between frames instead of a refill, motion blur, an
+Hazel; `TIMELINE-PLAN.md` works through what it would carry), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 
 ## Two machines, one repo: how to not make a mess

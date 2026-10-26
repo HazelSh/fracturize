@@ -492,7 +492,7 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// The path's transport and shape controls, pinned below the keypoint list.
-fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, authored: bool) {
+pub(super) fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, authored: bool) {
     // One key of your own isn't a path yet, and the list above doesn't show the
     // orbit that's actually flying — so say which is which.
     if authored && flying_default {

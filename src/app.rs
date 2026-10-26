@@ -849,6 +849,11 @@ pub struct App {
     scene_generation: u64,
     /// Why the tracks aren't playing, when a track won't apply.
     track_error: Option<String>,
+    /// The track whose value the scene can't use at the playhead, while that
+    /// lasts: what makes the error once per stretch rather than per frame.
+    track_invalid: Option<String>,
+    /// `param_catalogue`'s cache, keyed like the live animator.
+    param_cache: Option<((Option<u64>, u64), std::rc::Rc<Vec<crate::params::Param>>)>,
     pub point_size: f32,
 
     /// Persistent user preferences (I toggles pitch inversion)
@@ -1450,6 +1455,8 @@ impl App {
             anim_view: AnimView::default(),
             scene_generation: 0,
             track_error: None,
+            track_invalid: None,
+            param_cache: None,
             camera,
             point_size,
             prefs,
@@ -1880,7 +1887,7 @@ impl App {
     /// the camera back by hand — which is exactly when the route matters,
     /// because that's when you're positioning against it.
     pub fn visible_path(&self) -> Option<&CameraPath> {
-        if self.camera_follows {
+        if self.camera_moving() {
             return None;
         }
         let path = self.camera_path();
@@ -1889,7 +1896,37 @@ impl App {
 
     /// Is the camera flying the path right now?
     pub fn camera_moving(&self) -> bool {
+        self.camera_follows && self.playing
+    }
+
+    /// Whether the camera is attached to the timeline: following its path on
+    /// the clock, whether or not the clock is running. Detached, the camera is
+    /// yours — playing and scrubbing leave it where you put it.
+    pub fn camera_attached(&self) -> bool {
         self.camera_follows
+    }
+
+    /// Attach the camera to the timeline or detach it (the Timeline's camera
+    /// row). Not an edit: how you are watching, like orbiting. Attaching the
+    /// default orbit starts it from where the camera is now, as playing does.
+    pub fn set_camera_attached(&mut self, attached: bool) {
+        if attached == self.camera_follows {
+            return;
+        }
+        if attached {
+            if !self.camera_path().playable() {
+                return;
+            }
+            if self.path_is_default() {
+                self.invalidate_default_path();
+                self.refresh_default_path();
+                self.camera_epoch = self.time;
+            }
+            self.camera_lap =
+                ((self.time - self.camera_epoch) / self.camera_path().duration() as f64).floor() as i64;
+        }
+        self.camera_follows = attached;
+        log::info!("Camera: {}", if attached { "attached to the timeline" } else { "detached" });
     }
 
     /// Take the camera off the path, because the framing is being set by hand.
@@ -1936,7 +1973,7 @@ impl App {
     /// Start / stop the camera flying the path (O, Z, and the toolbar's
     /// transport button). The one motion control there is.
     pub fn toggle_camera_motion(&mut self) {
-        if self.camera_follows {
+        if self.camera_moving() {
             self.camera_follows = false;
             self.playing = false;
             log::info!("Camera: stopped");
@@ -7285,7 +7322,11 @@ impl App {
                 } else {
                     self.time = end;
                     self.playing = false;
-                    self.camera_follows = false;
+                    // A scene without tracks is the old camera-only transport,
+                    // where finishing the path let go of the camera.
+                    if self.scene.tracks.is_empty() {
+                        self.camera_follows = false;
+                    }
                     log::info!("Timeline: finished");
                 }
             }
@@ -7356,22 +7397,26 @@ impl App {
     /// where the scene's own path has it at that moment; the default orbit has
     /// no moments to go to, so a free camera stays put.
     pub fn scrub_to(&mut self, t: f64) {
+        // Only the clock moves. An attached camera follows it on the next
+        // update, as it does when playing; a detached one stays put.
         self.time = t.max(0.0);
-        if !self.path_is_default() {
-            let p = self.camera_path();
-            let local = (self.time - self.camera_epoch) / p.duration() as f64;
-            let t = if p.wraps() { local.rem_euclid(1.0) } else { local.clamp(0.0, 1.0) } as f32;
-            self.camera = p.sample(t, self.camera.fov);
-            self.camera_lap = local.floor() as i64;
-            self.zoom_level = 0;
-            self.zoom_turns = self.zoom_turns_base;
-        }
     }
 
-    /// Play or pause the timeline. The same transport as O: playing puts the
-    /// camera back on its path.
+    /// Play or pause the timeline's clock (the Timeline's own button). Unlike
+    /// O, which flies the camera, this leaves the camera as attached or
+    /// detached as it is.
     pub fn toggle_playback(&mut self) {
-        self.toggle_camera_motion();
+        if self.playing {
+            self.playing = false;
+            return;
+        }
+        if self.timeline_end().is_some_and(|end| self.time >= end - 1e-6) {
+            self.time = 0.0;
+            if !self.path_is_default() {
+                self.camera_epoch = 0.0;
+            }
+        }
+        self.playing = true;
     }
 
     /// Mute or unmute one track (the Timeline window). An edit: it changes
@@ -7413,15 +7458,19 @@ impl App {
     /// Start a keyed track on an `-S` path, with one key at the playhead
     /// holding the value the scene has there now — so adding a track changes
     /// nothing on screen until a second key says otherwise. Returns its index.
-    pub fn add_track(&mut self, target: &str) -> Result<usize, String> {
+    pub fn add_track(&mut self, target: &str, start: Option<toml::Value>) -> Result<usize, String> {
         let target = target.trim();
         if let Some(i) = self.scene.tracks.iter().position(|t| t.target == target) {
             return Err(format!("{target} already has a track (row {})", i + 1));
         }
-        let value = crate::track::authored_value(&self.scene_with_live_values(), target)?
-            .ok_or_else(|| {
+        // The caller may know the value already (the parameter picker does,
+        // including for things the file leaves out, like an unused variation).
+        let value = match start {
+            Some(v) => v,
+            None => crate::track::authored_value(&self.scene_with_live_values(), target)?.ok_or_else(|| {
                 format!("this scene doesn't write {target} down yet; set it once, then add the track")
-            })?;
+            })?,
+        };
         let track = crate::track::one_key(target, self.time, value)?;
         let before = self.edit_snapshot();
         self.scene.tracks.push(track);
@@ -7515,9 +7564,29 @@ impl App {
         self.commit_edit(format!("Track: {target}"), Some(&format!("timeline:source:{i}")), before);
     }
 
+    /// Every parameter of the scene a person might animate (`params::catalogue`),
+    /// built once per document state: it tries each path on the scene's text,
+    /// which is too much to redo every frame a menu is open.
+    pub fn param_catalogue(&mut self) -> std::rc::Rc<Vec<crate::params::Param>> {
+        let key = (self.history.top_serial(), self.scene_generation);
+        if let Some((k, cat)) = &self.param_cache {
+            if *k == key {
+                return cat.clone();
+            }
+        }
+        let cat = std::rc::Rc::new(crate::params::catalogue(&self.scene_with_live_values()));
+        self.param_cache = Some((key, cat.clone()));
+        cat
+    }
+
     /// Why the scene's tracks aren't playing, when they aren't.
     pub fn track_error(&self) -> Option<&str> {
         self.track_error.as_deref()
+    }
+
+    /// The track that has taken a value the scene can't use at the playhead.
+    pub fn track_invalid(&self) -> Option<&str> {
+        self.track_invalid.as_deref()
     }
 
     /// Put the scene at the playhead on screen.
@@ -7599,12 +7668,30 @@ impl App {
         let vt = a.view_targets;
         let class = animator.class();
         let frame = match animator.at(self.time) {
-            Ok(f) => f,
-            Err(e) => {
-                if self.track_error.as_deref() != Some(e.as_str()) {
-                    self.set_notice(format!("Tracks: {e}"), true);
+            Ok(f) => {
+                if self.track_invalid.take().is_some() {
+                    log::info!("Tracks: valid again at {:.2}s", self.time);
                 }
-                self.track_error = Some(e);
+                f
+            }
+            Err(e) => {
+                // Said once per stretch of invalid frames, naming the track
+                // rather than the value: the value is new every frame, so a
+                // message carrying it was a new message every frame. The last
+                // frame that worked stays on screen meanwhile.
+                // Named once, at the start of the stretch: finding the culprit
+                // parses the scene once per track, which is not a per-frame cost.
+                if self.track_invalid.is_some() {
+                    return;
+                }
+                let who = animator.culprit(self.time).unwrap_or_else(|| "a track".to_string());
+                if self.track_invalid.as_deref() != Some(who.as_str()) {
+                    self.set_notice(
+                        format!("Track '{who}' has taken a value the scene can't use; holding the last frame that worked ({e})"),
+                        true,
+                    );
+                    self.track_invalid = Some(who);
+                }
                 return;
             }
         };

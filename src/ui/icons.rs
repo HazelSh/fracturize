@@ -157,3 +157,9 @@ pub const CHATS: &str = "\u{E17C}";
 pub const FILM_STRIP: &str = "\u{E792}";
 /// Timeline: loop playback (Phosphor "repeat")
 pub const REPEAT: &str = "\u{E3F6}";
+/// Timeline: the camera is attached to the timeline (Phosphor "link")...
+pub const ATTACHED: &str = LINK;
+/// ...or detached from it (Phosphor "link-break")
+pub const DETACHED: &str = "\u{E2E4}";
+/// The parameter picker's search field (Phosphor "magnifying-glass")
+pub const SEARCH: &str = "\u{E30C}";
