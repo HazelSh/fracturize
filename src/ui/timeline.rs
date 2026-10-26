@@ -2,28 +2,40 @@
 //! every `[[track]]` share, drawn wide and low.
 //!
 //! A ruler in seconds with the playhead on it; under it a row for the camera
-//! and a row per track. Drag anywhere along the ruler or the rows to scrub.
-//! Each track's row draws its keys as diamonds and its value as a faint curve
-//! behind them, scaled to the row — the curve view the plan asks for, small.
-//! The eye mutes a track (an edit: it is in the file); right-click a row for
-//! its menu.
+//! and a row per track. Drag along the ruler or an empty stretch of a row to
+//! scrub. Each track's row draws its keys as diamonds and its value as a faint
+//! curve behind them, scaled to the row — the curve view the plan asks for,
+//! small. Click a row to select its track, a diamond to select its key; drag a
+//! diamond to retime it. The eye mutes a track; right-click a row for its menu.
 //!
-//! What it doesn't do yet, on purpose, so the model under it could settle
-//! first: add, drag or retime keys (tracks are authored in the scene file, or
-//! by an agent with `--time-grid` to look at them), and zoom the ruler — it
-//! always shows one timeline's length, paging along when the playhead runs
-//! past it.
+//! The column on the right edits what is selected: a keyed track's
+//! interpolation and extrapolation, the selected key's time and value, "key at
+//! the playhead", a cycle's or a rate's numbers — and, at its foot, a new track
+//! from any `-S` path, starting with one key at the playhead holding the
+//! scene's value there, so adding one changes nothing until it is keyed again.
+//! Every one of those is an ordinary undoable edit; scrubbing isn't.
+//!
+//! **No auto-key.** Editing a tracked value in the inspector edits the scene's
+//! own value — which a rate or cycle moves about, and which keys override.
+//! Whether an inspector edit should instead key the playhead is Hazel's call
+//! (FEATURE-PLANS item 10), so key values are edited here.
+//!
+//! Not yet: zooming the ruler — it always shows one timeline's length, paging
+//! along when the playhead runs past it.
 //!
 //! The playhead moves because time moves, which is content, not chrome; the
 //! zero-animation rule still holds for everything else here.
 
 use crate::app::App;
-use crate::track::{KeyValue, Source, Track};
+use crate::track::{Extrapolate, Interp, KeyValue, Source, Track, Wave};
 
 use super::hints::hinted;
 use super::{icons, num};
 
 const LABEL_W: f32 = 220.0;
+const DETAIL_W: f32 = 300.0;
+/// How close, in points, a press has to land to a diamond to take it.
+const KEY_GRAB: f32 = 7.0;
 const RULER_H: f32 = 18.0;
 const ROW_H: f32 = 22.0;
 
@@ -37,8 +49,26 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .show(ctx, |ui| {
             draw_transport(ui, app);
             ui.separator();
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                draw_lanes(ui, app);
+            // Selection can go stale under it: undo takes a track away.
+            let ui_state = &mut app.ui_state;
+            if ui_state.timeline_track.is_some_and(|i| i >= app.scene.tracks.len()) {
+                ui_state.timeline_track = None;
+            }
+            let h = ui.available_height();
+            let lanes_w = (ui.available_width() - DETAIL_W - 12.0).max(200.0);
+            ui.horizontal_top(|ui| {
+                let down = egui::Layout::top_down(egui::Align::Min);
+                ui.allocate_ui_with_layout(egui::vec2(lanes_w, h), down, |ui| {
+                    egui::ScrollArea::vertical().id_salt("timeline_lanes").auto_shrink([false, false]).show(ui, |ui| {
+                        draw_lanes(ui, app);
+                    });
+                });
+                ui.separator();
+                ui.allocate_ui_with_layout(egui::vec2(DETAIL_W, h), down, |ui| {
+                    egui::ScrollArea::vertical().id_salt("timeline_detail").auto_shrink([false, false]).show(ui, |ui| {
+                        draw_detail(ui, app);
+                    });
+                });
             });
         });
     super::remember(ctx, app, super::WindowKey::Timeline);
@@ -124,7 +154,14 @@ fn visible_span(app: &App) -> (f64, f64) {
 }
 
 fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
-    let (t0, t1) = visible_span(app);
+    // Frozen while a key is dragged: the timeline's length follows its last
+    // key, and the ruler pages by the playhead, so a ruler that rescaled under
+    // the drag fed the key's own motion back into where the pointer maps to —
+    // a key dragged left past the playhead jumped right.
+    let (t0, t1) = match (app.ui_state.timeline_drag_key, app.ui_state.timeline_span) {
+        (Some(_), Some(span)) => span,
+        _ => visible_span(app),
+    };
     let full_w = ui.available_width();
     let lane_w = (full_w - LABEL_W).max(60.0);
     let row_count = 1 + app.scene.tracks.len();
@@ -176,10 +213,15 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         if pointer.is_some_and(|p| row_rect.contains(p)) {
             hovered_row = Some(row);
         }
+        let selected = row > 0 && app.ui_state.timeline_track == Some(row - 1);
+        if selected {
+            painter.rect_filled(row_rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.35));
+        }
         if row == 0 {
             draw_camera_row(&painter, app, row_rect, lane_row, &x_of, &visuals);
         } else {
-            draw_track_row(&painter, &app.scene.tracks[row - 1], row_rect, lane_row, (t0, t1), &x_of, &visuals);
+            let key = if selected { app.ui_state.timeline_key } else { None };
+            draw_track_row(&painter, &app.scene.tracks[row - 1], row_rect, lane_row, (t0, t1), &x_of, &visuals, key);
         }
     }
 
@@ -190,16 +232,62 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         egui::Stroke::new(1.5, visuals.selection.stroke.color),
     );
 
-    // Scrubbing: a press or a drag on the lanes moves the playhead; the label
-    // column is for the rows' own controls.
-    if let Some(p) = resp.interact_pointer_pos() {
-        if (resp.dragged() || resp.clicked()) && p.x >= lane.left() {
-            app.scrub_to(t_of(p.x));
+    // A press picks what the drag will do: take the diamond under it (and
+    // select its track and key), or, anywhere else on the lanes, scrub. On a
+    // track's row it selects that track either way, and in the label column it
+    // only selects.
+    let row_at = |y: f32| -> Option<usize> {
+        let r = ((y - rect.top() - RULER_H) / ROW_H).floor();
+        (r >= 0.0 && (r as usize) < row_count).then_some(r as usize)
+    };
+    if resp.drag_started() || resp.clicked() {
+        // Where the press *began*: by the time egui calls it a drag the
+        // pointer is already past its threshold, and a diamond is smaller.
+        let origin = ui.input(|i| i.pointer.press_origin());
+        if let Some(p) = origin.or(resp.interact_pointer_pos()) {
+            app.ui_state.timeline_drag_key = None;
+            if let Some(r) = row_at(p.y).filter(|&r| r > 0) {
+                let i = r - 1;
+                if app.ui_state.timeline_track != Some(i) {
+                    app.ui_state.timeline_key = None;
+                }
+                app.ui_state.timeline_track = Some(i);
+                if let Source::Keys { keys, .. } = &app.scene.tracks[i].source {
+                    let hit = keys
+                        .iter()
+                        .enumerate()
+                        .map(|(k, key)| (k, (x_of(key.t) - p.x).abs()))
+                        .filter(|&(_, d)| d <= KEY_GRAB)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(k, _)| k);
+                    if hit.is_some() {
+                        app.ui_state.timeline_key = hit;
+                        app.ui_state.timeline_drag_key = hit.map(|k| (i, k));
+                        app.ui_state.timeline_span = Some((t0, t1));
+                    }
+                }
+            }
         }
+    }
+    if let Some(p) = resp.interact_pointer_pos() {
+        if resp.dragged() || resp.clicked() {
+            match app.ui_state.timeline_drag_key {
+                Some((i, k)) if resp.dragged() => app.set_key_time(i, k, t_of(p.x)),
+                Some(_) => {}
+                None if p.x >= lane.left() => app.scrub_to(t_of(p.x)),
+                None => {}
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        app.ui_state.timeline_drag_key = None;
     }
     let row_hint = match hovered_row {
         Some(0) => "the camera's path on the timeline · drag: scrub".to_string(),
-        Some(r) => format!("{} · drag: scrub · right-click: menu", app.scene.tracks[r - 1].target),
+        Some(r) => format!(
+            "{} · click: select · drag a diamond: retime it · drag elsewhere: scrub · right-click: menu",
+            app.scene.tracks[r - 1].target
+        ),
         None => "drag: scrub the playhead".to_string(),
     };
     let tooltip = match hovered_row {
@@ -355,6 +443,7 @@ fn draw_track_row(
     (t0, t1): (f64, f64),
     x_of: &dyn Fn(f64) -> f32,
     visuals: &egui::Visuals,
+    selected_key: Option<usize>,
 ) {
     let text = if track.mute { visuals.weak_text_color() } else { visuals.text_color() };
     // The target, shortened from the left: the end of a path is the part that
@@ -397,10 +486,14 @@ fn draw_track_row(
         painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, colour.gamma_multiply(0.45))));
     }
     if let Source::Keys { keys, .. } = &track.source {
-        for k in keys {
+        for (i, k) in keys.iter().enumerate() {
             let x = x_of(k.t);
             if x >= lane.left() - 1.0 && x <= lane.right() + 1.0 {
-                diamond(painter, egui::pos2(x, lane.center().y), colour);
+                let c = egui::pos2(x, lane.center().y);
+                if selected_key == Some(i) {
+                    painter.circle_stroke(c, 7.0, egui::Stroke::new(1.5, visuals.selection.stroke.color));
+                }
+                diamond(painter, c, colour);
             }
         }
     }
@@ -494,4 +587,242 @@ fn track_description(t: &Track) -> String {
         cost,
         if t.mute { "\nMuted." } else { "" }
     )
+}
+
+
+/// The selected track's settings, and the new-track field at the foot.
+fn draw_detail(ui: &mut egui::Ui, app: &mut App) {
+    match app.ui_state.timeline_track {
+        Some(i) => draw_track_detail(ui, app, i),
+        None => {
+            ui.label(
+                egui::RichText::new(
+                    "Click a track's row to edit it, or a diamond to edit that key.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+    }
+    ui.add_space(6.0);
+    ui.separator();
+    draw_new_track(ui, app);
+}
+
+fn draw_track_detail(ui: &mut egui::Ui, app: &mut App, i: usize) {
+    let track = app.scene.tracks[i].clone();
+    ui.label(egui::RichText::new(&track.target).monospace().strong());
+    let mut source = track.source.clone();
+    match &mut source {
+        Source::Keys { keys, interpolate, extrapolate, .. } => {
+            let keys = keys.clone();
+            let numeric = keys.iter().all(|k| matches!(k.value, KeyValue::Number(_)));
+            ui.horizontal_wrapped(|ui| {
+                let mut r = super::radio::radio(&mut app.ui_state, "track_interp", *interpolate);
+                for (v, text, tip) in [
+                    (Interp::Step, "step", "Hold each key's value until the next key"),
+                    (Interp::Linear, "linear", "A straight line from key to key"),
+                    (Interp::Smooth, "smooth", "Ease out of every key and into the next: still at each key"),
+                    (Interp::Spline, "spline", "A smooth curve through every key that doesn't stop at them"),
+                ] {
+                    let ok = numeric || v == Interp::Step;
+                    r = r.option_enabled(
+                        ok,
+                        v,
+                        text,
+                        if ok { tip.to_string() } else { format!("{tip}. These keys aren't numbers, so they can only step.") },
+                        "click: how the value runs between keys",
+                    );
+                }
+                if let Some(v) = r.show(ui) {
+                    *interpolate = v;
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                let mut r = super::radio::radio(&mut app.ui_state, "track_extrap", *extrapolate);
+                for (v, text, tip) in [
+                    (Extrapolate::Hold, "hold", "Hold the first and last values before and after the keys"),
+                    (Extrapolate::Repeat, "repeat", "Play the keys again from the first, forever"),
+                    (Extrapolate::PingPong, "ping-pong", "Forwards, then backwards, forever"),
+                    (Extrapolate::Offset, "offset", "Repeat, each lap starting where the last ended: a value that keeps climbing"),
+                ] {
+                    let ok = numeric || v != Extrapolate::Offset;
+                    r = r.option_enabled(ok, v, text, tip, "click: what happens past the last key");
+                }
+                if let Some(v) = r.show(ui) {
+                    *extrapolate = v;
+                }
+            });
+            // Only the two radios are this arm's to set: the key buttons
+            // below edit the track's keys directly, and must not be undone by
+            // a stale copy of them.
+            let (ip, ex) = (*interpolate, *extrapolate);
+            if let Source::Keys { interpolate, extrapolate, .. } = &track.source {
+                if (*interpolate, *extrapolate) != (ip, ex) {
+                    let mut fresh = track.source.clone();
+                    if let Source::Keys { interpolate, extrapolate, .. } = &mut fresh {
+                        *interpolate = ip;
+                        *extrapolate = ex;
+                    }
+                    app.set_track_source(i, fresh);
+                }
+            }
+
+            // The selected key, or a hint to select one.
+            let key = app.ui_state.timeline_key.filter(|&k| k < keys.len());
+            ui.horizontal(|ui| {
+                let resp = ui.button((icons::PLUS, "Key at playhead"));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Add a key at the playhead with the value the track has there, so the \
+                     curve doesn't change; then set its value below",
+                    "click: add a key at the playhead",
+                );
+                if resp.clicked() {
+                    if let Some(k) = app.add_key_at_playhead(i) {
+                        app.ui_state.timeline_key = Some(k);
+                    }
+                }
+                let resp = ui.add_enabled(key.is_some(), egui::Button::new((icons::TRASH, "Delete key")));
+                let resp = hinted(
+                    resp,
+                    &mut app.ui_state,
+                    if key.is_some() {
+                        "Delete the selected key (the last one takes the track with it). Ctrl+Z \
+                         brings it back."
+                    } else {
+                        "Select a key first: click its diamond"
+                    },
+                    "click: delete the selected key",
+                );
+                if resp.clicked() {
+                    if let Some(k) = key {
+                        app.delete_key(i, k);
+                        app.ui_state.timeline_key = None;
+                    }
+                }
+            });
+            if let Some(k) = key {
+                let (mut t, value) = (keys[k].t, keys[k].value.clone());
+                ui.horizontal(|ui| {
+                    ui.label("key at");
+                    let resp = ui.add(num::Drag::new(&mut t).speed(0.02).range(0.0..=3600.0).fixed_decimals(2).suffix(" s"));
+                    let resp = hinted(resp, &mut app.ui_state, "When this key is, in seconds", "drag: retime this key · click: type a time");
+                    if resp.changed() {
+                        app.set_key_time(i, k, t);
+                    }
+                    match value {
+                        KeyValue::Number(mut v) => {
+                            ui.label("value");
+                            let resp = ui.add(num::Drag::new(&mut v).speed(0.01).max_decimals(4));
+                            let resp = hinted(resp, &mut app.ui_state, "The value at this key", "drag: change the key's value · click: type one");
+                            if resp.changed() {
+                                app.set_key_value(i, k, v);
+                            }
+                        }
+                        KeyValue::Other(v) => {
+                            let resp = ui.label(egui::RichText::new(format!("= {v}")).monospace());
+                            hinted(
+                                resp,
+                                &mut app.ui_state,
+                                "Strings and booleans step from key to key; change them in the scene file",
+                                "a step key's value",
+                            );
+                        }
+                    }
+                });
+            }
+        }
+        Source::Rate { rate, .. } => {
+            ui.horizontal(|ui| {
+                ui.label("rate");
+                let resp = ui.add(num::Drag::new(rate).speed(0.005).max_decimals(4).suffix(" /s"));
+                hinted(resp, &mut app.ui_state, "How much the value changes a second, from the scene's own value", "drag: the rate");
+            });
+            app.set_track_source(i, source.clone());
+        }
+        Source::Cycle { wave, period, amplitude, phase, .. } => {
+            ui.horizontal_wrapped(|ui| {
+                let mut r = super::radio::radio(&mut app.ui_state, "track_wave", *wave);
+                for (v, tip) in [
+                    (Wave::Sine, "A smooth swing either side"),
+                    (Wave::Triangle, "Straight up, straight down"),
+                    (Wave::Saw, "Rises steadily, then drops back at once"),
+                    (Wave::Square, "Jumps between the two ends"),
+                ] {
+                    r = r.option(v, v.as_str(), tip, "click: the wave's shape");
+                }
+                if let Some(v) = r.show(ui) {
+                    *wave = v;
+                }
+            });
+            egui::Grid::new("track_cycle").num_columns(2).show(ui, |ui| {
+                ui.label("period");
+                let resp = ui.add(num::Drag::new(period).speed(0.05).range(0.05..=3600.0).fixed_decimals(2).suffix(" s"));
+                hinted(resp, &mut app.ui_state, "Seconds for one whole swing", "drag: the period");
+                ui.end_row();
+                ui.label("amplitude");
+                let resp = ui.add(num::Drag::new(amplitude).speed(0.01).max_decimals(4));
+                hinted(resp, &mut app.ui_state, "How far it swings either side of the scene's own value", "drag: the amplitude");
+                ui.end_row();
+                ui.label("phase");
+                let resp = ui.add(num::Drag::new(phase).speed(0.005).range(0.0..=1.0).fixed_decimals(3));
+                hinted(resp, &mut app.ui_state, "Where in its swing it starts, in periods (0.25 is a quarter of the way)", "drag: the phase");
+                ui.end_row();
+            });
+            app.set_track_source(i, source.clone());
+        }
+    }
+}
+
+fn draw_new_track(ui: &mut egui::Ui, app: &mut App) {
+    ui.label(egui::RichText::new("New track").small().strong());
+    let mut text = std::mem::take(&mut app.ui_state.timeline_new_target);
+    let mut add = false;
+    ui.horizontal(|ui| {
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .hint_text("transform.<name>.weight")
+                .desired_width(DETAIL_W - 70.0)
+                .font(egui::TextStyle::Monospace),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Any path -S takes: meta.haze, palette.rotate, transform.<name>.rotation.y, \
+             transform.<name>.variations.swirl, transform.<a>.xaos.<b>, \
+             subscene.<name>.share. Not camera.*: the camera's path is its track.",
+            "type an -S path, then Enter or Add",
+        );
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            add = true;
+        }
+        let resp = ui.add_enabled(!text.trim().is_empty(), egui::Button::new((icons::PLUS, "Add")));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Start a keyed track on this path, with one key at the playhead holding the \
+             scene's value there",
+            "click: add the track",
+        );
+        if resp.clicked() {
+            add = true;
+        }
+    });
+    if add && !text.trim().is_empty() {
+        match app.add_track(&text) {
+            Ok(i) => {
+                app.ui_state.timeline_track = Some(i);
+                app.ui_state.timeline_key = Some(0);
+                app.ui_state.timeline_new_error = None;
+                text.clear();
+            }
+            Err(e) => app.ui_state.timeline_new_error = Some(e),
+        }
+    }
+    app.ui_state.timeline_new_target = text;
+    if let Some(e) = &app.ui_state.timeline_new_error {
+        ui.label(egui::RichText::new(e).small().color(ui.visuals().warn_fg_color));
+    }
 }

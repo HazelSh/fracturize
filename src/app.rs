@@ -7397,6 +7397,124 @@ impl App {
         self.commit_edit(format!("Delete track: {}", gone.target), None, before);
     }
 
+    /// The scene as the window holds it, with the values it keeps live on
+    /// `App` folded in: what a rate or cycle moves about, and what a new
+    /// track's first key starts from.
+    fn scene_with_live_values(&self) -> Scene {
+        let mut base = self.scene.clone();
+        base.point_size = self.point_size;
+        base.haze = self.haze_amount;
+        base.exposure = self.exposure;
+        base.color_contrast = self.color_contrast;
+        base.color_falloff = self.color_falloff;
+        base
+    }
+
+    /// Start a keyed track on an `-S` path, with one key at the playhead
+    /// holding the value the scene has there now — so adding a track changes
+    /// nothing on screen until a second key says otherwise. Returns its index.
+    pub fn add_track(&mut self, target: &str) -> Result<usize, String> {
+        let target = target.trim();
+        if let Some(i) = self.scene.tracks.iter().position(|t| t.target == target) {
+            return Err(format!("{target} already has a track (row {})", i + 1));
+        }
+        let value = crate::track::authored_value(&self.scene_with_live_values(), target)?
+            .ok_or_else(|| {
+                format!("this scene doesn't write {target} down yet; set it once, then add the track")
+            })?;
+        let track = crate::track::one_key(target, self.time, value)?;
+        let before = self.edit_snapshot();
+        self.scene.tracks.push(track);
+        self.commit_edit(format!("Add track: {target}"), None, before);
+        Ok(self.scene.tracks.len() - 1)
+    }
+
+    /// Key track `i` at the playhead with the value it has there, so the curve
+    /// is unchanged and the new key is ready to be moved. Returns the key's
+    /// index, or `None` for a track that isn't keyed (or already has a key at
+    /// this moment).
+    pub fn add_key_at_playhead(&mut self, i: usize) -> Option<usize> {
+        let t = self.time;
+        let track = self.scene.tracks.get(i)?;
+        let crate::track::Source::Keys { keys, .. } = &track.source else { return None };
+        if keys.iter().any(|k| (k.t - t).abs() < 1e-3) {
+            return keys.iter().position(|k| (k.t - t).abs() < 1e-3);
+        }
+        let value = track.sample(t, None);
+        let before = self.edit_snapshot();
+        let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source else { return None };
+        let at = keys.partition_point(|k| k.t < t);
+        keys.insert(at, crate::track::Key { t, value });
+        let target = self.scene.tracks[i].target.clone();
+        self.commit_edit(format!("Key {target} at {t:.2}s"), None, before);
+        Some(at)
+    }
+
+    /// Move key `k` of track `i` in time, keeping it strictly between its
+    /// neighbours (keys are in time order, and two at one moment would make
+    /// the curve jump). A drag is one history entry.
+    pub fn set_key_time(&mut self, i: usize, k: usize, t: f64) {
+        let Some(crate::track::Source::Keys { keys, .. }) = self.scene.tracks.get(i).map(|t| &t.source) else { return };
+        let Some(key) = keys.get(k) else { return };
+        let lo = if k > 0 { keys[k - 1].t + 0.01 } else { f64::MIN };
+        let hi = keys.get(k + 1).map_or(f64::MAX, |n| n.t - 0.01);
+        let t = t.max(0.0).clamp(lo.min(hi), hi.max(lo));
+        if (key.t - t).abs() < 1e-9 {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source {
+            keys[k].t = t;
+        }
+        self.commit_edit("Move key", Some(&format!("timeline:key-time:{i}:{k}")), before);
+    }
+
+    /// Set the value of key `k` of track `i` (numbers only; a step key's value
+    /// is edited in the file).
+    pub fn set_key_value(&mut self, i: usize, k: usize, v: f64) {
+        let Some(crate::track::Source::Keys { keys, integral, .. }) = self.scene.tracks.get(i).map(|t| &t.source) else { return };
+        let v = if *integral { v.round() } else { v };
+        if !matches!(keys.get(k).map(|k| &k.value), Some(crate::track::KeyValue::Number(x)) if *x != v) {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source {
+            keys[k].value = crate::track::KeyValue::Number(v);
+        }
+        self.commit_edit("Key value", Some(&format!("timeline:key-value:{i}:{k}")), before);
+    }
+
+    /// Delete key `k` of track `i`. The last key takes the track with it,
+    /// since a track with no keys has nothing to say.
+    pub fn delete_key(&mut self, i: usize, k: usize) {
+        let Some(crate::track::Source::Keys { keys, .. }) = self.scene.tracks.get(i).map(|t| &t.source) else { return };
+        if k >= keys.len() {
+            return;
+        }
+        if keys.len() == 1 {
+            self.delete_track(i);
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source {
+            keys.remove(k);
+        }
+        self.commit_edit("Delete key", None, before);
+    }
+
+    /// Replace track `i`'s source: its interpolation, extrapolation, or a
+    /// cycle's or rate's numbers (the Timeline's detail column). Coalesced per
+    /// track, so dragging a period is one step.
+    pub fn set_track_source(&mut self, i: usize, source: crate::track::Source) {
+        if self.scene.tracks.get(i).is_none_or(|t| t.source == source) {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.tracks[i].source = source;
+        let target = self.scene.tracks[i].target.clone();
+        self.commit_edit(format!("Track: {target}"), Some(&format!("timeline:source:{i}")), before);
+    }
+
     /// Why the scene's tracks aren't playing, when they aren't.
     pub fn track_error(&self) -> Option<&str> {
         self.track_error.as_deref()
@@ -7433,12 +7551,7 @@ impl App {
             let had_frame = self.live_anim.as_ref().is_some_and(|a| a.animator.is_some());
             // Built from the scene as the window holds it: the live values
             // folded in, so a rate or a cycle moves about what is on screen.
-            let mut base = self.scene.clone();
-            base.point_size = self.point_size;
-            base.haze = self.haze_amount;
-            base.exposure = self.exposure;
-            base.color_contrast = self.color_contrast;
-            base.color_falloff = self.color_falloff;
+            let base = self.scene_with_live_values();
             let animator = match crate::track::Animator::for_scene(&base) {
                 Ok(a) => {
                     // Skipped tracks play no part, and say so in the Timeline.

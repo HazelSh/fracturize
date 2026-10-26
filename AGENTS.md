@@ -709,7 +709,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
-| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row, a row per track with its keys and a faint value curve; eye to mute, right-click to delete. See "Tracks and the timeline" |
+| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row, a row per track with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selected track — interpolation, extrapolation, key at playhead, the key's time and value, a cycle's or rate's numbers — and adds a track on any `-S` path. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -2852,15 +2852,22 @@ Things it rests on, each found the hard way:
   whether it loops.
 
 **In the app**: the Timeline window (toolbar, film strip). The O/Z/Space
-transport plays camera and tracks together. Mute and delete are undoable
-edits; scrubbing is view state, like orbiting. A Render job still renders the
+transport plays camera and tracks together. Select a row, then edit it in the
+column on the right; drag a diamond to retime its key (the ruler holds still
+while you do — it pages by the playhead and its length follows the last key,
+and the two fed back into the drag); "Key at playhead" adds a key holding the
+curve's value there; a new track on any `-S` path starts with one key at the
+playhead holding the scene's value, so it changes nothing until keyed again.
+All of those, and mute and delete, are undoable edits; scrubbing is view
+state, like orbiting. **No auto-key**: editing a tracked value in the
+inspector edits the scene's own value, which a rate or cycle moves about and
+keys override — key values are edited in the Timeline. A Render job still renders the
 frame at the playhead; an animation's length defaults to the timeline's, and
 its estimate charges a refill per frame when the attractor moves.
 
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
-authoring keys in the GUI (add at playhead, drag to retime, the inspector's
-key buttons — and with it the auto-key question, which is Hazel's), zooming
-the ruler, the curve editor proper, views as camera keys (Hazel's decision),
+keying from the inspector (and with it the auto-key question, which is
+Hazel's), zooming the ruler, the curve editor proper, views as camera keys (Hazel's decision),
 moving `[[camera.path]]` into `[[track]]` form (a migration commit for
 Hazel), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.

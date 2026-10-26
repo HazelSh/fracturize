@@ -133,6 +133,16 @@ pub struct UiState {
     /// The toolbar ran out of room last frame, so its window toggles show
     /// icons without captions (`toolbar::draw`).
     pub toolbar_compact: bool,
+    /// The Timeline's selection: a track, one of its keys, and the key a drag
+    /// is moving (`ui::timeline`).
+    pub timeline_track: Option<usize>,
+    pub timeline_key: Option<usize>,
+    pub timeline_drag_key: Option<(usize, usize)>,
+    /// The ruler's span, held still while a key is dragged.
+    pub timeline_span: Option<(f64, f64)>,
+    /// The Timeline's new-track field, and why the last add was refused.
+    pub timeline_new_target: String,
+    pub timeline_new_error: Option<String>,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -216,6 +226,12 @@ impl UiState {
             xaos_edge_menu: None,
             timeline_menu_row: None,
             toolbar_compact: false,
+            timeline_track: None,
+            timeline_key: None,
+            timeline_drag_key: None,
+            timeline_span: None,
+            timeline_new_target: String::new(),
+            timeline_new_error: None,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),
@@ -336,7 +352,7 @@ impl WindowKey {
             // Four rows of controls above a grid of tiles big enough to judge.
             Self::Mutate => egui::vec2(360.0, 340.0),
             // The transport row, the ruler and the camera's row.
-            Self::Timeline => egui::vec2(420.0, 110.0),
+            Self::Timeline => egui::vec2(560.0, 140.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -403,7 +419,9 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         // and wants all the width there is.
         WindowKey::Timeline => {
             // Short of the right edge, where the corner axis cross lives.
-            let h = (screen.height() * 0.25).clamp(170.0, 320.0);
+            // Tall enough for the detail column's furniture: a track's
+            // settings, its key, and the new-track field under them.
+            let h = (screen.height() * 0.3).clamp(250.0, 360.0);
             (
                 egui::pos2(20.0, (screen.bottom() - h - 50.0).max(top)),
                 egui::vec2((screen.width() - 140.0).max(420.0), h),

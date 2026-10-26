@@ -739,6 +739,39 @@ pub fn rename_map(tracks: &mut [Track], old: &str, new: &str) {
     }
 }
 
+/// What `scene` says at `target` right now, as it would be saved: the value a
+/// new track's first key starts from. `None` when the scene doesn't write that
+/// key down. An error when the path doesn't resolve on this scene.
+pub fn authored_value(scene: &Scene, target: &str) -> Result<Option<toml::Value>, String> {
+    let text = scene.to_toml_string()?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|e| format!("scene is not valid TOML: {e}"))?;
+    let applied = crate::set::apply_to_doc(&mut doc, &format!("{target}=0.0"))
+        .map_err(|e| e.strip_prefix("--set ").unwrap_or(&e).to_string())?;
+    Ok(applied
+        .from
+        .and_then(|f| toml::from_str::<toml::Table>(&format!("v = {f}")).ok())
+        .and_then(|t| t.get("v").cloned()))
+}
+
+/// A new keyed track on `target` with one key, `value` at `t`: what the
+/// Timeline's "add" makes. Numbers interpolate smoothly, anything else steps.
+pub fn one_key(target: &str, t: f64, value: toml::Value) -> Result<Track, String> {
+    let integral = value.as_integer().is_some();
+    TrackDef {
+        target: target.to_string(),
+        keys: Some(vec![vec![toml::Value::Float(t), value]]),
+        ..Default::default()
+    }
+    .resolve()
+    .map(|mut track| {
+        if let Source::Keys { integral: i, .. } = &mut track.source {
+            *i = integral;
+        }
+        track
+    })
+}
+
 // ---------------------------------------------------------------- timeline
 
 /// How long a scene's tracks take to play out: the latest last key, else the

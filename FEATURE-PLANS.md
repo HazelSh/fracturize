@@ -394,8 +394,10 @@ only Y add keys?
 > **Status, 2026-10-26: a first cut.** Transport, ruler, playhead, scrub,
 > loop, a camera row (its keys at the moments it passes them), a row per
 > track (keys as diamonds coloured by class, the value as a faint curve),
-> mute and delete. Not yet: authoring keys, retiming, zooming the ruler, the
-> curve editor proper. The transport is a clock plus "is the camera
+> mute and delete; select a track to edit its source in a side column, key at
+> the playhead, drag keys to retime, type a key's value, add a track on any
+> `-S` path. Not yet: keying from the inspector (auto-key), zooming the
+> ruler, the curve editor proper. The transport is a clock plus "is the camera
 > following", so grabbing the camera leaves an animation playing.
 
 A floating window docked above the status bar, full width, about a fifth of
