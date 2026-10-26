@@ -2251,13 +2251,10 @@ impl Scene {
         };
         // Subscene colormaps are resolved here, from their own maps' colours.
         scene.regenerate_colormap();
-        // Every track's path has to resolve on *this* scene — a transform by
-        // that name, a key a rate can start from — and that is only knowable
-        // with the text in hand. Refused at load, like any other bad value.
-        if !scene.tracks.is_empty() {
-            let dir = path.parent().unwrap_or(Path::new("."));
-            crate::track::Animator::new(content, dir, &scene.tracks)?;
-        }
+        // A track whose path doesn't resolve on this scene is *not* refused
+        // here: edits reach one constantly, and a scene the app saved must
+        // open again. `track::Animator` skips it and says why — in --info's
+        // notes, on stderr from a render, and in the Timeline window.
         Ok(scene)
     }
 

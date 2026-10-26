@@ -717,6 +717,28 @@ pub fn resolve_all(defs: &[TrackDef]) -> Result<Vec<Track>, String> {
     Ok(tracks)
 }
 
+/// Point every track that names map `old` at `new` instead — what renaming a
+/// map has to do, or its tracks are left pointing at a name that is gone.
+/// Covers the map's own fields (`transform.old.weight`) and other maps' xaos
+/// toward it (`transform.x.xaos.old`).
+pub fn rename_map(tracks: &mut [Track], old: &str, new: &str) {
+    for t in tracks {
+        let mut segs: Vec<String> = t.target.split('.').map(str::to_string).collect();
+        if segs.first().map(String::as_str) != Some("transform") {
+            continue;
+        }
+        if segs.get(1).map(String::as_str) == Some(old) {
+            segs[1] = new.to_string();
+        }
+        if matches!(segs.get(2).map(String::as_str), Some("xaos" | "xaos_p"))
+            && segs.get(3).map(String::as_str) == Some(old)
+        {
+            segs[3] = new.to_string();
+        }
+        t.target = segs.join(".");
+    }
+}
+
 // ---------------------------------------------------------------- timeline
 
 /// How long a scene's tracks take to play out: the latest last key, else the
@@ -792,6 +814,9 @@ pub struct Animator {
     tracks: Vec<(Track, Option<f64>)>,
     /// Things worth telling the person, found while building this.
     pub warnings: Vec<String>,
+    /// Tracks that don't apply to this scene, each with why: kept in the
+    /// scene and skipped here. See [`Animator::new`].
+    pub broken: Vec<(String, String)>,
     /// The buffer size the scene was given, which is a render property and
     /// so not in the text a frame is parsed from (`--points`, an effort tier).
     point_count: Option<(usize, bool)>,
@@ -833,14 +858,27 @@ impl Animator {
         doc.remove("track");
         let mut kept = Vec::new();
         let mut warnings = Vec::new();
+        let mut broken = Vec::new();
         for track in tracks.iter().filter(|t| !t.mute) {
             // Applying the first value is the check that the path resolves on
             // *this* scene (a transform by that name exists, and so on), and
             // what it displaces is the authored value a rate or cycle moves
             // about.
+            //
+            // A path that doesn't resolve is *reported, never refused*, as an
+            // xaos dead end is: edits reach one constantly — delete the map a
+            // track moves and the track points at nothing — and a scene the
+            // app saved has to open again. So the track stays in the scene,
+            // is skipped here, and says why wherever tracks are shown.
             let probe = track.spec_at(0.0, Some(0.0));
-            let applied = crate::set::apply_to_doc(&mut doc.clone(), &probe)
-                .map_err(|e| format!("track '{}': {e}", track.target))?;
+            let applied = match crate::set::apply_to_doc(&mut doc.clone(), &probe) {
+                Ok(a) => a,
+                Err(e) => {
+                    let e = e.strip_prefix("--set ").unwrap_or(&e).to_string();
+                    broken.push((track.target.clone(), e));
+                    continue;
+                }
+            };
             let base = applied.from.as_deref().and_then(|s| s.trim().parse::<f64>().ok());
             let needs_base = match &track.source {
                 Source::Rate { from, .. } => from.is_none(),
@@ -848,15 +886,17 @@ impl Animator {
                 Source::Keys { .. } => false,
             };
             if needs_base && base.is_none() {
-                return Err(format!(
-                    "track '{}': this scene doesn't write {} down, so there is no authored \
-                     value for the {} to move about — write it into the scene, or give the \
-                     track `{}`",
-                    track.target,
-                    track.target,
-                    track.source.kind(),
-                    if matches!(track.source, Source::Rate { .. }) { "from" } else { "centre" },
+                broken.push((
+                    track.target.clone(),
+                    format!(
+                        "this scene doesn't write {} down, so there is no authored value for \
+                         the {} to move about — write it into the scene, or give the track `{}`",
+                        track.target,
+                        track.source.kind(),
+                        if matches!(track.source, Source::Rate { .. }) { "from" } else { "centre" },
+                    ),
                 ));
+                continue;
             }
             // One Euler angle is only meaningful against the triple it sits
             // in, and a saved scene respells a rotation on the branch with y
@@ -881,7 +921,10 @@ impl Animator {
             }
             kept.push((track.clone(), base));
         }
-        Ok(Self { doc, dir: dir.to_path_buf(), tracks: kept, warnings, point_count: None })
+        for (target, why) in &broken {
+            warnings.push(format!("track '{target}' doesn't apply, so it is skipped: {why}"));
+        }
+        Ok(Self { doc, dir: dir.to_path_buf(), tracks: kept, warnings, broken, point_count: None })
     }
 
     /// The `-S` specs that make the scene at `t`.
@@ -1175,26 +1218,47 @@ amplitude = 0.25
     }
 
     #[test]
-    fn an_animator_refuses_a_target_this_scene_doesnt_have() {
+    fn a_track_aimed_at_nothing_is_skipped_and_said_not_refused() {
         let mut s = scene();
         s.tracks.push(Track {
             target: "transform.nope.weight".into(),
             source: Source::Rate { rate: 1.0, from: Some(1.0) },
             mute: false,
         });
-        let e = Animator::for_scene(&s).err().expect("should refuse");
-        assert!(e.contains("nope"), "{e}");
+        // The scene still opens and the other tracks still play.
+        let anim = Animator::for_scene(&s).unwrap().unwrap();
+        assert_eq!(anim.tracks().count(), 2);
+        assert_eq!(anim.broken.len(), 1);
+        assert!(anim.warnings.iter().any(|w| w.contains("nope")), "{:?}", anim.warnings);
+        assert!(anim.at(1.0).is_ok());
+        // And a saved scene with one in it loads again.
+        let text = s.to_toml_string().unwrap();
+        assert!(Scene::from_toml_str(&text, &std::env::temp_dir()).is_ok());
     }
 
     #[test]
     fn a_rate_on_an_unwritten_key_needs_a_from() {
-        // Refused at load, where the text is what the author wrote. (A scene
-        // saved from the app writes every weight, so there it has one.)
+        // Found where the text is what the author wrote. (A scene saved from
+        // the app writes every weight, so there it has one.)
         let src = format!("{SCENE}\n[[track]]\ntarget = \"transform.b.weight\"\nrate = 1.0\n");
-        let e = Scene::from_toml_str(&src, &std::env::temp_dir()).err().expect("should refuse");
-        assert!(e.contains("from"), "{e}");
-        let ok = src.replace("rate = 1.0", "rate = 1.0\nfrom = 1.0");
-        assert!(Scene::from_toml_str(&ok, &std::env::temp_dir()).is_ok());
+        let anim = Animator::new(&src, &std::env::temp_dir(), &resolve_all(&[TrackDef {
+            target: "transform.b.weight".into(),
+            rate: Some(toml::Value::Float(1.0)),
+            ..Default::default()
+        }]).unwrap()).unwrap();
+        assert!(anim.broken[0].1.contains("from"), "{:?}", anim.broken);
+    }
+
+    #[test]
+    fn renaming_a_map_carries_its_tracks() {
+        let mut tracks = vec![
+            Track { target: "transform.a.weight".into(), source: Source::Rate { rate: 1.0, from: None }, mute: false },
+            Track { target: "transform.b.xaos.a".into(), source: Source::Rate { rate: 1.0, from: None }, mute: false },
+            Track { target: "transform.ab.weight".into(), source: Source::Rate { rate: 1.0, from: None }, mute: false },
+        ];
+        rename_map(&mut tracks, "a", "arm");
+        let t: Vec<&str> = tracks.iter().map(|t| t.target.as_str()).collect();
+        assert_eq!(t, ["transform.arm.weight", "transform.b.xaos.arm", "transform.ab.weight"]);
     }
 
     #[test]

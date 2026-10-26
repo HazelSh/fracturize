@@ -2156,6 +2156,15 @@ fn tracks_section(subject: &Subject, notes: &mut Notes) -> Section {
     let flight = crate::path::resolve(scene.camera_path.as_ref(), &default);
     let length = crate::track::timeline_length(scene, flight);
     let worst = scene.tracks.iter().filter(|t| !t.mute).map(|t| t.class()).max();
+    // A track this scene can't take is skipped, not refused; this is where an
+    // agent finds out.
+    let broken = match crate::track::Animator::for_scene(scene) {
+        Ok(Some(a)) => a.broken,
+        _ => Vec::new(),
+    };
+    for (target, why) in &broken {
+        notes.add("tracks", format!("{target} doesn't apply, so it is skipped: {why}"));
+    }
     s.text(format!(
         "{} track{}, timeline {:.2}s ({})",
         scene.tracks.len(),
@@ -2170,7 +2179,14 @@ fn tracks_section(subject: &Subject, notes: &mut Notes) -> Section {
         },
     ));
     for (i, t) in scene.tracks.iter().enumerate() {
-        s.text(format!("[{}] {}{}", i, t.target, if t.mute { "   (muted)" } else { "" }));
+        let state = if t.mute {
+            "   (muted)"
+        } else if broken.iter().any(|(b, _)| *b == t.target) {
+            "   (skipped: see notes)"
+        } else {
+            ""
+        };
+        s.text(format!("[{}] {}{}", i, t.target, state));
         let what = match &t.source {
             Source::Keys { keys, interpolate, extrapolate, .. } => {
                 let nums: Vec<f64> = keys

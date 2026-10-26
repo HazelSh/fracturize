@@ -3462,6 +3462,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         }
     }
     let refills = animator.as_ref().and_then(|a| a.class()).is_some_and(|c| c > crate::track::Class::View);
+    let tracked = |target: &str| animator.as_ref().is_some_and(|a| a.tracks().any(|t| t.target == target));
     let first = match &animator {
         Some(a) => {
             let mut f = a.at(0.0)?;
@@ -3650,10 +3651,20 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             // A tracked point size moves by its ratio to the first frame's, so
             // a view's or a zoom's own scaling of it is kept; haze and contrast
             // are the frame's own unless a view pinned them.
+            // A tracked value is the frame's whatever a view says, since the
+            // track is the more specific statement; an untracked one keeps the
+            // view's or the scene's.
             Some(f) => (
-                if view.is_some() { haze } else { frame_setup(&None, f, haze_enabled, CameraOverride::default()).2 },
+                if view.is_none() || tracked("meta.haze") || tracked("meta.fog") {
+                    frame_setup(&None, f, haze_enabled, CameraOverride::default()).2
+                } else {
+                    haze
+                },
                 point_size * f.point_size / first.point_size.max(1e-12),
-                view.as_ref().and_then(|v| v.color_contrast).unwrap_or(f.color_contrast),
+                match view.as_ref().and_then(|v| v.color_contrast) {
+                    Some(c) if !tracked("meta.color_contrast") => c,
+                    _ => f.color_contrast,
+                },
             ),
             None => (haze, point_size, color_contrast),
         };

@@ -810,6 +810,9 @@ pub fn estimate_secs(
     throughput: f32,
     params: &JobParams,
     max_buffer_bytes: u64,
+    // The scene's tracks move the attractor (`track::Class::refills`), so an
+    // animation refills the buffer every frame instead of once.
+    refills: bool,
 ) -> Option<(f32, f32)> {
     if throughput <= 0.0 {
         return None;
@@ -827,7 +830,8 @@ pub fn estimate_secs(
         Samples::Ring { accumulate } => {
             let fill_frames = accumulate.max(1) as f32 + 8.0;
             let per_frame = params.points as f32 / throughput;
-            params.points as f32 * fill_frames / throughput
+            let fills = if refills { params.kind.frames() as f32 } else { 1.0 };
+            params.points as f32 * fill_frames / throughput * fills
                 + per_frame * params.kind.frames() as f32
         }
         Samples::Accumulate { spp } => {
@@ -974,8 +978,8 @@ mod tests {
         // game, so a job that tiles costs a multiple of one that doesn't.
         let one = JobParams { supersample: 1, ..acc.clone() };
         assert!(one.tile_plan(limit).unwrap().is_single());
-        let (lo_tiled, _) = estimate_secs(664e6, &acc, limit).unwrap();
-        let (lo_one, _) = estimate_secs(664e6, &one, limit).unwrap();
+        let (lo_tiled, _) = estimate_secs(664e6, &acc, limit, false).unwrap();
+        let (lo_one, _) = estimate_secs(664e6, &one, limit, false).unwrap();
         assert!(
             lo_tiled > lo_one * plan.tiles.len() as f32 * 0.5,
             "tiling must show up in the estimate: {lo_tiled:.1}s over {lo_one:.1}s for {} tiles",
@@ -1016,7 +1020,7 @@ mod tests {
                 ..still(12_000_000, w, h)
             };
             let (low, high) =
-                estimate_secs(THROUGHPUT, &params, Budget_LIMIT).expect("a positive throughput");
+                estimate_secs(THROUGHPUT, &params, Budget_LIMIT, false).expect("a positive throughput");
             // Sub-second jobs are held only to "still sub-second". Point
             // throughput is not one number: measured on this GPU it runs about
             // 1.48G points/s at 720p, 957M at 1080p and 583M at poster scale,
@@ -1051,8 +1055,8 @@ mod tests {
             ..still(12_000_000, 3840, 2160)
         };
         let sixteen = JobParams { bit_depth: crate::offline::BitDepth::Sixteen, ..eight.clone() };
-        let (lo8, hi8) = estimate_secs(664e6, &eight, Budget_LIMIT).unwrap();
-        let (lo16, hi16) = estimate_secs(664e6, &sixteen, Budget_LIMIT).unwrap();
+        let (lo8, hi8) = estimate_secs(664e6, &eight, Budget_LIMIT, false).unwrap();
+        let (lo16, hi16) = estimate_secs(664e6, &sixteen, Budget_LIMIT, false).unwrap();
         assert!(lo16 > lo8 && hi16 > hi8);
         // Measured at 4K, converged: 3.69 + 0.19 against 4.04 + 0.45.
         assert!((lo8..=hi8).contains(&3.88), "8-bit 4K: {lo8:.2}-{hi8:.2}s");

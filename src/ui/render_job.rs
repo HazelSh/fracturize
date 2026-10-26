@@ -271,8 +271,10 @@ pub fn open(app: &mut App) {
         points: (app.point_capacity() as usize * 4).clamp(8_000_000, 40_000_000),
         ..RenderJobForm::default()
     };
-    if let Some(path) = app.scene.camera_path.as_ref() {
-        form.seconds = path.duration();
+    // The timeline's length: the scene's own path, or its tracks, whichever
+    // runs longer. A scene with neither keeps the form's default.
+    if app.scene.camera_path.is_some() || !app.scene.tracks.is_empty() {
+        form.seconds = app.timeline_length() as f32;
     }
     form.filename = default_filename(app, form.mode, form.format);
     app.ui_state.render_job = form;
@@ -1158,7 +1160,9 @@ fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
 /// A low/high seconds range for the job, from this session's measured
 /// throughput — `None` until the renderer has produced a frame to measure.
 fn estimate_secs(app: &App, params: &JobParams, limit: u64) -> Option<(f32, f32)> {
-    crate::render_job::estimate_secs(app.measured_throughput()?, params, limit)
+    // A structure track refills the buffer every frame of an animation.
+    let refills = app.scene.tracks.iter().any(|t| !t.mute && t.class().refills());
+    crate::render_job::estimate_secs(app.measured_throughput()?, params, limit, refills)
 }
 
 /// The completed-this-session state: a green check, "Render done", and

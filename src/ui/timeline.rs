@@ -102,7 +102,7 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
         }
 
         if let Some(e) = app.track_error() {
-            ui.label(egui::RichText::new(format!("tracks not playing: {e}")).small().color(ui.visuals().error_fg_color));
+            ui.label(egui::RichText::new(format!("{} {e}", icons::X)).small().color(ui.visuals().warn_fg_color));
         } else if !has_tracks {
             ui.label(
                 egui::RichText::new(

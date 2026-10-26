@@ -4481,6 +4481,9 @@ impl App {
     /// estimates meaningless, and the interesting question ("did my render
     /// finish?") is answerable without one.
     pub fn start_job(&mut self, params: crate::render_job::JobParams) {
+        fn kind_is_still(kind: crate::render_job::JobKind) -> bool {
+            matches!(kind, crate::render_job::JobKind::Still { .. })
+        }
         use crate::render_job::{JobEvent, JobControl, JobKind};
 
         if self.job.is_some() {
@@ -4516,11 +4519,23 @@ impl App {
             return;
         }
 
-        let mut scene = self.scene.clone();
+        // A still is the scene at the playhead — what is on screen — and an
+        // animation is the whole timeline, so it takes the tracks with it.
+        let mut scene = match (&kind_is_still(params.kind), self.live_anim.as_ref().and_then(|a| a.animator.as_ref())) {
+            (true, Some(anim)) => anim.at(self.time).unwrap_or_else(|e| {
+                log::warn!("Render job: tracks won't apply ({e}); rendering the scene as authored");
+                self.scene.clone()
+            }),
+            _ => self.scene.clone(),
+        };
         // Job-scoped: the interactive buffer keeps whatever the Render window
         // set, so exploring stays comfortable while a big render runs.
         scene.point_count = params.points;
+        // The view carries the window's live values; at the playhead, a track's
+        // value is the live one.
+        let held = self.swap_anim_view(self.anim_view);
         let view = self.current_view();
+        self.swap_anim_view(held);
 
         // Built here rather than on the job thread because the *measured*
         // throughput lives on the app: the job renders on its own device and
@@ -5937,6 +5952,13 @@ impl App {
             return;
         }
         let before = self.edit_snapshot();
+        // Tracks name maps the way `-S` does: by name, or by index where there
+        // is none. Carry them over, or a rename leaves them aimed at nothing.
+        if self.scene.transforms[idx].layer == 0 {
+            let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
+            let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
+            crate::track::rename_map(&mut self.scene.tracks, &old, &new);
+        }
         self.scene.transform_names[idx] = name;
         self.commit_edit(
             format!("Rename T{}", idx),
@@ -7419,7 +7441,12 @@ impl App {
             base.color_falloff = self.color_falloff;
             let animator = match crate::track::Animator::for_scene(&base) {
                 Ok(a) => {
-                    self.track_error = None;
+                    // Skipped tracks play no part, and say so in the Timeline.
+                    let broken = a.as_ref().and_then(|a| a.broken.first()).map(|(t, why)| format!("{t}: {why}"));
+                    if broken.is_some() && broken != self.track_error {
+                        self.set_notice(format!("A track doesn't apply and is skipped — {}", broken.as_deref().unwrap_or("")), true);
+                    }
+                    self.track_error = broken;
                     a
                 }
                 Err(e) => {

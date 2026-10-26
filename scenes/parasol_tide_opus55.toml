@@ -1,0 +1,107 @@
+# Parasol, tide — tracks: Parasol (scenes/parasol.toml) breathing.
+#
+# The same three maps and the same five-fold canopy, with three values moving
+# on one clock, and the camera circling on the same clock:
+#
+#   transform.spine.xaos.petal   the edge Parasol cuts, opened and closed again
+#                                every 8 seconds. Cut, the petals arch into
+#                                domes; open, the lace grows back under them.
+#                                Xaos as the fade (FEATURE-PLANS, combination
+#                                8): a multiplier ramps the lace in and out,
+#                                and only the instant it touches 0 changes the
+#                                silhouette.
+#   transform.petal.rotation.x   the petals lift and settle, a sine at the
+#                                same period, a quarter cycle behind.
+#   meta.haze                    thickens as the lace grows.
+#
+# Every track's period divides the camera's 16-second loop, so the timeline
+# is 16 seconds and an animation of it loops without a seam (--info says
+# which tracks would break that, and the animation renderer keeps the last
+# frame when one does).
+#
+# Look at it:
+#   fracturize -s scenes/parasol_tide_opus55.toml --splat     # Timeline window
+#   fracturize -s scenes/parasol_tide_opus55.toml --info      # the tracks section
+#   fracturize -s scenes/parasol_tide_opus55.toml --splat -r renders/tide.png \
+#     --time-grid 4x2 --effort small --width 480 --height 270
+#   fracturize -s scenes/parasol_tide_opus55.toml --splat -r renders/tide.mp4 \
+#     --effort small --width 960 --height 540 --fps 24
+
+[meta]
+name = "Parasol, tide"
+author = "Claude Opus 5.5"
+point_size = 0.0012
+color_speed = 0.45
+haze = 0.22
+exposure = 1.2
+background = [0.010, 0.010, 0.020]
+
+[camera]
+focus = [0.0, 0.2, 0.0]
+distance = 3.0
+yaw = 0.0
+pitch = 0.62
+path_loop = "closed"
+path_seconds = 16.0
+
+[[camera.path]]
+yaw = 0.0
+pitch = 0.62
+
+[[camera.path]]
+yaw = 2.0944
+pitch = 0.45
+
+[[camera.path]]
+yaw = 4.1888
+pitch = 0.75
+
+[[symmetry]]
+group = "Cyc5"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["petal"]
+
+[[transform]]
+name = "petal"
+translation = [0.0, 0.18, 0.62]
+scale = [0.36, 0.42, 0.5]
+rotation = [20.0, 12.0, 0.0]
+color = [1.0, 0.62, 0.25]
+xaos = { relic = 0 }
+
+[[transform]]
+name = "spine"
+translation = [0.0, 0.55, 0.0]
+scale = [0.16, 0.5, 0.16]
+rotation = [0.0, 36.0, 0.0]
+color = [0.35, 0.75, 1.0]
+weight = 0.4
+xaos = { petal = 0 }
+
+[[transform]]
+name = "relic"
+translation = [0.0, -0.1, 0.0]
+scale = 0.45
+rotation = [0.0, 50.0, 18.0]
+color = [0.95, 0.3, 0.6]
+weight = 0.5
+
+# Cut at 0 s, fully open at 4 s, cut again at 8 s.
+[[track]]
+target = "transform.spine.xaos.petal"
+keys = [[0.0, 0.0], [4.0, 1.0], [8.0, 0.0]]
+extrapolate = "repeat"
+
+[[track]]
+target = "transform.petal.rotation.x"
+wave = "sine"
+period = 8.0
+amplitude = 9.0
+phase = 0.75
+
+[[track]]
+target = "meta.haze"
+wave = "sine"
+period = 8.0
+amplitude = 0.1
+phase = 0.75
