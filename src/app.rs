@@ -15,6 +15,9 @@ use crate::scene::{Scene, TransformSpec};
 use crate::ui::{hints, UiState};
 use crate::view::View;
 
+#[path = "app_collab.rs"]
+mod collab;
+
 /// Seconds since the epoch, for unique output filenames
 pub fn unix_timestamp() -> u64 {
     std::time::SystemTime::now()
@@ -1117,6 +1120,15 @@ pub struct App {
     screenshot_depth: wgpu::Texture,
     screenshot_buffer: wgpu::Buffer,
     pub pending_screenshot: bool,
+    /// Where the next screenshot goes instead of `screenshots/`: a render a
+    /// thread message is waiting for (`app_collab`).
+    screenshot_to: Option<std::path::PathBuf>,
+    /// Threads with the agent: the Collaborate window's state. See
+    /// `app_collab`.
+    pub(crate) collab: collab::Collab,
+    /// Whether the window has keyboard focus, so a new message for the person
+    /// can be announced to the desktop only when they aren't looking.
+    pub focused: bool,
 }
 
 /// A status-bar message about opening a scene (see `App::set_notice`).
@@ -1492,6 +1504,9 @@ impl App {
             screenshot_depth,
             screenshot_buffer,
             pending_screenshot: false,
+            screenshot_to: None,
+            collab: Default::default(),
+            focused: true,
         };
         app.refresh_zoom();
 
@@ -2376,6 +2391,14 @@ impl App {
     }
 
     fn write_scene_to(&mut self, path: &str) {
+        if self.previewing().is_some() {
+            // It would write the option over the scene's file. Keep, in the
+            // Collaborate window, is how an option is saved.
+            let e = "previewing an option: leave the preview (Esc) to save the scene, or Keep the option";
+            self.set_notice(format!("Not saved: {e}"), true);
+            self.last_save_error = Some(e.to_string());
+            return;
+        }
         match self.scene.save(path) {
             Ok(()) => {
                 log::info!("Scene saved to {}", path);
@@ -2468,7 +2491,9 @@ impl App {
     /// Undo and redo need no special case here, and deliberately don't have
     /// one: they move the history, and this reads where the history is.
     pub fn is_dirty(&self) -> bool {
-        self.history.top_serial() != self.saved_serial
+        // Previewing an option sets the live scene's history aside; the
+        // question is still about the live scene.
+        self.live_dirty().unwrap_or(self.history.top_serial() != self.saved_serial)
     }
 
     // === Losing work: the prompts that stand in the way (see ui::confirm) ===
@@ -4230,6 +4255,9 @@ impl App {
     /// Replace the current scene with one loaded from disk, rebuilding the
     /// GPU pipelines and resetting camera/selection to the scene's defaults
     pub fn load_scene_file(&mut self, path: &Path) {
+        // Back to the live scene first, so what's set aside isn't lost under
+        // the one being opened.
+        self.leave_preview();
         let scene = match Scene::load(path) {
             Ok(s) => s,
             Err(e) => {
@@ -7179,8 +7207,9 @@ impl App {
                 Some(format!("{} (from {})", self.scene.name, png))
             })
             .unwrap_or_else(|| format!("{} (unsaved)", self.scene.name));
+        let previewing = self.preview_label().map_or(String::new(), |p| format!("{p} · "));
         let title = format!(
-            "{}{} — Fracturize",
+            "{previewing}{}{} — Fracturize",
             if self.is_dirty() { "*" } else { "" },
             doc,
         );
@@ -7194,6 +7223,10 @@ impl App {
         let point_count = self.point_compute.valid_point_count();
         if point_count == 0 {
             log::warn!("No points to screenshot");
+            self.pending_screenshot = false;
+            if self.screenshot_to.take().is_some() {
+                self.collab_screenshot_done(None);
+            }
             return;
         }
 
@@ -7336,6 +7369,20 @@ impl App {
 
             for chunk in pixels.chunks_mut(4) {
                 chunk.swap(0, 2);
+            }
+
+            if let Some(path) = self.screenshot_to.take() {
+                // A render a thread message is waiting for: it says so if it
+                // couldn't be made, and the message goes without it.
+                let saved = image::save_buffer(&path, &pixels, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT, image::ColorType::Rgba8);
+                if let Err(e) = &saved {
+                    log::warn!("Couldn't render the view for the message: {e}");
+                }
+                drop(data);
+                self.screenshot_buffer.unmap();
+                self.pending_screenshot = false;
+                self.collab_screenshot_done(saved.is_ok().then_some(path.as_path()));
+                return;
             }
 
             let screenshot_dir = Path::new("screenshots");

@@ -47,6 +47,9 @@ pub struct PanelPrefs {
     /// The Xaos window: a layer's whole transition matrix.
     #[serde(default)]
     pub xaos_open: bool,
+    /// Collaborate: the scene's thread with an agent.
+    #[serde(default)]
+    pub collab_open: bool,
 }
 
 fn default_mutation_grid() -> u32 {

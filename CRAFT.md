@@ -620,6 +620,24 @@ and `todo.txt`'s lighting question is really a question about which room to live
 None of these are architectural. The engine is in good shape; the authoring surface
 is one notch behind it.
 
+### Proposing to a human
+
+When a person asks for a change through a thread (`--thread`, then
+`--propose`), three habits make the answer usable:
+
+- **Send two or three options that differ in one idea each**, not one
+  "best" and not nine near-copies. A person picks between ideas; a sheet of
+  near-identical options is a mutation grid they didn't ask for.
+- **Render every option at the request's own framing** — its `base.toml`
+  carries the camera they were looking through — so the cards compare form,
+  not framing. A note per option says what it changes in their words, not
+  as a `-S` path; the card already shows the path.
+- **Make options from `base.toml`, never from your own last option**, unless
+  you're answering a send-back (then from their tweak if there is one, and say
+  `revises`). Apply lays your option's changes from that base over whatever
+  they've done since; an option built on something else drags its differences
+  along with it.
+
 ---
 
 ## 9. Discovery log

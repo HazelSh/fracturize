@@ -84,6 +84,7 @@ src/
     history.rs     # History window: every edit, click a row to jump to it
     mutate.rs      # Mutate window: profile, strength, the mutation grid
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
+    collab.rs      # Collaborate: the thread, option cards, the composer, conflicts
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
@@ -106,6 +107,10 @@ src/
   prefs.rs       # Persistent user prefs (~/.config/fracturize/prefs.toml)
   scene.rs       # TOML scene parsing AND saving, TransformSpec, variation names/slots
   scene_source.rs# A path's scene TOML: the file, or a render PNG's embedded chunk
+  scene_diff.rs  # --diff: what changed between two scenes, and the three-way merge
+  thread.rs      # Threads with an agent: the message format on disk, reading, posting
+  collab.rs      # The CLI side of a thread: --request, --propose, --respond, --wait-reply…
+  app_collab.rs  # The GUI side: preview (a sandbox), apply (a merge), send back, keep
   scene_browser.rs# The Scenes window's model: places, a folder's scenes, parsed, sorted
   symmetry.rs    # Finite subgroups of SO(3) (C/D/T/O/I) by closure, plus
                  # `repeat` progressions, which are not groups
@@ -699,6 +704,7 @@ where "start a new document" lives in every program.
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
 | Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
+| Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
 
 All of them persist their open state to prefs, and all behave alike.
@@ -1321,6 +1327,78 @@ Four things it rests on:
 Not yet: an onion skin (the hovered tile over the parent in the main view),
 masks beyond profiles (only the selected map, a mute/solo set), and moving the
 grid into multiview panes once those exist.
+
+## Threads: proposals between a person and an agent
+
+Phase 2 of `AGENT-COLLAB-PLAN.md`: requests, proposals and responses about one
+scene, kept as files under `renders/collab/<scene-stem>/` (gitignored, so a
+thread never reaches the public repo). Either side can send any kind. An agent
+takes part with nothing but the CLI; the person with the Collaborate window.
+No socket or bridge yet (phase 3), so an agent waits with `--wait-reply`.
+
+```sh
+fracturize --list-threads [--waiting]             # every thread, and what's waiting on whom
+fracturize -s s.toml --thread [--since 0003]      # the thread, each option's -S diff included
+fracturize -s s.toml --request "text"             # the scene file goes with it as base.toml
+fracturize -s s.toml --propose dir/               # dir: message.toml, base.toml, options
+fracturize -s s.toml --respond 4 --verdict "B" --pick B
+fracturize -s s.toml --respond 4 --send-back B --note "thinner" [--tweak mine.toml]
+fracturize -s s.toml --wait-reply --timeout 30m   # exit 0 a message, 3 timed out, 4 withdrawn
+fracturize -s s.toml --withdraw 5 --reason "..."
+```
+
+`--from NAME` (else `$FRACTURIZE_AGENT`, else `agent`) says who you are; the
+window signs with the author name in prefs, else `human`. Anything not from you
+is for you. The list flag is `--list-threads` because `--threads` was already
+the encoder's thread count. A proposal directory's `message.toml`:
+
+```toml
+replying_to = "0001-request"     # optional
+revises = "0003-response/B"      # optional: what this is a new round of
+message = "Thinner seams, keeping your rotation."
+ask = "pick-one"                 # pick-one | pick-any | free
+
+[[option]]
+id = "B2"
+scene = "B2.toml"                # plain file names beside message.toml
+render = "B2.png"                # optional, and worth it: it's what the card shows
+note = "seam scale 0.04 → 0.025"
+```
+
+Things it rests on:
+
+- **A message is written once.** Each is a directory built under a temporary
+  name and renamed into place (`thread::post`), so a reader never sees half of
+  one and two racing writers both land, one number apart. Withdrawing adds a
+  `withdrawn.toml`, written the same way; that's the only later change.
+- **Preview sets the live scene aside rather than copying the option over
+  it.** The scene, its whole `History` and its save point are swapped out
+  (`app_collab::Preview`) and the option comes up with a fresh history. So
+  previewing touches neither undo nor the dirty bit (`is_dirty` asks the
+  set-aside history), and any edit made while previewing is a **tweak**:
+  undoable inside the preview, kept when you leave, shown on the card, and
+  sent with Send back. **Ctrl+S is refused while previewing** — it would write
+  the option over the scene's file — and opening a scene leaves the preview
+  first. Esc leaves it. *Hold to compare* shows the live scene while held; the
+  cloud re-forms each way, since the two are different IFSs.
+- **Apply is `scene_diff::merge`**, base → option laid over the live scene, so
+  edits made since the request survive. Where both changed a value, a dialog
+  lists yours beside theirs, defaulting to yours (as `--diff --base` does).
+  One `commit_edit("Agent: …")`, so one Ctrl+Z, then a response saying
+  "applied". The live values that only reach the scene on a save (point size,
+  falloff, contrast, haze, exposure) stay live unless the option changed them.
+- **What goes out is what the person sees**: a request's or proposal's scene
+  carries the live framing and those live values (`scene_to_send`), and "with
+  a render" is the `S` screenshot of the view, written beside the message
+  (`App::screenshot_to`) before it's posted.
+- **Keep** copies an option (or its tweak) to a new `scenes/<thread>-<n><id>.toml`,
+  never over a file: the one way a thread's scene reaches the project.
+
+Not yet: a re-render of a tweak with the proposal's settings (a sent-back
+tweak goes as a scene, without a picture); "delivered" and "seen" states,
+which need the bridge; a thread picker for other scenes' threads (the window
+shows the scene on screen's); the hold-to-blink *key* (a held button for now —
+the key is Hazel's to choose); and tweaks surviving a restart.
 
 ## The scene browser
 

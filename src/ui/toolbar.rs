@@ -51,6 +51,23 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Xaos window",
             );
 
+            // The badge counts what's waiting on the person. A badge and
+            // nothing more: a message never opens a window over the work.
+            let waiting = app.collab_waiting();
+            let caption = if waiting > 0 { format!("Collaborate ({waiting})") } else { "Collaborate".to_string() };
+            let resp = ui.toggle_value(&mut app.ui_state.panels.collab_open, (icons::CHATS, caption));
+            hinted(
+                resp,
+                &mut app.ui_state,
+                if waiting > 0 {
+                    "This scene's thread with an agent: something is waiting for your answer"
+                } else {
+                    "This scene's thread with an agent: ask for changes, look at what comes back, \
+                     apply it or send it back"
+                },
+                "toggle the Collaborate window",
+            );
+
             ui.separator();
 
             let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, (icons::VIDEO_CAMERA, "Camera"));
@@ -388,6 +405,19 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
     // there is work on screen that isn't on disk is worth being able to see
     // without opening anything.
     let dirty = if app.is_dirty() { "*" } else { "" };
+    // While an option is previewed the scene on screen isn't yours, and the
+    // readout says so where it would say what it is.
+    if let Some(label) = app.preview_label() {
+        let resp = ui.add(egui::Button::new(egui::RichText::new(label).color(ui.visuals().warn_fg_color)).frame(false).truncate());
+        hinted(
+            resp,
+            &mut app.ui_state,
+            "An option from the Collaborate window is on screen; your scene is set aside, \
+             untouched. Esc goes back to it.",
+            "previewing an option · Esc: back to your scene",
+        );
+        return;
+    }
     // Opened from a render, it says so: there's no .toml behind it yet.
     let from = if app.scene_png.is_some() { " (from PNG)" } else { "" };
     let label = if author.is_empty() {

@@ -149,3 +149,6 @@ pub const FLOW_ARROW: &str = "\u{E6EC}";
 /// fonts and renders as tofu — found by looking at the running app.
 #[allow(dead_code)]
 pub const ARROW: &str = "\u{E06C}";
+
+/// Collaborate window (two speech bubbles; Phosphor "chats")
+pub const CHATS: &str = "\u{E17C}";

@@ -21,6 +21,8 @@ mod pick;
 mod scene;
 mod scene_browser;
 mod scene_diff;
+mod thread;
+mod collab;
 mod scene_source;
 mod set;
 mod stats;
@@ -1110,6 +1112,103 @@ struct Args {
     /// With --base: write the merged scene here [not written]
     #[arg(long, value_name = "FILE", requires = "base", help_heading = "Inspecting")]
     merged: Option<std::path::PathBuf>,
+
+    // -------------------------------------------------------- Collaborating
+    /// List every thread, and who each is waiting on, and exit [off]
+    ///
+    /// Threads are requests, proposals and responses about one scene, kept
+    /// under renders/collab/<scene>/ (AGENT-COLLAB-PLAN.md). The Collaborate
+    /// window is the person's side of them; these flags are an agent's.
+    #[arg(long, help_heading = "Collaborating")]
+    list_threads: bool,
+
+    /// With --list-threads: only threads with a message waiting for you [all]
+    #[arg(long, requires = "list_threads", help_heading = "Collaborating")]
+    waiting: bool,
+
+    /// Print -s's thread, every option's changes included, and exit [off]
+    #[arg(long, help_heading = "Collaborating")]
+    thread: bool,
+
+    /// With --thread: only messages after this one [the whole thread]
+    #[arg(long, value_name = "MESSAGE", requires = "thread", help_heading = "Collaborating")]
+    since: Option<String>,
+
+    /// Post a request about -s to its thread, and exit [off]
+    ///
+    /// The scene file is attached as base.toml, so a proposal answering it
+    /// has something to be made from.
+    #[arg(long, value_name = "TEXT", help_heading = "Collaborating")]
+    request: Option<String>,
+
+    /// Check a proposal directory and post it to -s's thread [off]
+    ///
+    /// DIR holds message.toml (message, ask, replying_to, revises, and one
+    /// [[option]] per option: id, scene, render, note), base.toml (the scene
+    /// the options were made from), and the option files. Up to 9 options.
+    /// Every option must load; everything wrong is listed at once.
+    #[arg(long, value_name = "DIR", help_heading = "Collaborating")]
+    propose: Option<std::path::PathBuf>,
+
+    /// Answer a proposal in -s's thread, and exit [off]
+    ///
+    /// With --verdict and any of --pick, --reject, --send-back. MESSAGE is
+    /// its id or number (0002-proposal, or 2).
+    #[arg(long, value_name = "MESSAGE", help_heading = "Collaborating")]
+    respond: Option<String>,
+
+    /// With --respond: the answer, as text [none]
+    #[arg(long, value_name = "TEXT", requires = "respond", help_heading = "Collaborating")]
+    verdict: Option<String>,
+
+    /// With --respond: pick this option, repeatable [none]
+    #[arg(long, value_name = "OPTION", requires = "respond", help_heading = "Collaborating")]
+    pick: Vec<String>,
+
+    /// With --respond: reject this option, repeatable [none]
+    #[arg(long, value_name = "OPTION", requires = "respond", help_heading = "Collaborating")]
+    reject: Vec<String>,
+
+    /// With --respond: send this option back for another round [none]
+    #[arg(long, value_name = "OPTION", requires = "respond", help_heading = "Collaborating")]
+    send_back: Option<String>,
+
+    /// With --send-back: what to change [none]
+    #[arg(long, value_name = "TEXT", requires = "send_back", help_heading = "Collaborating")]
+    note: Option<String>,
+
+    /// With --send-back: your edit of the option, as a scene file [none]
+    #[arg(long, value_name = "FILE", requires = "send_back", help_heading = "Collaborating")]
+    tweak: Option<std::path::PathBuf>,
+
+    /// With --reject or --withdraw: why [none]
+    #[arg(long, value_name = "TEXT", help_heading = "Collaborating")]
+    reason: Option<String>,
+
+    /// Wait for a message in -s's thread from someone else, print it [off]
+    ///
+    /// Exits 0 with the new messages printed, 3 if --timeout ran out, 4 if a
+    /// message was withdrawn instead.
+    #[arg(long, help_heading = "Collaborating")]
+    wait_reply: bool,
+
+    /// With --wait-reply: give up after this long, as 90s, 30m or 2h [never]
+    #[arg(long, value_name = "DURATION", requires = "wait_reply", help_heading = "Collaborating")]
+    timeout: Option<String>,
+
+    /// Take back an unanswered message of yours in -s's thread [off]
+    #[arg(long, value_name = "MESSAGE", help_heading = "Collaborating")]
+    withdraw: Option<String>,
+
+    /// Who you are in a thread [$FRACTURIZE_AGENT, else "agent"]
+    ///
+    /// Agents: your model name, as you would sign a scene.
+    #[arg(long, value_name = "NAME", help_heading = "Collaborating")]
+    from: Option<String>,
+
+    /// Who a message is to [whoever last wrote, else "human"]
+    #[arg(long, value_name = "NAME", help_heading = "Collaborating")]
+    to: Option<String>,
 
     // -------------------------------------------------------- Windowed mode
     /// Capture a screenshot and exit after --delay frames
@@ -2206,6 +2305,10 @@ impl ApplicationHandler for AppWrapper {
                                 app.ui_state.render_job.open = false;
                             } else if app.show_browser {
                                 app.toggle_browser();
+                            } else if app.collab.pending_apply.is_some() {
+                                app.collab.pending_apply = None;
+                            } else if app.previewing().is_some() {
+                                app.leave_preview();
                             } else if app.selected_transform().is_some() {
                                 app.select_transform(None);
                             } else if app.selected_subscene().is_some() {
@@ -2440,6 +2543,7 @@ impl ApplicationHandler for AppWrapper {
             // browser. Each file of a multi-file drop is its own event, so
             // they're collected here and opened (the first of them) at the
             // top of the next frame.
+            WindowEvent::Focused(on) => app.focused = on,
             WindowEvent::DroppedFile(path) => app.file_dropped(path),
             WindowEvent::HoveredFile(path) => app.drop_hover = Some(path),
             WindowEvent::HoveredFileCancelled => app.drop_hover = None,
@@ -2715,6 +2819,11 @@ fn main() {
     // --diff: what changed between two scenes, or a three-way merge
     if !args.diff.is_empty() {
         std::process::exit(run_diff(&args));
+    }
+
+    // Threads: each operation does one thing to renders/collab/ and exits.
+    if let Some(code) = collab::run(&args) {
+        std::process::exit(code);
     }
 
     // --fit: make a scene out of a picture. Pure CPU — no device, no scene to

@@ -23,6 +23,7 @@ use crate::prefs::PanelPrefs;
 pub mod axis_widget;
 pub mod browser;
 pub mod camera_panel;
+pub mod collab;
 pub mod confirm;
 pub mod history;
 pub mod gradient;
@@ -54,6 +55,8 @@ pub struct UiState {
     /// the moment it differs (toolbar toggle and a window's own close
     /// button both mutate this same value, so they can't go out of sync).
     pub panels: PanelPrefs,
+    /// The Collaborate window's composer, notes and picture cache.
+    pub collab: collab::CollabUi,
     /// This frame's status-bar left-hand hint, set by `hints::hinted` when a
     /// widget is hovered; cleared at the start of every frame and read (then
     /// taken) by `status_bar::draw`, which falls back to gizmo-hover /
@@ -219,6 +222,7 @@ impl UiState {
             import_error: None,
             dice_save_as: None,
             dice_profile_error: None,
+            collab: collab::CollabUi::new(),
         }
     }
 }
@@ -253,6 +257,7 @@ pub enum WindowKey {
     Camera,
     Subscenes,
     Xaos,
+    Collab,
 }
 
 impl WindowKey {
@@ -269,6 +274,7 @@ impl WindowKey {
             Self::Camera => "camera",
             Self::Subscenes => "subscenes",
             Self::Xaos => "xaos",
+            Self::Collab => "collab",
         }
     }
 
@@ -314,6 +320,8 @@ impl WindowKey {
             Self::RandomSettings => egui::vec2(300.0, 260.0),
             // The preset row and the radio above a grid of at least a few cells.
             Self::Xaos => egui::vec2(300.0, 220.0),
+            // A header, a composer below, and room for a card between.
+            Self::Collab => egui::vec2(380.0, 340.0),
             // Four rows of controls above a grid of tiles big enough to judge.
             Self::Mutate => egui::vec2(360.0, 340.0),
             _ => egui::vec2(180.0, 100.0),
@@ -366,6 +374,11 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::Subscenes => (
             egui::pos2((right_x - 340.0).max(20.0), top),
             egui::vec2(320.0, 360.0),
+        ),
+        // Down the middle-right, beside the work it is about.
+        WindowKey::Collab => (
+            egui::pos2((right_x - 440.0).max(20.0), top),
+            egui::vec2(420.0, (screen.height() - top - 40.0).clamp(340.0, 700.0)),
         ),
         // Below Subscenes, also beside the Transforms window whose selection
         // it shares.
@@ -447,6 +460,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     random_flames::draw(&ctx, app);
     random_settings::draw(&ctx, app);
     step("explore", t, &mut timings);
+    let t = std::time::Instant::now();
+    collab::draw(&ctx, app);
+    step("collab", t, &mut timings);
     let t = std::time::Instant::now();
     render_panel::draw(&ctx, app);
     step("render", t, &mut timings);

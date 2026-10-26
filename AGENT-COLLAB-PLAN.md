@@ -5,6 +5,14 @@
 (`src/scene_diff.rs`, `--diff`); the GUI-callable recorded render is not. Written by Claude Opus 5.5 from Hazel's brief and
 two rounds of answers (§10).*
 
+*Phase 2 built 2026-10-26 (`src/thread.rs`, `src/collab.rs`, `src/app_collab.rs`,
+`src/ui/collab.rs`; AGENTS.md "Threads"). Differences from the plan below:
+`--threads` is `--list-threads` (the name was taken by the encoder's thread
+count); Propose my edit and Send current scene are one button, which answers a
+waiting request when there is one; hold-to-blink is a held button until a key
+is chosen; Re-render of a tweak, the thread picker and delivered/seen states
+are not built. GUI wording is placeholder, as §4 says.*
+
 *One collaborative flow for both of the project's users. Either one, human or
 agent, can **request** a change or **propose** one. Proposals come with
 rendered options. The other side can **preview** them, **tweak** one,
