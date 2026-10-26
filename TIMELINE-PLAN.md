@@ -143,3 +143,119 @@ Differences from today worth deciding on purpose:
   editable on the Timeline like any other track — drag a camera key to retime
   it), and whether that is worth a re-blessed flights golden.
 - Whether views-as-keys is wanted, since it shapes the key format.
+
+---
+
+## 3. Rotation tracks and the Euler branch
+
+### The problem
+
+A map's rotation is held as a **matrix**; the file writes it as three Euler
+angles (extrinsic XYZ, degrees), or as a `rotvec` where no Euler triple
+reproduces it closely enough (near a quarter turn about y). Every rotation has
+two Euler triples, and the saver always writes the one with |y| ≤ 90°: an
+authored `[0, 135, 0]` comes back as `[180, 45, 180]`. Same pose, different
+numbers.
+
+A track on `transform.x.rotation.y` sets **one number of the triple the scene
+writes** (the animator works on the text a save would produce, so the app and
+the CLI agree). So:
+
+- **The motion depends on which triple is written.** Sweeping y from 135° to
+  180° on `[0, 135, 0]` is a turn about y; the same sweep applied to
+  `[180, 45, 180]` sets y to 135…180 inside a triple whose x and z are 180°,
+  which is a different motion that doesn't start at the authored pose.
+- **A save can switch the branch under an existing track**, if the map's
+  rotation was authored past |y| = 90°.
+- **The saver may write `rotvec` instead**, and then `rotation.*` doesn't
+  resolve: the track is skipped and reported (it is not refused, by design).
+- Separately from the branch problem, animating one Euler angle is a poor
+  control anyway: y alone is a turn about a fixed axis only when x is zero,
+  and near y = ±90° (gimbal lock) x and z become the same control.
+
+Today the only defence is a warning, and it appears in the terminal and in
+agent reports but **not in the Timeline**.
+
+### Is a matrix fallback the answer?
+
+**No, and the file doesn't have one.** `[[transform]]` is translation, scale,
+`rotation` or `rotvec`. The raw 3×4 grid exists only in the inspector, for
+sheared matrices, which the file can't write at all (the gizmo plan's shear
+note). And animating matrix entries would be worse than Euler angles:
+interpolating two rotation matrices element by element passes through
+matrices that shear and shrink, which is neither a rotation nor saveable.
+Interpolating `rotvec` components has the same flaw, more mildly, except about
+a fixed axis. Rotations want to be animated as rotations.
+
+### Mitigations, cheapest first
+
+**A. Say it where people look.** Flag such tracks in the Timeline (a warning
+mark on the row, the reason in its tooltip), and in the parameter picker mark
+or grey the x/y/z rotation leaves of a map whose y is past 90°, pointing at B
+or C below. `track::Animator` already detects the case. Small, and worth
+doing whatever else happens.
+
+**B. Remember the authored triple.** Keep the Euler triple a map was read with
+beside its matrix (as `colours_left_out` remembers which colours were
+implied). The saver writes it back whenever it still reproduces the matrix,
+and the animator's text then carries the author's branch. When an edit changes
+the rotation (a gizmo drag), decompose onto the branch **nearest the
+remembered triple**, so the numbers move continuously instead of jumping
+between branches. This fixes the save flip for every consumer: tracks,
+`--diff`, and `--info`'s "authored (-26, 138, 0) prints as (154, 42, -180)".
+It doesn't fix gimbal lock or make one-angle tracks a good control.
+
+**C. Rotation tracks that aren't Euler angles (recommended).** Add two
+angle-valued targets that compose a rotation onto the map's authored pose
+instead of overwriting one of its numbers:
+
+- **spin**: about one of the map's own axes, through its own origin. The
+  translation stays put. This is "turn the petal about itself".
+- **turn**: about a world axis through the origin (or the zoom fixed point, or
+  a symmetry axis), moving the translation with it. This is "carry the motif
+  round the group".
+
+These are exactly `--derive`'s `--spin` and `--turn` (`src/derive.rs`), whose
+quaternion products are already written and tested. The value is still one
+number, degrees, so keys, rates, cycles, extrapolation, clamping, the picker
+and the Timeline's curve all work unchanged. A `rate` spins forever with no
+wrap and no gimbal lock, and editing the base pose in the inspector moves the
+whole motion, as rates and cycles already do.
+
+A sketch of the file form:
+
+```toml
+[[track]]
+target = "transform.petal.spin.y"    # own y axis; or turn.x / turn.y / turn.z
+rate = 45.0                           # degrees per second
+```
+
+What it needs:
+
+- **Targets that aren't `-S` paths.** The animator applies the `-S` tracks to
+  the text, parses, then multiplies the spin/turn rotations into the parsed
+  frame's matrices (`M · R` for spin, `W · M` for turn). Several on one map
+  compose in a fixed, documented order; a free `axis = [x, y, z]` could come
+  later.
+- **The picker** offers "Spin about its own x / y / z" and "Turn about world
+  x / y / z" under each map, and could stop offering raw Euler angles, or keep
+  them for maps already at |y| ≤ 90°.
+- **Symmetry**: a spin on a motif applies before the group, so every copy
+  spins; a turn about the group's own axis is the natural "the whole flower
+  rotates" track.
+- **Infinite zoom**: a spin or turn on the zoom map changes the similarity per
+  frame, the same live re-derivation `App::refresh_zoom` already does when the
+  map is dragged.
+- **Classes**: structure, like any matrix change.
+
+**D. Pose keys (later, if wanted).** Keys that are whole orientations,
+interpolated as rotations with the camera path's cumulative quaternion spline
+and its routes. That is the general "pose A at 0 s, pose B at 4 s" tool and
+handles any pair of poses, not just one axis. It is the same machinery a
+`[[track]]`-form camera would use (§2), so it belongs with that decision rather
+than before it.
+
+### Suggested order
+
+A now (cheap, honest). B in the next pass that touches the saver. C as the
+real answer for rotation in animation. D with the camera-format decision.
