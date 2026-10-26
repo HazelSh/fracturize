@@ -94,10 +94,13 @@ src/
     radio.rs       # Segmented one-of-n radio, used by all three such settings
     browser.rs     # Scenes window (Ctrl+O / B): folder tree + places, thumbnail rows
     shortcuts.rs   # Controls window (H / F1): input prefs + the keybind table
+    timeline.rs    # Timeline window: transport, ruler, camera row, track rows
     labels.rs      # World-anchored transform name labels
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
   path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
+  track.rs       # Tracks: -S paths over time (keys/rate/cycle), the shared
+                 # Extrapolate fold, Animator (the scene at time t), classes
   video.rs       # Animation formats: Format (avif/mp4), RGBA->YUV, shared ISOBMFF muxer
   avif.rs        # AV1 backend for .avif (rav1e)
   h264.rs        # H.264 backend for .mp4 (openh264)
@@ -550,7 +553,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Home | put the camera on the selected transform's fixed point |
 | Enter | enable/disable selected transform |
 | G / Tab | toggle transform gizmos and their name labels |
-| O, Z, or Space | play / stop the camera flying its path (three keys, one action) |
+| O, Z, or Space | play / stop the timeline: the camera flying its path, and every track (three keys, one action) |
 | Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
@@ -706,6 +709,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
+| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row, a row per track with its keys and a faint value curve; eye to mute, right-click to delete. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -1768,6 +1772,19 @@ matrix = [
   [1.0, 2.0],                   # from petal
 ]
 
+# Animation: any -S path over time (see "Tracks and the timeline"). Last in
+# the file, because they name what's above. One source per track:
+[[track]]
+target = "transform.whorl.rotation.y"   # an -S path; not camera.* (the path is)
+keys = [[0.0, 0.0], [4.0, 90.0]]        # [seconds, value]; strings/bools step
+interpolate = "smooth"                  # step | linear | smooth | spline
+extrapolate = "pingpong"                # hold | repeat | pingpong | offset
+# rate = 0.05      # ...or units a second from the authored value (or `from`)
+# wave = "sine"    # ...or a cycle: sine | triangle | saw | square,
+# period = 8.0     #    period seconds, amplitude either side of the
+# amplitude = 15.0 #    authored value (or `centre`), phase in periods
+# mute = true      # kept, drawn, not applied
+
 # Composition: another attractor beside this one (see "Subscenes"). Each keeps
 # its own walkers, so their maps never mix. Repeatable, up to 15.
 [[subscene]]
@@ -2743,6 +2760,110 @@ fracturize --scene scenes/wellspiral.toml --render well.avif \
   only thing that budget exists to survive.
 - **Point size** is world-space and the band spans many scales, so a scene will
   look grittier here than its `point_size` suggests; judge it inside the band.
+
+## Tracks and the timeline
+
+FEATURE-PLANS.md items 9, 10 and a first cut of 8. A **track** is an `-S`
+path, a source of values over time, and what happens past its ends
+(`src/track.rs` has the model; `scenes/parasol_tide_opus55.toml` is the worked
+example: Parasol's cut xaos edge opening and closing on a camera loop).
+
+- **Sources**: `keys` (`[[t, v], ...]`, interpolated step / linear / smooth /
+  spline; smooth is the default and eases every key, spline is non-uniform
+  Catmull-Rom through them), `rate` (units a second) and a cycle (`wave`,
+  `period`, `amplitude`, `phase`). **Rates and cycles move about the authored
+  value** (or `from` / `centre`), so editing the base in the inspector moves
+  the whole motion; keys *are* the value. String and boolean keys
+  (`palette.name`, `palette.reverse`) step.
+- **Extrapolation** past the last key: `hold` (default), `repeat`, `pingpong`,
+  `offset` (each lap starts where the last ended, Blender's cycles with
+  offset). **The camera's loop is one of these**: `Loop::extrapolate` maps
+  once/closed/pingpong/zoom to hold/repeat/pingpong/offset, the zoom loop being
+  repeat-with-offset whose offset is the zoom symmetry. The camera keeps its
+  own source — framings are rotations, which is what `path.rs`'s routes are
+  for — and its own file format; `CameraPath::sample` folds time by the same
+  rule, spelled in f32 so every flight stays bit-identical
+  (`the_camera_folds_time_as_tracks_do` holds the two together).
+- **One clock, in seconds.** The camera is sampled at `time / its duration`.
+  The **timeline's length** (`track::timeline_length`) is the scene's own
+  path or its tracks, whichever runs longer; a scene with tracks and no path
+  runs as long as its tracks while the default orbit keeps turning through
+  them. An animation render plays exactly that; `--seconds` stretches it to
+  fit, as it always did a path. It loops (drops its last frame) only if every
+  track comes back too (`track::loops_over`).
+
+**The scene at time t is the scene with one `-S` per track applied**
+(`Animator`): the TOML without its `[[track]]`s, overrides applied to a
+cached `toml_edit` document, parsed. ~0.08 ms a frame, so the window does it
+every frame it plays. One address language for the CLI, sweeps and
+animation, and anything `-S` reaches a track can animate.
+
+**Classes** (`track::Class`) say what a frame costs: *view* (point size,
+exposure, haze, background: re-render), *colour* (palette, transform colours:
+recolour), *placement* (subscene placement) and *structure* (everything that
+moves the attractor). Past view, an animation **refills the point buffer every
+frame** — in place (`offline::refill_points`), same seed, so the grain is
+coherent from frame to frame — and the window churns its ring at the fill rate
+while one plays.
+
+Things it rests on, each found the hard way:
+
+- **The animated scene is never `App::scene`.** That is the document — what
+  the inspector edits, history snapshots and Ctrl+S writes — and an animated
+  value in it would be saved as the authored one. `App::refresh_animation`
+  builds the frame aside, swaps it in only for the GPU upload (so the gizmos
+  follow it), and holds view values in `App::anim_view`, swapped in only
+  around the frame's drawing (`App::render`). Keyed off the history position,
+  so a paused timeline costs nothing.
+- **A track that doesn't resolve is reported, never refused**, like an xaos
+  dead end: delete the map a track moves and it points at nothing, and a scene
+  the app saved must open again. `Animator` skips it and says why — `--info`
+  notes, stderr from a render, the Timeline. Renaming a map renames it in its
+  tracks (`track::rename_map`). Refused at load are only malformed tracks:
+  camera targets (the path is the camera's track), two tracks on one target,
+  interpolated strings, mixed sources.
+- **One Euler angle is only meaningful in its triple.** A track on
+  `transform.x.rotation.y` sets one angle of the triple the scene *writes*,
+  and a saved scene respells a rotation with |y| > 90° on the other branch;
+  the animator warns when that is in play.
+- **The transport is a clock plus "is the camera following".** `path_t` is
+  gone. Grabbing the camera stops it following and, in a scene with tracks,
+  leaves the clock running: you can orbit an animation while it plays. Play
+  resumes from the playhead; from the end of a one-shot it starts over. The
+  default orbit carries its own epoch, so it always starts from where you are
+  and is carried across a timeline loop rather than snapping back.
+- **Ordinary scenes are byte-identical**: stills in both renderers,
+  `--path-t`, and animations including zoom and ping-pong loops, against the
+  build before tracks.
+
+**CLI, for agents:**
+
+- `--time T` — the frame at T seconds, for a still, a sheet or `--info`
+  (whose `tracks` section then lists the `-S` flags that moment comes to —
+  the frame said as a command). A still of a scene with tracks without
+  `--time` is t = 0, and says so.
+- `--time-grid 4x3` — a sheet of moments across the timeline, each tile its
+  time's `-S` flags and framed where the camera is then: how to read an
+  animation without watching it.
+- `--info` gains a `tracks` section (only for a scene with tracks, so no
+  golden moved): each track's target, source and class, the timeline's
+  length, what an animation costs, and notes for skipped or constant tracks.
+- `.avif`/`.mp4` render the timeline; the summary line says the class and
+  whether it loops.
+
+**In the app**: the Timeline window (toolbar, film strip). The O/Z/Space
+transport plays camera and tracks together. Mute and delete are undoable
+edits; scrubbing is view state, like orbiting. A Render job still renders the
+frame at the playhead; an animation's length defaults to the timeline's, and
+its estimate charges a refill per frame when the attractor moves.
+
+**Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
+authoring keys in the GUI (add at playhead, drag to retime, the inspector's
+key buttons — and with it the auto-key question, which is Hazel's), zooming
+the ruler, the curve editor proper, views as camera keys (Hazel's decision),
+moving `[[camera.path]]` into `[[track]]` form (a migration commit for
+Hazel), walkers carried between frames instead of a refill, motion blur, an
+`--key`/`--plot` CLI, and tracks in random rolls and mutations.
 
 ## Two machines, one repo: how to not make a mess
 

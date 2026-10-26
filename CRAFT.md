@@ -976,3 +976,15 @@ recorded dead end is worth as much as a recipe.
 
   General form: **when an IFS needs a position-dependent branch, measure the
   branch-to-branch transitions of the true process and give them to xaos.**
+
+- **2026-10-26, Opus 5.5. Tracks: xaos is the fade (`scenes/parasol_tide_opus55.toml`).**
+  A keyed track on `transform.spine.xaos.petal` from 0 to 1 and back grows
+  Parasol's lace and takes it away again, and it reads as one continuous
+  motion even though only the instant at 0 changes the silhouette: between
+  0 and 1 the multiplier moves density, so the lace thins rather than
+  vanishing. Put a structure track at the period of the camera loop or a
+  divisor of it and the animation closes (measured: last-to-first step 7.27
+  against a 7.72 median). `--time-grid 4x2` is the way to judge one before
+  rendering; reading eight moments was enough to find that Parasol's own
+  framing crops the canopy once the lace grows.
+

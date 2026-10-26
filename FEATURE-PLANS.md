@@ -313,6 +313,17 @@ most. Order: **9 → 8 → 10 → 11 → 12 → 12.5 → 13**.
 
 ### 9. Animation kinds, and the camera rebuilt on them
 
+> **Status, 2026-10-26 (Opus 5.5): built, short of the file-format move.**
+> `src/track.rs` has the one `Track` (keys / rate / cycle, extrapolation
+> hold / repeat / pingpong / offset). The camera shares the time model: its
+> `Loop` *is* an extrapolation (`Loop::extrapolate`, zoom loop =
+> repeat-with-offset), and it is sampled on the same clock in seconds as every
+> track. What is **not** done is moving `[[camera.path]]` into `[[track]]`
+> form: it is a format change to every scene with a path, which this plan
+> itself makes one explicit migration commit, and nothing built so far needs
+> it. The views-as-keys decision below is still open. See AGENTS.md, "Tracks
+> and the timeline".
+
 **The core idea.** One `Track` type: a target, a source of values over time,
 and what happens past its ends.
 
@@ -380,6 +391,13 @@ only Y add keys?
 
 ### 8. A timeline window, wide and low
 
+> **Status, 2026-10-26: a first cut.** Transport, ruler, playhead, scrub,
+> loop, a camera row (its keys at the moments it passes them), a row per
+> track (keys as diamonds coloured by class, the value as a faint curve),
+> mute and delete. Not yet: authoring keys, retiming, zooming the ruler, the
+> curve editor proper. The transport is a clock plus "is the camera
+> following", so grabbing the camera leaves an animation playing.
+
 A floating window docked above the status bar, full width, about a fifth of
 the height (it's `egui::Window` like everything else, so `default_layout`
 places it and prefs remember where you moved it).
@@ -397,6 +415,19 @@ places it and prefs remember where you moved it).
   had and JWildfire's "motion curves" do have.
 
 ### 10. Animating (almost) every scene parameter
+
+> **Status, 2026-10-26: built as written**, addressing by `-S` path, with the
+> four classes, per-frame refills offline (in place, same seed), fill-rate
+> churn live, `--time`, `--time-grid` and an `--info` `tracks` section.
+> Decided without Hazel, and easy to reverse:
+> - **Editing a tracked value edits the base, no auto-key.** For a rate or a
+>   cycle the base is what the motion moves about, so that edit is the useful
+>   one; for keys it shows only where the keys don't reach. Auto-key waits for
+>   key authoring in the GUI.
+> - **A track whose path doesn't resolve is skipped and reported, not a load
+>   error**, like an xaos dead end: deleting the map a track moves made saved
+>   scenes unopenable.
+> - Not done: `--key`, `--plot`, `-S track.*`, motion blur, carried walkers.
 
 **Addressing: reuse `-S` paths.** `src/set.rs` already names every scene value
 (`transform.whorl.variations.swirl`, `subscene.smoke.translation.y`,
