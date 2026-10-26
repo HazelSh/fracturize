@@ -62,6 +62,8 @@ src/
     profile.rs     # Profiles as files: format, built-ins, named lookup, comment-keeping save
     profiles/      # The built-in profiles, compiled in (anything, colour-only, …)
   random_list.rs # The Random flames list's model: rolls on worker threads
+  mutation_grid.rs # The Mutate window's grid: layout (shared with --mutations 8|24),
+                 # tiles mutated on the same workers, a seed remembered per parent
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
   xaos.rs        # Xaos: per-map transition rows, the exact sampler (GPU twin),
@@ -80,7 +82,7 @@ src/
     subscenes.rs   # Subscenes window: layers, eye, share, import, placement
     xaos.rs        # Xaos: inspector block, matrix window, viewport edge overlay
     history.rs     # History window: every edit, click a row to jump to it
-    mutate.rs      # Mutate window: profile, strength, the button
+    mutate.rs      # Mutate window: profile, strength, the mutation grid
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
@@ -689,7 +691,7 @@ where "start a new document" lives in every program.
 |--------|------------------|
 | Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
 | History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
-| Mutate | The dice profile picker, mutation strength (the profile's), Mutate, Undo, Settings… |
+| Mutate | The dice profile picker, mutation strength (the profile's), 3×3 / 5×5, New, Mutate, Undo, Settings… — then the mutation grid: the scene in the middle, its mutations around it, click one to make it the scene. See "The mutation grid" |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
 | Random settings | The dice profile: picker, save / save as / revert (with a `*` when changed); one list of parts — shape, structure, colour — each switched on or off with its ranges under it; the quality check; how big a mutation's step is; Roll one and Mutate at the foot. See "The dice" |
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
@@ -926,13 +928,6 @@ undefended absence reads as an accident, so they are written down:
 - **Transform reordering.** Meaningless for an IFS: order doesn't affect the
   attractor, weights do. This one is deferred permanently.
 - **A menu bar.** See the File-menu note above.
-- **The 3×3 mutation grid** — Apophysis's signature exploration UI, showing
-  eight perturbations around the current flame so mutation becomes *look,
-  choose* rather than *roll, judge, undo*. The highest-value single addition
-  left, and the largest job: it needs offscreen thumbnail rendering, which
-  `render_job.rs` / `offline.rs` can already do at arbitrary point counts.
-  Eight 200×200 thumbnails at low point counts are cheap next to a 50M-point
-  live view. Still on `todo.txt`.
 
 ### The chrome doesn't move
 
@@ -1284,9 +1279,48 @@ A profile saved before xaos was a part kept the base's rows exactly when the
 transform count was off; read without an `xaos` key, it gets xaos off where
 `count` is off, so it does the same (`profile::migrate`).
 
-Not yet (FEATURE-PLANS.md Track A, items 3 and 5): infinite zoom as a part,
-and the 3×3 / 5×5 mutation grid, which is this generator with the Random
-flames list's model and a grid layout.
+Not yet (FEATURE-PLANS.md Track A, item 5): infinite zoom as a part.
+
+## The mutation grid
+
+The Mutate window is look-and-choose (FEATURE-PLANS.md item 3): the scene in
+the middle of a 3×3 or 5×5, its mutations around it, and a click makes one
+the scene — one edit, labelled `Grid k: <what changed>` — and a new ring grows
+around it at once. The model is `src/mutation_grid.rs`; the tiles are made on
+the Random flames list's worker pool (`random_list::spawn_workers`, which now
+takes a `dice::Action`), through the same `dice::mutate_seeded` U calls, so
+each tile went through the gate against the scene in the middle. Thumbnails
+are `gpu::thumbs` (`ThumbKey::Mutation`), and as everywhere only the tile
+under the pointer flies its camera.
+
+Four things it rests on:
+
+- **Tile `k` is seed `base + k`, laid out by `mutation_grid::cell`**, which
+  `--mutations 8|24` also uses: parent in the middle, the inner ring in
+  reading order, then the outer one. So the window's grid *is*
+  `--mutations 8 --seed <the seed it shows>` (the status line's tooltip prints
+  the command), a 3×3 is a 5×5's inner ring tile for tile, and a 5×5's outer
+  ring is made at twice the strength (`ring_strength`, capped at the limit).
+  Any other `--mutations N` keeps the old near-square sheet.
+- **A parent keeps its grid.** The base seed is remembered per parent, by a
+  fingerprint of the scene with the camera left out, so after picking a tile
+  Ctrl+Z brings back the old scene *and the same tiles*, and a sibling can be
+  picked. This touches nothing in the history: the grid follows whatever is on
+  screen, and a scene it has seen gets the seed it had. It looks again when
+  the history's position or the count of opened files moves, after 400 ms of
+  stillness so a drag doesn't restart it per frame; a pick restarts at once.
+- **Tiles are framed by the live camera**, baked into the grid's copy of the
+  parent when it starts, so the comparison is of form seen the way you were
+  looking. Picking a tile puts the scene's own saved framing back. With the
+  camera flying, the tiles hold the framing of the moment the grid started.
+- **A thumbnail's ring scales with its area** (`thumbs::points_for`): 8k
+  points up to the Random flames list's 256×144, then in proportion, to 64k.
+  Tiles are drawn from a ladder of widths, so a resize draws them smaller
+  rather than re-rendering 25 of them.
+
+Not yet: an onion skin (the hovered tile over the parent in the main view),
+masks beyond profiles (only the selected map, a mute/solo set), and moving the
+grid into multiview panes once those exist.
 
 ## The scene browser
 

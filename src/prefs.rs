@@ -19,7 +19,7 @@ pub struct PanelPrefs {
     /// History: every edit, clickable to jump to.
     #[serde(default)]
     pub history_open: bool,
-    /// Mutate: strength and the button.
+    /// Mutate: the profile, the strength, and the grid of mutations.
     #[serde(default)]
     pub mutate_open: bool,
     /// The Random flames list down the left of the screen.
@@ -47,6 +47,10 @@ pub struct PanelPrefs {
     /// The Xaos window: a layer's whole transition matrix.
     #[serde(default)]
     pub xaos_open: bool,
+}
+
+fn default_mutation_grid() -> u32 {
+    3
 }
 
 fn default_ui_scale() -> f32 {
@@ -117,6 +121,10 @@ pub struct Prefs {
     /// `None`. `None` here too = `default`.
     #[serde(default)]
     pub random_profile_builtin: Option<String>,
+    /// The Mutate window's grid: 3 (eight mutations around the scene) or 5
+    /// (twenty-four, the outer ring at twice the strength).
+    #[serde(default = "default_mutation_grid")]
+    pub mutation_grid: u32,
     /// Who to credit on scenes made in-app. Scene files carry their own
     /// author; this is only the default for one that doesn't have one yet (a
     /// blank canvas, a random flame), so a person doesn't have to type their
@@ -180,6 +188,7 @@ impl Default for Prefs {
             random: Default::default(),
             random_profile: None,
             random_profile_builtin: None,
+            mutation_grid: default_mutation_grid(),
             author: None,
             point_count: None,
             threads: None,

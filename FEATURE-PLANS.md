@@ -139,6 +139,12 @@ XAOS-PLAN.md §6, as profile settings:
 
 ### 3. The mutation grid: 3×3 and 5×5, click to accept, recurse
 
+*Built 2026-10-26 as the Mutate window (`src/mutation_grid.rs`, AGENTS.md "The
+mutation grid"): points 1, 2, 3 and 5, with masks as profiles (4). Ctrl+Z gets
+the old grid back by remembering a seed per parent rather than by a history
+entry carrying seeds. Not built: the onion skin (6), and the grid living in
+multiview panes (it has its own layout until those exist).*
+
 The Random flames list *is* this feature with a different source: rows of
 gated generations with live thumbnails, rolled off-thread, click to open.
 So the grid is the same model (`random_list.rs`, generalised to take a

@@ -41,22 +41,29 @@ pub struct RandomEntry {
     pub symmetry: Option<String>,
 }
 
-struct Job {
-    generation: u64,
-    seed: u64,
-    settings: Arc<RandomSettings>,
-    base: Arc<Scene>,
+/// One roll or mutation for a worker to make. The Random flames list and the
+/// mutation grid both hand their work to [`spawn_workers`] in this form, so
+/// the two go through one pool and one call into the dice.
+pub(crate) struct Job {
+    pub generation: u64,
+    pub seed: u64,
+    pub settings: Arc<RandomSettings>,
+    pub base: Arc<Scene>,
+    pub action: dice::Action,
+    /// The caller's own label for the job (the grid's tile), handed back.
+    pub tag: usize,
 }
 
-enum Outcome {
+pub(crate) enum Outcome {
     Rolled(Box<dice::Roll>),
-    Failed { attempts: u32, rejected: Rejections },
+    Failed { attempts: u32, rejected: Rejections, message: String },
 }
 
-struct Done {
-    generation: u64,
-    seed: u64,
-    outcome: Outcome,
+pub(crate) struct Done {
+    pub generation: u64,
+    pub seed: u64,
+    pub tag: usize,
+    pub outcome: Outcome,
 }
 
 /// Rolls that came back empty in a row before the list stops asking. Past
@@ -239,7 +246,7 @@ impl RandomList {
                     kinds,
                 });
             }
-            Outcome::Failed { attempts, rejected } => {
+            Outcome::Failed { attempts, rejected, .. } => {
                 self.candidates += attempts as u64;
                 self.add_rejections(rejected);
                 self.failures += 1;
@@ -259,8 +266,15 @@ impl RandomList {
         let generation = self.generation.load(Ordering::Relaxed);
         let seed = self.base_seed.wrapping_add(self.next_index);
         self.next_index += 1;
-        let job = Job { generation, seed, settings: self.settings.clone(), base: self.base.clone() };
-        let (tx, _) = self.workers.get_or_insert_with(|| spawn_workers(self.generation.clone()));
+        let job = Job {
+            generation,
+            seed,
+            settings: self.settings.clone(),
+            base: self.base.clone(),
+            action: dice::Action::Roll,
+            tag: 0,
+        };
+        let (tx, _) = self.workers.get_or_insert_with(|| spawn_workers("random-flames", self.generation.clone()));
         if tx.send(job).is_ok() {
             self.in_flight += 1;
         }
@@ -273,9 +287,11 @@ pub fn fresh_seed() -> u64 {
     rand::random::<u32>() as u64
 }
 
-/// Threads rolling flames: a couple, leaving the rest of the machine to the
-/// renderer and the person. They live as long as the app.
-fn spawn_workers(current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
+/// Threads rolling flames or mutating them: a couple, leaving the rest of the
+/// machine to the renderer and the person. They live as long as the app.
+/// A job whose generation is no longer `current` when a worker reaches it is
+/// skipped: whoever asked has moved on.
+pub(crate) fn spawn_workers(name: &str, current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
     let (job_tx, job_rx) = channel::<Job>();
     let (done_tx, done_rx) = channel::<Done>();
     let job_rx = Arc::new(Mutex::new(job_rx));
@@ -285,7 +301,7 @@ fn spawn_workers(current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
         let done_tx = done_tx.clone();
         let current = current.clone();
         let spawned = std::thread::Builder::new()
-            .name(format!("random-flames-{i}"))
+            .name(format!("{name}-{i}"))
             .spawn(move || {
                 loop {
                     let Ok(job) = job_rx.lock().map(|rx| rx.recv()) else { return };
@@ -294,11 +310,16 @@ fn spawn_workers(current: Arc<AtomicU64>) -> (Sender<Job>, Receiver<Done>) {
                     if job.generation != current.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let outcome = match dice::roll_seeded(&job.settings, &job.base, job.seed) {
-                        Ok(r) => Outcome::Rolled(Box::new(r)),
-                        Err(f) => Outcome::Failed { attempts: f.attempts, rejected: f.rejected },
+                    let made = match job.action {
+                        dice::Action::Roll => dice::roll_seeded(&job.settings, &job.base, job.seed),
+                        dice::Action::Mutate => dice::mutate_seeded(&job.settings, &job.base, job.seed),
                     };
-                    if done_tx.send(Done { generation: job.generation, seed: job.seed, outcome }).is_err() {
+                    let outcome = match made {
+                        Ok(r) => Outcome::Rolled(Box::new(r)),
+                        Err(f) => Outcome::Failed { attempts: f.attempts, rejected: f.rejected, message: f.message() },
+                    };
+                    let done = Done { generation: job.generation, seed: job.seed, tag: job.tag, outcome };
+                    if done_tx.send(done).is_err() {
                         return;
                     }
                 }

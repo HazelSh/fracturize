@@ -314,6 +314,8 @@ impl WindowKey {
             Self::RandomSettings => egui::vec2(300.0, 260.0),
             // The preset row and the radio above a grid of at least a few cells.
             Self::Xaos => egui::vec2(300.0, 220.0),
+            // Four rows of controls above a grid of tiles big enough to judge.
+            Self::Mutate => egui::vec2(360.0, 340.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -340,7 +342,8 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::History => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 260.0)),
         // Beside Random settings, so the three dice windows — the list, the
         // profile, the mutation — sit left to right and none hides another.
-        WindowKey::Mutate => (egui::pos2(690.0, top), egui::vec2(300.0, 110.0)),
+        // Large, because it holds the grid: a 3×3 of tiles you can judge.
+        WindowKey::Mutate => (egui::pos2(690.0, top), egui::vec2(600.0, 520.0)),
         // Asked for down the left side of the screen: the full height, one
         // thumbnail wide. Over Render's default spot, which is fine — this is
         // only where windows land before anyone has moved them.

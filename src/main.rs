@@ -30,6 +30,7 @@ mod symmetry;
 mod tile;
 mod glyphs;
 mod dice;
+mod mutation_grid;
 mod random_list;
 mod record;
 mod renorm;
@@ -904,6 +905,9 @@ struct Args {
 
     /// Sheet of the scene plus N mutations, tile 0 = original [no sheet]
     ///
+    /// 8 and 24 lay out as the Mutate window's 3x3 and 5x5 grids: the original
+    /// in the middle, and on a 5x5 the outer ring at twice the strength, so
+    /// the window's grid is `--mutations 8 --seed <the seed it shows>`.
     /// Each variant is saved as <out>.mutN.toml and described on stdout.
     /// What a mutation may change comes from --random-config, and every one
     /// is checked like a random roll — judged against the scene it came from,

@@ -47,8 +47,22 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 /// hands egui exactly the encoded values the sRGB store wrote.
 const EGUI_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Points in a thumbnail's ring.
+/// Points in a thumbnail's ring at the Random flames list's 256x144 and
+/// below.
 pub const POINTS: u32 = 8192;
+
+/// The most points a thumbnail's ring holds.
+const MAX_POINTS: u32 = 65536;
+
+/// Points in the ring of a thumbnail `width` x `height` pixels: [`POINTS`] up
+/// to the Random flames list's size, then in proportion to the area, so a
+/// mutation-grid tile three times as wide is as dense to look at as a list
+/// row. A whole number of laps of the 256 walkers.
+pub fn points_for(width: u32, height: u32) -> u32 {
+    let area = width as f64 * height as f64 / (256.0 * 144.0);
+    let n = (POINTS as f64 * area.max(1.0)).min(MAX_POINTS as f64) as u32;
+    n.div_ceil(256) * 256
+}
 
 /// One workgroup: 256 walkers, so a lap is 32 iterations each.
 const WORKGROUPS: u32 = 1;
@@ -88,6 +102,8 @@ pub struct Thumbnail {
     /// How long one flight of the camera path takes, in seconds: the authored
     /// path's, else the default orbit's. The hovered entry plays at this rate.
     seconds: f32,
+    /// Points in its ring ([`points_for`] its size).
+    points: u32,
     /// Zoom periods the ring has been carried by, so a flight that crosses a
     /// wrap carries the points with the camera — by the change in fold depth,
     /// never by the depth itself (see "Infinite Zoom" in AGENTS.md).
@@ -105,15 +121,16 @@ impl Thumbnail {
         height: u32,
     ) -> Result<Self, String> {
         let table = LayerTable::build(&scene, &[], scene.color_contrast);
+        let points = points_for(width, height);
         let mut compute = PointCompute::with_pipelines(
-            device, &pipes.chaos, &table, POINTS, DEFAULT_SEED, WORKGROUPS,
+            device, &pipes.chaos, &table, points, DEFAULT_SEED, WORKGROUPS,
         );
         compute.zoom = crate::offline::scene_zoom(&scene)?;
 
         // Burn in, then one lap. Two submits, because `advance_with_iters`
         // writes the params through the queue and both writes would otherwise
         // land before either dispatch runs.
-        let lap = POINTS.div_ceil(compute.num_walkers);
+        let lap = points.div_ceil(compute.num_walkers);
         for iters in [BURN_IN, lap] {
             compute.advance_with_iters(queue, iters);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -159,7 +176,7 @@ impl Thumbnail {
         splat.upload_params(
             queue,
             scene.exposure,
-            POINTS as f64,
+            points as f64,
             height as f32,
             crate::scene::clear_color(scene.background, 1.0),
             crate::gpu::buffers::Alpha::Opaque,
@@ -170,7 +187,8 @@ impl Thumbnail {
         let seconds = crate::path::resolve(scene.camera_path.as_ref(), &default).duration();
 
         let mut thumb = Self {
-            scene, compute, splat, texture, view, egui_view, depth_view, width, height, seconds, folded: 0,
+            scene, compute, splat, texture, view, egui_view, depth_view, width, height, seconds, points,
+            folded: 0,
         };
         thumb.render(device, queue, None);
         Ok(thumb)
@@ -207,7 +225,7 @@ impl Thumbnail {
             OrbitCamera::point_pixels(point_size, camera.distance, self.height as f32, camera.fov) <= 1.5;
         self.splat.render(
             device, &mut encoder, &self.view, &self.depth_view,
-            self.width, self.height, POINTS, primitives,
+            self.width, self.height, self.points, primitives,
         );
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -226,12 +244,13 @@ pub enum ThumbState<'a> {
     Failed(&'a str),
 }
 
-/// What a thumbnail is of: a scene file, or a roll in the Random flames list
-/// (by its id there, which is never reused).
+/// What a thumbnail is of: a scene file, a roll in the Random flames list, or
+/// a tile of the mutation grid (by its id there; neither id is reused).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ThumbKey {
     File(std::path::PathBuf),
     Random(u64),
+    Mutation(u64),
 }
 
 struct Slot {

@@ -219,7 +219,7 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
             app,
             |p| &mut p.mutate_open,
             &format!("{} Mutate…", icons::SHUFFLE),
-            "The dice profile, the mutation strength, and a button to mutate with them.",
+            "The mutation grid: the scene among eight or twenty-four mutations of it. Click one to make it the scene; Ctrl+Z brings the grid back.",
         );
 
         ui.separator();

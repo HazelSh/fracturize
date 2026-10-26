@@ -149,7 +149,7 @@ count slider that lets a weak machine stay responsive.
 - As Pip, I want to open the program on something beautiful, not a blank
   canvas, and be shown three things to try.
 - As Pip, I want to see eight variations of this one and pick the one I like
-  (the 3×3 mutation grid; deferred, and the biggest thing for Pip and Jay).
+  (the mutation grid: built 2026-10-26, in the Mutate window).
 - As Pip, I want to know what a word means where I meet it.
 - As Pip, I want to try a slider and see what it does without committing.
 - As Pip, I want to save a picture I'm proud of without learning what
@@ -208,8 +208,8 @@ and render jobs; the volume renderer; symmetry groups and repeats; subscenes;
 saved views.
 
 **Gaps:**
-- As Jay, I want the 3×3 mutation grid, so mutation is "look and choose"
-  instead of "roll, judge, undo".
+- ~~As Jay, I want the 3×3 mutation grid, so mutation is "look and choose"
+  instead of "roll, judge, undo".~~ Built 2026-10-26: the Mutate window.
 - As Jay, I want grade controls (gamma, threshold, vibrancy) in the Render
   window, saved in views.
 - As Jay, I want to bookmark a state mid-session and come back to it, apart

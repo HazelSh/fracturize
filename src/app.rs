@@ -1054,6 +1054,13 @@ pub struct App {
     /// The Random flames list: rolls under the person's random settings,
     /// made on background threads. See `random_list`.
     pub random_list: crate::random_list::RandomList,
+    /// The Mutate window's grid: the scene's mutations around it, made on
+    /// background threads. See `mutation_grid`.
+    pub mutation_grid: crate::mutation_grid::MutationGrid,
+    /// Scenes opened from disk so far. With the history's position it tells
+    /// the mutation grid when the scene may have changed under it: opening a
+    /// file clears the history, so the position alone can't.
+    scene_loads: u64,
     /// The dice profile the random settings came from: its name, and what it
     /// said, so the Random settings window can mark them changed.
     dice_profile: crate::dice::profile::Selected,
@@ -1130,6 +1137,21 @@ pub fn droppable(path: &Path) -> Result<(), String> {
             path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         )),
     }
+}
+
+/// A mutation's history label: what changed, cut short so the History window
+/// stays tidy (at a character boundary — the log has glyphs like `°` in it).
+fn mutation_label(prefix: &str, log: &[String]) -> String {
+    let mut label = format!("{prefix}{}", log.join("; "));
+    if label.len() > 60 {
+        let mut cut = 57;
+        while cut > 0 && !label.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        label.truncate(cut);
+        label.push_str("...");
+    }
+    label
 }
 
 impl App {
@@ -1451,6 +1473,8 @@ impl App {
             browser_selected: 0,
             thumbs,
             random_list,
+            mutation_grid: crate::mutation_grid::MutationGrid::new(),
+            scene_loads: 0,
             dice_profile,
             chaos_pipelines,
             splat_pipelines,
@@ -4262,6 +4286,7 @@ impl App {
         // editor ever written. The surprise was never the clear — it was that
         // it happened without asking, which is what `request_load_scene` fixes.
         self.history.clear();
+        self.scene_loads += 1;
         self.mark_saved();
         self.rebuild_pipelines();
     }
@@ -5039,11 +5064,9 @@ impl App {
                 return;
             }
         };
-        let before = self.edit_snapshot();
-        let log = r.log;
         log::info!(
             "Mutation seed {seed}: {} ({} tries{}; reproduce with --mutations 1 --seed {}{})",
-            log.join("; "),
+            r.log.join("; "),
             r.attempts,
             r.strength.filter(|&s| s < self.prefs.random.mutation.strength).map_or(String::new(), |s| format!(
                 ", strength backed off to {s:.2}"
@@ -5051,23 +5074,79 @@ impl App {
             seed.wrapping_sub(1),
             self.dice_config_flag(),
         );
-        self.scene = r.scene;
+        let label = mutation_label("", &r.log);
+        self.apply_mutation(r.scene, label);
+    }
+
+    /// Make tile `k` of the mutation grid the scene: the same edit U makes,
+    /// labelled with what changed. The grid then starts over around it, at
+    /// once; Ctrl+Z brings back the old parent, and its grid with it.
+    pub fn adopt_mutation(&mut self, k: u32) {
+        let grid = &self.mutation_grid;
+        let Some(child) = grid.child(k) else { return };
+        let mut scene = child.scene.clone();
+        log::info!(
+            "Mutation grid tile {k}, seed {}: {} (reproduce the grid with --mutations {} --seed {}{})",
+            child.seed,
+            child.log.join("; "),
+            crate::mutation_grid::children(grid.size()),
+            grid.base_seed,
+            self.dice_config_flag(),
+        );
+        let label = mutation_label(&format!("Grid {k}: "), &child.log);
+        // The tiles were framed by the live camera; the scene's own framing
+        // is the person's, and picking a tile isn't a reason to move it.
+        scene.set_camera(&self.scene.camera());
+        self.apply_mutation(scene, label);
+        self.mutation_grid.expire();
+    }
+
+    /// A mutated scene in place of this one, as one edit.
+    fn apply_mutation(&mut self, scene: Scene, label: String) {
+        let before = self.edit_snapshot();
+        self.scene = scene;
         self.bump_matrix_generation();
         self.after_scene_shape_change();
-
-        // Label from the op log, truncated so the history list stays tidy
-        // (the op log can contain multi-byte glyphs like '°', so truncate at
-        // the nearest char boundary rather than a raw byte index)
-        let mut label = log.join("; ");
-        if label.len() > 60 {
-            let mut cut = 57;
-            while cut > 0 && !label.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            label.truncate(cut);
-            label.push_str("...");
-        }
         self.commit_edit(label, None, before);
+    }
+
+    /// Bring the mutation grid up to date with the scene on screen and
+    /// collect its finished tiles. Called while the Mutate window is open.
+    pub fn poll_mutation_grid(&mut self) {
+        self.mutation_grid.poll(
+            &self.prefs.random,
+            &self.scene,
+            &self.camera,
+            self.history.top_serial(),
+            self.scene_loads,
+            self.prefs.mutation_grid,
+        );
+    }
+
+    /// New mutations of the same scene.
+    pub fn reroll_mutation_grid(&mut self) {
+        self.mutation_grid.reroll(&self.prefs.random, &self.scene, &self.camera, self.prefs.mutation_grid);
+    }
+
+    /// Tiles a side of the mutation grid: 3 or 5.
+    pub fn mutation_grid_size(&self) -> u32 {
+        self.prefs.mutation_grid
+    }
+
+    /// 3 or 5 tiles a side.
+    pub fn set_mutation_grid_size(&mut self, n: u32) {
+        if crate::mutation_grid::SIZES.contains(&n) && n != self.prefs.mutation_grid {
+            self.prefs.mutation_grid = n;
+            self.prefs_dirty_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// The grid, the thumbnail cache and the UI state, borrowed together so a
+    /// tile can ask for its thumbnail while it draws.
+    pub fn mutation_grid_parts(
+        &mut self,
+    ) -> (&crate::mutation_grid::MutationGrid, &mut crate::gpu::thumbs::ThumbCache, &mut crate::ui::UiState) {
+        (&self.mutation_grid, &mut self.thumbs, &mut self.ui_state)
     }
 
     /// Reconcile app state after the scene changed under us (mutation/undo
