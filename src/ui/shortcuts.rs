@@ -163,6 +163,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Explore",
         &[
             ("U / Shift+U", "random mutation / undo", Some(HelpAction::Mutate)),
+            ("Ctrl+U", "mutation grid in the view / back to one", Some(HelpAction::MutationGrid)),
             ("Ctrl+Z / Ctrl+Shift+Z", "undo / redo any edit", Some(HelpAction::Undo)),
             ("Ctrl+Y", "redo", None),
             ("X / Shift+X", "show new traces / hide them", Some(HelpAction::Traces)),

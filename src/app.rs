@@ -564,6 +564,7 @@ pub enum HelpAction {
     ColorContrast,
     HazeIntensity,
     Mutate,
+    MutationGrid,
     Undo,
     Browse,
     Traces,
@@ -1115,6 +1116,13 @@ pub struct App {
     browser_selected: usize,
     /// Scene thumbnails for the browser's rows. See `gpu::thumbs`.
     pub thumbs: crate::gpu::thumbs::ThumbCache,
+    /// The mutation grid's panes, when it fills the view. See `grid_view`.
+    grid_panes: crate::gpu::thumbs::GridPanes,
+    /// The view is the mutation grid: the scene in the middle and its
+    /// mutations around it, every pane drawn from the one camera, so moving
+    /// the camera explores all of them at once. Session state: it changes
+    /// what's shown, not the scene.
+    grid_view: bool,
     /// The Random flames list: rolls under the person's random settings,
     /// made on background threads. See `random_list`.
     pub random_list: crate::random_list::RandomList,
@@ -1272,6 +1280,7 @@ impl App {
         let splat_pipelines =
             crate::gpu::points::splat::SplatPipelines::with_precision(&gpu.device, gpu.format, false);
         let thumbs = crate::gpu::thumbs::ThumbCache::new(&gpu.device, &chaos_pipelines);
+        let grid_panes = crate::gpu::thumbs::GridPanes::new(&gpu.device, &chaos_pipelines);
 
         // Create point compute pipeline
         let point_compute = PointCompute::with_pipelines(
@@ -1554,6 +1563,8 @@ impl App {
             browser: None,
             browser_selected: 0,
             thumbs,
+            grid_panes,
+            grid_view: false,
             random_list,
             mutation_grid: crate::mutation_grid::MutationGrid::new(),
             scene_loads: 0,
@@ -3600,16 +3611,25 @@ impl App {
             // then drag whatever I happen to be over".
             Drag::Consumed => {}
             Drag::Orbit => {
+                if self.grid_view {
+                    self.stop_following();
+                }
                 let dy = if self.prefs.invert_pitch { -dy } else { dy };
                 self.camera.orbit(dx, dy, self.prefs.orbit_style);
                 self.invalidate_default_path();
             }
             Drag::Pan => {
+                if self.grid_view {
+                    self.stop_following();
+                }
                 let (_, h) = self.gpu.size();
                 self.camera.pan(dx, dy, h as f32);
                 self.invalidate_default_path();
             }
             Drag::Roll => {
+                if self.grid_view {
+                    self.stop_following();
+                }
                 self.camera.roll_by(dx);
                 self.invalidate_default_path();
             }
@@ -3692,7 +3712,7 @@ impl App {
     fn update_hover(&mut self) {
         use winit::window::CursorIcon;
 
-        let hit = if self.show_gizmos {
+        let hit = if self.show_gizmos && !self.grid_view {
             let (w, h) = self.gpu.size();
             let matrices = self.gizmo_matrices();
             crate::pick::pick_gizmo(
@@ -3763,6 +3783,17 @@ impl App {
         self.fine_from = self.cursor;
         self.fine_active = self.shift_held;
         match button {
+            // The grid: a drag orbits every pane at once, and a click picks one
+            // (see `on_mouse_release`). Nothing to grab. The camera keeps
+            // flying its path until the press moves: a pick isn't taking the
+            // camera, and stopping the flight to choose a tile would lose the
+            // very view it was chosen from.
+            MouseButton::Left if self.grid_view => {
+                self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
+            }
+            MouseButton::Right if self.grid_view => {
+                self.drag = Drag::Roll;
+            }
             MouseButton::Left => {
                 // The keybinds and scene-browser overlays used to hand-roll
                 // click hit-testing here. Both are real egui windows now
@@ -3850,7 +3881,9 @@ impl App {
             // a deselect. Only the plain orbit grab: a shift-click is a
             // modified gesture and a right-click is the roll/menu button, and
             // neither reads as "select nothing".
-            if matches!(button, MouseButton::Left)
+            if matches!(button, MouseButton::Left) && matches!(self.drag, Drag::Orbit) && !self.drag_moved && self.grid_view {
+                self.grid_click();
+            } else if matches!(button, MouseButton::Left)
                 && matches!(self.drag, Drag::Orbit)
                 && !self.drag_moved
                 && self.gizmo_selection().is_some()
@@ -5231,11 +5264,55 @@ impl App {
             self.dice_config_flag(),
         );
         let label = mutation_label(&format!("Grid {k}: "), &child.log);
+        let id = child.id;
         // The tiles were framed by the live camera; the scene's own framing
         // is the person's, and picking a tile isn't a reason to move it.
         scene.set_camera(&self.scene.camera());
         self.apply_mutation(scene, label);
-        self.mutation_grid.expire();
+        self.mutation_grid.expire(Some(id));
+    }
+
+    // === The mutation grid as the view ===
+
+    pub fn grid_view(&self) -> bool {
+        self.grid_view
+    }
+
+    /// Show the mutation grid in place of the scene (Ctrl+U), or go back.
+    pub fn toggle_grid_view(&mut self) {
+        self.grid_view = !self.grid_view;
+        if self.grid_view {
+            // Gizmos and their drags belong to the one scene in the middle;
+            // with nine on screen they'd be drawn over all of them.
+            self.drag = Drag::None;
+            self.hovered = None;
+        }
+        log::info!("Mutation grid view {}", if self.grid_view { "on" } else { "off" });
+    }
+
+    /// A click on the grid that didn't become a drag: the tile under it
+    /// becomes the scene, and the middle one rolls new mutations.
+    fn grid_click(&mut self) {
+        match self.ui_state.grid_hover {
+            Some(0) => self.reroll_mutation_grid(),
+            Some(k) => self.adopt_mutation(k),
+            None => {}
+        }
+    }
+
+    /// The grid, its panes and the UI state, borrowed together so the view
+    /// can ask for each pane while it lays them out.
+    pub fn grid_view_parts(
+        &mut self,
+    ) -> (&crate::mutation_grid::MutationGrid, &mut crate::gpu::thumbs::GridPanes, &mut crate::ui::UiState) {
+        (&self.mutation_grid, &mut self.grid_panes, &mut self.ui_state)
+    }
+
+    /// Points in each pane's ring: the window's budget shared between the
+    /// panes, within what reads and what's affordable to rebuild.
+    fn grid_pane_points(&self) -> u32 {
+        let n = self.mutation_grid_size();
+        (self.buffer_capacity / (n * n)).clamp(65_536, 1_000_000)
     }
 
     /// A mutated scene in place of this one, as one edit.
@@ -5276,14 +5353,6 @@ impl App {
             self.prefs.mutation_grid = n;
             self.prefs_dirty_since = Some(std::time::Instant::now());
         }
-    }
-
-    /// The grid, the thumbnail cache and the UI state, borrowed together so a
-    /// tile can ask for its thumbnail while it draws.
-    pub fn mutation_grid_parts(
-        &mut self,
-    ) -> (&crate::mutation_grid::MutationGrid, &mut crate::gpu::thumbs::ThumbCache, &mut crate::ui::UiState) {
-        (&self.mutation_grid, &mut self.thumbs, &mut self.ui_state)
     }
 
     /// Reconcile app state after the scene changed under us (mutation/undo
@@ -7922,6 +7991,7 @@ impl App {
                     self.mutate_scene()
                 }
             }
+            HelpAction::MutationGrid => self.toggle_grid_view(),
             HelpAction::Undo => {
                 if shift {
                     self.redo()
@@ -7971,6 +8041,15 @@ impl App {
         // Before egui paints, so a thumbnail built or flown this frame is the
         // one it draws.
         self.thumbs.service(&self.gpu.device, &self.gpu.queue, egui_renderer);
+        if self.grid_view {
+            let points = self.grid_pane_points();
+            let size = self.ui_state.grid_pane_px;
+            if size.0 > 0 && size.1 > 0 {
+                self.grid_panes.service(&self.gpu.device, &self.gpu.queue, egui_renderer, &self.camera, size, points);
+            }
+        } else if !self.grid_panes.is_empty() {
+            self.grid_panes.clear(egui_renderer);
+        }
 
         let (width, height) = self.gpu.size();
         let aspect = width as f32 / height as f32;
@@ -8072,8 +8151,29 @@ impl App {
             self.path_renderer.upload_camera(&self.gpu.queue, &camera);
         }
 
-        match self.render_mode {
-            RenderMode::Points => {
+        // The grid fills the view with panes egui draws; the scene itself
+        // isn't drawn under them, only its ground.
+        let mode = if self.grid_view { None } else { Some(self.render_mode) };
+        match mode {
+            None => {
+                let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("grid_clear_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(self.window_clear()),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            Some(RenderMode::Points) => {
                 self.point_renderer.upload_camera(&self.gpu.queue, &camera);
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("point_pass"),
@@ -8107,7 +8207,7 @@ impl App {
                     );
                 }
             }
-            RenderMode::Splat | RenderMode::Volume => {
+            Some(RenderMode::Splat | RenderMode::Volume) => {
                 self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
                 self.splat_renderer.upload_params(
                     &self.gpu.queue,
@@ -8146,7 +8246,7 @@ impl App {
         // finished picture, and it belongs under the handles you are about to
         // grab rather than over them.
         let (run_start, run_len) = self.point_compute.emphasis_window();
-        if run_len > 0 {
+        if run_len > 0 && !self.grid_view {
             self.emphasis_renderer.upload_camera(&self.gpu.queue, &camera);
             self.emphasis_renderer.upload_params(
                 &self.gpu.queue,
@@ -8179,7 +8279,7 @@ impl App {
         // aliasing; the pass gets its own copy of that depth so the point
         // cloud still occludes them, and its own sample count so they are the
         // only thing anti-aliased.
-        let draw_overlay = self.show_traces || self.show_gizmos;
+        let draw_overlay = (self.show_traces || self.show_gizmos) && !self.grid_view;
         if draw_overlay {
             {
                 let mut render_pass = self.overlay.begin(&mut encoder);

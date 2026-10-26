@@ -120,10 +120,26 @@ impl Thumbnail {
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
+        Self::with_ring(device, queue, pipes, scene, width, height, points_for(width, height), WORKGROUPS)
+    }
+
+    /// The same, with a ring of `points` worked by `workgroups` × 256
+    /// walkers: what a mutation grid pane, a few hundred thousand points on a
+    /// third of the window, is built with.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_ring(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipes: &ThumbPipelines,
+        scene: Scene,
+        width: u32,
+        height: u32,
+        points: u32,
+        workgroups: u32,
+    ) -> Result<Self, String> {
         let table = LayerTable::build(&scene, &[], scene.color_contrast);
-        let points = points_for(width, height);
         let mut compute = PointCompute::with_pipelines(
-            device, &pipes.chaos, &table, points, DEFAULT_SEED, WORKGROUPS,
+            device, &pipes.chaos, &table, points, DEFAULT_SEED, workgroups,
         );
         compute.zoom = crate::offline::scene_zoom(&scene)?;
 
@@ -230,9 +246,147 @@ impl Thumbnail {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
+    /// Redraw from `camera` instead of the scene's own: a mutation grid pane
+    /// following the window's camera. One splat; the points stay.
+    pub fn render_from(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera: &OrbitCamera) {
+        self.scene.set_camera(camera);
+        self.scene.camera_fov = camera.fov;
+        self.scene.camera_fov_authored = true;
+        self.render(device, queue, None);
+    }
+
     /// What egui registers and draws.
     pub fn view(&self) -> &wgpu::TextureView {
         &self.egui_view
+    }
+}
+
+/// The mutation grid's panes: one [`Thumbnail`] per tile, with a ring big
+/// enough for a third or a fifth of the window, all drawn from the window's
+/// camera so they turn and zoom together as the scene is explored.
+///
+/// Built like thumbnails — asked for while egui lays the grid out, built by
+/// [`GridPanes::service`] before it paints — and redrawn only when the camera
+/// moves, so a still grid costs nothing a frame.
+pub struct GridPanes {
+    pipes: ThumbPipelines,
+    panes: std::collections::HashMap<u64, Pane>,
+    wanted: Vec<(u64, Scene)>,
+    /// Pixels a pane, and points in its ring: a change rebuilds them all.
+    size: (u32, u32),
+    points: u32,
+    drawn_from: Option<OrbitCamera>,
+    frame: u64,
+}
+
+struct Pane {
+    built: Result<(Thumbnail, egui::TextureId), String>,
+    used: u64,
+}
+
+/// Build time per frame for panes, past the first: a 3×3 lands in a few
+/// frames without the window stalling for all of it.
+const PANE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Walkers in a pane's ring, ×256. Enough parallelism that a ring of half a
+/// million converges in one short dispatch.
+const PANE_WORKGROUPS: u32 = 64;
+
+impl GridPanes {
+    pub fn new(device: &wgpu::Device, chaos: &ChaosPipelines) -> Self {
+        Self {
+            pipes: ThumbPipelines::new(device, chaos),
+            panes: Default::default(),
+            wanted: Vec::new(),
+            size: (0, 0),
+            points: 0,
+            drawn_from: None,
+            frame: 0,
+        }
+    }
+
+    /// Pane `id`'s picture, asking for it if it isn't built.
+    pub fn get(&mut self, id: u64, scene: &Scene) -> ThumbState<'_> {
+        match self.panes.get_mut(&id) {
+            Some(p) => {
+                p.used = self.frame;
+                match &p.built {
+                    Ok((_, tex)) => ThumbState::Ready(*tex),
+                    Err(e) => ThumbState::Failed(e),
+                }
+            }
+            None => {
+                if !self.wanted.iter().any(|(k, _)| *k == id) {
+                    self.wanted.push((id, scene.clone()));
+                }
+                ThumbState::Pending
+            }
+        }
+    }
+
+    /// Build what was asked for at `size` pixels and `points` a ring, redraw
+    /// every pane if `camera` moved, and let go of panes nobody asked for.
+    pub fn service(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        egui: &mut egui_wgpu::Renderer,
+        camera: &OrbitCamera,
+        size: (u32, u32),
+        points: u32,
+    ) {
+        self.frame += 1;
+        if size != self.size || points != self.points {
+            self.clear(egui);
+            self.size = size;
+            self.points = points;
+        }
+        let moved = self.drawn_from != Some(*camera);
+        if moved {
+            for p in self.panes.values_mut() {
+                if let Ok((t, _)) = &mut p.built {
+                    t.render_from(device, queue, camera);
+                }
+            }
+            self.drawn_from = Some(*camera);
+        }
+        let start = std::time::Instant::now();
+        let mut built = 0;
+        while !self.wanted.is_empty() && (built == 0 || start.elapsed() < PANE_BUDGET) {
+            let (id, scene) = self.wanted.remove(0);
+            let made = Thumbnail::with_ring(device, queue, &self.pipes, scene, size.0, size.1, points, PANE_WORKGROUPS)
+                .map(|mut t| {
+                    t.render_from(device, queue, camera);
+                    let tex = egui.register_native_texture(device, t.view(), wgpu::FilterMode::Linear);
+                    (t, tex)
+                });
+            self.panes.insert(id, Pane { built: made, used: self.frame });
+            built += 1;
+        }
+        self.wanted.clear();
+        // A pane not asked for in a couple of frames belongs to a grid that
+        // has moved on.
+        let stale: Vec<u64> = self.panes.iter().filter(|(_, p)| p.used + 2 < self.frame).map(|(k, _)| *k).collect();
+        for k in stale {
+            if let Some(Pane { built: Ok((_, tex)), .. }) = self.panes.remove(&k) {
+                egui.free_texture(&tex);
+            }
+        }
+    }
+
+    /// Let every pane go: the grid view is off.
+    pub fn clear(&mut self, egui: &mut egui_wgpu::Renderer) {
+        for (_, p) in self.panes.drain() {
+            if let Ok((_, tex)) = p.built {
+                egui.free_texture(&tex);
+            }
+        }
+        self.wanted.clear();
+        self.drawn_from = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.panes.is_empty()
     }
 }
 
@@ -244,13 +398,12 @@ pub enum ThumbState<'a> {
     Failed(&'a str),
 }
 
-/// What a thumbnail is of: a scene file, a roll in the Random flames list, or
-/// a tile of the mutation grid (by its id there; neither id is reused).
+/// What a thumbnail is of: a scene file, or a roll in the Random flames list
+/// (by its id there, which is never reused).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ThumbKey {
     File(std::path::PathBuf),
     Random(u64),
-    Mutation(u64),
 }
 
 struct Slot {

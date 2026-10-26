@@ -27,6 +27,7 @@ pub mod collab;
 pub mod confirm;
 pub mod history;
 pub mod gradient;
+pub mod grid_view;
 pub mod hints;
 pub mod icons;
 pub mod gizmo_ring;
@@ -56,6 +57,12 @@ pub struct UiState {
     /// the moment it differs (toolbar toggle and a window's own close
     /// button both mutate this same value, so they can't go out of sync).
     pub panels: PanelPrefs,
+    /// The mutation grid view: the tile under the pointer (0 the middle),
+    /// the pixels a pane is drawn at, and the area the grid filled last frame
+    /// (what the toolbar and status bar leave).
+    pub grid_hover: Option<u32>,
+    pub grid_pane_px: (u32, u32),
+    pub grid_area: Option<egui::Rect>,
     /// The Collaborate window's composer, notes and picture cache.
     pub collab: collab::CollabUi,
     /// This frame's status-bar left-hand hint, set by `hints::hinted` when a
@@ -248,6 +255,9 @@ impl UiState {
             dice_save_as: None,
             dice_profile_error: None,
             collab: collab::CollabUi::new(),
+            grid_hover: None,
+            grid_pane_px: (0, 0),
+            grid_area: None,
         }
     }
 }
@@ -349,8 +359,7 @@ impl WindowKey {
             Self::Xaos => egui::vec2(300.0, 220.0),
             // A header, a composer below, and room for a card between.
             Self::Collab => egui::vec2(380.0, 340.0),
-            // Four rows of controls above a grid of tiles big enough to judge.
-            Self::Mutate => egui::vec2(360.0, 340.0),
+
             // The transport row, the ruler and the camera's row.
             Self::Timeline => egui::vec2(560.0, 140.0),
             _ => egui::vec2(180.0, 100.0),
@@ -379,8 +388,7 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::History => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 260.0)),
         // Beside Random settings, so the three dice windows — the list, the
         // profile, the mutation — sit left to right and none hides another.
-        // Large, because it holds the grid: a 3×3 of tiles you can judge.
-        WindowKey::Mutate => (egui::pos2(690.0, top), egui::vec2(600.0, 520.0)),
+        WindowKey::Mutate => (egui::pos2(690.0, top), egui::vec2(320.0, 150.0)),
         // Asked for down the left side of the screen: the full height, one
         // thumbnail wide. Over Render's default spot, which is fine — this is
         // only where windows land before anyone has moved them.
@@ -493,6 +501,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     };
 
     let t = std::time::Instant::now();
+    // First, on the background layer: everything else draws over it.
+    grid_view::draw(&ctx, app);
     toolbar::draw(ui, app);
     step("toolbar", t, &mut timings);
     let t = std::time::Instant::now();
@@ -543,9 +553,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     let t = std::time::Instant::now();
     // Under the labels: a name should never be obscured by the ring
     // encircling it.
-    gizmo_ring::draw(&ctx, app);
-    labels::draw(&ctx, app);
-    xaos::draw_overlay(&ctx, app);
+    if !app.grid_view() {
+        gizmo_ring::draw(&ctx, app);
+        labels::draw(&ctx, app);
+        xaos::draw_overlay(&ctx, app);
+    }
+    // What the toolbar and status bar leave of the window: where next
+    // frame's grid goes.
+    app.ui_state.grid_area = Some(ui.available_rect_before_wrap());
     step("labels", t, &mut timings);
     let t = std::time::Instant::now();
     axis_widget::draw(&ctx, app);

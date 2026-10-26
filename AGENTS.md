@@ -62,7 +62,7 @@ src/
     profile.rs     # Profiles as files: format, built-ins, named lookup, comment-keeping save
     profiles/      # The built-in profiles, compiled in (anything, colour-only, …)
   random_list.rs # The Random flames list's model: rolls on worker threads
-  mutation_grid.rs # The Mutate window's grid: layout (shared with --mutations 8|24),
+  mutation_grid.rs # The mutation grid's model: layout (shared with --mutations 8|24),
                  # tiles mutated on the same workers, a seed remembered per parent
   renorm.rs      # Infinite zoom: renormalize an IFS into a scale-invariant set
   subscene.rs    # Composite scenes: layers, placement, walker (= point) partition
@@ -82,7 +82,8 @@ src/
     subscenes.rs   # Subscenes window: layers, eye, share, import, placement
     xaos.rs        # Xaos: inspector block, matrix window, viewport edge overlay
     history.rs     # History window: every edit, click a row to jump to it
-    mutate.rs      # Mutate window: profile, strength, the mutation grid
+    mutate.rs      # Mutate window: profile, strength, grid size, the grid toggle
+    grid_view.rs   # The mutation grid as the view (Ctrl+U): panes on the background layer
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
     collab.rs      # Collaborate: the thread, option cards, the composer, conflicts
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
@@ -374,6 +375,7 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | right-click a gizmo | that transform's context menu: duplicate / enable / delete / rename — the same menu its row in the Transforms window has |
 | scroll | zoom — **always**, whatever is under the pointer |
 | click empty space | deselect (the only way to clear a selection) |
+| click a pane (grid view) | make that mutation the scene; the middle pane rolls new mutations. Drag, scroll, pan and roll move the one camera every pane follows |
 | click an unselected gizmo's origin dot | select it, and nothing else — the press starts no drag at all, not even a camera orbit |
 | drag the selected gizmo's origin dot | translate the transform in the view plane |
 | drag an axis endpoint (tip dot) | scale that one axis; drag past the origin to mirror it |
@@ -560,6 +562,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
 | U / Shift+U | random scene mutation / undo it |
+| Ctrl+U | the mutation grid in the view, or back to one view (Esc also leaves it) |
 | Ctrl+Z / Ctrl+Shift+Z | undo / redo *any* edit (see `src/history.rs`) |
 | X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
 | I | invert mouse pitch, flightsim style (persisted to prefs) |
@@ -1293,25 +1296,47 @@ Not yet (FEATURE-PLANS.md Track A, item 5): infinite zoom as a part.
 
 ## The mutation grid
 
-The Mutate window is look-and-choose (FEATURE-PLANS.md item 3): the scene in
-the middle of a 3×3 or 5×5, its mutations around it, and a click makes one
-the scene — one edit, labelled `Grid k: <what changed>` — and a new ring grows
-around it at once. The model is `src/mutation_grid.rs`; the tiles are made on
-the Random flames list's worker pool (`random_list::spawn_workers`, which now
-takes a `dice::Action`), through the same `dice::mutate_seeded` U calls, so
-each tile went through the gate against the scene in the middle. Thumbnails
-are `gpu::thumbs` (`ThumbKey::Mutation`), and as everywhere only the tile
-under the pointer flies its camera.
+**The grid is the view** (Ctrl+U, Explore → Mutation grid, or the Mutate
+window's toggle): the viewport splits into a 3×3 or 5×5, the scene in the
+middle and its mutations around it, and **every pane is drawn from the one
+camera**. Orbit, zoom, pan, roll or fly the path and all of them turn
+together, so a mutation is judged in 3D, from the angle that matters, before
+it's taken. A click that doesn't become a drag picks the pane under it — one
+edit, labelled `Grid k: <what changed>` — and a new ring grows around it; a
+click on the middle rolls new mutations. Hover a pane for what changed (its
+foot and the status bar). Esc or Ctrl+U goes back to one view. FEATURE-PLANS.md
+item 3, as Hazel asked for it on 2026-10-26: not a window, a use of the view.
 
-Four things it rests on:
+How it's put together, and what it rests on:
 
+- **Panes are painted on egui's background layer** (`ui::grid_view`), under
+  every window, and take no input. The viewport's own drag and scroll handling
+  never knows the grid is there, which is why every camera gesture works
+  unchanged. The press handler skips gizmos and xaos edges in grid view, and
+  the release turns a no-drag left click into `App::grid_click`, reading the
+  pane the UI found under the pointer (`UiState::grid_hover`). Gizmos, labels,
+  the ring, traces, emphasis and the xaos overlay aren't drawn.
+- **A pick doesn't stop the flight.** Elsewhere a press takes the camera off
+  its path; in grid view only a press that moves does, because a pick isn't a
+  grab and stopping the camera to choose would lose the view you chose from.
+- **Each pane is its own ring** (`gpu::thumbs::GridPanes`, a `Thumbnail` with
+  `with_ring`): the window's point budget divided between the panes, 64k to
+  1M each, 16,384 walkers, converged once. Redrawn from the camera only when
+  the camera moves (`render_from`), so a still grid costs nothing a frame.
+  **Panes are splatted whatever the renderer** — the thumbnail machinery is
+  splat-only — so in points mode the grid looks softer than the single view.
+  The main pass clears to the background and draws nothing while the grid is
+  up; the chaos game keeps running, so leaving it is instant.
+- **A picked pane moves to the middle**: the new parent takes the picked
+  tile's id (`MutationGrid::expire(Some(id))`), so its picture is reused
+  instead of rebuilt.
 - **Tile `k` is seed `base + k`, laid out by `mutation_grid::cell`**, which
   `--mutations 8|24` also uses: parent in the middle, the inner ring in
-  reading order, then the outer one. So the window's grid *is*
-  `--mutations 8 --seed <the seed it shows>` (the status line's tooltip prints
-  the command), a 3×3 is a 5×5's inner ring tile for tile, and a 5×5's outer
-  ring is made at twice the strength (`ring_strength`, capped at the limit).
-  Any other `--mutations N` keeps the old near-square sheet.
+  reading order, then the outer one. So the grid *is* `--mutations 8 --seed
+  <base>` (the Mutate window's status line prints the command), a 3×3 is a
+  5×5's inner ring tile for tile, and a 5×5's outer ring is made at twice the
+  strength (`ring_strength`, capped at the limit). Any other `--mutations N`
+  keeps the old near-square sheet.
 - **A parent keeps its grid.** The base seed is remembered per parent, by a
   fingerprint of the scene with the camera left out, so after picking a tile
   Ctrl+Z brings back the old scene *and the same tiles*, and a sibling can be
@@ -1319,18 +1344,16 @@ Four things it rests on:
   screen, and a scene it has seen gets the seed it had. It looks again when
   the history's position or the count of opened files moves, after 400 ms of
   stillness so a drag doesn't restart it per frame; a pick restarts at once.
-- **Tiles are framed by the live camera**, baked into the grid's copy of the
-  parent when it starts, so the comparison is of form seen the way you were
-  looking. Picking a tile puts the scene's own saved framing back. With the
-  camera flying, the tiles hold the framing of the moment the grid started.
-- **A thumbnail's ring scales with its area** (`thumbs::points_for`): 8k
-  points up to the Random flames list's 256×144, then in proportion, to 64k.
-  Tiles are drawn from a ladder of widths, so a resize draws them smaller
-  rather than re-rendering 25 of them.
+- Tiles are made on the Random flames list's worker pool
+  (`random_list::spawn_workers`, which takes a `dice::Action`), through the
+  same `dice::mutate_seeded` U calls, so each went through the gate against
+  the scene in the middle. The Mutate window keeps the profile, strength, grid
+  size and buttons; the grid itself left it.
 
-Not yet: an onion skin (the hovered tile over the parent in the main view),
-masks beyond profiles (only the selected map, a mute/solo set), and moving the
-grid into multiview panes once those exist.
+Not yet: panes in the points renderer; an onion skin (the hovered pane over
+the parent); masks beyond profiles (only the selected map, a mute/solo set);
+infinite-zoom panes fold by their own map, so a mutated zoom map can drift
+from the middle across a wrap.
 
 ## Threads: proposals between a person and an agent
 

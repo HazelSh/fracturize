@@ -110,7 +110,6 @@ pub struct Child {
     pub strength: f32,
     /// The strength its ring asked for.
     pub asked: f32,
-    pub attempts: u32,
 }
 
 pub enum Tile {
@@ -146,6 +145,8 @@ pub struct MutationGrid {
     changed_since: Option<Instant>,
     /// Start over without waiting; see [`Self::expire`].
     immediate: bool,
+    /// The id the next parent takes; see [`Self::expire`].
+    picked: Option<u64>,
     /// Parents and the seeds their grids were made from, newest last.
     seeds: VecDeque<(u64, u64)>,
     generation: Arc<AtomicU64>,
@@ -172,6 +173,7 @@ impl MutationGrid {
             seen: None,
             changed_since: None,
             immediate: false,
+            picked: None,
             seeds: VecDeque::new(),
             generation: Arc::new(AtomicU64::new(0)),
             next_id: 0,
@@ -193,10 +195,13 @@ impl MutationGrid {
         self.changed_since.is_some() || self.tiles.iter().any(|t| matches!(t, Tile::Pending))
     }
 
-    /// Start over on the next poll without waiting for things to settle: a
-    /// tile was just picked, and the new parent wants its ring at once.
-    pub fn expire(&mut self) {
+    /// Start over on the next poll without waiting for things to settle: tile
+    /// `picked` (its id) was just made the scene, and the new parent wants
+    /// its ring at once. The new parent takes the picked tile's id, so its
+    /// picture moves to the middle instead of being drawn again.
+    pub fn expire(&mut self, picked: Option<u64>) {
         self.immediate = true;
+        self.picked = picked;
         self.changed_since = Some(Instant::now() - SETTLE);
     }
 
@@ -267,7 +272,7 @@ impl MutationGrid {
         self.parent_print = print;
         self.base_seed = seed;
         self.next_id += 1;
-        self.parent_id = self.next_id;
+        self.parent_id = self.picked.take().unwrap_or(self.next_id);
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let n = children(self.size);
         self.tiles = (0..n).map(|_| Tile::Pending).collect();
@@ -307,7 +312,6 @@ impl MutationGrid {
                         seed: d.seed,
                         strength: r.strength.unwrap_or(asked),
                         asked,
-                        attempts: r.attempts,
                         log: r.log,
                         scene: r.scene,
                     })
@@ -416,12 +420,12 @@ mod tests {
 
         // Pick tile 1: a new parent, a new grid.
         let picked = grid.child(1).or(grid.child(2)).map(|c| c.scene.clone()).expect("a tile");
-        grid.expire();
+        grid.expire(None);
         fill(&mut grid, &settings, &picked, Some(2), 3);
         assert_ne!(grid.base_seed, first.0);
 
         // Undo: the old parent, the same seeds.
-        grid.expire();
+        grid.expire(None);
         fill(&mut grid, &settings, &parent, Some(1), 3);
         assert_eq!((grid.base_seed, seeds(&grid)), first);
 

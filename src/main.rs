@@ -2416,6 +2416,8 @@ impl ApplicationHandler for AppWrapper {
                                 app.collab.pending_apply = None;
                             } else if app.previewing().is_some() {
                                 app.leave_preview();
+                            } else if app.grid_view() {
+                                app.toggle_grid_view();
                             } else if app.selected_transform().is_some() {
                                 app.select_transform(None);
                             } else if app.selected_subscene().is_some() {
@@ -2599,6 +2601,9 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "x" | "X" => {
                                 app.toggle_traces(app.shift_held);
+                            }
+                            "u" | "U" if app.ctrl_held => {
+                                app.toggle_grid_view();
                             }
                             "u" | "U" => {
                                 if app.shift_held {

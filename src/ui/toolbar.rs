@@ -276,12 +276,21 @@ fn draw_explore_menu(ui: &mut egui::Ui, app: &mut App) {
         if menu_item(ui, app, &format!("{} Mutate", icons::SHUFFLE), "U", "Perturb the scene at random. One Ctrl+Z takes it back.") {
             app.mutate_scene();
         }
+        if menu_item(
+            ui,
+            app,
+            &format!("{} Mutation grid{}", icons::SHUFFLE, if app.grid_view() { " (on)" } else { "" }),
+            "Ctrl+U",
+            "Fill the view with the scene and its mutations around it, all seen through one camera: orbit to judge them from every side, click one to take it, click the middle for new ones.",
+        ) {
+            app.toggle_grid_view();
+        }
         menu_toggle(
             ui,
             app,
             |p| &mut p.mutate_open,
             &format!("{} Mutate…", icons::SHUFFLE),
-            "The mutation grid: the scene among eight or twenty-four mutations of it. Click one to make it the scene; Ctrl+Z brings the grid back.",
+            "The dice profile, the mutation strength and the grid's size, and a button to mutate with them.",
         );
 
         ui.separator();
