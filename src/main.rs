@@ -30,6 +30,7 @@ mod subscene;
 mod sweep;
 mod symmetry;
 mod tile;
+mod track;
 mod glyphs;
 mod dice;
 mod mutation_grid;
@@ -522,6 +523,17 @@ struct Args {
     #[arg(long, value_name = "0-1", help_heading = "Camera")]
     path_t: Option<f32>,
 
+    /// The moment of the timeline to render, in seconds [the scene as written]
+    ///
+    /// The scene's [[track]]s are applied at this time and the camera is put
+    /// where its path is at this time — the same clock the window plays and an
+    /// animation renders. A still, a sheet or --info then sees that frame.
+    /// Past the end of a one-shot path the camera holds its last frame, as a
+    /// held track does. Can't be combined with --path-t, or with a .avif/.mp4
+    /// (which plays the whole timeline).
+    #[arg(long, value_name = "SECONDS", help_heading = "Camera")]
+    time: Option<f32>,
+
     /// Camera look-at point, in world units [--view, else the scene]
     // allow_hyphen_values, or a focus with a negative coordinate — which is
     // half of them — is read as a flag and the run dies on "unexpected
@@ -873,6 +885,16 @@ struct Args {
     /// One fill of the point buffer is shared by all tiles.
     #[arg(long, value_name = "COLSxROWS", help_heading = "Contact sheets")]
     orbit_grid: Option<String>,
+
+    /// Sheet of moments across the timeline, e.g. 4x3 [one moment]
+    ///
+    /// Tile k is `--time` at k/(n-1) of the way through the timeline (k/n
+    /// for one that loops), labelled with its time: how to read an animation
+    /// without watching it. Each tile applies the scene's tracks at its time
+    /// and frames the camera where the path has it, and refills the point
+    /// buffer, so prefer --effort tiny/small.
+    #[arg(long, value_name = "COLSxROWS", help_heading = "Contact sheets")]
+    time_grid: Option<String>,
 
     /// One tile per map, each showing only that map's points [no sheet]
     ///
@@ -1257,6 +1279,7 @@ impl Args {
             focus: self.focus,
             fov: self.fov.map(camera::Fov::from_degrees),
             path_t: self.path_t,
+            time: self.time,
         }
     }
 }
@@ -1521,7 +1544,91 @@ fn run_sweep(
         std::process::exit(1);
     });
     let build = sheet_scene_builder(args, scene_path, effort_points);
-    offline::render_sweep(params, &tiles, cols, rows, &build, &[])
+    offline::render_sweep(params, &tiles, cols, rows, &build, &[], &[])
+}
+
+/// The scene as it is at `t` seconds: its tracks applied (see `track`). A
+/// scene with none comes back as it was. Exits on a track that won't apply,
+/// naming it.
+fn frame_at(scene: &Scene, t: f32) -> Scene {
+    match track::Animator::for_scene(scene) {
+        Ok(Some(anim)) => {
+            for w in &anim.warnings {
+                eprintln!("note: {w}");
+            }
+            anim.at(t as f64).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            })
+        }
+        Ok(None) => scene.clone(),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `--time-grid`: a sweep sheet whose tiles are moments. A moment of an
+/// animation is the scene with each track's value at that time as an `-S`,
+/// framed where the camera path is then — so this is `--sweep` with a camera
+/// per tile, built by the same builder.
+fn run_time_grid(
+    params: offline::OfflineParams,
+    args: &Args,
+    grid: offline::GridMode,
+    effort_points: Option<usize>,
+) -> Result<render_job::Outcome, String> {
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1);
+    };
+    if !matches!(grid, offline::GridMode::Single) || !args.sweep.is_empty() || args.map_grid
+        || args.edge_grid || args.mutations.is_some() || args.random_sheet.is_some()
+    {
+        fail("--time-grid is a sheet of its own; it can't be combined with another sheet".into());
+    }
+    let Some(scene_path) = args.scene.clone() else {
+        fail("--time-grid needs --scene: it plays a scene file's timeline".into());
+    };
+    let (cols, rows) = parse_grid(args.time_grid.as_deref().unwrap_or_default()).unwrap_or_else(|e| fail(e));
+    let scene = &params.scene;
+    let anim = track::Animator::for_scene(scene).unwrap_or_else(|e| fail(e));
+    let mut base_over = params.camera;
+    base_over.time = None;
+    let base = offline::effective_camera(params.view.as_ref(), scene, base_over);
+    let default = path::CameraPath::full_orbit(&base);
+    let flight = path::resolve(scene.camera_path.as_ref(), &default);
+    let length = track::timeline_length(scene, flight);
+    let n = (cols * rows) as usize;
+    let loops = flight.wraps() && scene.tracks.iter().all(|t| t.mute || track::loops_over(t, length));
+    let times: Vec<f64> = (0..n)
+        .map(|i| match (loops, n) {
+            (_, 1) => 0.0,
+            (true, _) => length * i as f64 / n as f64,
+            (false, _) => length * i as f64 / (n - 1) as f64,
+        })
+        .collect();
+    println!(
+        "Timeline: {:.2}s{}, {} moments",
+        length,
+        if loops { " (loops: the last moment is one step short of the first again)" } else { "" },
+        n
+    );
+    let tiles: Vec<sweep::Tile> = times
+        .iter()
+        .map(|&t| sweep::Tile {
+            sets: anim.as_ref().map(|a| a.sets_at(t)).unwrap_or_default(),
+            label: format!("t {:.2}s", t),
+            description: format!("--time {:.3}", t),
+        })
+        .collect();
+    let cameras: Vec<camera::CameraOverride> = times
+        .iter()
+        .map(|&t| camera::CameraOverride { time: Some(t as f32), ..params.camera })
+        .collect();
+    let build = sheet_scene_builder(args, scene_path, effort_points);
+    offline::render_sweep(params, &tiles, cols, rows, &build, &[], &cameras)
 }
 
 /// `--map-grid`: a sweep sheet whose tiles differ only in which map they
@@ -1576,7 +1683,7 @@ fn run_map_grid(
     let lit: Vec<Option<gpu::points::compute::Isolate>> = (0..n).map(|i| Some(i.into())).collect();
     let (cols, rows) = offline::grid_shape(n);
     let build = sheet_scene_builder(args, scene_path, effort_points);
-    offline::render_sweep(params, &tiles, cols, rows, &build, &lit)
+    offline::render_sweep(params, &tiles, cols, rows, &build, &lit, &[])
 }
 
 /// `--isolate`'s argument: a map, or `a>b` for one xaos edge — the points `b`
@@ -1676,7 +1783,7 @@ fn run_edge_grid(
         }
     }
     let build = sheet_scene_builder(args, scene_path, effort_points);
-    offline::render_sweep(params, &tiles, n as u32, n as u32, &build, &lit)
+    offline::render_sweep(params, &tiles, n as u32, n as u32, &build, &lit, &[])
 }
 
 /// Each map's share of the points: the chance it is the one drawn, which is
@@ -2669,6 +2776,7 @@ fn default_scene() -> Scene {
         subscenes: Vec::new(),
         root_share: 1.0,
         root_visible: true,
+        tracks: Vec::new(),
         xaos_matrix_layers: Vec::new(),
             colours_left_out: Vec::new(),
         name: "Default Sierpinski".to_string(),
@@ -2961,6 +3069,19 @@ fn main() {
         apply_zoom_args(&mut scene, &args, false);
         // --info prints the palette in its own section; don't say it twice
         apply_palette_args(&mut scene, &args, false);
+        // The frame at --time, keeping the tracks so the report can still
+        // list them, with the -S flags they came to at that moment.
+        let mut frame = None;
+        if let Some(t) = args.time {
+            let sets = match track::Animator::for_scene(&scene) {
+                Ok(Some(a)) => a.sets_at(t as f64),
+                _ => Vec::new(),
+            };
+            let tracks = scene.tracks.clone();
+            scene = frame_at(&scene, t);
+            scene.tracks = tracks;
+            frame = Some((t, sets));
+        }
         // A --view is part of "what would render", so --info reports through
         // it rather than describing a framing the next --render wouldn't use.
         let view = args.view.as_ref().map(|path| {
@@ -2975,6 +3096,9 @@ fn main() {
             .with_seed(seed)
             .with_color(args.color)
             .with_aspect(args.width, args.height);
+        if let Some((t, sets)) = frame {
+            subject = subject.with_frame(t, sets);
+        }
         if let (Some(path), Some(v)) = (args.view.as_deref(), view.as_ref()) {
             subject = subject.with_view(path, v);
         }
@@ -3027,6 +3151,26 @@ fn main() {
         let mut scene = load_scene(&args);
         apply_zoom_args(&mut scene, &args, true);
         apply_palette_args(&mut scene, &args, true);
+        if args.time.is_some() && args.path_t.is_some() {
+            eprintln!("--time and --path-t both say where the camera is; give one");
+            std::process::exit(1);
+        }
+        let animating = crate::video::Format::from_path(std::path::Path::new(out)).is_some();
+        if let Some(t) = args.time {
+            if animating || args.time_grid.is_some() {
+                eprintln!(
+                    "--time names one moment; {} plays the whole timeline",
+                    if animating { "an animation" } else { "--time-grid" }
+                );
+                std::process::exit(1);
+            }
+            scene = frame_at(&scene, t);
+        } else if !animating && args.time_grid.is_none() && !scene.tracks.is_empty() {
+            // A still of an animated scene is its first frame, said once so
+            // nobody wonders why the tracks did nothing.
+            println!("this scene has {} track(s); rendering t = 0 (use --time for another moment)", scene.tracks.len());
+            scene = frame_at(&scene, 0.0);
+        }
 
         // Effort presets set points + accumulation; explicit flags win
         // A tier names a sample density; accumulating is the only way to
@@ -3047,6 +3191,7 @@ fn main() {
         // typed it; a tier they typed for its size is not a request to
         // accumulate, and refusing it blamed a flag nobody had typed.
         let many_images = args.orbit_grid.is_some()
+            || args.time_grid.is_some()
             || args.move_grid.is_some()
             || args.mutations.is_some()
             || args.random_sheet.is_some()
@@ -3232,6 +3377,7 @@ fn main() {
         let format = crate::video::Format::from_path(std::path::Path::new(out));
         let result = if let Some(format) = format {
             if !matches!(grid, offline::GridMode::Single)
+                || args.time_grid.is_some()
                 || args.mutations.is_some()
                 || args.random_sheet.is_some()
                 || !args.sweep.is_empty()
@@ -3267,6 +3413,7 @@ fn main() {
             )
         } else {
             match (args.sweep.is_empty(), args.mutations) {
+                _ if args.time_grid.is_some() => run_time_grid(params, &args, grid, effort_points),
                 _ if args.map_grid => run_map_grid(params, &args, grid, effort_points),
                 _ if args.edge_grid => run_edge_grid(params, &args, grid, effort_points),
                 (false, _) => run_sweep(params, &args, grid, effort_points),

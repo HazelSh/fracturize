@@ -561,6 +561,41 @@ fn fill_points(
     compute.zoom = scene_zoom(scene)?;
     // Before the first dispatch, so no point in the ring predates it.
     compute.set_isolate(isolate);
+    let (point_count, outcome) =
+        run_fill(device, queue, &mut compute, scene, accumulate, control, gpu_timing);
+    Ok((compute, point_count, outcome))
+}
+
+/// Fill `compute` again for `scene` — a frame of an animation whose tracks
+/// move the attractor. The same maps in the same layout (a track never adds
+/// one), so the buffers are rewritten in place rather than reallocated: at a
+/// large effort that is hundreds of megabytes a frame not allocated.
+fn refill_points(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    compute: &mut PointCompute,
+    scene: &Scene,
+    accumulate: u32,
+    control: Option<&JobControl>,
+) -> Result<(u32, Outcome), String> {
+    let table = crate::gpu::points::compute::LayerTable::build(scene, &[], scene.color_contrast);
+    compute.update_weights(device, queue, &table);
+    compute.update_colormap(queue, &scene.colormap);
+    compute.zoom = scene_zoom(scene)?;
+    compute.reset(queue);
+    Ok(run_fill(device, queue, compute, scene, accumulate, control, false))
+}
+
+/// The chaos game's warmup and accumulation frames, into `compute`.
+fn run_fill(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    compute: &mut PointCompute,
+    scene: &Scene,
+    accumulate: u32,
+    control: Option<&JobControl>,
+    gpu_timing: bool,
+) -> (u32, Outcome) {
     let total_frames = compute.warmup_frames + accumulate.max(1);
     log::info!(
         "Filling {} point buffer: {} warmup + {} accumulation frames",
@@ -635,7 +670,7 @@ fn fill_points(
             total_frames,
         );
     }
-    Ok((compute, point_count, outcome))
+    (point_count, outcome)
 }
 /// How long to sleep after a lap that took `busy`, to hold the render to
 /// `share` of the GPU's time.
@@ -782,9 +817,13 @@ pub fn effective_camera_folded(
     // framing, which is the order anyone typing both would expect. The default
     // is built from the framing so far, so a scene with no authored path still
     // answers — with a point on its full orbit.
-    if let Some(t) = over.path_t {
+    if over.path_t.is_some() || over.time.is_some() {
         let default = CameraPath::full_orbit(&camera);
-        camera = crate::path::resolve(scene.camera_path.as_ref(), &default).sample(t, camera.fov);
+        let path = crate::path::resolve(scene.camera_path.as_ref(), &default);
+        // `--time` is the shared clock in seconds; the path is sampled at its
+        // own fraction of it, and past its end does what its loop says.
+        let t = over.path_t.unwrap_or_else(|| over.time.unwrap_or(0.0) / path.duration());
+        camera = path.sample(t, camera.fov);
     }
     // Flags last: they are the most specific thing anyone said.
     over.apply(&mut camera);
@@ -3414,8 +3453,28 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     sampling.check_fits(&device, width, height)?;
     let t_setup = Instant::now();
 
-    let (compute, point_count, fill) =
-        fill_points(&device, &queue, &scene, accumulate, control.as_ref(), gpu_timing, chaos_seed, isolate)?;
+    // What moves over time besides the camera. Frame 0 is filled below like
+    // any still; later frames are this scene at their own time.
+    let animator = crate::track::Animator::for_scene(&scene)?;
+    if let Some(a) = &animator {
+        for w in &a.warnings {
+            println!("note: {w}");
+        }
+    }
+    let refills = animator.as_ref().and_then(|a| a.class()).is_some_and(|c| c > crate::track::Class::View);
+    let first = match &animator {
+        Some(a) => {
+            let mut f = a.at(0.0)?;
+            if let Some(v) = view.as_ref().and_then(|v| v.color_falloff) {
+                f.color_falloff = v;
+                f.resolve_all_color_speeds(v);
+            }
+            f
+        }
+        None => scene.clone(),
+    };
+    let (mut compute, point_count, fill) =
+        fill_points(&device, &queue, &first, accumulate, control.as_ref(), gpu_timing, chaos_seed, isolate)?;
     // See this function's doc comment: an animation has nothing to keep from a
     // half-filled cloud, so a cancel here is a cancel.
     if fill.is_partial() {
@@ -3442,8 +3501,16 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         &default,
     );
 
-    let seconds = anim.seconds.unwrap_or_else(|| path.duration()).max(0.1);
+    // The timeline: the camera path, or the tracks, whichever runs longer.
+    // `--seconds` sets the clip's length and the timeline is stretched to fit
+    // it, which is what it always did to a path on its own.
+    let length = crate::track::timeline_length(&scene, &path);
+    let seconds = anim.seconds.unwrap_or(length as f32).max(0.1);
     let frames = ((seconds * anim.fps as f32).round() as u32).max(2);
+    // A loop drops its last frame (it is the first again) only when every
+    // track comes back too — a held track ends somewhere else.
+    let loops = path.wraps()
+        && scene.tracks.iter().all(|t| t.mute || crate::track::loops_over(t, length));
     println!(
         "Animating {} frames ({:.1}s at {} fps): {} keypoints, {}{}",
         frames,
@@ -3453,6 +3520,19 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         path.loops.kind().label(),
         if is_default { " (auto full orbit)" } else { "" },
     );
+    if let Some(a) = &animator {
+        println!(
+            "Timeline {:.2}s, {} track(s), {}{}",
+            length,
+            a.tracks().count(),
+            match a.class() {
+                Some(c) if c.refills() => format!("{} class: the point buffer is refilled every frame", c.as_str()),
+                Some(crate::track::Class::Colour) => "colour class: recoloured every frame".to_string(),
+                _ => "view class: nothing to refill".to_string(),
+            },
+            if path.wraps() && !loops { "; it doesn't loop (a track ends elsewhere), so the last frame is kept" } else { "" },
+        );
+    }
     println!("Encoding {} ({})", anim.format.codec_label(), anim.format.extension());
 
     let mut encoder = crate::video::AnimationEncoder::new(
@@ -3460,7 +3540,7 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
     )?;
     println!("Encoding on {} thread{}", threads, if threads == 1 { "" } else { "s" });
     let aspect = width as f32 / height as f32;
-    let target = TileTarget::new(
+    let mut target = TileTarget::new(
         &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
     );
     let mut frame_buf = vec![0u16; (width * height * 4) as usize];
@@ -3497,11 +3577,52 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
             }
         }
         // Closed paths exclude t=1 so the loop wraps without a repeated frame
-        let t = if path.wraps() {
-            i as f32 / frames as f32
+        let frac = if loops {
+            i as f64 / frames as f64
         } else {
-            i as f32 / (frames - 1) as f32
+            i as f64 / (frames - 1) as f64
         };
+        let time = frac * length;
+        // The frame's own scene, when anything moves. Refilled in place when a
+        // track moves the attractor; recoloured when only colour moves; and
+        // the renderer and target rebuilt either way, since exposure and the
+        // background are baked into them.
+        let frame_scene = match &animator {
+            Some(a) if i > 0 => {
+                let mut f = a.at(time)?;
+                if let Some(v) = view.as_ref().and_then(|v| v.color_falloff) {
+                    f.color_falloff = v;
+                    f.resolve_all_color_speeds(v);
+                }
+                if refills {
+                    let (_, fill) = refill_points(&device, &queue, &mut compute, &f, accumulate, control.as_ref())?;
+                    if fill.is_partial() {
+                        outcome = Outcome::Partial;
+                        break;
+                    }
+                    // A fresh fill belongs to whatever fold the camera is at,
+                    // exactly as the first frame's did.
+                    carried = None;
+                } else {
+                    compute.update_colormap(&queue, &f.colormap);
+                }
+                let clear = crate::scene::clear_color(f.background, if transparent { 0.0 } else { 1.0 });
+                let ratio = if first.exposure > 0.0 { f.exposure / first.exposure } else { 1.0 };
+                renderer = TileRenderer::new(
+                    &device, &queue, &compute, splat, exposure * ratio, point_count as f64, sampling,
+                    filter, filter_radius, bit_depth, clear, transparent, grade,
+                );
+                target = TileTarget::new(
+                    &device, &queue, width, height, clear, sampling, filter, filter_radius, bit_depth,
+                );
+                Some(f)
+            }
+            _ => None,
+        };
+        let shown = frame_scene.as_ref().unwrap_or(&first);
+        // Without tracks the timeline *is* the path, and `frac` is exactly the
+        // fraction it always sampled at — no round trip through seconds.
+        let t = if scene.tracks.is_empty() { frac as f32 } else { (time / path.duration() as f64) as f32 };
         let mut cam = path.sample(t, base_camera.fov);
         // The one place the wrap really earns itself: a path whose distance
         // keys span many periods (they interpolate in log space, so that's a
@@ -3525,12 +3646,23 @@ pub fn render_animation(params: OfflineParams, anim: AnimParams) -> Result<Outco
         // camera and its haze scale together, so the last frame matches the
         // first instead of the image drifting out of a band nailed to the
         // scene's authored distance.
+        let (haze, point_size, color_contrast) = match &frame_scene {
+            // A tracked point size moves by its ratio to the first frame's, so
+            // a view's or a zoom's own scaling of it is kept; haze and contrast
+            // are the frame's own unless a view pinned them.
+            Some(f) => (
+                if view.is_some() { haze } else { frame_setup(&None, f, haze_enabled, CameraOverride::default()).2 },
+                point_size * f.point_size / first.point_size.max(1e-12),
+                view.as_ref().and_then(|v| v.color_contrast).unwrap_or(f.color_contrast),
+            ),
+            None => (haze, point_size, color_contrast),
+        };
         let (haze_near, haze_far) = haze.band(cam.distance);
         let camera = CameraUniforms::new(
             cam.view_proj(aspect), cam.fov, sampling.target_height(), point_size, aspect, 1.0,
             haze_near, haze_far, haze.transmittance, haze.saturation,
-            color_contrast, scene.background.to_array(),
-            transparent, scene.packs_rgb(),
+            color_contrast, shown.background.to_array(),
+            transparent, shown.packs_rgb(),
         )
         // After the wrap too, and for the same reason: the guard is a ramp in
         // multiples of the eye distance, so it has to be rebuilt from the
@@ -3951,6 +4083,11 @@ pub fn render_sweep(
     // The map each tile isolates, by tile; a tile without one isolates
     // whatever `--isolate` asked for, if anything. This is what `--map-grid` is.
     tile_isolate: &[Option<crate::gpu::points::compute::Isolate>],
+    // The camera each tile is framed by, by tile; empty means one framing for
+    // the whole sheet. This is what `--time-grid` is: each tile a moment of the
+    // flight, framed where the camera is at that moment and drawn with the
+    // tile's own point size, haze and background, since tracks move those too.
+    tile_camera: &[CameraOverride],
 ) -> Result<Outcome, String> {
     print_start("sweep sheet", params.width, params.height, params.out_path);
     let OfflineParams {
@@ -4073,7 +4210,29 @@ pub fn render_sweep(
             &device, &queue, &compute, splat, exposure, point_count as f64, sampling, filter,
             filter_radius, bit_depth, clear, transparent, grade,
         );
-        renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
+        let use_point_primitives = match tile_camera.get(idx) {
+            None => {
+                renderer.upload_camera(&queue, &camera(compute.zoom.as_ref()));
+                use_point_primitives
+            }
+            Some(&over) => {
+                let (cam, ps, hz, _, _) = frame_setup(&view, variant, haze_enabled, over);
+                let (near, far) = hz.band(cam.distance);
+                let contrast = view.as_ref().and_then(|v| v.color_contrast).unwrap_or(variant.color_contrast);
+                renderer.upload_camera(
+                    &queue,
+                    &CameraUniforms::new(
+                        cam.view_proj(aspect), cam.fov, sampling.target_height(), ps, aspect, 1.0,
+                        near, far, hz.transmittance, hz.saturation,
+                        contrast, variant.background.to_array(),
+                        transparent, variant.packs_rgb(),
+                    )
+                    .with_zoom_guard(compute.zoom.as_ref(), cam.eye())
+                    .with_supersample(sampling.n),
+                );
+                sampling.use_point_primitives(ps, cam.distance, cam.fov)
+            }
+        };
         fill_total += t0.elapsed().as_secs_f32();
 
         let (col, row) = (idx as u32 % cols, idx as u32 / cols);

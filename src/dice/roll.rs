@@ -520,6 +520,7 @@ pub(super) fn finish(
         subscenes: Vec::new(),
         root_share: 1.0,
         root_visible: true,
+        tracks: Vec::new(),
         xaos_matrix_layers: Vec::new(),
             colours_left_out: Vec::new(),
         name: format!("random-{}", crate::app::unix_timestamp()),

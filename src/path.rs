@@ -274,6 +274,19 @@ impl Loop {
             _ => None,
         }
     }
+
+    /// The same loop as every other track names it: `once` holds, `closed`
+    /// repeats, `pingpong` ping-pongs, and a zoom loop is a repeat *with
+    /// offset* whose offset is the zoom symmetry. See `crate::track`.
+    pub fn extrapolate(self) -> crate::track::Extrapolate {
+        use crate::track::Extrapolate;
+        match self {
+            Self::Once => Extrapolate::Hold,
+            Self::PingPong => Extrapolate::PingPong,
+            Self::Closed => Extrapolate::Repeat,
+            Self::Zoom(_) => Extrapolate::Offset,
+        }
+    }
 }
 
 /// How a segment's route between its two keys is named.
@@ -588,21 +601,24 @@ impl CameraPath {
                 .to_camera(Fov::default());
         }
 
-        // Orientation is genuinely periodic, so a looping path needs no
-        // accumulation across whole loops: the second pass *is* the first.
-        let t = if self.wraps() {
-            t.rem_euclid(1.0)
-        } else {
-            t.clamp(0.0, 1.0)
-        };
+        // Folded by the loop's extrapolation, the rule every track folds its
+        // time by (`Extrapolate::fold`): held for a one-shot, wrapped for the
+        // loops. Spelled here in f32, as it always was, so every flight stays
+        // the same to the bit; `the_camera_folds_time_as_tracks_do` holds the
+        // two spellings together. Orientation is genuinely periodic, so a
+        // looping path needs no accumulation across whole loops: the second
+        // pass *is* the first, and a zoom loop's offset — the symmetry — is
+        // carried by the wrap, not here.
+        //
         // A ping-pong is a triangle wave in path time: out over the first
         // half, back over the second. This is the whole of it — the spline
         // below never learns that the camera is coming home, and doesn't need
         // to, because the return journey is the outward one read backwards.
-        let t = if self.loops == Loop::PingPong {
-            1.0 - (2.0 * t - 1.0).abs()
-        } else {
-            t
+        use crate::track::Extrapolate;
+        let t = match self.loops.extrapolate() {
+            Extrapolate::Hold => t.clamp(0.0, 1.0),
+            Extrapolate::Repeat | Extrapolate::Offset => t.rem_euclid(1.0),
+            Extrapolate::PingPong => 1.0 - (2.0 * t.rem_euclid(1.0) - 1.0).abs(),
         };
         // Easing *after* the fold, which is what makes the turnaround smooth:
         // smoothstep has zero derivative at both ends, so the camera decelerates
@@ -674,6 +690,48 @@ impl CameraPath {
 /// Reading files from `scenes/` departs from this repo's habit of parsing
 /// inline TOML in tests (see `scene::tests`). That's the point — the artifacts
 /// being protected are the ones on disk.
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    /// The camera folds its 0..1 path time in f32, by hand, to stay bit-exact
+    /// with every flight rendered before tracks existed; tracks fold seconds
+    /// in f64 with `Extrapolate::fold`. They must be the same rule.
+    #[test]
+    fn the_camera_folds_time_as_tracks_do() {
+        let cam = PathKey {
+            orientation: Orientation::from_yaw_pitch_roll(
+                crate::rot::Angle::from_radians(0.3),
+                crate::rot::Angle::from_radians(0.4),
+                crate::rot::Angle::ZERO,
+            ),
+            distance: 3.0,
+            focus: Vec3::new(0.1, -0.2, 0.3),
+        }
+        .to_camera(Fov::default());
+        let orbit = CameraPath::full_orbit(&cam);
+        for loops in [Loop::Once, Loop::PingPong, Loop::Closed] {
+            let path = CameraPath { loops, ease: Some(false), ..orbit.clone() };
+            let passes = if loops == Loop::PingPong { 2.0 } else { 1.0 };
+            for i in -40..=80 {
+                let t = i as f32 / 23.0;
+                let folded = loops.extrapolate().fold(t as f64 * passes, 0.0, 1.0).0 as f32;
+                let a = path.sample(t, cam.fov);
+                // A ping-pong's geometry is the open path, so its folded time
+                // is read off that path flown once; folding twice would turn
+                // round a second time.
+                let plain = if loops == Loop::PingPong {
+                    CameraPath { loops: Loop::Once, ..path.clone() }
+                } else {
+                    path.clone()
+                };
+                let b = plain.sample(folded, cam.fov);
+                assert!((a.eye() - b.eye()).length() < 1e-4, "{loops:?} at {t}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod golden {
     use super::*;

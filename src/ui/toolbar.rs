@@ -14,11 +14,32 @@ use super::icons;
 use super::num;
 use super::render_panel;
 
+/// The window toggles' captions, for measuring what dropping them saves.
+const WINDOW_CAPTIONS: [&str; 7] =
+    ["Transforms", "Subscenes", "Xaos", "Collaborate", "Camera", "Timeline", "Render"];
+
+/// A window's toolbar toggle: icon and caption, or the icon alone when the
+/// toolbar is too narrow for every caption (`UiState::toolbar_compact`). The
+/// tooltip names the window either way.
+fn window_toggle(ui: &mut egui::Ui, open: &mut bool, icon: &str, caption: impl Into<String>, compact: bool) -> egui::Response {
+    if compact {
+        ui.toggle_value(open, icon)
+    } else {
+        ui.toggle_value(open, (icon, caption.into()))
+    }
+}
+
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
+            // Decided from last frame's fit: a toolbar that ran into its own
+            // right-hand block drops the window toggles' captions, and gets
+            // them back once there is room for all of them again, with a
+            // margin so a window edge sitting on the boundary doesn't flicker
+            // between the two.
+            let compact = app.ui_state.toolbar_compact;
 
             draw_file_menu(ui, app);
             draw_explore_menu(ui, app);
@@ -27,7 +48,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             // Then the windows, ordered by task rather than by module: what am
             // I working on, then how am I looking at it. Help is pushed to the
             // right end, where it lives in every toolbar ever made.
-            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
+            let resp = window_toggle(ui, &mut app.ui_state.panels.transforms_open, icons::SHAPES, "Transforms", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -35,7 +56,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Transforms window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.subscenes_open, (icons::UNITE, "Subscenes"));
+            let resp = window_toggle(ui, &mut app.ui_state.panels.subscenes_open, icons::UNITE, "Subscenes", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -43,7 +64,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Subscenes window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.xaos_open, (icons::GRAPH, "Xaos"));
+            let resp = window_toggle(ui, &mut app.ui_state.panels.xaos_open, icons::GRAPH, "Xaos", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -55,7 +76,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             // nothing more: a message never opens a window over the work.
             let waiting = app.collab_waiting();
             let caption = if waiting > 0 { format!("Collaborate ({waiting})") } else { "Collaborate".to_string() };
-            let resp = ui.toggle_value(&mut app.ui_state.panels.collab_open, (icons::CHATS, caption));
+            let resp = window_toggle(ui, &mut app.ui_state.panels.collab_open, icons::CHATS, caption, compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -70,7 +91,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
             ui.separator();
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.camera_open, (icons::VIDEO_CAMERA, "Camera"));
+            let resp = window_toggle(ui, &mut app.ui_state.panels.camera_open, icons::VIDEO_CAMERA, "Camera", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -78,7 +99,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Camera window",
             );
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.render_open, (icons::SLIDERS, "Render"));
+            let resp = window_toggle(ui, &mut app.ui_state.panels.timeline_open, icons::FILM_STRIP, "Timeline", compact);
+            hinted(
+                resp,
+                &mut app.ui_state,
+                "The scene over time: the camera's path and every animated value on one \
+                 clock, with a playhead to scrub",
+                "toggle the Timeline window",
+            );
+
+            let resp = window_toggle(ui, &mut app.ui_state.panels.render_open, icons::SLIDERS, "Render", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -91,10 +121,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
             ui.separator();
             draw_quick_controls(ui, app);
+            let left_end = ui.cursor().min.x;
 
             // Right-aligned, and therefore built right-to-left: help at the far
             // end, then the scene identity beside it.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
                 let resp = ui.selectable_label(app.show_help, (icons::KEYBOARD, "Help"));
                 let resp = hinted(
@@ -109,6 +140,20 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 ui.separator();
                 draw_scene_identity(ui, app);
             });
+            let gap = right.response.rect.left() - left_end;
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let captions: f32 = WINDOW_CAPTIONS
+                .iter()
+                .map(|c| {
+                    ui.ctx().fonts_mut(|f| f.layout_no_wrap(c.to_string(), font.clone(), egui::Color32::WHITE).size().x)
+                        + ui.spacing().icon_spacing
+                })
+                .sum();
+            if !compact && gap < 4.0 {
+                app.ui_state.toolbar_compact = true;
+            } else if compact && gap > captions + 24.0 {
+                app.ui_state.toolbar_compact = false;
+            }
         });
         ui.add_space(2.0);
     });

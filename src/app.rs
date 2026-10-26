@@ -730,6 +730,39 @@ impl XaosSummary {
     }
 }
 
+/// The scene's tracks, built for the live window (see `App::refresh_animation`).
+struct LiveAnimation {
+    /// The document it was built from: history position and scene generation.
+    key: (Option<u64>, u64),
+    /// `None` when every track is muted, or the scene's tracks won't apply
+    animator: Option<crate::track::Animator>,
+    /// The playhead it last showed, so a paused timeline costs nothing
+    shown_at: Option<f64>,
+    /// Which targets are tracked, among the values the window keeps live on
+    /// `App` rather than on the scene
+    view_targets: ViewTargets,
+}
+
+#[derive(Default, Clone, Copy)]
+struct ViewTargets {
+    point_size: bool,
+    exposure: bool,
+    haze: bool,
+    contrast: bool,
+    falloff: bool,
+    background: bool,
+}
+
+/// View-class values a track holds at the playhead (`App::anim_view`).
+#[derive(Default, Clone, Copy)]
+struct AnimView {
+    point_size: Option<f32>,
+    exposure: Option<f32>,
+    haze: Option<f32>,
+    contrast: Option<f32>,
+    background: Option<Vec3>,
+}
+
 pub struct App {
     pub gpu: GpuContext,
     pub window: Arc<Window>,
@@ -779,15 +812,43 @@ pub struct App {
     /// Why infinite zoom is off, when the scene asked for it and it couldn't
     /// be built. Shown in the status bar rather than swallowed.
     pub zoom_error: Option<String>,
-    /// Playhead along [`App::camera_path`] in 0..1 while the camera is flying
-    /// it; `None` when the camera is being positioned by hand.
+    /// The timeline's playhead, in seconds: the one clock the camera path and
+    /// every `[[track]]` are sampled on (see `crate::track`).
     ///
-    /// One flag, because there's one motion. The turntable and the camera-path
-    /// flythrough used to be separate mechanisms with a flag each (`orbit_
-    /// paused` and `path_play_t`) that had to be kept from fighting; the
-    /// turntable is now just the path a scene gets when it authors none, so
-    /// "is the camera flying the path" is the only question left.
-    path_t: Option<f32>,
+    /// It used to be `path_t`, a 0..1 position along the camera path, because
+    /// the camera was the only thing that moved. Now tracks move too, and they
+    /// are in seconds, so the clock is; the camera samples it at
+    /// `(time − camera_epoch) / duration`.
+    time: f64,
+    /// Whether the clock is running.
+    playing: bool,
+    /// Whether the camera is flying the path, rather than being positioned by
+    /// hand. Taking the camera stops this and, in a scene with tracks, leaves
+    /// the clock running — you can orbit an animation while it plays. In a
+    /// scene without them the two are one motion, as they always were.
+    camera_follows: bool,
+    /// Where on the clock the camera path's own t = 0 sits. Zero for a path
+    /// the scene authored; for the default orbit, the moment it was last
+    /// rebuilt around the current framing, so the orbit always starts from
+    /// where you are.
+    camera_epoch: f64,
+    /// Which pass of a looping path the camera is on, so a zoom loop can count
+    /// the periods it has descended.
+    camera_lap: i64,
+    /// Whether playback runs back to 0 at the end of the timeline (a session
+    /// setting, toggled in the Timeline window).
+    pub loop_playback: bool,
+    /// The scene's tracks, ready to evaluate, and what they last showed.
+    live_anim: Option<LiveAnimation>,
+    /// View-class values a track holds at the playhead, swapped in around the
+    /// frame's GPU work only (`App::render`) so that nothing which edits or
+    /// saves the scene ever sees them.
+    anim_view: AnimView,
+    /// Bumped whenever a whole scene arrives, so the live animator knows its
+    /// history position names a different document.
+    scene_generation: u64,
+    /// Why the tracks aren't playing, when a track won't apply.
+    track_error: Option<String>,
     pub point_size: f32,
 
     /// Persistent user preferences (I toggles pitch inversion)
@@ -1379,7 +1440,16 @@ impl App {
             // The camera starts moving, as it always has. When the scene
             // authored no path that's the default orbit, whose t=0 is exactly
             // the framing it was just built from — so nothing jumps.
-            path_t: Some(0.0),
+            time: 0.0,
+            playing: true,
+            camera_follows: true,
+            camera_epoch: 0.0,
+            camera_lap: 0,
+            loop_playback: true,
+            live_anim: None,
+            anim_view: AnimView::default(),
+            scene_generation: 0,
+            track_error: None,
             camera,
             point_size,
             prefs,
@@ -1601,7 +1671,7 @@ impl App {
             // treated as carrying no grade at all.
             self.grade = v.grade();
         }
-        self.path_t = None;
+        self.stop_following();
         self.invalidate_default_path();
         log::info!("Loaded view (camera stopped; press O to fly the path)");
     }
@@ -1665,11 +1735,11 @@ impl App {
         let was_default = self.path_is_default();
         self.default_path = CameraPath::full_orbit(&self.camera);
         // t=0 on the new path *is* the framing it was just built from, so
-        // continuing from the old playhead would jump; continuing from 0 is
-        // seamless. Only when the default is what's flying, of course — an
-        // authored path must not restart because someone scrolled.
-        if was_default && self.path_t.is_some() {
-            self.path_t = Some(0.0);
+        // the orbit restarts its own clock here; continuing from the old one
+        // would jump. Only the default's — an authored path must not restart
+        // because someone scrolled, and the timeline's clock never does.
+        if was_default {
+            self.camera_epoch = self.time;
         }
     }
 
@@ -1810,7 +1880,7 @@ impl App {
     /// the camera back by hand — which is exactly when the route matters,
     /// because that's when you're positioning against it.
     pub fn visible_path(&self) -> Option<&CameraPath> {
-        if self.path_t.is_some() {
+        if self.camera_follows {
             return None;
         }
         let path = self.camera_path();
@@ -1819,14 +1889,24 @@ impl App {
 
     /// Is the camera flying the path right now?
     pub fn camera_moving(&self) -> bool {
-        self.path_t.is_some()
+        self.camera_follows
     }
 
     /// Take the camera off the path, because the framing is being set by hand.
     /// The viewport drags do this inline; the Camera window's numeric fields
     /// call it, since typing a distance is the same intent as dragging one.
     pub fn stop_camera_motion(&mut self) {
-        self.path_t = None;
+        self.stop_following();
+    }
+
+    /// The camera leaves the path. In a scene with tracks the clock keeps
+    /// running, so an animation can be orbited while it plays; in one without,
+    /// the clock was only ever the camera's, and stops with it.
+    fn stop_following(&mut self) {
+        self.camera_follows = false;
+        if self.scene.tracks.is_empty() {
+            self.playing = false;
+        }
     }
 
     /// Send the playhead back to the start of the path, and the zoom depth
@@ -1842,9 +1922,10 @@ impl App {
     /// person set, and a scene that stopped the camera dead on load would be
     /// its own annoyance. Only the position is reset.
     fn rewind_camera_playhead(&mut self) {
-        if self.path_t.is_some() {
-            self.path_t = Some(0.0);
-        }
+        self.time = 0.0;
+        self.camera_epoch = 0.0;
+        self.camera_lap = 0;
+        self.scene_generation += 1;
         self.zoom_level = 0;
         self.zoom_turns = 0;
         self.zoom_turns_base = 0;
@@ -1855,8 +1936,9 @@ impl App {
     /// Start / stop the camera flying the path (O, Z, and the toolbar's
     /// transport button). The one motion control there is.
     pub fn toggle_camera_motion(&mut self) {
-        if self.path_t.is_some() {
-            self.path_t = None;
+        if self.camera_follows {
+            self.camera_follows = false;
+            self.playing = false;
             log::info!("Camera: stopped");
             return;
         }
@@ -1876,7 +1958,19 @@ impl App {
             path.duration(),
             if self.path_is_default() { " (default orbit)" } else { "" },
         );
-        self.path_t = Some(0.0);
+        // Play resumes from the playhead — the timeline's clock is a place,
+        // not a stopwatch — except from the very end of a one-shot, which
+        // starts over. The default orbit always starts from where you are.
+        if self.timeline_end().is_some_and(|end| self.time >= end - 1e-6) {
+            self.time = 0.0;
+            self.camera_epoch = 0.0;
+        }
+        if self.path_is_default() {
+            self.camera_epoch = self.time;
+        }
+        self.camera_lap = ((self.time - self.camera_epoch) / self.camera_path().duration() as f64).floor() as i64;
+        self.camera_follows = true;
+        self.playing = true;
     }
 
     /// Append the current camera framing as a keypoint of this scene's own path
@@ -2040,7 +2134,7 @@ impl App {
             log::info!("Camera path cleared — back to the default orbit");
         }
         if self.path_is_default() != was_default {
-            self.path_t = None;
+            self.stop_following();
         }
     }
 
@@ -2066,7 +2160,7 @@ impl App {
         }
         let before = self.edit_snapshot();
         self.scene.camera_path = None;
-        self.path_t = None;
+        self.stop_following();
         self.invalidate_default_path();
         self.commit_edit("Reset camera path", None, before);
         log::info!("Camera path reset to the default orbit");
@@ -3698,11 +3792,11 @@ impl App {
                 self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
                 // Taking the camera by hand stops it flying the path — they'd
                 // fight over the same framing otherwise.
-                self.path_t = None;
+                self.stop_following();
             }
             MouseButton::Middle => {
                 self.drag = Drag::Pan;
-                self.path_t = None;
+                self.stop_following();
             }
             MouseButton::Right => {
                 // Over a gizmo, right-click is that transform's context menu —
@@ -3731,7 +3825,7 @@ impl App {
                     }
                 }
                 self.drag = Drag::Roll;
-                self.path_t = None;
+                self.stop_following();
             }
             _ => {}
         }
@@ -7107,40 +7201,38 @@ impl App {
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
-        // One motion: the camera flies the path. Which path — the scene's own
-        // keys or the default orbit — is `camera_path`'s business, not this
-        // loop's, so the turntable and a hand-authored flythrough are the same
-        // three lines of code and behave identically.
-        if let Some(t) = self.path_t {
-            let (duration, loops, playable, periods) = {
+        // One clock. The camera flies the path on it — which path, the scene's
+        // own keys or the default orbit, is `camera_path`'s business, not this
+        // loop's — and every track is sampled on it (`refresh_animation`).
+        if self.playing {
+            self.time += dt as f64;
+        }
+        if self.camera_follows {
+            let (duration, wraps, playable, periods) = {
                 let p = self.camera_path();
                 let periods = match p.loops {
                     crate::path::Loop::Zoom(z) => z.periods as i32,
                     _ => 0,
                 };
-                (p.duration(), p.wraps(), p.playable(), periods)
+                (p.duration() as f64, p.wraps(), p.playable(), periods)
             };
             if !playable {
-                self.path_t = None;
+                self.stop_following();
             } else {
-                let t = t + dt / duration;
+                let local = (self.time - self.camera_epoch) / duration;
                 // Each pass of a zoom loop descends `periods` periods and
                 // arrives on the frame it left — the same picture, one level
-                // down. The playhead rolling over is the only record that it
+                // down. The lap rolling over is the only record that it
                 // happened, so it is where the monotone count is kept whole.
-                if loops && t >= 1.0 {
-                    self.zoom_turns_base += periods;
+                let lap = local.floor() as i64;
+                if wraps && lap > self.camera_lap {
+                    self.zoom_turns_base += (lap - self.camera_lap) as i32 * periods;
                 }
-                // A zoom loop wraps like a closed one: it ends on the frame it
-                // began, so there is nothing to stop for.
-                let ended = !loops && t >= 1.0;
-                let t = if ended {
-                    1.0
-                } else if loops {
-                    t.rem_euclid(1.0)
-                } else {
-                    t
-                };
+                self.camera_lap = lap;
+                // Folded in f64, where the clock lives, before it meets the
+                // spline's f32: an hour in, `local` is ~100 laps and an f32
+                // would have left it a few bits of fraction.
+                let t = if wraps { local.rem_euclid(1.0) } else { local.clamp(0.0, 1.0) } as f32;
                 // The path carries a framing, never a lens: playing one back must not
                 // change the FoV out from under the person watching.
                 let cam = self.camera_path().sample(t, self.camera.fov);
@@ -7154,12 +7246,29 @@ impl App {
                 // reading runs away by nine per frame.
                 self.zoom_level = 0;
                 self.zoom_turns = self.zoom_turns_base;
-                self.path_t = if ended { None } else { Some(t) };
-                if ended {
-                    log::info!("Camera path: finished");
+            }
+        }
+        if self.playing {
+            if let Some(end) = self.timeline_end().filter(|&end| self.time >= end) {
+                if self.loop_playback && !self.scene.tracks.is_empty() {
+                    // Round again. The default orbit is a cycle with no end of
+                    // its own, so it is carried across the seam rather than
+                    // sent back to where it began.
+                    self.time -= end;
+                    if self.path_is_default() {
+                        self.camera_epoch -= end;
+                    } else {
+                        self.camera_lap = 0;
+                    }
+                } else {
+                    self.time = end;
+                    self.playing = false;
+                    self.camera_follows = false;
+                    log::info!("Timeline: finished");
                 }
             }
         }
+        self.refresh_animation();
 
         // Keep the eye inside one zoom period. Last, so it catches the camera
         // however it moved this frame — dragged, scrolled, or flown along the
@@ -7193,6 +7302,226 @@ impl App {
     /// Recomputed every frame but only *set* when it changes: `set_title` is a
     /// round trip to the window manager, and the string is stable for minutes
     /// at a time.
+    // === The timeline: one clock for the camera and every track ===
+
+    /// Where playback stops (or goes round): the timeline's length. `None`
+    /// when nothing would ever end it — a scene with no tracks whose camera
+    /// path loops, which is every scene that ever flew the default orbit.
+    pub fn timeline_end(&self) -> Option<f64> {
+        if self.scene.tracks.is_empty() {
+            let p = self.camera_path();
+            return (!p.wraps()).then(|| self.camera_epoch + p.duration() as f64);
+        }
+        Some(self.timeline_length())
+    }
+
+    /// The timeline's length in seconds (`track::timeline_length`): what an
+    /// animation of this scene renders.
+    pub fn timeline_length(&self) -> f64 {
+        crate::track::timeline_length(&self.scene, self.camera_path())
+    }
+
+    pub fn playhead(&self) -> f64 {
+        self.time
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    /// Move the playhead (the Timeline window's ruler). Scrubbing is view
+    /// state, like orbiting: it lands no history entry. The camera goes to
+    /// where the scene's own path has it at that moment; the default orbit has
+    /// no moments to go to, so a free camera stays put.
+    pub fn scrub_to(&mut self, t: f64) {
+        self.time = t.max(0.0);
+        if !self.path_is_default() {
+            let p = self.camera_path();
+            let local = (self.time - self.camera_epoch) / p.duration() as f64;
+            let t = if p.wraps() { local.rem_euclid(1.0) } else { local.clamp(0.0, 1.0) } as f32;
+            self.camera = p.sample(t, self.camera.fov);
+            self.camera_lap = local.floor() as i64;
+            self.zoom_level = 0;
+            self.zoom_turns = self.zoom_turns_base;
+        }
+    }
+
+    /// Play or pause the timeline. The same transport as O: playing puts the
+    /// camera back on its path.
+    pub fn toggle_playback(&mut self) {
+        self.toggle_camera_motion();
+    }
+
+    /// Mute or unmute one track (the Timeline window). An edit: it changes
+    /// what Ctrl+S writes.
+    pub fn set_track_muted(&mut self, i: usize, mute: bool) {
+        if self.scene.tracks.get(i).is_none_or(|t| t.mute == mute) {
+            return;
+        }
+        let before = self.edit_snapshot();
+        self.scene.tracks[i].mute = mute;
+        let target = self.scene.tracks[i].target.clone();
+        self.commit_edit(format!("{} track: {}", if mute { "Mute" } else { "Unmute" }, target), None, before);
+    }
+
+    /// Delete one track. The value it animated goes back to what the scene
+    /// authors.
+    pub fn delete_track(&mut self, i: usize) {
+        if i >= self.scene.tracks.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let gone = self.scene.tracks.remove(i);
+        self.commit_edit(format!("Delete track: {}", gone.target), None, before);
+    }
+
+    /// Why the scene's tracks aren't playing, when they aren't.
+    pub fn track_error(&self) -> Option<&str> {
+        self.track_error.as_deref()
+    }
+
+    /// Put the scene at the playhead on screen.
+    ///
+    /// The animated scene is never `self.scene`. That is the document — what
+    /// the inspector edits, what history snapshots and what Ctrl+S writes — and
+    /// an animated value in it would be saved as the authored one. So a frame
+    /// is built aside (`Animator::at`), its maps and colours are pushed to the
+    /// GPU with the frame swapped in for exactly as long as that takes, and
+    /// the values the window keeps live on `App` (point size, exposure, haze,
+    /// contrast) and the background are held in `anim_view` and swapped in only
+    /// around the frame's drawing (`render`). The gizmos follow the frame, so
+    /// a map you are watching move is drawn where it is.
+    ///
+    /// Rebuilt when the document changes (a history position, or a new
+    /// scene), re-evaluated when the playhead moves, and free when neither
+    /// does — a paused timeline costs nothing.
+    fn refresh_animation(&mut self) {
+        if self.scene.tracks.is_empty() {
+            if self.live_anim.take().is_some() {
+                // The last track went (deleted, or undone away): the base
+                // scene goes back on screen.
+                self.anim_view = AnimView::default();
+                self.track_error = None;
+                self.push_colormap();
+            }
+            return;
+        }
+        let key = (self.history.top_serial(), self.scene_generation);
+        if self.live_anim.as_ref().is_none_or(|a| a.key != key) {
+            let had_frame = self.live_anim.as_ref().is_some_and(|a| a.animator.is_some());
+            // Built from the scene as the window holds it: the live values
+            // folded in, so a rate or a cycle moves about what is on screen.
+            let mut base = self.scene.clone();
+            base.point_size = self.point_size;
+            base.haze = self.haze_amount;
+            base.exposure = self.exposure;
+            base.color_contrast = self.color_contrast;
+            base.color_falloff = self.color_falloff;
+            let animator = match crate::track::Animator::for_scene(&base) {
+                Ok(a) => {
+                    self.track_error = None;
+                    a
+                }
+                Err(e) => {
+                    if self.track_error.as_deref() != Some(e.as_str()) {
+                        self.set_notice(format!("Tracks not playing: {e}"), true);
+                    }
+                    self.track_error = Some(e);
+                    None
+                }
+            };
+            let mut view_targets = ViewTargets::default();
+            for t in animator.iter().flat_map(|a| a.tracks()) {
+                match t.target.split('.').nth(1).filter(|_| t.target.starts_with("meta.")) {
+                    Some("point_size") => view_targets.point_size = true,
+                    Some("exposure") => view_targets.exposure = true,
+                    Some("haze" | "fog") => view_targets.haze = true,
+                    Some("color_contrast") => view_targets.contrast = true,
+                    Some("color_falloff") => view_targets.falloff = true,
+                    Some("background") => view_targets.background = true,
+                    _ => {}
+                }
+            }
+            if animator.is_none() {
+                self.anim_view = AnimView::default();
+                if had_frame {
+                    self.push_colormap();
+                }
+            }
+            self.live_anim = Some(LiveAnimation { key, animator, shown_at: None, view_targets });
+        }
+        let a = self.live_anim.as_mut().expect("just built");
+        if a.shown_at == Some(self.time) {
+            return;
+        }
+        a.shown_at = Some(self.time);
+        let Some(animator) = &a.animator else { return };
+        let vt = a.view_targets;
+        let class = animator.class();
+        let frame = match animator.at(self.time) {
+            Ok(f) => f,
+            Err(e) => {
+                if self.track_error.as_deref() != Some(e.as_str()) {
+                    self.set_notice(format!("Tracks: {e}"), true);
+                }
+                self.track_error = Some(e);
+                return;
+            }
+        };
+        self.anim_view = AnimView {
+            point_size: vt.point_size.then_some(frame.point_size),
+            exposure: vt.exposure.then_some(frame.exposure),
+            haze: vt.haze.then_some(frame.haze),
+            contrast: vt.contrast.then_some(frame.color_contrast),
+            background: vt.background.then_some(frame.background),
+        };
+        if class.is_some_and(|c| c > crate::track::Class::View) {
+            let falloff = if vt.falloff { frame.color_falloff } else { self.color_falloff };
+            let held = self.anim_view.contrast.unwrap_or(self.color_contrast);
+            let contrast = std::mem::replace(&mut self.color_contrast, held);
+            let base = std::mem::replace(&mut self.scene, frame);
+            self.scene.resolve_all_color_speeds(falloff);
+            self.point_compute.update_colormap(&self.gpu.queue, &self.scene.colormap);
+            let table = self.layer_table();
+            self.point_compute.update_weights(&self.gpu.device, &self.gpu.queue, &table);
+            let specs = self.gizmo_specs();
+            if self.gizmo_renderer.instance_count() == specs.len() as u32 + 1 {
+                self.gizmo_renderer.update_transforms(&self.gpu.queue, &specs);
+            }
+            if self.scene.zoom.is_some() {
+                self.refresh_zoom();
+            }
+            self.scene = base;
+            self.color_contrast = contrast;
+        }
+    }
+
+    /// Whether the attractor itself is moving under a playing timeline, so
+    /// the ring should turn over at the fill rate: ~1 s instead of ~13, which
+    /// trades grain for a ghost that keeps up.
+    fn anim_churning(&self) -> bool {
+        self.playing
+            && self.live_anim.as_ref().is_some_and(|a| {
+                a.animator.as_ref().and_then(|x| x.class()).is_some_and(|c| c.refills())
+            })
+    }
+
+    /// Swap the playhead's view values in (and, called again with what it
+    /// returned, back out). See `refresh_animation`.
+    fn swap_anim_view(&mut self, mut v: AnimView) -> AnimView {
+        fn swap<T: Copy>(slot: &mut T, held: &mut Option<T>) {
+            if let Some(x) = held {
+                std::mem::swap(slot, x);
+            }
+        }
+        swap(&mut self.point_size, &mut v.point_size);
+        swap(&mut self.exposure, &mut v.exposure);
+        swap(&mut self.haze_amount, &mut v.haze);
+        swap(&mut self.color_contrast, &mut v.contrast);
+        swap(&mut self.scene.background, &mut v.background);
+        v
+    }
+
     fn refresh_window_title(&mut self) {
         // The filename, not the scene's display name: it's what the person
         // typed, what Ctrl+S writes, and what they'll look for on disk.
@@ -7481,6 +7810,21 @@ impl App {
         textures_delta: &egui::TexturesDelta,
         pixels_per_point: f32,
     ) -> FrameOutcome {
+        // The playhead's view values, for this frame's drawing only. The UI
+        // has already run, so nothing that edits the scene can see them.
+        let held = self.swap_anim_view(self.anim_view);
+        let outcome = self.render_frame(egui_renderer, paint_jobs, textures_delta, pixels_per_point);
+        self.swap_anim_view(held);
+        outcome
+    }
+
+    fn render_frame(
+        &mut self,
+        egui_renderer: &mut egui_wgpu::Renderer,
+        paint_jobs: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        pixels_per_point: f32,
+    ) -> FrameOutcome {
         if self.pending_screenshot {
             self.take_screenshot();
         }
@@ -7498,7 +7842,7 @@ impl App {
         // The emphasis is settled first, because what the chaos pass measures
         // this frame is part of the params this upload writes.
         self.sync_emphasis();
-        if self.emphasis_filling() {
+        if self.emphasis_filling() || self.anim_churning() {
             // The ring still holds points measured against a different
             // transform. Churning at the fill rate replaces them in about a
             // second instead of thirteen, and changes nothing about the

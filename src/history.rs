@@ -327,6 +327,7 @@ mod tests {
             subscenes: Vec::new(),
             root_share: 1.0,
             root_visible: true,
+            tracks: Vec::new(),
             xaos_matrix_layers: Vec::new(),
             colours_left_out: Vec::new(),
             name: "Test".to_string(),

@@ -152,3 +152,8 @@ pub const ARROW: &str = "\u{E06C}";
 
 /// Collaborate window (two speech bubbles; Phosphor "chats")
 pub const CHATS: &str = "\u{E17C}";
+
+/// Timeline window (Phosphor "film-strip")
+pub const FILM_STRIP: &str = "\u{E792}";
+/// Timeline: loop playback (Phosphor "repeat")
+pub const REPEAT: &str = "\u{E3F6}";

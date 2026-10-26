@@ -501,6 +501,11 @@ pub struct CameraOverride {
     /// step, and the frames either side of a seam are exactly what anything
     /// measuring the seam needs to compare.
     pub path_t: Option<f32>,
+    /// The same, named as a time on the timeline in seconds (`--time`): the
+    /// path is sampled at `time / its duration`, so a closed path wraps and a
+    /// one-shot holds its last frame. The scene's tracks are applied at this
+    /// time by the caller; this only moves the camera.
+    pub time: Option<f32>,
 }
 
 impl CameraOverride {

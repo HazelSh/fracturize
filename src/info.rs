@@ -90,6 +90,9 @@ pub struct Subject<'a> {
     /// Width over height of the frame `on screen` measures against: the
     /// render's `--width`/`--height`, 16:9 unless they say otherwise.
     pub aspect: f32,
+    /// `--time`, and the `-S` flags its tracks came to at that moment. The
+    /// scene above is then that frame, carrying its tracks for the report.
+    pub frame: Option<(f32, Vec<String>)>,
 }
 
 impl<'a> Subject<'a> {
@@ -103,7 +106,13 @@ impl<'a> Subject<'a> {
             seed: None,
             color: false,
             aspect: 16.0 / 9.0,
+            frame: None,
         }
+    }
+
+    pub fn with_frame(mut self, time: f32, sets: Vec<String>) -> Self {
+        self.frame = Some((time, sets));
+        self
     }
 
     pub fn with_aspect(mut self, width: u32, height: u32) -> Self {
@@ -600,6 +609,10 @@ fn build(subject: &Subject) -> Report {
     sections.push(colour_section(subject, &resolved, &mut notes));
     sections.push(camera_section(subject, &effective, layered, &mut notes));
     sections.push(path_section(scene));
+    // Only for a scene that moves, so no golden file moves.
+    if !scene.tracks.is_empty() {
+        sections.push(tracks_section(subject, &mut notes));
+    }
     sections.push(zoom_section(scene, &mut notes));
 
     sections.insert(1, notes_section(&notes));
@@ -2130,6 +2143,110 @@ fn path_section(scene: &Scene) -> Section {
     s.text("route is how each segment gets to the next key: the short way, or");
     s.text("that plus whole extra turns");
     s
+}
+
+/// What moves over time: every track, what it costs, and — with `--time` —
+/// the `-S` flags that moment comes to, which is the frame said as a command.
+fn tracks_section(subject: &Subject, notes: &mut Notes) -> Section {
+    use crate::track::{Class, Source};
+    let scene = subject.scene;
+    let mut s = Section::new("tracks");
+    let base = crate::offline::effective_camera(subject.view.map(|(_, v)| v), scene, CameraOverride::default());
+    let default = crate::path::CameraPath::full_orbit(&base);
+    let flight = crate::path::resolve(scene.camera_path.as_ref(), &default);
+    let length = crate::track::timeline_length(scene, flight);
+    let worst = scene.tracks.iter().filter(|t| !t.mute).map(|t| t.class()).max();
+    s.text(format!(
+        "{} track{}, timeline {:.2}s ({})",
+        scene.tracks.len(),
+        if scene.tracks.len() == 1 { "" } else { "s" },
+        length,
+        if scene.camera_path.as_ref().is_some_and(|p| p.playable())
+            && crate::track::tracks_length(&scene.tracks).is_none_or(|t| (flight.duration() as f64) >= t)
+        {
+            "the camera path's"
+        } else {
+            "the tracks'"
+        },
+    ));
+    for (i, t) in scene.tracks.iter().enumerate() {
+        s.text(format!("[{}] {}{}", i, t.target, if t.mute { "   (muted)" } else { "" }));
+        let what = match &t.source {
+            Source::Keys { keys, interpolate, extrapolate, .. } => {
+                let nums: Vec<f64> = keys
+                    .iter()
+                    .filter_map(|k| match k.value {
+                        crate::track::KeyValue::Number(x) => Some(x),
+                        _ => None,
+                    })
+                    .collect();
+                let range = if nums.is_empty() {
+                    "steps".to_string()
+                } else {
+                    let (lo, hi) = nums.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+                    if lo == hi {
+                        notes.add("tracks", format!("{}'s keys are all {}: it holds one value", t.target, lo));
+                    }
+                    format!("{} to {}", trim_num(lo), trim_num(hi))
+                };
+                format!(
+                    "{} key{} {:.2}s to {:.2}s, {}, {}, {}",
+                    keys.len(),
+                    if keys.len() == 1 { "" } else { "s" },
+                    keys[0].t,
+                    keys[keys.len() - 1].t,
+                    range,
+                    interpolate.as_str(),
+                    extrapolate.as_str()
+                )
+            }
+            Source::Rate { rate, from } => format!(
+                "rate {}/s from {}",
+                trim_num(*rate),
+                from.map_or("the authored value".to_string(), trim_num)
+            ),
+            Source::Cycle { wave, period, amplitude, phase, centre } => format!(
+                "{} every {:.2}s, ±{} about {}{}",
+                wave.as_str(),
+                period,
+                trim_num(*amplitude),
+                centre.map_or("the authored value".to_string(), trim_num),
+                if *phase != 0.0 { format!(", phase {}", trim_num(*phase)) } else { String::new() }
+            ),
+        };
+        s.text(format!("    {}", what));
+        s.text(format!("    {} class", t.class().as_str()));
+    }
+    let cost = match worst {
+        Some(c) if c.refills() => {
+            "the attractor moves: an animation refills the buffer every frame, and the window churns faster while playing"
+        }
+        Some(Class::Colour) => "only colour moves: frames recolour, the points stay",
+        Some(_) => "only the view moves: frames re-render, nothing refills",
+        None => "every track is muted",
+    };
+    for line in wrap("", 0, cost) {
+        s.text(line);
+    }
+    match &subject.frame {
+        Some((t, sets)) => {
+            s.text(format!("at --time {:.3}s the tracks come to:", t));
+            for set in sets {
+                s.text(format!("  -S {}", set));
+            }
+        }
+        None => {
+            s.text("--time T renders or reports any moment; --time-grid 4x3 sheets them");
+        }
+    }
+    s
+}
+
+/// A number at the precision it was written with, up to six places.
+fn trim_num(x: f64) -> String {
+    let t = format!("{:.6}", x);
+    let t = t.trim_end_matches('0').trim_end_matches('.');
+    if t == "-0" { "0".to_string() } else { t.to_string() }
 }
 
 fn zoom_section(scene: &Scene, notes: &mut Notes) -> Section {

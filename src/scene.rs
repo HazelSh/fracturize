@@ -1612,6 +1612,10 @@ pub struct SceneFile {
     /// Other attractors composed into this one; see `crate::subscene`.
     #[serde(default, rename = "subscene", skip_serializing_if = "Vec::is_empty")]
     pub subscenes: Vec<crate::subscene::SubsceneDef>,
+    /// Values over time; see `crate::track`. Last in the file, because they
+    /// name things everything above defines.
+    #[serde(default, rename = "track", skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<crate::track::TrackDef>,
 }
 
 /// A `[[symmetry]]` block.
@@ -1751,6 +1755,10 @@ pub struct Scene {
     pub root_share: f32,
     /// Whether the scene's own layer is drawn (`[meta] visible`).
     pub root_visible: bool,
+    /// What moves over time (`[[track]]`), each aimed at an `-S` path. Empty
+    /// for a still scene, which is then exactly what it always was. A frame of
+    /// an animation (`track::Animator::at`) has none: it is a still.
+    pub tracks: Vec<crate::track::Track>,
 }
 
 impl Scene {
@@ -1849,6 +1857,7 @@ impl Scene {
             root_visible: true,
             xaos_matrix_layers: Vec::new(),
             colours_left_out: Vec::new(),
+            tracks: Vec::new(),
         }
     }
 
@@ -2195,6 +2204,7 @@ impl Scene {
                 .to_string());
         }
 
+        let tracks = crate::track::resolve_all(&scene_file.tracks)?;
         let mut scene = Scene {
             name: scene_file.meta.name,
             author: scene_file.meta.author.unwrap_or_else(|| "Unknown".to_string()),
@@ -2237,9 +2247,17 @@ impl Scene {
                 .filter(|&(_, m)| m)
                 .map(|(k, _)| k as u16)
                 .collect(),
+            tracks,
         };
         // Subscene colormaps are resolved here, from their own maps' colours.
         scene.regenerate_colormap();
+        // Every track's path has to resolve on *this* scene — a transform by
+        // that name, a key a rate can start from — and that is only knowable
+        // with the text in hand. Refused at load, like any other bad value.
+        if !scene.tracks.is_empty() {
+            let dir = path.parent().unwrap_or(Path::new("."));
+            crate::track::Animator::new(content, dir, &scene.tracks)?;
+        }
         Ok(scene)
     }
 
@@ -2594,6 +2612,7 @@ impl Scene {
             xaos: matrix_form.then(|| xaos_matrix_def(&root_specs, &root_names)).flatten(),
             transforms,
             subscenes: (1..=self.subscenes.len()).map(|k| self.subscene_def(k)).collect(),
+            tracks: self.tracks.iter().map(crate::track::Track::to_def).collect(),
         }
     }
 
@@ -3522,10 +3541,15 @@ fn merge_scene_into_document(
         let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
         doc["subscene"] = fresh_doc.get("subscene")?.clone();
     }
+    // Tracks too: the timeline adds, removes and re-keys them, and a key list
+    // is one value. Removed *before* the early return below, so a pure
+    // composite doesn't keep tracks that were deleted.
+    doc.remove("track");
     // A pure composite has no maps of its own; drop the array rather than
     // leave the ones that were edited away.
     if file.transforms.is_empty() {
         doc.remove("transform");
+        append_tracks(&mut doc, file, fresh)?;
         return Some(doc.to_string());
     }
 
@@ -3597,7 +3621,18 @@ fn merge_scene_into_document(
         doc["transform"] = fresh_doc.get("transform")?.clone();
     }
 
+    append_tracks(&mut doc, file, fresh)?;
     Some(doc.to_string())
+}
+
+/// The `[[track]]` tables from the fresh serialization, after everything they
+/// name. `merge_scene_into_document` removed the old ones.
+fn append_tracks(doc: &mut toml_edit::DocumentMut, file: &SceneFile, fresh: &str) -> Option<()> {
+    if !file.tracks.is_empty() {
+        let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
+        doc["track"] = fresh_doc.get("track")?.clone();
+    }
+    Some(())
 }
 
 /// Rewrite each `[transform.variations]` sub-table as an inline

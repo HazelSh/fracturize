@@ -37,6 +37,7 @@ pub mod radio;
 pub mod random_flames;
 pub mod random_settings;
 pub mod table;
+pub mod timeline;
 pub mod render_job;
 pub mod render_panel;
 pub mod save_as;
@@ -126,6 +127,12 @@ pub struct UiState {
     pub xaos_edge: Option<(usize, usize)>,
     /// An overlay edge's right-click menu, pinned where it opened.
     pub xaos_edge_menu: Option<((usize, usize), Option<egui::Pos2>)>,
+    /// The Timeline row whose context menu is open, held while the pointer
+    /// is on the menu rather than the row.
+    pub timeline_menu_row: Option<usize>,
+    /// The toolbar ran out of room last frame, so its window toggles show
+    /// icons without captions (`toolbar::draw`).
+    pub toolbar_compact: bool,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -207,6 +214,8 @@ impl UiState {
             xaos_overlay: false,
             xaos_edge: None,
             xaos_edge_menu: None,
+            timeline_menu_row: None,
+            toolbar_compact: false,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),
@@ -258,6 +267,7 @@ pub enum WindowKey {
     Subscenes,
     Xaos,
     Collab,
+    Timeline,
 }
 
 impl WindowKey {
@@ -275,6 +285,7 @@ impl WindowKey {
             Self::Subscenes => "subscenes",
             Self::Xaos => "xaos",
             Self::Collab => "collab",
+            Self::Timeline => "timeline",
         }
     }
 
@@ -324,6 +335,8 @@ impl WindowKey {
             Self::Collab => egui::vec2(380.0, 340.0),
             // Four rows of controls above a grid of tiles big enough to judge.
             Self::Mutate => egui::vec2(360.0, 340.0),
+            // The transport row, the ruler and the camera's row.
+            Self::Timeline => egui::vec2(420.0, 110.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -386,6 +399,16 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
             egui::pos2((right_x - 400.0).max(20.0), top + 380.0),
             egui::vec2(380.0, 380.0),
         ),
+        // Wide and low, docked above the status bar: time runs left to right,
+        // and wants all the width there is.
+        WindowKey::Timeline => {
+            // Short of the right edge, where the corner axis cross lives.
+            let h = (screen.height() * 0.25).clamp(170.0, 320.0);
+            (
+                egui::pos2(20.0, (screen.bottom() - h - 50.0).max(top)),
+                egui::vec2((screen.width() - 140.0).max(420.0), h),
+            )
+        }
     }
 }
 
@@ -477,6 +500,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     step("xaos", t, &mut timings);
     let t = std::time::Instant::now();
     camera_panel::draw(&ctx, app);
+    timeline::draw(&ctx, app);
     step("camera", t, &mut timings);
     let t = std::time::Instant::now();
     browser::draw(&ctx, app);

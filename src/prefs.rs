@@ -50,6 +50,9 @@ pub struct PanelPrefs {
     /// Collaborate: the scene's thread with an agent.
     #[serde(default)]
     pub collab_open: bool,
+    /// The Timeline: the camera and every track on one clock.
+    #[serde(default)]
+    pub timeline_open: bool,
 }
 
 fn default_mutation_grid() -> u32 {

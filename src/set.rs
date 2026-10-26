@@ -72,6 +72,13 @@ fn shown(v: &Value) -> String {
     v.to_string().trim().to_string()
 }
 
+/// Apply one `path=value` to a document already parsed — what an animation
+/// does once per track per frame (`crate::track::Animator`), where parsing the
+/// text again for each override would be the whole cost.
+pub fn apply_to_doc(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
+    apply_one(doc, spec)
+}
+
 fn apply_one(doc: &mut DocumentMut, spec: &str) -> Result<Applied, String> {
     let (path, raw) = spec
         .split_once('=')
