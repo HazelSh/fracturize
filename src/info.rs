@@ -2200,7 +2200,21 @@ fn tracks_section(subject: &Subject, notes: &mut Notes) -> Section {
                         _ => None,
                     })
                     .collect();
-                let range = if nums.is_empty() {
+                let poses = keys.iter().filter(|k| matches!(k.value, crate::track::KeyValue::Rotation(_))).count();
+                let range = if poses > 0 {
+                    // The whole journey, routes and all: what a key's triple
+                    // says, summed, rather than where the keys sit.
+                    let turned: f32 = keys
+                        .windows(2)
+                        .filter_map(|p| match (&p[0].value, &p[1].value) {
+                            (crate::track::KeyValue::Rotation(a), crate::track::KeyValue::Rotation(b)) => {
+                                Some(a.route_to(b).magnitude().to_degrees())
+                            }
+                            _ => None,
+                        })
+                        .sum();
+                    format!("poses, turning {}°", trim_num(turned.round() as f64))
+                } else if nums.is_empty() {
                     "steps".to_string()
                 } else {
                     let (lo, hi) = nums.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));

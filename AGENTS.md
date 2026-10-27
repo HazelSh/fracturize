@@ -1777,6 +1777,24 @@ extrapolate = "pingpong"                # hold | repeat | pingpong | offset
 # amplitude = 15.0 #    authored value (or `centre`), phase in periods
 # mute = true      # kept, drawn, not applied
 
+# A map's WHOLE rotation keys poses, not one Euler angle, and turns between
+# them as a rotation (the camera's spline and routes): no wrong way round, no
+# gimbal lock, no shear. Change one angle from the key before and it turns by
+# exactly that much about that angle's axis — y 0 → 720 is two whole turns;
+# otherwise the short way, or say `turns = N` / `route = [x, y, z]`. Linear is
+# a constant rate, smooth eases each key, spline flies through all of them;
+# `offset` keeps turning. Applied as `rotvec`, so no Euler branch can flip it.
+[[track]]
+target = "transform.petal.rotation"     # or subscene.<name>.rotation
+interpolate = "linear"
+extrapolate = "offset"                  # a quarter turn every 2 s, forever
+[[track.keys]]
+t = 0.0
+rotation = [0.0, 0.0, 0.0]              # degrees, XYZ; or rotvec = [...] (radians)
+[[track.keys]]
+t = 2.0
+rotation = [0.0, 90.0, 0.0]
+
 # Composition: another attractor beside this one (see "Subscenes"). Each keeps
 # its own walkers, so their maps never mix. Repeatable, up to 15.
 [[subscene]]
@@ -2825,7 +2843,13 @@ Things it rests on, each found the hard way:
 - **One Euler angle is only meaningful in its triple.** A track on
   `transform.x.rotation.y` sets one angle of the triple the scene *writes*,
   and a saved scene respells a rotation with |y| > 90° on the other branch;
-  the animator warns when that is in play.
+  the animator warns when that is in play. **Animate a map's turn with its
+  whole rotation instead** (`transform.x.rotation`, the picker's "whole
+  (poses)" leaf): its keys are poses (`KeyValue::Rotation`, `track::RotKey`),
+  interpolated as rotations along routes read from the Euler column
+  (`RotKey::route_to`: one angle changing is that angle's axis, by exactly that
+  much), and each frame sets `rotvec`, which no save respells. A whole-rotation
+  track beside one of its own angles is refused, since the whole would win.
 - **The transport is a clock plus "is the camera following".** `path_t` is
   gone. Grabbing the camera stops it following and, in a scene with tracks,
   leaves the clock running: you can orbit an animation while it plays. Play
@@ -2895,7 +2919,7 @@ its estimate charges a refill per frame when the attractor moves.
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
 keying from the inspector (and with it the auto-key question, which is
 Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper,
-whole-rotation tracks on maps (TIMELINE-PLAN §3), walkers carried between frames instead of a refill, motion blur, an
+spin/turn rate tracks and post-rotation poses (TIMELINE-PLAN §3 C), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 
 ## Two machines, one repo: how to not make a mess

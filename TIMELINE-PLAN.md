@@ -276,6 +276,8 @@ What it needs:
   map is dragged.
 - **Classes**: structure, like any matrix change.
 
+**D. Pose keys — done 2026-10-28.** A track on `transform.<map>.rotation` (or a subscene's) keys whole poses, `[[track.keys]]` tables with `t` and `rotation` or `rotvec`; interpolated with the camera's spline and routes, the route read from the Euler column (one angle changing turns about that angle's axis by exactly that much), applied as `rotvec`. Linear, smooth, spline and step all mean what they mean for numbers, and `offset` keeps turning. C (rate tracks that spin about an axis forever) is still open, and offset on a pose covers much of it. The original note:
+
 **D. Pose keys (later, if wanted).** Keys that are whole orientations,
 interpolated as rotations with the camera path's cumulative quaternion spline
 and its routes. That is the general "pose A at 0 s, pose B at 4 s" tool and

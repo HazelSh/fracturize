@@ -552,7 +552,8 @@ fn draw_track_row(
             let t = t0 + (t1 - t0) * i as f64 / n as f64;
             match track.sample(t, Some(0.0)) {
                 KeyValue::Number(v) => Some((t, v)),
-                KeyValue::Other(_) => None,
+                // A pose isn't one number; its diamonds are the picture.
+                KeyValue::Rotation(_) | KeyValue::Other(_) => None,
             }
         })
         .collect();
@@ -771,6 +772,21 @@ fn draw_track_detail(ui: &mut egui::Ui, app: &mut App, i: usize) {
                         app.ui_state.timeline_key = Some(k);
                     }
                 }
+                if keys.iter().any(|k| matches!(k.value, KeyValue::Rotation(_))) {
+                    let resp = ui.button((icons::PLUS, "Key the map's rotation"));
+                    let resp = hinted(
+                        resp,
+                        &mut app.ui_state,
+                        "Key the rotation the map has in the Transforms window (or after a gizmo \
+                         drag) at the playhead: pose the map, then key it here",
+                        "click: key the map's own rotation at the playhead",
+                    );
+                    if resp.clicked() {
+                        if let Some(k) = app.key_rotation_from_scene(i) {
+                            app.ui_state.timeline_key = Some(k);
+                        }
+                    }
+                }
                 let resp = ui.add_enabled(key.is_some(), egui::Button::new((icons::TRASH, "Delete key")));
                 let resp = hinted(
                     resp,
@@ -806,6 +822,26 @@ fn draw_track_detail(ui: &mut egui::Ui, app: &mut App, i: usize) {
                             let resp = hinted(resp, &mut app.ui_state, "The value at this key", "drag: change the key's value · click: type one");
                             if resp.changed() {
                                 app.set_key_value(i, k, v);
+                            }
+                        }
+                        KeyValue::Rotation(r) => {
+                            let mut e = r.euler.unwrap_or_else(|| crate::track::euler_of(r.orientation, None));
+                            let mut changed = false;
+                            for (c, axis) in ["x", "y", "z"].iter().enumerate() {
+                                ui.label(*axis);
+                                let resp = ui.add(num::Drag::new(&mut e[c]).speed(0.5).max_decimals(2).suffix("°"));
+                                let resp = hinted(
+                                    resp,
+                                    &mut app.ui_state,
+                                    "The map's rotation at this key, in degrees (XYZ, as its own fields \
+                                     write it). Change one angle from the key before and the map turns \
+                                     by exactly that much about it on the way: 360 more is a whole turn.",
+                                    "drag: turn this key · click: type an angle",
+                                );
+                                changed |= resp.changed();
+                            }
+                            if changed {
+                                app.set_key_rotation(i, k, e);
                             }
                         }
                         KeyValue::Other(v) => {

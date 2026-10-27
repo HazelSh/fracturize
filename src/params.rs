@@ -119,7 +119,10 @@ pub fn catalogue(scene: &Scene) -> Vec<Param> {
     // Try the path on the scene's own text: listed only if `-S` takes it, with
     // the value it displaced or, where the file says nothing, `implied`.
     let mut offer = |group: &[&str], label: &str, path: String, implied: Option<toml::Value>| {
-        let Ok(applied) = crate::set::apply_to_doc(&mut doc.clone(), &format!("{path}=0.0")) else {
+        // A whole rotation is the one array offered: a track keys it as poses.
+        let whole = crate::track::takes_rotations(&path);
+        let probe = if whole { "[0.0, 0.0, 0.0]" } else { "0.0" };
+        let Ok(applied) = crate::set::apply_to_doc(&mut doc.clone(), &format!("{path}={probe}")) else {
             return;
         };
         let value = applied
@@ -128,7 +131,11 @@ pub fn catalogue(scene: &Scene) -> Vec<Param> {
             .and_then(|t| t.get("v").cloned())
             .or(implied);
         // Arrays and tables are reached through their elements.
-        let Some(value) = value.filter(|v| !matches!(v, toml::Value::Array(_) | toml::Value::Table(_)))
+        let Some(value) = value.filter(|v| match v {
+            toml::Value::Array(a) => whole && a.len() == 3,
+            toml::Value::Table(_) => false,
+            _ => !whole,
+        })
         else {
             return;
         };
@@ -196,6 +203,8 @@ pub fn catalogue(scene: &Scene) -> Vec<Param> {
         offer(&top, "Share of the points", format!("{base}.share"), f(1.0));
         offer(&top, "Visible", format!("{base}.visible"), Some(toml::Value::Boolean(true)));
         offer(&top, "Scale", format!("{base}.scale"), f(1.0));
+        let zero = toml::Value::Array(vec![toml::Value::Float(0.0); 3]);
+        offer(&["Subscenes", &name, "Rotation"], "whole (poses)", format!("{base}.rotation"), Some(zero));
         for (axis, l) in [("x", "x"), ("y", "y"), ("z", "z")] {
             offer(&["Subscenes", &name, "Position"], l, format!("{base}.translation.{axis}"), f(0.0));
             offer(&["Subscenes", &name, "Rotation"], l, format!("{base}.rotation.{axis}"), f(0.0));
@@ -250,6 +259,12 @@ fn map_params(
         ("post_rotation", "Post rotation", 0.0),
         ("post_scale", "Post scale", 1.0),
     ] {
+        if key == "rotation" {
+            // The whole pose first: keyed as rotations, it turns smoothly the
+            // way round each key says, which one angle of three can't.
+            let zero = toml::Value::Array(vec![toml::Value::Float(0.0); 3]);
+            offer(&sub(group, label), "whole (poses)", format!("{base}.rotation"), Some(zero));
+        }
         for axis in ["x", "y", "z"] {
             offer(&sub(group, label), axis, format!("{base}.{key}.{axis}"), f(implied));
         }

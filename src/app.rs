@@ -7627,6 +7627,48 @@ impl App {
         self.commit_edit("Key value", Some(&format!("timeline:key-value:{i}:{k}")), before);
     }
 
+    /// Set rotation key `k` of track `i` to an Euler triple (degrees, XYZ).
+    /// The route out of it is read from the triples again, so an explicit
+    /// `turns`/`route` on it goes. Coalesced, like any drag.
+    pub fn set_key_rotation(&mut self, i: usize, k: usize, euler: [f64; 3]) {
+        let Some(crate::track::Source::Keys { keys, .. }) = self.scene.tracks.get(i).map(|t| &t.source) else { return };
+        if !matches!(keys.get(k).map(|k| &k.value), Some(crate::track::KeyValue::Rotation(r)) if r.euler != Some(euler)) {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source {
+            keys[k].value = crate::track::KeyValue::Rotation(crate::track::RotKey::from_euler(euler));
+        }
+        self.commit_edit("Key rotation", Some(&format!("timeline:key-value:{i}:{k}")), before);
+    }
+
+    /// Key whole-rotation track `i` at the playhead with the rotation its map
+    /// has in the scene (the inspector's, or a gizmo drag's): pose, then key.
+    /// Replaces a key already at this moment. Returns the key's index.
+    pub fn key_rotation_from_scene(&mut self, i: usize) -> Option<usize> {
+        let target = self.scene.tracks.get(i)?.target.clone();
+        let value = crate::track::authored_value(&self.scene_with_live_values(), &target).ok().flatten();
+        let e: Vec<f64> = value?.as_array()?.iter().filter_map(|v| v.as_float().or(v.as_integer().map(|i| i as f64))).collect();
+        let [x, y, z] = e[..] else { return None };
+        let t = self.time;
+        let before = self.edit_snapshot();
+        let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source else { return None };
+        let key = crate::track::Key { t, value: crate::track::KeyValue::Rotation(crate::track::RotKey::from_euler([x, y, z])) };
+        let at = match keys.iter().position(|k| (k.t - t).abs() < 1e-3) {
+            Some(j) => {
+                keys[j] = key;
+                j
+            }
+            None => {
+                let j = keys.partition_point(|k| k.t < t);
+                keys.insert(j, key);
+                j
+            }
+        };
+        self.commit_edit(format!("Key {target} at {t:.2}s"), None, before);
+        Some(at)
+    }
+
     /// Delete key `k` of track `i`. The last key takes the track with it,
     /// since a track with no keys has nothing to say.
     pub fn delete_key(&mut self, i: usize, k: usize) {
