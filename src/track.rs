@@ -13,25 +13,29 @@
 //!   run) or [`Source::Cycle`] (an oscillator: sine, triangle, saw, square);
 //! - for keys, what happens past the ends: [`Extrapolate`].
 //!
-//! # The camera is a track too, of a kind that can't be three numbers
+//! # The camera is a track too: views at moments
 //!
-//! Framings are rotations, and rotations don't interpolate as numbers — that
-//! is what `path.rs`'s routes and cumulative spline exist for. So the camera
-//! keeps its own *source* (the `CameraPath` spline, or the default full orbit,
-//! which is a cycle in all but name) and shares everything else: it is sampled
-//! on the same clock, in seconds, and its loop is one of these same
-//! extrapolations — `once` is [`Extrapolate::Hold`], `closed` is `Repeat`,
-//! `pingpong` is `PingPong`, and the zoom loop is **repeat with offset**,
-//! where the offset is the zoom symmetry rather than a number. That last one
-//! is the reason to name them this way: `path_loop = "zoom"` stops being a
-//! special case and becomes `Offset` on a framing.
+//! `[[track]] target = "camera"` is the camera's track. Its keys are *views* —
+//! a framing (yaw/pitch/roll or `rotvec`, distance, focus) at a time `t` — and
+//! its loop is an [`Extrapolate`] like any other track's: `hold`, `pingpong`,
+//! `repeat` (with a `period`, the lap back round to the first key), or
+//! `offset`, where the offset is the scene's zoom symmetry rather than a
+//! number. That last one is the zoom loop, which stops being a special case.
+//!
+//! Framings are rotations, and rotations don't interpolate as numbers, so the
+//! camera keeps its own spline: `path.rs`'s cumulative quaternion Catmull-Rom
+//! with explicit routes, which is what lets a key sequence spiral through
+//! several whole turns (winze) instead of taking the short way. Uneven key
+//! times are honoured with per-second tangents. The track is resolved by the
+//! scene loader, since a key inherits whatever its view leaves out from the
+//! scene's `[camera]`, and is held as `Scene::camera_path` — the one track
+//! every scene has, the default orbit when none is written.
 //! [`Extrapolate::fold`] is the one time-folding function; `CameraPath::sample`
-//! calls it too.
+//! folds by the same rule.
 //!
-//! The camera's file format is unchanged. Moving `[[camera.path]]` into
-//! `[[track]]` form is a format change to every scene with a path, and the plan
-//! makes it one explicit migration commit for Hazel to run, with views-as-keys
-//! a decision still open; nothing here needs it.
+//! The old spelling — `[camera] path_loop / path_seconds / path_ease /
+//! path_zoom_periods` with `[[camera.path]]` keypoints — still loads, its keys
+//! placed when the old flight passed them, and saving writes the track.
 //!
 //! # Evaluating: the scene at time `t` is the scene with `-S` applied
 //!
@@ -469,17 +473,48 @@ fn sample_keys(keys: &[Key], interp: Interp, ex: Extrapolate, t: f64) -> KeyValu
 
 // ---------------------------------------------------------------- the file
 
+/// One key as the file writes it: `[seconds, value]` for a number (or a
+/// string or boolean), or a table for the camera — a view at a moment,
+/// `{ t = 2.0, yaw = 1.2, pitch = 0.3, distance = 4.0, focus = [...] }`,
+/// which reads best as its own `[[track.keys]]` section.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum KeyDef {
+    Pair(Vec<toml::Value>),
+    View(crate::scene::PathKeyDef),
+}
+
+impl<'de> Deserialize<'de> for KeyDef {
+    /// By shape, so a mistyped field in a view says which, rather than
+    /// "matched no variant".
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        match toml::Value::deserialize(d)? {
+            toml::Value::Array(a) => Ok(Self::Pair(a)),
+            toml::Value::Table(t) => toml::Value::Table(t)
+                .try_into()
+                .map(Self::View)
+                .map_err(|e| D::Error::custom(format!("a camera key: {e}"))),
+            other => Ok(Self::Pair(vec![other])),
+        }
+    }
+}
+
+/// The camera's track target: not an `-S` path, since a framing isn't one
+/// number.
+pub const CAMERA: &str = "camera";
+
 /// A `[[track]]` table.
 ///
 /// Exactly one of `keys`, `rate` and the cycle fields (`wave`, `period`,
-/// `amplitude`) says which source it is.
+/// `amplitude`) says which source it is. The camera's (`target = "camera"`)
+/// is always keys, each a view, and carries `period`, `ease` and
+/// `zoom_periods` instead; `scene.rs` resolves it, since its keys inherit the
+/// scene's own framing.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TrackDef {
     pub target: String,
-    /// `[[seconds, value], ...]`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keys: Option<Vec<Vec<toml::Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpolate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -500,6 +535,18 @@ pub struct TrackDef {
     pub centre: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mute: bool,
+    /// Camera only: smoothstep each lap (default: on for hold and pingpong,
+    /// off for the loops, whose seam it would stall)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<bool>,
+    /// Camera only, with `extrapolate = "offset"`: zoom periods descended a
+    /// lap (default 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom_periods: Option<u32>,
+    /// `[[seconds, value], ...]`, or the camera's views. Last, because the
+    /// camera's are sections and TOML wants a table's values before them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<KeyDef>>,
 }
 
 /// A TOML number as `f64`, whichever way it was written: `rate = 1` is as good
@@ -510,6 +557,110 @@ fn number(v: &toml::Value) -> Option<f64> {
 }
 
 impl TrackDef {
+    pub fn is_camera(&self) -> bool {
+        self.target.trim() == CAMERA
+    }
+
+    /// The camera track's loop, from `extrapolate`: hold, pingpong, repeat,
+    /// or offset — which for a framing is the zoom loop, its offset being the
+    /// scene's scale symmetry. With the zoom periods a lap.
+    pub fn camera_loop(&self) -> Result<(crate::path::LoopKind, u32), String> {
+        use crate::path::LoopKind;
+        let who = "the camera track";
+        if self.rate.is_some()
+            || self.from.is_some()
+            || self.wave.is_some()
+            || self.amplitude.is_some()
+            || self.phase.is_some()
+            || self.centre.is_some()
+            || self.interpolate.is_some()
+        {
+            return Err(format!(
+                "{who}: its keys are views, interpolated as framings — `rate`, cycles and \
+                 `interpolate` are for number tracks"
+            ));
+        }
+        let kind = match self.extrapolate.as_deref() {
+            None => LoopKind::Once,
+            Some("zoom") => LoopKind::Zoom,
+            Some(s) => match Extrapolate::parse(s) {
+                Some(Extrapolate::Hold) => LoopKind::Once,
+                Some(Extrapolate::PingPong) => LoopKind::PingPong,
+                Some(Extrapolate::Repeat) => LoopKind::Closed,
+                Some(Extrapolate::Offset) => LoopKind::Zoom,
+                None => {
+                    return Err(format!(
+                        "{who}: extrapolate '{s}' is not one of hold, pingpong, repeat, \
+                         offset (the zoom loop)"
+                    ));
+                }
+            },
+        };
+        if self.zoom_periods.is_some() && kind != LoopKind::Zoom {
+            return Err(format!("{who}: `zoom_periods` is for extrapolate = \"offset\""));
+        }
+        Ok((kind, self.zoom_periods.unwrap_or(1).clamp(1, 64)))
+    }
+
+    /// The camera track's keys, each a view with its time.
+    pub fn camera_keys(&self) -> Result<Vec<crate::scene::PathKeyDef>, String> {
+        let who = "the camera track";
+        let mut out = Vec::new();
+        for (i, k) in self.keys.iter().flatten().enumerate() {
+            let KeyDef::View(v) = k else {
+                return Err(format!(
+                    "{who}: key {} is a [seconds, value] pair; the camera's keys are views \
+                     — `{{ t = 0.0, yaw = ..., pitch = ..., distance = ... }}`",
+                    i + 1
+                ));
+            };
+            let t = v.t.filter(|t| t.is_finite()).ok_or_else(|| {
+                format!("{who}: key {} has no `t` — when, in seconds, the camera is there", i + 1)
+            })?;
+            if let Some(prev) = out.last().and_then(|p: &crate::scene::PathKeyDef| p.t) {
+                if t <= prev {
+                    return Err(format!(
+                        "{who}: keys must be in time order, each later than the last \
+                         ({t} comes after {prev})"
+                    ));
+                }
+            }
+            out.push(*v);
+        }
+        if out.is_empty() {
+            return Err(format!("{who}: no keys"));
+        }
+        Ok(out)
+    }
+
+    /// The camera track's lap, for the loops that close: seconds from its
+    /// first key round to arriving back there.
+    pub fn camera_period(&self) -> Result<Option<f32>, String> {
+        let (kind, _) = self.camera_loop()?;
+        let period = self.num(&self.period, "period")?;
+        let closes = matches!(kind, crate::path::LoopKind::Closed | crate::path::LoopKind::Zoom);
+        match period {
+            Some(_) if !closes => Err(
+                "the camera track: `period` is the lap of a loop that comes back round \
+                 (repeat, offset); a hold or pingpong track's lap is its keys"
+                    .to_string(),
+            ),
+            Some(p) => {
+                let keys = self.camera_keys()?;
+                let span = keys.last().and_then(|k| k.t).unwrap_or(0.0)
+                    - keys.first().and_then(|k| k.t).unwrap_or(0.0);
+                if p <= span {
+                    return Err(format!(
+                        "the camera track: `period` {p} must be longer than its keys' span \
+                         ({span}): the loop still has to come back round from the last key"
+                    ));
+                }
+                Ok(Some(p as f32))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn num(&self, v: &Option<toml::Value>, key: &str) -> Result<Option<f64>, String> {
         match v {
             None => Ok(None),
@@ -527,13 +678,19 @@ impl TrackDef {
     pub fn resolve(&self) -> Result<Track, String> {
         let target = self.target.trim().to_string();
         let who = format!("track '{target}'");
+        if target == CAMERA {
+            return Err(format!("{who}: the camera's track is resolved with the scene"));
+        }
         crate::set::validate_path(&target).map_err(|e| format!("{who}: {e}"))?;
         if target.starts_with("camera.") {
             return Err(format!(
-                "{who}: the camera is animated by its path ([[camera.path]] keys, \
-                 path_loop, path_seconds), not by a track — a track on it would fight \
-                 the path every frame"
+                "{who}: the camera is animated by its own track, `target = \"camera\"`, whose \
+                 keys are whole views — a track on one of its numbers would fight it \
+                 every frame"
             ));
+        }
+        if self.ease.is_some() || self.zoom_periods.is_some() {
+            return Err(format!("{who}: `ease` and `zoom_periods` are the camera track's"));
         }
 
         let is_keys = self.keys.is_some();
@@ -561,6 +718,11 @@ impl TrackDef {
         let source = if let Some(raw) = &self.keys {
             let mut keys = Vec::with_capacity(raw.len());
             for pair in raw {
+                let KeyDef::Pair(pair) = pair else {
+                    return Err(format!(
+                        "{who}: each key is [seconds, value]; a table of fields is a camera key"
+                    ));
+                };
                 let [t, v] = pair.as_slice() else {
                     return Err(format!(
                         "{who}: each key is [seconds, value], not {}",
@@ -626,7 +788,9 @@ impl TrackDef {
             if !numeric && extrapolate == Extrapolate::Offset {
                 return Err(format!("{who}: offset adds a number each lap; these keys aren't numbers"));
             }
-            let integral = raw.iter().all(|p| p.get(1).is_some_and(|v| v.as_integer().is_some()));
+            let integral = raw.iter().all(|p| {
+                matches!(p, KeyDef::Pair(p) if p.get(1).is_some_and(|v| v.as_integer().is_some()))
+            });
             Source::Keys { keys, interpolate, extrapolate, integral }
         } else if is_rate {
             let rate = self.num(&self.rate, "rate")?.ok_or_else(|| {
@@ -677,7 +841,7 @@ impl Track {
                                 KeyValue::Number(x) => toml::Value::Float(*x),
                                 KeyValue::Other(v) => v.clone(),
                             };
-                            vec![toml::Value::Float(k.t), v]
+                            KeyDef::Pair(vec![toml::Value::Float(k.t), v])
                         })
                         .collect(),
                 );
@@ -711,8 +875,12 @@ impl Track {
 }
 
 /// Resolve a scene file's `[[track]]` tables, refusing two on one target.
+///
+/// The camera's track is left out: it is a framing, resolved with the scene's
+/// camera (`Scene::camera_path`).
 pub fn resolve_all(defs: &[TrackDef]) -> Result<Vec<Track>, String> {
-    let tracks: Vec<Track> = defs.iter().map(TrackDef::resolve).collect::<Result<_, _>>()?;
+    let tracks: Vec<Track> =
+        defs.iter().filter(|d| !d.is_camera()).map(TrackDef::resolve).collect::<Result<_, _>>()?;
     for (i, a) in tracks.iter().enumerate() {
         if tracks[..i].iter().any(|b| b.target == a.target) {
             return Err(format!(
@@ -767,7 +935,7 @@ pub fn one_key(target: &str, t: f64, value: toml::Value) -> Result<Track, String
     let integral = value.as_integer().is_some();
     TrackDef {
         target: target.to_string(),
-        keys: Some(vec![vec![toml::Value::Float(t), value]]),
+        keys: Some(vec![KeyDef::Pair(vec![toml::Value::Float(t), value])]),
         ..Default::default()
     }
     .resolve()

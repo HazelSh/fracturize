@@ -507,7 +507,6 @@ pub(super) fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_defaul
 
     let moving = app.camera_moving();
     let seconds = app.camera_path().duration();
-    let explicit_seconds = app.camera_path().seconds.is_some();
     let zoom_loop = app.path_zoom_loop();
     // A zoom loop closes under the scene's scale symmetry, so it only exists
     // when there is one to close under.
@@ -535,16 +534,13 @@ pub(super) fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_defaul
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            if explicit_seconds {
-                "How long the whole path takes"
-            } else {
-                "How long the whole path takes. At the moment that's the \
-                 default of 3 seconds between keypoints"
-            },
+            "How long the whole path takes. Every key's time stretches with it, \
+             so they keep their spacing; drag a key on the Timeline to retime \
+             just that one",
             "drag: set the path duration",
         );
         if resp.changed() {
-            app.set_path_seconds(Some(secs));
+            app.set_path_seconds(secs);
         }
     });
 

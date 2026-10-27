@@ -66,12 +66,13 @@ camera   yaw         0.0000 rad (   0.0°)
          under infinite zoom, reported in the canonical period as it renders
 
 path     2 keypoints, closed loop, 8.0s
-         key        yaw    pitch     roll   distance   route
-         [0]   0.0000   0.4000   0.0000      3.400   short
-         [1]   1.5708   0.4000   0.0000      3.400   +1 turn
+         key        at      yaw    pitch     roll   distance   route
+         [0]     0.00s   0.0000   0.4000   0.0000      3.400   short
+         [1]     4.00s   1.5708   0.4000   0.0000      3.400   +1 turn
          [0] focus ( 0.000,  0.000,  0.000)
-         route is how each segment gets to the next key: the short way, or
-         that plus whole extra turns
+         back at key [0] after 8.00s, a lap
+         at is when the camera is on that view; route is how each segment
+         gets to the next key: the short way, or that plus whole extra turns
 
 zoom     on   map [0] bough
          fixed point     ( 0.000,  0.000,  0.000)

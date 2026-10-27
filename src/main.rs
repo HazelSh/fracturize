@@ -601,7 +601,7 @@ struct Args {
     /// Render headlessly and exit — .png, .avif or .mp4 [else a window]
     ///
     /// A .png path renders a still or a contact sheet. A .avif or .mp4 path
-    /// renders an animation along the scene's [[camera.path]], or a full orbit
+    /// renders an animation along the scene's camera track, or a full orbit
     /// if it has none. .avif is AV1: small, and loops like a GIF. .mp4 is
     /// H.264, which upload sites accept. Prints each tile's camera (for
     /// sheets) and a timing breakdown to stdout.
@@ -870,7 +870,7 @@ struct Args {
     #[arg(long, default_value = "30", value_name = "N", help_heading = "Animation")]
     fps: u32,
 
-    /// Animation duration [the path's own: path_seconds, or 3s a segment]
+    /// Animation duration [the timeline's: the camera track, or the tracks]
     #[arg(long, value_name = "SECONDS", help_heading = "Animation")]
     seconds: Option<f32>,
 

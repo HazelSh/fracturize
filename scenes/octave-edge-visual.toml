@@ -88,16 +88,6 @@ distance = 2.0
 yaw = 0.55
 pitch = 0.20
 focus = [0.0, 0.0, 0.0]
-# One period is one octave is one wrap. Slow enough to watch a single wrap
-# happen rather than seeing a strobe.
-path_seconds = 2.5
-path_zoom_loop = 1
-
-[[camera.path]]
-yaw = 0.55
-pitch = 0.20
-distance = 2.0
-focus = [0.0, 0.0, 0.0]
 
 # The scale symmetry, as plain as it gets: no translation puts the fixed point
 # on the origin, no rotation makes a wrap a pure dolly, and a half scale makes
@@ -151,3 +141,16 @@ octave_falloff = 0.0
 # show what a hard edge does. Drag "edge guard" up in the Render window and
 # watch the blink turn into a fade you have to look for.
 edge_guard = 0.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 2.5
+
+[[track.keys]]
+t = 0.0
+yaw = 0.55
+pitch = 0.2
+distance = 2.0
+focus = [0.0, 0.0, 0.0]

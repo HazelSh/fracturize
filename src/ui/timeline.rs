@@ -175,8 +175,9 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
     // key, and the ruler pages by the playhead, so a ruler that rescaled under
     // the drag fed the key's own motion back into where the pointer maps to —
     // a key dragged left past the playhead jumped right.
-    let (t0, t1) = match (app.ui_state.timeline_drag_key, app.ui_state.timeline_span) {
-        (Some(_), Some(span)) => span,
+    let dragging = app.ui_state.timeline_drag_key.is_some() || app.ui_state.timeline_drag_camera.is_some();
+    let (t0, t1) = match app.ui_state.timeline_span {
+        Some(span) if dragging => span,
         _ => visible_span(app),
     };
     let full_w = ui.available_width();
@@ -269,10 +270,24 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         let origin = ui.input(|i| i.pointer.press_origin());
         if let Some(p) = origin.or(resp.interact_pointer_pos()) {
             app.ui_state.timeline_drag_key = None;
+            app.ui_state.timeline_drag_camera = None;
             if row_at(p.y) == Some(0) {
                 app.ui_state.timeline_camera = true;
                 app.ui_state.timeline_track = None;
                 app.ui_state.timeline_key = None;
+                if !app.path_is_default() {
+                    let hit = camera_key_times(app, lane, &x_of)
+                        .into_iter()
+                        .map(|o| (o, (x_of(o.t) - p.x).abs()))
+                        .filter(|&(_, d)| d <= KEY_GRAB)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(o, _)| o);
+                    app.ui_state.timeline_camera_key = hit.map(|o| o.key);
+                    if let Some(o) = hit.filter(|o| o.primary) {
+                        app.ui_state.timeline_drag_camera = Some(o.key);
+                        app.ui_state.timeline_span = Some((t0, t1));
+                    }
+                }
             }
             if let Some(r) = row_at(p.y).filter(|&r| r > 0) {
                 let i = r - 1;
@@ -303,19 +318,21 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         .is_some_and(|o| o.y < rect.top() + RULER_H && o.x >= lane.left());
     if let Some(p) = resp.interact_pointer_pos() {
         if resp.dragged() || resp.clicked() {
-            match app.ui_state.timeline_drag_key {
-                Some((i, k)) if resp.dragged() => app.set_key_time(i, k, t_of(p.x)),
-                Some(_) => {}
-                None if on_ruler => app.scrub_to(t_of(p.x)),
-                None => {}
+            match (app.ui_state.timeline_drag_key, app.ui_state.timeline_drag_camera) {
+                (Some((i, k)), _) if resp.dragged() => app.set_key_time(i, k, t_of(p.x)),
+                (None, Some(k)) if resp.dragged() => app.set_camera_key_time(k, t_of(p.x)),
+                (Some(_), _) | (None, Some(_)) => {}
+                (None, None) if on_ruler => app.scrub_to(t_of(p.x)),
+                (None, None) => {}
             }
         }
     }
     if resp.drag_stopped() {
         app.ui_state.timeline_drag_key = None;
+        app.ui_state.timeline_drag_camera = None;
     }
     let row_hint = match hovered_row {
-        Some(0) => "the camera's path · click: select · link: attach or detach the camera".to_string(),
+        Some(0) => "the camera · click a diamond: select that view · drag it: retime it · link: attach or detach".to_string(),
         Some(r) => format!("{} · click: select · drag a diamond: retime it · right-click: menu", names[r - 1]),
         None => "drag: scrub the playhead".to_string(),
     };
@@ -443,48 +460,57 @@ fn draw_camera_row(
     }
     let colour = visuals.widgets.active.fg_stroke.color;
     let colour = if attached { colour } else { colour.gamma_multiply(0.4) };
-    for t in camera_key_times(app, lane, x_of) {
-        diamond(painter, egui::pos2(x_of(t), lane.center().y), colour);
+    let selected = app.ui_state.timeline_camera.then_some(app.ui_state.timeline_camera_key).flatten();
+    for o in camera_key_times(app, lane, x_of) {
+        let c = if Some(o.key) == selected { visuals.selection.stroke.color } else { colour };
+        // Repeats of a key on later laps, or on a ping-pong's way back, are
+        // drawn fainter: they are the same key seen again, and only the
+        // first is dragged.
+        diamond(painter, egui::pos2(x_of(o.t), lane.center().y), if o.primary { c } else { c.gamma_multiply(0.5) });
     }
 }
 
-/// When the camera passes each of its keys, over the visible span.
-fn camera_key_times(app: &App, lane: egui::Rect, x_of: &dyn Fn(f64) -> f32) -> Vec<f64> {
+/// One moment the camera is on one of its keys.
+#[derive(Clone, Copy)]
+struct CameraKeyAt {
+    t: f64,
+    key: usize,
+    /// The key's own time, rather than a repeat on a later lap or on a
+    /// ping-pong's way back: the one a drag retimes.
+    primary: bool,
+}
+
+/// When the camera is on each of its keys, over the visible span: each key's
+/// own time, and again on every later lap of a loop, and mirrored on a
+/// ping-pong's way back.
+fn camera_key_times(app: &App, lane: egui::Rect, x_of: &dyn Fn(f64) -> f32) -> Vec<CameraKeyAt> {
     let p = app.camera_path();
-    let n = p.keys.len();
-    let segs = p.segments().max(1) as f64;
-    let d = p.duration() as f64;
-    let eased = p.ease.unwrap_or_else(|| p.loops.eases_by_default());
-    // Path parameter of each key over one loop.
-    let mut params: Vec<f64> = (0..n).map(|i| i as f64 / segs).filter(|&u| u <= 1.0 + 1e-9).collect();
-    if p.loops == crate::path::Loop::PingPong {
-        let back: Vec<f64> = params.iter().rev().skip(1).map(|u| 1.0 - u / 2.0).collect();
-        params = params.iter().map(|u| u / 2.0).chain(back).collect();
-    }
-    // Eased paths reach a key later or sooner than its parameter says; the
-    // ease is a smoothstep on loop time, so invert it.
-    let unease = |u: f64| {
-        if !eased {
-            return u;
-        }
-        let (mut lo, mut hi) = (0.0, 1.0);
-        for _ in 0..40 {
-            let m = 0.5 * (lo + hi);
-            if m * m * (3.0 - 2.0 * m) < u { lo = m } else { hi = m }
-        }
-        0.5 * (lo + hi)
-    };
+    let times: Vec<f64> = p.key_times().iter().map(|&t| t as f64).collect();
+    let start = p.start() as f64;
+    let lap = p.lap() as f64;
+    let pong = p.loops == crate::path::Loop::PingPong;
+    let cycle = p.duration() as f64;
     let mut out = Vec::new();
     let laps = if p.wraps() { 64 } else { 1 };
-    for lap in 0..laps {
-        for &u in &params {
-            let t = (lap as f64 + unease(u)) * d;
+    for l in 0..laps {
+        let base = l as f64 * cycle;
+        let mut moments: Vec<(f64, usize, bool)> =
+            times.iter().enumerate().map(|(k, &t)| (base + t, k, l == 0)).collect();
+        if pong {
+            let n = times.len();
+            moments.extend(
+                times.iter().enumerate().rev().skip(1).take(n.saturating_sub(2)).map(|(k, &t)| {
+                    (base + start + 2.0 * lap - (t - start), k, false)
+                }),
+            );
+        }
+        for (t, key, primary) in moments {
             let x = x_of(t);
             if x > lane.right() + 1.0 {
                 return out;
             }
             if x >= lane.left() - 1.0 {
-                out.push(t);
+                out.push(CameraKeyAt { t, key, primary });
             }
         }
     }
@@ -858,18 +884,110 @@ fn draw_camera_detail(ui: &mut egui::Ui, app: &mut App) {
     let authored = !app.path_is_default() || app.scene.camera_path.is_some();
     let flying_default = app.path_is_default();
     super::camera_panel::draw_path_controls(ui, app, flying_default, authored);
-    let resp = ui.button((icons::PLUS, "Key the camera here (Y)"));
+
+    // Loops come back round after their last key: how long that takes is the
+    // lap, and the closing segment is whatever it leaves.
+    let p = app.camera_path().clone();
+    if authored && p.loops.closes() {
+        let mut lap = p.lap();
+        ui.horizontal(|ui| {
+            ui.label("lap");
+            let resp = ui.add(num::Drag::new(&mut lap).speed(0.05).range(0.1..=3600.0).suffix("s"));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "How long one lap of the loop takes, from the first key round to being back \
+                 there. The way home from the last key gets whatever is left.",
+                "drag: set the loop's lap",
+            );
+            if resp.changed() {
+                app.set_camera_period(lap);
+            }
+        });
+    }
+
+    ui.add_space(4.0);
+    let resp = ui.button((icons::PLUS, "Key the camera at the playhead"));
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "Add the current framing as the next keypoint of the camera's path. Two keys \
-         make a path of the scene's own instead of the default orbit; the Camera window \
-         lists and edits them.",
-        "click: add the framing as a camera keypoint",
+        "Make the framing you're looking at the camera's view at the playhead, replacing \
+         a key already there. Two keys make a camera track of the scene's own instead of \
+         the default orbit. (Y adds one after the last key instead.)",
+        "click: key this framing at the playhead",
     );
     if resp.clicked() {
-        app.add_path_key();
+        app.key_camera_at_playhead(None);
     }
+    let views = app.saved_views().to_vec();
+    ui.add_enabled_ui(!views.is_empty(), |ui| {
+        let resp = ui.menu_button("Key a saved view at the playhead…", |ui| {
+            for (label, path) in &views {
+                let r = ui.button(label);
+                let r = hinted(r, &mut app.ui_state, path.display().to_string(), "click: key this view here");
+                if r.clicked() {
+                    app.key_camera_at_playhead(Some(path));
+                    ui.close();
+                }
+            }
+        });
+        hinted(
+            resp.response,
+            &mut app.ui_state,
+            if views.is_empty() {
+                "No saved views for this scene yet: V saves the framing on screen as one"
+            } else {
+                "Put one of this scene's saved views (V) on the camera's track at the playhead"
+            },
+            "click: choose a saved view to key",
+        );
+    });
+
+    let Some(k) = app.ui_state.timeline_camera_key.filter(|&k| authored && k < p.keys.len()) else {
+        ui.label(egui::RichText::new("Click a diamond to edit that view.").small().weak());
+        return;
+    };
+    ui.separator();
+    ui.label(egui::RichText::new(format!("View {} of {}", k + 1, p.keys.len())).strong());
+    let mut t = p.time(k);
+    ui.horizontal(|ui| {
+        ui.label("at");
+        let resp = ui.add(num::Drag::new(&mut t).speed(0.02).range(-3600.0..=3600.0).suffix("s"));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "When the camera is on this view. It stays between its neighbours: the keys \
+             keep their order, because each segment's route is the journey between two of them.",
+            "drag: retime this view",
+        );
+        if resp.changed() {
+            app.set_camera_key_time(k, t as f64);
+        }
+    });
+    ui.horizontal(|ui| {
+        let resp = ui.button((icons::CAMERA, "Go to it"));
+        let resp = hinted(resp, &mut app.ui_state, "Put the playhead on this view", "click: scrub to this view");
+        if resp.clicked() {
+            app.scrub_to(p.time(k) as f64);
+            app.set_camera_attached(true);
+        }
+        let resp = ui.button((icons::REFRESH, "Re-key"));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Replace this view with the framing on screen, at the same time",
+            "click: re-key this view",
+        );
+        if resp.clicked() {
+            app.rekey_camera(k);
+        }
+        let resp = ui.button((icons::TRASH, "Delete"));
+        let resp = hinted(resp, &mut app.ui_state, "Remove this view from the camera's track. Ctrl+Z brings it back.", "click: delete this view");
+        if resp.clicked() {
+            app.remove_path_key_at(k);
+            app.ui_state.timeline_camera_key = None;
+        }
+    });
 }
 
 fn draw_new_track(ui: &mut egui::Ui, app: &mut App) {

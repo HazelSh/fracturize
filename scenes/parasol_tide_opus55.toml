@@ -41,20 +41,6 @@ focus = [0.0, 0.2, 0.0]
 distance = 3.0
 yaw = 0.0
 pitch = 0.62
-path_loop = "closed"
-path_seconds = 16.0
-
-[[camera.path]]
-yaw = 0.0
-pitch = 0.62
-
-[[camera.path]]
-yaw = 2.0944
-pitch = 0.45
-
-[[camera.path]]
-yaw = 4.1888
-pitch = 0.75
 
 [[symmetry]]
 group = "Cyc5"
@@ -85,6 +71,33 @@ scale = 0.45
 rotation = [0.0, 50.0, 18.0]
 color = [0.95, 0.3, 0.6]
 weight = 0.5
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "repeat"
+period = 16.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 0.62
+distance = 3.0
+focus = [0.0, 0.2, 0.0]
+
+[[track.keys]]
+t = 5.3333
+yaw = 2.0944
+pitch = 0.45
+distance = 3.0
+focus = [0.0, 0.2, 0.0]
+
+[[track.keys]]
+t = 10.6667
+yaw = 4.1888
+pitch = 0.75
+distance = 3.0
+focus = [0.0, 0.2, 0.0]
 
 # Cut at 0 s, fully open at 4 s, cut again at 8 s.
 [[track]]

@@ -3370,7 +3370,7 @@ pub struct AnimParams {
     pub format: crate::video::Format,
 }
 
-/// Render an animation: the camera flies the scene's [[camera.path]] spline
+/// Render an animation: the camera flies the scene's camera track
 /// (or a seamless full-turn orbit when no path is authored) while the point
 /// cloud stays fixed — one chaos fill, one cheap render pass per frame, frames
 /// streamed straight into the encoder `anim.format` selects (AV1 for .avif,

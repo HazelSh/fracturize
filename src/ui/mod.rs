@@ -145,6 +145,9 @@ pub struct UiState {
     pub timeline_new_error: Option<String>,
     /// The Timeline's camera row is selected, rather than a track.
     pub timeline_camera: bool,
+    /// The camera's selected key, and the one a drag is retiming.
+    pub timeline_camera_key: Option<usize>,
+    pub timeline_drag_camera: Option<usize>,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -234,6 +237,8 @@ impl UiState {
             timeline_span: None,
             timeline_new_error: None,
             timeline_camera: false,
+            timeline_camera_key: None,
+            timeline_drag_camera: None,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),

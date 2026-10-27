@@ -558,7 +558,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Enter | enable/disable selected transform |
 | G / Tab | toggle transform gizmos and their name labels |
 | O, Z, or Space | play / stop the timeline: the camera flying its path, and every track (three keys, one action) |
-| Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
+| Y / Shift+Y | add the current framing as a camera key after the last one (the playhead goes to it) / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
@@ -1658,83 +1658,10 @@ roll = 0.0                # optional: rotation about the view axis, radians
                           # pointed straight up.
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
 # into the framing/distance and never written back
-path_loop = "closed"      # how playback gets from the last frame back to the
-                          # first. One of:
-                          #   "once"     play through and stop (the default)
-                          #   "pingpong" out to the last key, then back again
-                          #   "closed"   loop back to key 1 (seamless)
-                          #   "zoom"     close under the [zoom] symmetry, so the
-                          #              animation loops as an endless zoom
-                          # See `path::Loop`. Legacy `path_closed = true` and
-                          # `path_zoom_loop = N` still load and are migrated on
-                          # save; neither is written back.
-path_zoom_periods = 1     # zoom periods descended per loop, with path_loop =
-                          # "zoom" (default 1; see "Infinite Zoom")
-path_seconds = 14.0       # playback/render duration (default 3s per segment
-                          # *travelled* — which a ping-pong does twice over)
-path_ease = false         # smoothstep time; default: once and pingpong ease,
-                          # the two closing loops don't
-
-# Camera path spline keypoints (2+ = a path; see src/path.rs). A uniform
-# Catmull-Rom spline runs through the keys, in *cumulative* form so it splines
-# framings rather than angles: yaw is unbounded (keys spanning 2*TAU author a
-# two-turn corkscrew — nothing wraps), distance interpolates in log space
-# (constant-relative-rate zooms), and focus travels on its own spline so look
-# directions blend smoothly while the eye moves. Omitted fields inherit the
-# base [camera] framing. Closed paths take the shortest yaw route back to key
-# 1. In-app: Y appends the current framing as a keypoint, Shift+Y removes,
-# O or Z flies it; the Camera window's Loop radio picks any of the four. All
-# six path operations are undoable.
-#
-# ROUTES. Which way round a segment goes is data, not something re-derived
-# from its endpoints — that is what used to make a 1° change swing 359° the
-# wrong way. Normally the yaw column says it: keys at 0, 3.14, 6.28 author a
-# full turn, and that is read once at load and kept. A key can also carry
-# `turns = N` to state it outright, which is written only where the yaw
-# column can't (the closing segment of a loop, or a key written as `rotvec`),
-# so a hand-edited yaw can never contradict a `turns` beside it. Whatever the
-# route says, the keys themselves are always hit exactly.
-#
-# A key may instead carry `route = [x, y, z]` — the segment's journey as a
-# rotation vector, winning over `turns` where both are given. This is for the
-# routes an integer cannot name, and only those: between two *equal* framings
-# no axis is implied, so "pitch three full turns and come back" is unsayable
-# as a winding (it collapses to a yaw loop). The catch of storing a
-# displacement is that it can contradict its keys, so it is checked as the
-# scene loads — `exp(route)` must land on the next key within half a degree,
-# or the load fails naming the key and the miss. No UI writes one; it is a
-# file-format door.
-#
-# A key may use `rotvec = [x, y, z]` instead of yaw/pitch/roll, on the same
-# terms as [camera] above: exact, no poles, and what gets written for a
-# keypoint framing the three angles can't name.
-#
-# EVERY SCENE HAS A PATH. Omit these keypoints (or author fewer than two) and
-# the path is a seamless full orbit around the current framing, at 0.18 rad/s
-# — the "turntable". That default is not a second system: it is a real
-# `CameraPath`, it draws, it plays, and `--render x.avif|x.mp4` flies it, all
-# through the same code (`path::resolve`, used by both `App::camera_path` and
-# src/offline.rs). Editing it — a keypoint, the loop flag, the duration — is
-# what turns it into scene data; until then no scene grows a path it never
-# asked for, and Ctrl+S writes no [[camera.path]] block.
-#
-# Paths are drawn in the viewport when gizmos are on (G): the eye's route as a
-# green polyline with a cross at each keypoint — but only while the path ISN'T
-# playing. During playback the camera stands on the line, so drawing it is a
-# smear across the shot that says nothing; it reappears the moment you take the
-# camera back by hand, which is when the route is what you're positioning
-# against.
-[[camera.path]]
-yaw = 0.0
-pitch = 0.9
-distance = 5.5
-
-[[camera.path]]
-yaw = 3.14                # half a turn later...
-pitch = 0.1
-distance = 1.6            # ...swooped in close
-focus = [0.0, -0.5, 0.0]  # looking lower
-roll = 0.4                # ...and tilted
+# The camera's motion is its track: `[[track]] target = "camera"`, below with
+# the others. `path_loop`, `path_seconds`, `path_ease`, `path_zoom_periods`
+# and `[[camera.path]]` keypoints are its old spelling: they still load (keys
+# placed when the old flight passed them) and saving writes the track.
 
 [zoom]                    # optional: infinite zoom (see "Infinite Zoom")
 map = "whorl"             # a transform name, or its index as a string
@@ -1781,9 +1708,66 @@ matrix = [
 ]
 
 # Animation: any -S path over time (see "Tracks and the timeline"). Last in
-# the file, because they name what's above. One source per track:
+# the file, because they name what's above.
+#
+# The camera's track comes first. Its keys are VIEWS AT MOMENTS: a framing —
+# yaw/pitch/roll (radians) or `rotvec`, distance, focus, every one optional
+# and inherited from [camera] — at `t` seconds. The camera is on each view at
+# its time, and in between flies a cumulative quaternion Catmull-Rom (see
+# src/path.rs): it splines framings rather than angles, distance in log space
+# (constant-rate zooms), focus on its own spline. Uneven times are fine — the
+# tangents are per second, so speed runs smoothly through a key.
 [[track]]
-target = "transform.whorl.rotation.y"   # an -S path; not camera.* (the path is)
+target = "camera"
+extrapolate = "repeat"    # what happens after the last key:
+                          #   "hold"     stop there (the default)
+                          #   "pingpong" fly back to the first key, and again
+                          #   "repeat"   loop back to key 1 (seamless); needs
+                          #   period = <s>, the lap back round to key 1, so the
+                          #              way home is whatever the last key leaves
+                          #   "offset"   close under the [zoom] symmetry, so it
+                          #              loops as an endless zoom ("zoom" works
+                          #              too); zoom_periods = N periods a lap
+period = 14.0
+# ease = true             # come to rest at the first and last key; default on
+                          # for hold and pingpong, meaningless on the loops
+
+# ROUTES. Which way round a segment goes is data, not re-derived from its
+# endpoints — that is what used to make a 1° change swing 359° the wrong way,
+# and what lets a path spiral down and back up through whole turns. Normally
+# the yaw column says it: keys at 0, 3.14, 6.28 author a full turn, read once
+# at load and kept, and saving writes the column chained, never wrapped. A key
+# can also carry `turns = N` (extra whole turns on the segment leaving it),
+# written only where the yaw column can't say it (a loop's way home, a key
+# written as `rotvec`), or `route = [x, y, z]`, the journey as a rotation
+# vector, for routes no integer names: between two equal framings no axis is
+# implied, so "pitch three turns and come back" needs it. A route is checked
+# on load — it must land on the next key within half a degree. Whatever the
+# route says, the keys themselves are hit exactly.
+#
+# EVERY SCENE HAS A CAMERA TRACK. Without one the camera flies the default:
+# a seamless orbit of the current framing at 0.18 rad/s, four keys a quarter
+# turn apart on a repeat — the "turntable". It draws, plays and renders
+# through the same code (`path::resolve`, used by `App::camera_path` and
+# src/offline.rs). Editing it is what makes it scene data; until then Ctrl+S
+# writes no camera track. Paths are drawn in the viewport with gizmos on (G),
+# except while playing, when the camera is standing on the line.
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 0.9
+distance = 5.5
+
+[[track.keys]]
+t = 6.0
+yaw = 3.14                # half a turn later...
+pitch = 0.1
+distance = 1.6            # ...swooped in close
+focus = [0.0, -0.5, 0.0]  # looking lower
+roll = 0.4                # ...and tilted
+
+[[track]]
+target = "transform.whorl.rotation.y"   # an -S path; not camera.* (the camera track is)
 keys = [[0.0, 0.0], [4.0, 90.0]]        # [seconds, value]; strings/bools step
 interpolate = "smooth"                  # step | linear | smooth | spline
 extrapolate = "pingpong"                # hold | repeat | pingpong | offset
@@ -2691,19 +2675,22 @@ expensive thing to go looking for.
 ### Looping zoom animations
 
 An animation can loop as an *endless* zoom, and exactly rather than
-approximately, because the scene has a symmetry. `path_loop = "zoom"` closes
-the path under that symmetry instead of by returning to the first key: one loop
-descends `path_zoom_periods` zoom periods and ends on a frame **identical** to the one it
+approximately, because the scene has a symmetry. A camera track with
+`extrapolate = "offset"` closes under that symmetry instead of by returning to
+the first key: one lap descends `zoom_periods` zoom periods (default 1) and
+ends on a frame **identical** to the one it
 started, since scaling by `sᴺ` about the fixed point and turning by the map's
 rotation leaves the rendered set unchanged. Played on a loop, a fourteen-second
 file falls forever.
 
 ```toml
-[camera]
-path_loop = "zoom"
-path_seconds = 14.0
+[[track]]
+target = "camera"
+extrapolate = "offset"   # the zoom loop
+period = 14.0
 
-[[camera.path]]      # one keypoint is enough — and is better than two
+[[track.keys]]           # one key is enough — and is better than two
+t = 0.0
 yaw = 0.0
 pitch = 1.15
 distance = 3.6
@@ -2716,7 +2703,7 @@ exactly linear — a constant-rate descent with no ease, no wobble and no
 velocity kink at the seam. Author more keys and you get a flight that closes
 one period lower; the last key is still synthesized, never written.
 
-- `path_loop = "zoom"` needs a `[zoom]` map, and says so if there isn't one.
+- The zoom loop needs a `[zoom]` map, and says so if there isn't one.
   It is resolved against the live renormalizing map, so dragging that map
   updates the loop rather than staling it.
 - It is a *different* loop from `"closed"`, not a variant: closing back to the
@@ -2738,15 +2725,17 @@ one period lower; the last key is still synthesized, never written.
 
 ### Zoom animations
 
-A camera path key whose `distance` is many periods below the first authors a
+A camera key whose `distance` is many periods below the first authors a
 descent of exactly that many periods — distance interpolates in log space, so
 that's a constant-rate zoom, and the per-frame wrap folds it back into one
 period however deep it goes. `scenes/wellspiral.toml` descends nine:
 
 ```toml
-[[camera.path]]
+[[track.keys]]
+t = 0.0
 distance = 3.6
-[[camera.path]]
+[[track.keys]]
+t = 14.0
 distance = 0.0363   # 3.6 · 0.6^9
 ```
 
@@ -2785,14 +2774,17 @@ example: Parasol's cut xaos edge opening and closing on a camera loop).
   (`palette.name`, `palette.reverse`) step.
 - **Extrapolation** past the last key: `hold` (default), `repeat`, `pingpong`,
   `offset` (each lap starts where the last ended, Blender's cycles with
-  offset). **The camera's loop is one of these**: `Loop::extrapolate` maps
-  once/closed/pingpong/zoom to hold/repeat/pingpong/offset, the zoom loop being
-  repeat-with-offset whose offset is the zoom symmetry. The camera keeps its
-  own source — framings are rotations, which is what `path.rs`'s routes are
-  for — and its own file format; `CameraPath::sample` folds time by the same
-  rule, spelled in f32 so every flight stays bit-identical
-  (`the_camera_folds_time_as_tracks_do` holds the two together).
-- **One clock, in seconds.** The camera is sampled at `time / its duration`.
+  offset). **The camera is a track** (`target = "camera"`, see "Scene Files"):
+  its keys are views at moments and its loop is one of these, the zoom loop
+  being `offset` whose offset is the zoom symmetry. Only its interpolation is
+  its own — framings are rotations, interpolated by `path.rs`'s cumulative
+  quaternion spline with routes, so a path can spiral through whole turns.
+  `CameraPath::sample` folds time by the same rule
+  (`the_camera_folds_time_as_tracks_do` holds the two together). It is held
+  as `Scene::camera_path`, not in `Scene::tracks`, because it is the one
+  track every scene has (the default orbit) and it drives the view rather
+  than an `-S` path; it is written first among the `[[track]]`s.
+- **One clock, in seconds.** A camera key at `t` is passed at `t`.
   The **timeline's length** (`track::timeline_length`) is the scene's own
   path or its tracks, whichever runs longer; a scene with tracks and no path
   runs as long as its tracks while the default orbit keeps turning through
@@ -2902,9 +2894,8 @@ its estimate charges a refill per frame when the attractor moves.
 
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
 keying from the inspector (and with it the auto-key question, which is
-Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper, views as camera keys (Hazel's decision),
-moving `[[camera.path]]` into `[[track]]` form (a migration commit for
-Hazel; `TIMELINE-PLAN.md` works through what it would carry), walkers carried between frames instead of a refill, motion blur, an
+Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper,
+whole-rotation tracks on maps (TIMELINE-PLAN §3), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 
 ## Two machines, one repo: how to not make a mess
@@ -4085,7 +4076,7 @@ too long for its tile is truncated with a trailing `>` rather than running into
 its neighbour. `--no-labels` turns them off.
 
 **Animation** (`--render <out.avif|out.mp4>`): the camera flying
-the scene's path — its `[[camera.path]]` spline, or the default full-turn orbit
+the scene's camera track — its views and the spline through them, or the default full-turn orbit
 of the base framing when it authors fewer than two keypoints. Same rule the app
 previews with (`path::resolve`), so what you watch in the window is what this
 writes. The point cloud is fixed, so
@@ -4115,9 +4106,9 @@ Both go through the same RGBA -> BT.709 limited-range 4:2:0 conversion, so the
 two formats are colour-identical by construction. Cannot combine with
 grid/mutation sheets. Options:
 
-- `--fps N` (default 30), `--seconds S` (default: the path's `path_seconds`,
-  else 3s per spline segment — but the *default* orbit carries its own
-  `path_seconds` of ~35s, one turn at 0.18 rad/s, so a pathless scene animates
+- `--fps N` (default 30), `--seconds S` (default: the timeline's length — the
+  camera track's keys, or its lap — but the *default* orbit's lap is ~35s,
+  one turn at 0.18 rad/s, so a scene without a camera track animates
   a full slow turn unless you pass `--seconds`), `--quality 0-100` (default 60
   — the AV1 quantizer for `.avif`, H.264's QP for `.mp4`).
 - Closed paths omit the final frame so the loop wraps without a stutter.

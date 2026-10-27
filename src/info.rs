@@ -2113,7 +2113,7 @@ fn path_section(scene: &Scene) -> Section {
     // The keys are the subject of path authoring and the report only ever
     // counted them. A count tells you a path exists; the keys tell you where
     // it goes, which is what you came to find out.
-    s.text(format!("{:<5}{:>9}{:>9}{:>9}{:>11}   {}", "key", "yaw", "pitch", "roll", "distance", "route"));
+    s.text(format!("{:<5}{:>8}{:>9}{:>9}{:>9}{:>11}   {}", "key", "at", "yaw", "pitch", "roll", "distance", "route"));
     for (i, k) in p.keys.iter().enumerate() {
         let c = k.orientation.yaw_pitch_roll();
         let route = match p.routes.get(i) {
@@ -2123,8 +2123,9 @@ fn path_section(scene: &Scene) -> Section {
         };
         let snap = |a: f32| if a.abs() < 5e-5 { 0.0 } else { a };
         s.text(format!(
-            "[{}]{:>9.4}{:>9.4}{:>9.4}{:>11.3}   {}",
-            i,
+            "{:<5}{:>7.2}s{:>9.4}{:>9.4}{:>9.4}{:>11.3}   {}",
+            format!("[{i}]"),
+            p.time(i),
             snap(c.yaw.radians()),
             snap(c.pitch.radians()),
             snap(c.roll.radians()),
@@ -2140,8 +2141,11 @@ fn path_section(scene: &Scene) -> Section {
             s.text(format!("[{}] focus {}", i, point(k.focus)));
         }
     }
-    s.text("route is how each segment gets to the next key: the short way, or");
-    s.text("that plus whole extra turns");
+    if p.loops.closes() {
+        s.text(format!("back at key [0] after {:.2}s, a lap", p.lap()));
+    }
+    s.text("at is when the camera is on that view; route is how each segment");
+    s.text("gets to the next key: the short way, or that plus whole extra turns");
     s
 }
 

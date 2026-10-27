@@ -19,48 +19,20 @@ translation = [0.33, -0.33, -0.33]
 scale = 0.333
 color = [0.7, 0.2, 0.0]
 
-[[camera.path]]
-yaw = 3.1141
-pitch = -0.9008
-distance = 2.7901
-focus = [0.0365, -0.6594, -0.6198]
-roll = 0.0568
-
 [[transform]]
 translation = [-0.33, 0.33, -0.33]
 scale = 0.333
 color = [0.1, 0.5, 0.1]
-
-[[camera.path]]
-yaw = 2.2192
-pitch = -0.661
-distance = 1.8306
-focus = [0.7936, -0.6535, -0.6065]
-roll = 0.6576
 
 [[transform]]
 translation = [0.33, 0.33, -0.33]
 scale = 0.333
 color = [0.1, 0.4, 0.6]
 
-[[camera.path]]
-yaw = 3.1627
-pitch = -0.9183
-distance = 1.201
-focus = [-0.0098, -0.6826, -0.5513]
-roll = -0.0061
-
 [[transform]]
 translation = [-0.33, -0.33, 0.33]
 scale = 0.333
 color = [0.5, 0.0, 0.5]
-
-[[camera.path]]
-yaw = 4.1088
-pitch = -0.7015
-distance = 0.788
-focus = [-0.4654, -0.7003, -0.561]
-roll = -0.7077
 
 [zoom]
 map = "8"
@@ -176,4 +148,41 @@ distance = 1.1496
 yaw = -3.0012
 pitch = -0.9177
 roll = -0.0988
-path_loop = "zoom"
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 12.0
+
+[[track.keys]]
+t = 0.0
+yaw = 3.1141
+pitch = -0.9008
+distance = 2.7901
+focus = [0.0365, -0.6594, -0.6198]
+roll = 0.0568
+
+[[track.keys]]
+t = 3.0
+yaw = 2.2192
+pitch = -0.661
+distance = 1.8306
+focus = [0.7936, -0.6535, -0.6065]
+roll = 0.6576
+
+[[track.keys]]
+t = 6.0
+yaw = 3.1627
+pitch = -0.9183
+distance = 1.201
+focus = [-0.0098, -0.6826, -0.5513]
+roll = -0.0061
+
+[[track.keys]]
+t = 9.0
+yaw = 4.1088
+pitch = -0.7015
+distance = 0.788
+focus = [-0.4654, -0.7003, -0.561]
+roll = -0.7077

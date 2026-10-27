@@ -72,6 +72,34 @@ What it means for each kind of track:
 
 ## 2. Moving the camera path into `[[track]]` form
 
+**Done, 2026-10-28.** Hazel asked for it: the camera animated as views at
+keyframe points, interpolated, reproducing the old flights, with spirals kept.
+What was settled, against the questions below:
+
+- **Keys have times**, and the spline honours them: `path.rs`'s cumulative
+  quaternion Catmull-Rom took per-second tangents (`timed_basis`), which at
+  even spacing is exactly the old uniform spline. Routes (`turns`, `route`,
+  the chained yaw column) are unchanged, so winze still corkscrews.
+- **The file**: `[[track]] target = "camera"`, `extrapolate` (hold / pingpong /
+  repeat / offset = the zoom loop), `period` (a loop's lap), `zoom_periods`,
+  `ease`, then `[[track.keys]]` tables with `t` and a view's camera fields.
+  Written first among the tracks; comments on the old `[[camera.path]]` keys
+  move onto the new ones. The old spelling still loads.
+- **Easing** is now coming to rest at the first and last key (zero end
+  tangents), not a smoothstep on the whole lap, so every key is passed at its
+  own time. Old eased paths load with their keys placed when the smoothstep
+  passed them, so they fly nearly as before (ammonite,
+  taking_a_line_for_an_orbit and random-1785761947 are the shipped ones).
+- **The default orbit** stays four quarter-turn keys on a repeat, never
+  written until edited.
+- **Views as keys**: yes — the Timeline keys the framing on screen, or a saved
+  view, at the playhead; Y still appends after the last key.
+- **In memory** the camera is `Scene::camera_path`, not an entry in
+  `Scene::tracks`: it is the one track every scene has and drives the view,
+  not an `-S` path.
+
+The text below is the reasoning from before it was done.
+
 ### Where it stands
 
 The camera shares the *time model* with tracks — one clock, its loop is an

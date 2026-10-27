@@ -36,19 +36,6 @@ yaw = 0.0
 pitch = 1.42        # nearly down the coiling axis: the spiral reads flattest here
 focus = [0.0, 0.0, 0.0]
 
-path_closed = false
-path_seconds = 18.0
-
-[[camera.path]]
-yaw = 0.0
-pitch = 1.42
-distance = 3.0
-
-[[camera.path]]
-yaw = 0.0
-pitch = 1.42
-distance = 0.0117   # 3.0 · 0.88^43 — forty-three whorls in
-
 # The growth law. Zero translation, so its fixed point — the umbilicus — is the
 # origin, and a uniform scale, so the wrap is exact and the zoom seamless.
 [[transform]]
@@ -90,3 +77,21 @@ map = "whorl"
 radius = 3.0
 levels = 15
 octave_falloff = 0.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 1.42
+distance = 3.0
+focus = [0.0, 0.0, 0.0]
+
+[[track.keys]]
+t = 17.9984
+yaw = 0.0
+pitch = 1.42
+distance = 0.0117
+focus = [0.0, 0.0, 0.0]

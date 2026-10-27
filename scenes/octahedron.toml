@@ -22,25 +22,11 @@ translation = [-0.5, 0.0, 0.0]
 scale = 0.4
 color = [0.2, 1.0, 1.0]
 
-[[camera.path]]
-yaw = -1.5702
-pitch = 0.0011
-distance = 2.5614
-focus = [0.0, 0.0, 0.0]
-roll = 0.0165
-
 # +Y vertex (green)
 [[transform]]
 translation = [0.0, 0.5, 0.0]
 scale = 0.4
 color = [0.2, 1.0, 0.2]
-
-[[camera.path]]
-yaw = -1.5702
-pitch = 0.0011
-distance = 2.5614
-focus = [0.0, 0.0, 0.0]
-roll = 0.0165
 
 # -Y vertex (magenta)
 [[transform]]
@@ -48,25 +34,11 @@ translation = [0.0, -0.5, 0.0]
 scale = 0.4
 color = [1.0, 0.2, 1.0]
 
-[[camera.path]]
-yaw = -0.803
-pitch = 0.0069
-distance = 2.5614
-focus = [0.0, 0.0, 0.0]
-roll = 0.0165
-
 # +Z vertex (blue)
 [[transform]]
 translation = [0.0, 0.0, 0.5]
 scale = 0.4
 color = [0.2, 0.2, 1.0]
-
-[[camera.path]]
-yaw = -0.803
-pitch = 0.0069
-distance = 2.5614
-focus = [0.0, 0.0, 0.0]
-roll = 0.0165
 
 # -Z vertex (yellow)
 [[transform]]
@@ -79,45 +51,87 @@ distance = 2.5614
 yaw = -0.8038
 pitch = 0.0172
 roll = 0.0168
-path_closed = true
-path_seconds = 19.8
 
-[[camera.path]]
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "repeat"
+period = 19.8
+
+[[track.keys]]
+t = 0.0
+yaw = -1.5702
+pitch = 0.0011
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
+[[track.keys]]
+t = 1.98
+yaw = -1.5702
+pitch = 0.0011
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
+[[track.keys]]
+t = 3.96
+yaw = -0.803
+pitch = 0.0069
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
+[[track.keys]]
+t = 5.94
+yaw = -0.803
+pitch = 0.0069
+distance = 2.5614
+focus = [0.0, 0.0, 0.0]
+roll = 0.0165
+
+[[track.keys]]
+t = 7.92
 yaw = -0.8419
 pitch = 0.5628
 distance = 2.5614
 focus = [0.0, 0.0, 0.0]
 roll = 0.0195
 
-[[camera.path]]
+[[track.keys]]
+t = 9.9
 yaw = -0.8419
 pitch = 0.5628
 distance = 2.5614
 focus = [0.0, 0.0, 0.0]
 roll = 0.0195
 
-[[camera.path]]
+[[track.keys]]
+t = 11.88
 yaw = -2.3251
 pitch = 1.0506
 distance = 2.5614
 focus = [0.0, 0.0, 0.0]
 roll = 0.0333
 
-[[camera.path]]
+[[track.keys]]
+t = 13.86
 yaw = -2.3251
 pitch = 1.0506
 distance = 2.5614
 focus = [0.0, 0.0, 0.0]
 roll = 0.0333
 
-[[camera.path]]
+[[track.keys]]
+t = 15.84
 yaw = -1.9386
 pitch = 1.5532
 distance = 2.5614
 focus = [0.0, 0.0, 0.0]
 roll = 1.2158
 
-[[camera.path]]
+[[track.keys]]
+t = 17.82
 yaw = -1.9386
 pitch = 1.5532
 distance = 2.5614

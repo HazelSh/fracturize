@@ -259,7 +259,10 @@ fn path_fingerprint(path: &CameraPath) -> u64 {
     mix(path.loops.zoom().map_or(0, |z| z.periods.wrapping_add(1)));
     mix(path.loops.zoom().map_or(0, |z| z.scale.to_bits()));
     mix(path.ease.map_or(2, |e| e as u32));
-    mix(path.seconds.unwrap_or(f32::NAN).to_bits());
+    mix(path.period.unwrap_or(f32::NAN).to_bits());
+    for t in path.key_times() {
+        mix(t.to_bits());
+    }
     // Routes are part of the shape: two paths through the same keys but
     // different routes draw different polylines.
     for r in &path.routes {
@@ -1687,7 +1690,7 @@ impl App {
 
     /// The camera path. There is always one.
     ///
-    /// A scene that authors `[[camera.path]]` keypoints flies those; one that
+    /// A scene with a camera track (`target = "camera"`) flies it; one that
     /// doesn't flies a full orbit around its current framing. The default is
     /// not a separate turntable mechanism — it's this system's default value,
     /// synthesized rather than authored but identical in every other respect:
@@ -1922,8 +1925,7 @@ impl App {
                 self.refresh_default_path();
                 self.camera_epoch = self.time;
             }
-            self.camera_lap =
-                ((self.time - self.camera_epoch) / self.camera_path().duration() as f64).floor() as i64;
+            self.camera_lap = self.camera_local().floor() as i64;
         }
         self.camera_follows = attached;
         log::info!("Camera: {}", if attached { "attached to the timeline" } else { "detached" });
@@ -2005,14 +2007,27 @@ impl App {
         if self.path_is_default() {
             self.camera_epoch = self.time;
         }
-        self.camera_lap = ((self.time - self.camera_epoch) / self.camera_path().duration() as f64).floor() as i64;
+        self.camera_lap = self.camera_local().floor() as i64;
         self.camera_follows = true;
         self.playing = true;
     }
 
-    /// Append the current camera framing as a keypoint of this scene's own path
-    /// (Y). Not an edit to the default orbit — the default is what you get
-    /// *until* the scene has two keypoints, and this is how it gets them.
+    /// Where the camera is in its own laps: the clock, from the camera's
+    /// epoch and its first key, in laps. The whole part counts laps; the
+    /// fraction is what `CameraPath::sample` takes.
+    fn camera_local(&self) -> f64 {
+        let p = self.camera_path();
+        (self.time - self.camera_epoch - p.start() as f64) / p.duration() as f64
+    }
+
+    /// Append the current camera framing as a key of this scene's own camera
+    /// track (Y), [`KEY_SPACING`] after the last one, and put the playhead on
+    /// it. Not an edit to the default orbit — the default is what you get
+    /// *until* the scene has two keys, and this is how it gets them. The
+    /// Timeline's "Key the camera at the playhead" is the other way in, for a
+    /// key at a chosen moment.
+    ///
+    /// [`KEY_SPACING`]: crate::path::KEY_SPACING
     pub fn add_path_key(&mut self) {
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
@@ -2023,10 +2038,10 @@ impl App {
             .get_or_insert_with(|| {
                 crate::path::CameraPath::new(Vec::new(), crate::path::Loop::Once)
             });
-        path.keys.push(key);
-        // A new key means a new segment; give it the short way round until
-        // someone says otherwise.
-        path.fit_routes();
+        let t = path.times_or_spacing_after_last();
+        path.key_at(t, key);
+        self.time = t as f64;
+        let path = self.scene.camera_path.as_ref().expect("just keyed");
         log::info!(
             "Camera path keypoint {} added ({}; Ctrl+S saves it with the scene)",
             path.keys.len(),
@@ -2040,6 +2055,84 @@ impl App {
         self.commit_edit("Add path keypoint", None, before);
     }
 
+    /// Key the camera at the playhead (the Timeline): this framing — or a
+    /// saved view's, with `view` — becomes the camera's view at this moment,
+    /// replacing a key already there. A view at a keyframe point.
+    pub fn key_camera_at_playhead(&mut self, view: Option<&std::path::Path>) {
+        let framing = match view {
+            None => crate::path::PathKey::from_camera(&self.camera),
+            Some(path) => match View::load(path) {
+                Ok(v) => crate::path::PathKey::from_camera(&OrbitCamera::from_legacy(
+                    Vec3::from(v.focus),
+                    Vec3::from(v.offset),
+                    v.distance,
+                    v.rotation,
+                    v.pitch,
+                    v.roll,
+                )),
+                Err(e) => {
+                    self.set_notice(format!("Couldn't key that view: {e}"), true);
+                    return;
+                }
+            },
+        };
+        let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
+        let t = self.time as f32;
+        let path = self
+            .scene
+            .camera_path
+            .get_or_insert_with(|| crate::path::CameraPath::new(Vec::new(), crate::path::Loop::Once));
+        let i = path.key_at(t, framing);
+        self.ui_state.timeline_camera_key = Some(i);
+        self.after_path_edit(was_default);
+        self.commit_edit(format!("Key the camera at {t:.2}s"), None, before);
+    }
+
+    /// Move camera key `k` to `t` seconds (dragging its diamond). Coalesced
+    /// like any drag; never reorders the keys.
+    pub fn set_camera_key_time(&mut self, k: usize, t: f64) {
+        let Some(p) = self.scene.camera_path.as_ref() else { return };
+        if k >= p.keys.len() || (p.time(k) as f64 - t).abs() < 1e-4 {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let Some(p) = self.scene.camera_path.as_mut() {
+            p.set_key_time(k, t as f32);
+        }
+        self.commit_edit("Retime camera key", Some(&format!("camera_key_time_{k}")), before);
+    }
+
+    /// Put camera key `k`'s view back to the current framing, at its time.
+    pub fn rekey_camera(&mut self, k: usize) {
+        let Some(p) = self.scene.camera_path.as_ref() else { return };
+        if k >= p.keys.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let framing = crate::path::PathKey::from_camera(&self.camera);
+        if let Some(p) = self.scene.camera_path.as_mut() {
+            p.keys[k] = framing;
+        }
+        self.commit_edit(format!("Re-key camera key {}", k + 1), None, before);
+    }
+
+    /// A looping camera's lap, in seconds (the Timeline): how long after its
+    /// first key it is back there.
+    pub fn set_camera_period(&mut self, seconds: f32) {
+        let Some(p) = self.scene.camera_path.as_ref() else { return };
+        let span = p.time(p.keys.len().saturating_sub(1)) - p.start();
+        let seconds = seconds.max(span + 0.05);
+        if !p.loops.closes() || (p.lap() - seconds).abs() < 1e-4 {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let Some(p) = self.scene.camera_path.as_mut() {
+            p.period = Some(seconds);
+        }
+        self.commit_edit("Camera loop period", Some("camera_period"), before);
+    }
+
     /// Remove the last path keypoint (Shift+Y)
     pub fn remove_path_key(&mut self) {
         if self.scene.camera_path.is_none() {
@@ -2049,7 +2142,7 @@ impl App {
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
         if let Some(path) = &mut self.scene.camera_path {
-            path.keys.pop();
+            path.remove_key(path.keys.len().saturating_sub(1));
         }
         self.after_path_edit(was_default);
         self.commit_edit("Remove path keypoint", None, before);
@@ -2149,7 +2242,7 @@ impl App {
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
         if let Some(path) = &mut self.scene.camera_path {
-            path.keys.remove(idx);
+            path.remove_key(idx);
         }
         log::info!("Camera path keypoint {} removed", idx);
         self.after_path_edit(was_default);
@@ -2160,7 +2253,7 @@ impl App {
     /// [`path_is_default`](Self::path_is_default) from *before* the edit.
     ///
     /// An empty key list isn't a path, so it goes back to `None`: nothing
-    /// writes an empty `[[camera.path]]`, and the default orbit is what the
+    /// writes an empty camera track, and the default orbit is what the
     /// scene flies again. And when the edit changed *which* path flies — the
     /// second key taking over, or a deletion handing back — the playhead means
     /// nothing on the new route, so the camera stops instead of teleporting
@@ -2175,15 +2268,15 @@ impl App {
         }
     }
 
-    /// Set the path's playback duration in seconds; `None` restores the
-    /// default of 3s per segment.
-    pub fn set_path_seconds(&mut self, seconds: Option<f32>) {
-        let seconds = seconds.map(|s| s.max(0.1));
-        if self.camera_path().seconds == seconds {
+    /// Set the path's playback duration in seconds, stretching every key's
+    /// time (and a loop's period) with it.
+    pub fn set_path_seconds(&mut self, seconds: f32) {
+        let seconds = seconds.max(0.1);
+        if (self.camera_path().duration() - seconds).abs() < 1e-4 {
             return;
         }
         let before = self.edit_snapshot();
-        self.author_path().seconds = seconds;
+        self.author_path().retime_to(seconds);
         // The draggy one of the six: coalesced, so a drag across the field is
         // one undo step rather than sixty.
         self.commit_edit("Path duration", Some("path_seconds"), before);
@@ -7278,7 +7371,8 @@ impl App {
             if !playable {
                 self.stop_following();
             } else {
-                let local = (self.time - self.camera_epoch) / duration;
+                let _ = duration;
+                let local = self.camera_local();
                 // Each pass of a zoom loop descends `periods` periods and
                 // arrives on the frame it left — the same picture, one level
                 // down. The lap rolling over is the only record that it
