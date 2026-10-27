@@ -324,6 +324,23 @@ impl Thread {
                 }
             }
         }
+        // `replying_to = "0001"` names `0001-request` as well as the full id
+        // does; say it in full, so the links the thread is read by hold.
+        let full: Vec<(u32, String)> = messages.iter().map(|m| (m.number(), m.id.clone())).collect();
+        let canonical = |r: &str| match r.parse::<u32>() {
+            Ok(n) => full.iter().find(|(k, _)| *k == n).map_or(r.to_string(), |(_, id)| id.clone()),
+            Err(_) => r.to_string(),
+        };
+        for m in &mut messages {
+            if let Some(r) = &m.header.replying_to {
+                m.header.replying_to = Some(canonical(r));
+            }
+            if let Some(r) = &m.header.revises
+                && let Some((msg, opt)) = r.split_once('/')
+            {
+                m.header.revises = Some(format!("{}/{opt}", canonical(msg)));
+            }
+        }
         Ok(Thread { dir: dir.to_path_buf(), file, messages, broken })
     }
 
@@ -791,6 +808,23 @@ mod tests {
         let t = Thread::open(&dir).unwrap();
         assert_eq!(t.messages[0].withdrawn.as_ref().map(|w| w.reason.as_str()), Some("changed my mind"));
         assert!(!t.waiting(&t.messages[0]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reply_by_number_answers_what_it_names() {
+        // `replying_to = "1"` was accepted and then matched nothing, so the
+        // request it answered stayed waiting for ever.
+        let dir = tmp("short");
+        post(&dir, "s.toml", Draft::new(Header::new(Kind::Request, "hazel", "", "frame it"))).unwrap();
+        let mut h = Header::new(Kind::Proposal, "claude", "hazel", "framed");
+        h.replying_to = Some("1".into());
+        h.revises = Some("0001/A".into());
+        post(&dir, "s.toml", Draft::new(h)).unwrap();
+        let t = Thread::open(&dir).unwrap();
+        assert_eq!(t.messages[1].header.replying_to.as_deref(), Some("0001-request"));
+        assert_eq!(t.messages[1].header.revises.as_deref(), Some("0001-request/A"));
+        assert!(!t.waiting(&t.messages[0]), "the request is answered");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

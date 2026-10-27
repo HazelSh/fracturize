@@ -504,16 +504,16 @@ pub fn symmetry_blocks(
                 // Written even at their defaults: a repeat with `repeat = 8`
                 // and nothing else is a file that doesn't say what it does, and
                 // the step is the whole content of the block.
-                step: step.map(|r| r.translate.to_array().map(|v| v as f64)),
-                turn: step.map(|r| r.turn as f64),
-                shrink: step.map(|r| r.scale as f64),
+                // Tidied like a transform's numbers, so a file doesn't fill
+                // with 0.20000000298023224 and a save of a save is the same
+                // text (which is what `scene_diff` compares).
+                step: step.map(|r| r.translate.to_array().map(tidy_sig)),
+                turn: step.map(|r| tidy(r.turn)),
+                shrink: step.map(|r| tidy_sig(r.scale)),
                 // Only where it means something: writing an axis beside
                 // `group = "Icosa"` would say the polyhedral group is aimed,
                 // and it isn't.
-                axis: sym
-                    .kind()
-                    .uses_axis()
-                    .then(|| sym.axis().to_array().map(|v| v as f64)),
+                axis: sym.kind().uses_axis().then(|| tidy_rotvec(sym.axis())),
                 mirror: sym.mirror().then_some(true),
                 applies_to,
                 color: match sym.color() {
@@ -4005,6 +4005,31 @@ color = [0.2, 0.5, 1.0]
     /// Saving over an existing file goes through the comment-preserving merge,
     /// which is a different path from a fresh write — and the one that has
     /// historically dropped whole tables (`[zoom]`, `path_zoom_loop`).
+    #[test]
+    fn a_save_of_a_save_is_the_same_text() {
+        // An axis that isn't unit length, and a step an f32 can't hold
+        // exactly: normalizing again on every load moved the axis's last bit
+        // and the step came out as 0.20000000298023224, so a tweak sent back
+        // through the window diffed as "symmetry rewritten" against its option.
+        for (tag, block) in [
+            (
+                "repeat",
+                "\n[[symmetry]]\nrepeat = 12\naxis = [0.0, 1.0, 0.3]\nstep = [-0.2, -0.03, 0.04]\n\
+                 turn = 17.0\nshrink = 0.88\napplies_to = [\"petal\"]\n",
+            ),
+            ("dihedral", "\n[[symmetry]]\ngroup = \"D3\"\naxis = [0.3, 0.9, -0.2]\napplies_to = [\"petal\"]\n"),
+        ] {
+            let once = load_str(&two_motif_scene(block), tag).unwrap().to_toml_string().unwrap();
+            let twice = load_str(&once, tag).unwrap().to_toml_string().unwrap();
+            let thrice = load_str(&twice, tag).unwrap().to_toml_string().unwrap();
+            assert_eq!(once, twice, "{tag}: the second save differs from the first");
+            assert_eq!(twice, thrice, "{tag}");
+            if tag == "repeat" {
+                assert!(once.contains("step = [-0.2, -0.03, 0.04]"), "{tag}: {once}");
+            }
+        }
+    }
+
     #[test]
     fn a_save_over_an_existing_file_keeps_the_symmetry() {
         let tmp = std::env::temp_dir().join("fracturize-sym-merge.toml");

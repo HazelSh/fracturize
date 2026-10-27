@@ -129,11 +129,19 @@ fn scene_op(args: &Args) -> Result<i32, String> {
     if let Some(src) = &args.propose {
         let t = open()?;
         let to = args.to.clone().unwrap_or_else(|| t.other_party(&me, "human"));
-        let draft = thread::proposal_from_dir(src, &me, &to).map_err(|e| format!("--propose {}:\n{e}", src.display()))?;
+        let mut draft = thread::proposal_from_dir(src, &me, &to).map_err(|e| format!("--propose {}:\n{e}", src.display()))?;
         if let Some(r) = &draft.header.replying_to {
-            if t.get(r).is_none() {
+            let Some(m) = t.get(r) else {
                 return Err(format!("--propose: replying_to = {r}, which isn't in {}", dir.display()));
-            }
+            };
+            // Written in full, as everything that reads the thread expects.
+            draft.header.replying_to = Some(m.id.clone());
+        }
+        if let Some((msg, opt)) = draft.header.revises.as_deref().and_then(|r| r.split_once('/')) {
+            let Some(m) = t.get(msg) else {
+                return Err(format!("--propose: revises = {msg}/{opt}, but there's no message {msg} in {}", dir.display()));
+            };
+            draft.header.revises = Some(format!("{}/{opt}", m.id));
         }
         let n = draft.header.options.len();
         let id = thread::post(&dir, scene_path, draft)?;
@@ -202,6 +210,12 @@ fn respond(args: &Args, dir: &Path, scene_path: &str, me: &str, target: &str) ->
             a.tweak = Some(name);
         }
         header.answers.push(a);
+    }
+    let mut said = std::collections::BTreeSet::new();
+    for a in &header.answers {
+        if !said.insert(a.option.as_str()) {
+            return Err(format!("--respond: option {} is given two verdicts; pick, reject or send it back, not more than one", a.option));
+        }
     }
     if header.answers.is_empty() && header.message.trim().is_empty() {
         return Err("--respond needs a --verdict, or --pick / --reject / --send-back".to_string());

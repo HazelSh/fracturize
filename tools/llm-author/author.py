@@ -318,6 +318,7 @@ def main():
     ap.add_argument("task", choices=["new", "free", "tweak"])
     ap.add_argument("--theme", help="the theme, for `new`")
     ap.add_argument("--scene", help="the scene to vary, for `tweak`")
+    ap.add_argument("--request", help="what someone looking at the scene asked for, for `tweak`")
     ap.add_argument("--rounds", type=int, default=6, help="most rounds the model gets [6]")
     ap.add_argument("--repairs", type=int, default=2,
                     help="format fixes allowed per round before the run ends [2]")
@@ -344,6 +345,8 @@ def main():
         ap.error("`new` needs --theme")
     if args.task == "tweak" and not args.scene:
         ap.error("`tweak` needs --scene")
+    if args.request and args.task != "tweak":
+        ap.error("--request goes with `tweak`")
     base = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1").rstrip("/")
     args.base = base[:-3] if base.endswith("/v1") else base
     if args.spark_seed is None:
@@ -387,6 +390,8 @@ def main():
         name = re.search(r'^name\s*=\s*"([^"]*)"', src.read_text(), re.M)
         task = fill("tweak.md", scene=src.read_text().strip(), info=info or err,
                     scene_name=name.group(1) if name else src.stem)
+        if args.request:
+            task += fill("request.md", request=args.request.strip())
     sparks = None
     if args.spark > 0:
         sparks, pool = draw_sparks(args.spark, args.spark_seed, args.spark_words)
@@ -504,6 +509,8 @@ def main():
                f"- vision: {'on' if vision else 'off'}"]
     if args.theme:
         summary.append(f"- theme: {args.theme}")
+    if args.request:
+        summary.append(f"- request: {args.request}")
     if sparks:
         summary.append(f"- sparks: {', '.join(sparks)} (--spark {args.spark} "
                        f"--spark-seed {args.spark_seed}, {args.spark_words})")

@@ -1,0 +1,96 @@
+# Lumin Path: a collaboration, through the Collaborate thread (2026-10-27).
+#
+# Gemma 4 E4B wrote the orb in an llm-author `free` run (sparks: glowworm,
+# clearness, byway): a bulb core, a violet cluster, orange wisps. Its debrief,
+# below, names "a glowing organism moving through a crystalline path", but the
+# path was never built. Claude Opus 5.5 added one map, "shard", run as a
+# `repeat` so each copy of a flat absfold crystal steps back from the orb,
+# turns and shrinks. The person sent that back as "more haze so the far fins
+# fade, and could the trail come toward the camera more?", and the step got a
+# component along the camera's -forward: the fins grow as they near you and
+# haze takes the far ones. Gemma's own answer to the same request (all
+# absfold, a glass comet) is kept as scenes/lumin_path-4G.toml.
+
+# Debrief from gemma4-e4b, 2026-10-27:
+#
+#   intent: I was aiming to create a fragile, bioluminescent structure
+#   representing a glowing organism moving through a crystalline path,
+#   emphasizing vibrant cyan and violet colors.
+#   result: The final render achieved a dense, solid, and highly colored
+#   structure, successfully capturing the bioluminescent mood through the
+#   blend of cyan and violet hues.
+#   cost: The initial lack of visibility forced many iterative changes to the
+#   scale, weight, and camera distance to bring the attractor into the
+#   viewable frame.
+#   unclear: none
+#   change: Starting with larger initial scales and weights, based on the
+#   provided size/material charts, would have likely avoided the need to fix
+#   the attractor size repeatedly.
+#   other: pass
+
+[meta]
+name = "Lumin Path"
+author = "gemma4-e4b, Claude Opus 5.5"
+point_size = 0.0028 # Optimized point size
+background = [0.01, 0.01, 0.03]
+color_mode = "mix"
+color_speed = 0.8 # Slightly increased to enhance distinct glowing paths
+color_contrast = 3
+haze = 0.45
+
+[camera]
+distance = 2.2 # Adjusted slightly for framing
+yaw = -2.6396
+pitch = 0.3
+focus = [0.1, 0.02, -0.02]
+
+[[symmetry]]
+repeat = 13
+step = [-0.15, 0.02, -0.13]
+turn = 17.0
+shrink = 0.9
+axis = [0.0, 0.957826, 0.287348]
+applies_to = ["shard"]
+
+[[transform]]
+name = "core"
+translation = [0.0, 0.0, 0.0]
+scale = 0.7
+rotation = [20.0, 10.0, 0.0]
+color = [0.1, 0.8, 0.4]
+weight = 15.0
+variations = { bulb = 0.8 }
+
+[[transform]]
+name = "structure"
+translation = [0.1, 0.0, 0.0]
+scale = [1.2, 0.6, 0.6]
+rotation = [15.0, 5.0, 0.0]
+color = [0.8, 0.2, 0.1]
+weight = 8.0
+
+[[transform]]
+name = "filament"
+translation = [0.0, 0.2, 0.0]
+scale = 0.3
+rotation = [5.0, 5.0, 0.0]
+color = [0.9, 0.9, 1.0]
+weight = 6.0835
+variations = { bulb = 0.5, linear = 0.5 }
+
+[[transform]]
+name = "cluster"
+translation = [0.5, 0.0, 0.0]
+scale = 0.4
+rotation = [-10.0, 25.0, 0.0]
+color = [0.5, 0.1, 0.9]
+weight = 10.0
+
+[[transform]]
+name = "shard"
+translation = [-0.25, 0.02, 0.0]
+scale = [0.24, 0.035, 0.17]
+rotation = [35.0, 20.0, 45.0]
+color = [0.55, 0.85, 1.0]
+weight = 6.0
+variations = { absfold = 0.85, linear = 0.15 }

@@ -1393,8 +1393,12 @@ Things it rests on:
   edits made since the request survive. Where both changed a value, a dialog
   lists yours beside theirs, defaulting to yours (as `--diff --base` does).
   One `commit_edit("Agent: …")`, so one Ctrl+Z, then a response saying
-  "applied". The live values that only reach the scene on a save (point size,
-  falloff, contrast, haze, exposure) stay live unless the option changed them.
+  "applied". The merge is of the live scene *as a save would write it*
+  (`as_saved`), so the values that only reach the file on a save (point size,
+  falloff, contrast, haze, exposure) conflict like any other: a haze you
+  changed since the request is listed, not overwritten. An option that moves
+  the framing moves the live camera too, or the next Ctrl+S, which writes the
+  live framing, would quietly undo it. A tweak carries those values as well.
 - **What goes out is what the person sees**: a request's or proposal's scene
   carries the live framing and those live values (`scene_to_send`), and "with
   a render" is the `S` screenshot of the view, written beside the message
