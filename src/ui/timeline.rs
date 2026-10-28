@@ -148,10 +148,10 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
             ui.label(
                 egui::RichText::new(format!("{} {who} has taken a value the scene can't use; holding the last good frame", icons::X))
                     .small()
-                    .color(ui.visuals().warn_fg_color),
+                    .color(super::theme::warn(ui.visuals())),
             );
         } else if let Some(e) = app.track_error() {
-            ui.label(egui::RichText::new(format!("{} {e}", icons::X)).small().color(ui.visuals().warn_fg_color));
+            ui.label(egui::RichText::new(format!("{} {e}", icons::X)).small().color(super::theme::warn(ui.visuals())));
         } else if !has_tracks {
             ui.label(
                 egui::RichText::new("No tracks yet: \"Animate a parameter\" on the right starts one")
@@ -1055,7 +1055,7 @@ fn draw_new_track(ui: &mut egui::Ui, app: &mut App) {
         }
     }
     if let Some(e) = &app.ui_state.timeline_new_error {
-        ui.label(egui::RichText::new(e).small().color(ui.visuals().warn_fg_color));
+        ui.label(egui::RichText::new(e).small().color(super::theme::warn(ui.visuals())));
     }
 }
 

@@ -29,7 +29,7 @@ use crate::history::{EditSnapshot, History};
 use crate::scene::Scene;
 use crate::thread::{self, Answer, Draft, Header, Kind, Thread, Verdict};
 
-use super::App;
+use super::{App, Tone};
 
 /// How often the thread is read again while nothing else asks.
 const RESCAN: Duration = Duration::from_millis(1500);
@@ -151,14 +151,19 @@ impl App {
     }
 
     /// The scene as the person sees it, to send: the live values that only
-    /// reach the scene on a save, and the framing they're looking through.
-    pub(super) fn scene_to_send(&self) -> Scene {
+    /// reach the scene on a save, and, `with_view`, the framing they're
+    /// looking through. Without it the scene keeps its own framing: orbiting
+    /// to look around is how anyone reads a 3D scene, and it isn't a change
+    /// to propose or a view to ask about until the person says it is.
+    pub(super) fn scene_to_send(&self, with_view: bool) -> Scene {
         let snap = match &self.collab.preview {
             Some(p) => p.live.clone(),
             None => self.edit_snapshot(),
         };
         let mut scene = as_saved(&snap);
-        scene.set_camera(&self.camera);
+        if with_view {
+            scene.set_camera(&self.camera);
+        }
         scene
     }
 
@@ -167,8 +172,10 @@ impl App {
     }
 
     /// Post a request: the text, the scene as it is (as `base.toml`), the
-    /// selected transform, and a render of the view if `render`.
-    pub fn collab_request(&mut self, text: &str, render: bool, selection: bool) {
+    /// selected transform, and a render of the view if `render`. The live
+    /// framing goes in the scene only `with_view`, which a render implies:
+    /// the picture is of a view, and the scene has to say which.
+    pub fn collab_request(&mut self, text: &str, render: bool, with_view: bool, selection: bool) {
         let me = self.collab_me();
         let to = self.collab_to();
         let mut header = Header::new(Kind::Request, &me, &to, text);
@@ -176,8 +183,8 @@ impl App {
             header.selection.push(self.scene.transform_names.get(i).cloned().flatten().unwrap_or_else(|| i.to_string()));
         }
         let mut draft = Draft::new(header);
-        if let Err(e) = draft.scene("base.toml", &self.scene_to_send()) {
-            self.set_notice(format!("Couldn't send: {e}"), true);
+        if let Err(e) = draft.scene("base.toml", &self.scene_to_send(with_view || render)) {
+            self.set_notice(format!("Couldn't send: {e}"), Tone::Error);
             return;
         }
         if render {
@@ -191,7 +198,7 @@ impl App {
     /// saved (or, unsaved, the thread's first base). It answers the newest
     /// request waiting on the person, if there is one — "frame it the way
     /// you'd hang it" — and otherwise asks what the agent would do with it.
-    pub fn collab_propose_mine(&mut self, text: &str, render: bool) {
+    pub fn collab_propose_mine(&mut self, text: &str, render: bool, with_view: bool) {
         let me = self.collab_me();
         let thread = self.collab.thread.as_ref();
         let to = self.collab_to();
@@ -202,7 +209,7 @@ impl App {
         });
         let saved = self.scene_path.as_deref().and_then(|p| Scene::load(p).ok());
         let first_base = thread.and_then(|t| t.messages.iter().find_map(|m| m.base().and_then(Result::ok)));
-        let mine = self.scene_to_send();
+        let mine = self.scene_to_send(with_view || render);
         let base = saved.or(first_base).unwrap_or_else(|| mine.clone());
         header.options.push(thread::Opt {
             id: "mine".into(),
@@ -212,7 +219,7 @@ impl App {
         });
         let mut draft = Draft::new(header);
         if let Err(e) = draft.scene("base.toml", &base).and_then(|()| draft.scene("mine.toml", &mine)) {
-            self.set_notice(format!("Couldn't send: {e}"), true);
+            self.set_notice(format!("Couldn't send: {e}"), Tone::Error);
             return;
         }
         if render {
@@ -256,8 +263,8 @@ impl App {
         let kind = draft.header.kind.name();
         let dir = self.collab_dir();
         match thread::post(&dir, &self.thread_scene_name(), draft) {
-            Ok(id) => self.set_notice(format!("Sent {id} to {}", dir.display()), false),
-            Err(e) => self.set_notice(format!("Couldn't send the {kind}: {e}"), true),
+            Ok(id) => self.set_notice(format!("Sent {id} to {}", dir.display()), Tone::Success),
+            Err(e) => self.set_notice(format!("Couldn't send the {kind}: {e}"), Tone::Error),
         }
         self.poll_collab(true);
     }
@@ -321,7 +328,7 @@ impl App {
         }
         let (scene, _) = match self.option_scene(message, option) {
             Ok(s) => s,
-            Err(e) => return self.set_notice(format!("Can't preview: {e}"), true),
+            Err(e) => return self.set_notice(format!("Can't preview: {e}"), Tone::Error),
         };
         let live = self.edit_snapshot();
         let history = std::mem::replace(&mut self.history, History::new());
@@ -383,7 +390,7 @@ impl App {
     pub fn collab_apply(&mut self, message: &str, option: &str) {
         let (theirs, base) = match self.option_scene(message, option) {
             Ok(s) => s,
-            Err(e) => return self.set_notice(format!("Can't apply: {e}"), true),
+            Err(e) => return self.set_notice(format!("Can't apply: {e}"), Tone::Error),
         };
         if self.collab.preview.is_some() {
             self.leave_preview();
@@ -405,7 +412,7 @@ impl App {
                     theirs,
                 });
             }
-            Err(e) => self.set_notice(format!("Can't apply {option}: {e}"), true),
+            Err(e) => self.set_notice(format!("Can't apply {option}: {e}"), Tone::Error),
         }
     }
 
@@ -418,7 +425,7 @@ impl App {
         let mine = as_saved(&self.edit_snapshot());
         match crate::scene_diff::merge(&p.base, &mine, &p.theirs, &take, &dir) {
             Ok(m) => self.commit_apply(&p.message, &p.option, m.scene),
-            Err(e) => self.set_notice(format!("Can't apply {}: {e}", p.option), true),
+            Err(e) => self.set_notice(format!("Can't apply {}: {e}", p.option), Tone::Error),
         }
     }
 
@@ -488,7 +495,7 @@ impl App {
         if let Some((name, scene)) = draft_scene
             && let Err(e) = draft.scene(&name, &scene)
         {
-            return self.set_notice(format!("Couldn't send the tweak: {e}"), true);
+            return self.set_notice(format!("Couldn't send the tweak: {e}"), Tone::Error);
         }
         self.post_draft(draft);
     }
@@ -498,7 +505,7 @@ impl App {
     pub fn collab_keep(&mut self, message: &str, option: &str) {
         let (scene, _) = match self.option_scene(message, option) {
             Ok(s) => s,
-            Err(e) => return self.set_notice(format!("Can't keep: {e}"), true),
+            Err(e) => return self.set_notice(format!("Can't keep: {e}"), Tone::Error),
         };
         let stem = self.collab_dir().file_name().map_or("thread".into(), |s| s.to_string_lossy().into_owned());
         let n = self.collab.thread.as_ref().and_then(|t| t.get(message)).map_or(0, |m| m.number());
@@ -509,16 +516,16 @@ impl App {
             k += 1;
         }
         match scene.save(&path) {
-            Ok(()) => self.set_notice(format!("Kept {option} as {}", path.display()), false),
-            Err(e) => self.set_notice(format!("Couldn't keep {option}: {e}"), true),
+            Ok(()) => self.set_notice(format!("Kept {option} as {}", path.display()), Tone::Success),
+            Err(e) => self.set_notice(format!("Couldn't keep {option}: {e}"), Tone::Error),
         }
     }
 
     pub fn collab_withdraw(&mut self, message: &str) {
         let Some(t) = &self.collab.thread else { return };
         match thread::withdraw(t, message, "") {
-            Ok(id) => self.set_notice(format!("Withdrew {id}"), false),
-            Err(e) => self.set_notice(format!("Can't withdraw: {e}"), true),
+            Ok(id) => self.set_notice(format!("Withdrew {id}"), Tone::Success),
+            Err(e) => self.set_notice(format!("Can't withdraw: {e}"), Tone::Error),
         }
         self.poll_collab(true);
     }

@@ -30,7 +30,7 @@ use crate::agent_local::{self, Conversation, LocalRun, Status, Trigger};
 use crate::bridge::{self, Call, Event};
 use crate::thread::{self, Draft, Header, Kind, Message, Thread, Verdict};
 
-use super::App;
+use super::{App, Tone};
 
 /// How long a render a bridge asked for may take before it's given up on.
 const RENDER_TIMEOUT: Duration = Duration::from_secs(15);
@@ -206,7 +206,8 @@ impl App {
             "previewing": self.preview_label(),
         });
         if !brief {
-            v["scene_toml"] = json!(self.scene_to_send().to_toml_string()?);
+            v["scene_toml"] = json!(self.scene_to_send(false).to_toml_string()?);
+            v["live_view"] = json!(crate::camera::CameraOverride::describe(&self.camera));
         }
         Ok(v)
     }
@@ -422,7 +423,7 @@ impl App {
         let prompt = crate::agent::brief(&name, &scene, &thread::render_message(t, m));
         match Headless::start(&self.prefs.agent.claude, "claude", &prompt, dir.to_path_buf(), m.id.clone()) {
             Ok(h) => self.agent.headless = Some(h),
-            Err(e) => self.set_notice(format!("Couldn't start Claude: {e}"), true),
+            Err(e) => self.set_notice(format!("Couldn't start Claude: {e}"), Tone::Error),
         }
     }
 
@@ -463,7 +464,7 @@ impl App {
             header.replying_to = Some(h.message.clone());
             let scene = self.thread_scene_for(&h.thread);
             if let Err(e) = thread::post(&h.thread, &scene, Draft::new(header)) {
-                self.set_notice(format!("Couldn't post Claude's answer: {e}"), true);
+                self.set_notice(format!("Couldn't post Claude's answer: {e}"), Tone::Error);
             }
         }
         self.poll_collab(true);
@@ -473,13 +474,13 @@ impl App {
         let Some(t) = self.collab.thread.as_ref() else { return };
         let trigger = match local_trigger(t, m, self.scene_path.as_deref()) {
             Ok(tr) => tr,
-            Err(e) => return self.set_notice(format!("The local model can't take this message: {e}"), true),
+            Err(e) => return self.set_notice(format!("The local model can't take this message: {e}"), Tone::Error),
         };
         let prefs = self.prefs.agent.local.clone();
         if !prefs.preset.is_empty() && self.agent.llm.is_none() {
             match LlmServer::start(&prefs) {
                 Ok(s) => self.agent.llm = Some(s),
-                Err(e) => return self.set_notice(format!("Couldn't start the local model: {e}"), true),
+                Err(e) => return self.set_notice(format!("Couldn't start the local model: {e}"), Tone::Error),
             }
         }
         let renderer = match self.render_mode {
@@ -507,7 +508,7 @@ impl App {
             if let Some(r) = &self.agent.local {
                 r.stop();
             }
-            self.set_notice(format!("The local model's server stopped: {why}"), true);
+            self.set_notice(format!("The local model's server stopped: {why}"), Tone::Error);
         }
         let Some(r) = &mut self.agent.local else { return };
         let mut done = None;

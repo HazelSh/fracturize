@@ -3,7 +3,7 @@
 //! toolbar and every window so `hinted()` hover hints set this frame are
 //! already in `app.ui_state.status_hint` by the time we read it.
 
-use crate::app::App;
+use crate::app::{App, Tone};
 use crate::scene::similarity_dimension;
 
 use super::hints::{hinted, HINT_VIEWPORT};
@@ -107,7 +107,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new("zoom off")
-                                .color(ui.visuals().error_fg_color),
+                                .color(super::theme::error(ui.visuals())),
                         )
                         .on_hover_text(err);
                     } else if let Some(z) = app.zoom() {
@@ -328,11 +328,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         // Why the last open failed, or what a drop ignored. Stays
                         // until clicked away or the next scene opens.
-                        if let Some((text, error)) = app.notice().map(|n| (n.text.clone(), n.error)) {
-                            let color = if error {
-                                ui.visuals().error_fg_color
-                            } else {
-                                ui.visuals().warn_fg_color
+                        if let Some((text, tone)) = app.notice().map(|n| (n.text.clone(), n.tone)) {
+                            let color = match tone {
+                                Tone::Error => super::theme::error(ui.visuals()),
+                                Tone::Success => super::theme::SUCCESS,
+                                Tone::Note => super::theme::warn(ui.visuals()),
                             };
                             let first = text.lines().next().unwrap_or_default().to_string();
                             let resp = ui
@@ -389,11 +389,7 @@ fn draw_sparkline(ui: &mut egui::Ui, samples: &[f32], p99_ms: f32) {
     for i in 0..n - 1 {
         let (a, b) = (samples[i], samples[i + 1]);
         let avg = 0.5 * (a + b);
-        let color = if avg < 16.7 {
-            egui::Color32::from_rgb(90, 220, 120)
-        } else {
-            egui::Color32::from_rgb(230, 175, 60)
-        };
+        let color = if avg < 16.7 { super::theme::SUCCESS } else { super::theme::CAUTION };
         painter.line_segment(
             [egui::pos2(x_of(i), y_of(a)), egui::pos2(x_of(i + 1), y_of(b))],
             egui::Stroke::new(1.2, color),

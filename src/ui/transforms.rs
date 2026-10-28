@@ -1775,7 +1775,7 @@ fn draw_trs_fields(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Trs
         ui.label(
             egui::RichText::new("mirrored")
                 .small()
-                .color(egui::Color32::from_rgb(230, 180, 80)),
+                .color(super::theme::CAUTION),
         )
         .on_hover_text(
             "This transform is mirrored. The minus sign always shows on the x \
@@ -1914,7 +1914,7 @@ fn commit_trs(app: &mut App, idx: usize, cache: &TrsCache, field: &str) {
 }
 
 fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut TrsCache, editing: &mut bool) {
-    ui.label(egui::RichText::new("sheared").color(egui::Color32::from_rgb(230, 180, 80)));
+    ui.label(egui::RichText::new("sheared").color(super::theme::CAUTION));
     ui.label(
         egui::RichText::new(
             "This transform is sheared, so it can't be shown as position, \

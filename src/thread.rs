@@ -593,13 +593,64 @@ pub fn proposal_from_dir(src: &Path, from: &str, to: &str) -> Result<Draft, Stri
 
 // ------------------------------------------------------------------- text
 
-/// A message's time, as local-ish text. UTC, to keep it free of a timezone
-/// dependency; the order is what matters.
+/// A message's time, for a person or an agent reading the thread: local time,
+/// with the zone said outright, `2026-10-28 11:56 NZDT (UTC+13:00)`. On disk a
+/// time is seconds since the epoch, so a thread means the same anywhere; only
+/// the display is local. Where the zone can't be read it is UTC, and says so.
 pub fn when(secs: u64) -> String {
-    let days = secs / 86_400;
-    let (h, m) = ((secs % 86_400) / 3600, (secs % 3600) / 60);
-    // Civil date from days since the epoch (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
+    match local_offset(secs) {
+        Some((offset, zone)) => local_text(secs, offset, &zone),
+        None => format!("{} UTC", civil(secs as i64)),
+    }
+}
+
+/// A time at an offset from UTC, in seconds, named `zone`.
+fn local_text(secs: u64, offset: i64, zone: &str) -> String {
+    let sign = if offset < 0 { '-' } else { '+' };
+    let (h, m) = (offset.abs() / 3600, (offset.abs() % 3600) / 60);
+    let zone = if zone.is_empty() { String::new() } else { format!("{zone} ") };
+    format!("{} {zone}(UTC{sign}{h:02}:{m:02})", civil(secs as i64 + offset))
+}
+
+/// The local zone's offset from UTC at that moment, and its abbreviation, as
+/// the C library knows them (the TZ variable, else /etc/localtime).
+#[cfg(unix)]
+fn local_offset(secs: u64) -> Option<(i64, String)> {
+    static TZSET: std::sync::Once = std::sync::Once::new();
+    unsafe extern "C" {
+        fn tzset();
+    }
+    // `localtime_r` needn't read the zone itself; `tzset` does, once.
+    TZSET.call_once(|| unsafe { tzset() });
+    let t = secs as libc::time_t;
+    // SAFETY: `tm` is plain data, filled in by `localtime_r`, which is the
+    // reentrant form; `tm_zone` points at static storage the library owns.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return None;
+        }
+        let zone = if tm.tm_zone.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(tm.tm_zone).to_string_lossy().into_owned()
+        };
+        Some((tm.tm_gmtoff as i64, zone))
+    }
+}
+
+#[cfg(not(unix))]
+fn local_offset(_secs: u64) -> Option<(i64, String)> {
+    None
+}
+
+/// `YYYY-MM-DD HH:MM` for seconds since the epoch, as a civil date (Howard
+/// Hinnant's algorithm).
+fn civil(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m) = (rem / 3600, (rem % 3600) / 60);
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -608,7 +659,7 @@ pub fn when(secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(mo <= 2);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}Z")
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}")
 }
 
 /// A one-line count of what changed between two scenes: `3 values, +1
@@ -855,7 +906,11 @@ mod tests {
 
     #[test]
     fn dates_read_as_dates() {
-        assert_eq!(when(0), "1970-01-01 00:00Z");
-        assert_eq!(when(1_761_442_200), "2025-10-26 01:30Z");
+        assert_eq!(civil(0), "1970-01-01 00:00");
+        assert_eq!(civil(1_761_442_200), "2025-10-26 01:30");
+        // A time in a zone ahead of UTC lands on the next day; one behind,
+        // the day before. The zone is always said.
+        assert_eq!(local_text(1_761_442_200, 13 * 3600, "NZDT"), "2025-10-26 14:30 NZDT (UTC+13:00)");
+        assert_eq!(local_text(1_761_442_200, -(3 * 3600 + 1800), ""), "2025-10-25 22:00 (UTC-03:30)");
     }
 }

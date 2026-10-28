@@ -761,7 +761,7 @@ fn draw_zoom_map_picker(ui: &mut egui::Ui, app: &mut App) {
 
 fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
     if let Some(err) = app.zoom_error.clone() {
-        ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
+        ui.label(egui::RichText::new(err).color(super::theme::error(ui.visuals())).small());
         return;
     }
 
@@ -833,7 +833,7 @@ fn draw_zoom_body(ui: &mut egui::Ui, app: &mut App) {
                         "below {:.2}: the edge is in view",
                         crate::renorm::MIN_RADIUS
                     ))
-                    .color(ui.visuals().error_fg_color)
+                    .color(super::theme::error(ui.visuals()))
                     .small(),
                 );
             }

@@ -156,7 +156,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             if exists {
                 ui.label(
                     egui::RichText::new(format!("{} already exists.", trimmed))
-                        .color(ui.visuals().warn_fg_color)
+                        .color(super::theme::warn(ui.visuals()))
                         .small(),
                 );
                 let mut ack = app.ui_state.save_as.allow_overwrite;
@@ -181,7 +181,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             if let Some(err) = &app.ui_state.save_as.error {
                 ui.label(
                     egui::RichText::new(err)
-                        .color(ui.visuals().error_fg_color)
+                        .color(super::theme::error(ui.visuals()))
                         .small(),
                 );
             }

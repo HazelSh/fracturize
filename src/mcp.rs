@@ -321,8 +321,8 @@ fn tools() -> Value {
     json!([
         {
             "name": "get_state",
-            "description": "The window as it is: the scene on screen (as TOML, with the live framing and look), \
-                            its path, whether it has unsaved edits, the selected transform, the renderer, the thread, \
+            "description": "The window as it is: the scene on screen (as TOML, with its own framing and the live look), \
+                            where the person is looking from now, its path, whether it has unsaved edits, the selected transform, the renderer, the thread, \
                             and whether an option is being previewed.",
             "inputSchema": { "type": "object", "properties": {} }
         },
@@ -445,6 +445,14 @@ fn get_state(shared: &Shared) -> Result<String, String> {
     out.push_str("\n```toml\n");
     out.push_str(v["scene_toml"].as_str().unwrap_or(""));
     out.push_str("```\n");
+    if let Some(view) = v["live_view"].as_str() {
+        out.push_str(
+            "\nWhere the person is looking now. It is not part of the scene: they may only be \
+             turning it to see it. Use it if the framing is what's being discussed.\n```toml\n",
+        );
+        out.push_str(view);
+        out.push_str("\n```\n");
+    }
     Ok(out)
 }
 

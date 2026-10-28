@@ -495,9 +495,24 @@ pub(crate) fn escape_fraction(transforms: &[TransformSpec], enabled: &[bool]) ->
         .map(|(_, reseeds)| reseeds as f32 / MEASURE_STEPS as f32)
 }
 
+/// A longer walk than [`walk_points`], for questions a few thousand points
+/// answer too coarsely: where the visible material sits on screen needs a few
+/// dozen points a cell to tell a sparse wing from stray dust.
+pub(crate) fn walk_points_n(transforms: &[TransformSpec], enabled: &[bool], steps: usize) -> Option<Vec<Vec3>> {
+    walk_points_steps(transforms, enabled, steps).map(|(p, _)| p)
+}
+
 fn walk_points_counted(
     transforms: &[TransformSpec],
     enabled: &[bool],
+) -> Option<(Vec<Vec3>, u32)> {
+    walk_points_steps(transforms, enabled, MEASURE_STEPS)
+}
+
+fn walk_points_steps(
+    transforms: &[TransformSpec],
+    enabled: &[bool],
+    steps: usize,
 ) -> Option<(Vec<Vec3>, u32)> {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::from_seed([0x5c; 32]);
@@ -506,8 +521,8 @@ fn walk_points_counted(
         walker.step(&mut rng);
     }
     walker.reseeds = 0;
-    let mut points = Vec::with_capacity(MEASURE_STEPS);
-    for _ in 0..MEASURE_STEPS {
+    let mut points = Vec::with_capacity(steps);
+    for _ in 0..steps {
         walker.step(&mut rng);
         if !walker.pos.is_finite() {
             return None;

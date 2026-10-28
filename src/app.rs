@@ -1209,8 +1209,18 @@ pub struct App {
 /// A status-bar message about opening a scene (see `App::set_notice`).
 pub struct Notice {
     pub text: String,
-    /// A failure, drawn in the error colour, rather than a note.
-    pub error: bool,
+    pub tone: Tone,
+}
+
+/// What a notice is saying, which decides its colour (`ui::theme`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Worth knowing: a drop that ignored files, say.
+    Note,
+    /// Something asked for was done: sent, kept, withdrawn.
+    Success,
+    /// A failure.
+    Error,
 }
 
 /// Whether a dropped file is one the window can open, by its extension: a
@@ -2078,7 +2088,7 @@ impl App {
                     v.roll,
                 )),
                 Err(e) => {
-                    self.set_notice(format!("Couldn't key that view: {e}"), true);
+                    self.set_notice(format!("Couldn't key that view: {e}"), Tone::Error);
                     return;
                 }
             },
@@ -2626,7 +2636,7 @@ impl App {
             // It would write the option over the scene's file. Keep, in the
             // Collaborate window, is how an option is saved.
             let e = "previewing an option: leave the preview (Esc) to save the scene, or Keep the option";
-            self.set_notice(format!("Not saved: {e}"), true);
+            self.set_notice(format!("Not saved: {e}"), Tone::Error);
             self.last_save_error = Some(e.to_string());
             return;
         }
@@ -2746,7 +2756,7 @@ impl App {
         // file anyway, is a question about nothing. Find out first.
         if self.is_dirty() {
             if let Err(e) = Scene::load(path) {
-                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), true);
+                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), Tone::Error);
                 return;
             }
         }
@@ -4494,7 +4504,7 @@ impl App {
             Err(e) => {
                 log::error!("Failed to load {}: {}", path.display(), e);
                 // The scene on screen is untouched; say why nothing happened.
-                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), true);
+                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), Tone::Error);
                 return;
             }
         };
@@ -4568,12 +4578,12 @@ impl App {
         let files = std::mem::take(&mut self.dropped);
         let first = &files[0];
         if let Err(e) = droppable(first) {
-            self.set_notice(e, true);
+            self.set_notice(e, Tone::Error);
             return;
         }
         self.request_load_scene(first);
         let ignored = files.len() - 1;
-        let failed = self.notice.as_ref().is_some_and(|n| n.error);
+        let failed = self.notice.as_ref().is_some_and(|n| n.tone == Tone::Error);
         if ignored > 0 && !failed {
             let name = first.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // Still asking about unsaved edits, it hasn't opened yet.
@@ -4585,7 +4595,7 @@ impl App {
                     name,
                     if ignored == 1 { "file".to_string() } else { format!("{} files", ignored) },
                 ),
-                false,
+                Tone::Note,
             );
         }
     }
@@ -4593,11 +4603,11 @@ impl App {
     /// Show a message in the status bar until it's clicked away or the next
     /// scene opens. Not on a timer: a message that leaves on its own can leave
     /// before it's been read.
-    pub fn set_notice(&mut self, text: String, error: bool) {
-        if error {
+    pub fn set_notice(&mut self, text: String, tone: Tone) {
+        if tone == Tone::Error {
             log::error!("{}", text);
         }
-        self.notice = Some(Notice { text, error });
+        self.notice = Some(Notice { text, tone });
     }
 
     pub fn notice(&self) -> Option<&Notice> {
@@ -5147,7 +5157,7 @@ impl App {
                 );
                 self.adopt_scene(r.scene, &format!("Random flame (seed {seed})"));
             }
-            Err(f) => self.set_notice(format!("Random flame: {}. Kept the scene you had.", f.message()), true),
+            Err(f) => self.set_notice(format!("Random flame: {}. Kept the scene you had.", f.message()), Tone::Error),
         }
     }
 
@@ -5183,7 +5193,7 @@ impl App {
         match crate::dice::profile::load(&entry) {
             Ok(loaded) => {
                 if !loaded.warnings.is_empty() {
-                    self.set_notice(format!("Profile {}: {}", entry.name, loaded.warnings.join("; ")), true);
+                    self.set_notice(format!("Profile {}: {}", entry.name, loaded.warnings.join("; ")), Tone::Error);
                 }
                 self.prefs.random_profile = entry.path.clone();
                 self.prefs.random_profile_builtin = entry.is_builtin().then(|| entry.name.clone());
@@ -5195,7 +5205,7 @@ impl App {
                 self.set_random_settings(loaded.settings);
                 self.prefs_dirty_since = Some(std::time::Instant::now());
             }
-            Err(e) => self.set_notice(format!("Couldn't load the profile: {e}"), true),
+            Err(e) => self.set_notice(format!("Couldn't load the profile: {e}"), Tone::Error),
         }
     }
 
@@ -5334,7 +5344,7 @@ impl App {
         let r = match crate::dice::mutate_seeded(&self.prefs.random, &self.scene, seed) {
             Ok(r) => r,
             Err(f) => {
-                self.set_notice(format!("Mutate: {}. Kept the scene you had.", f.message()), true);
+                self.set_notice(format!("Mutate: {}. Kept the scene you had.", f.message()), Tone::Error);
                 return;
             }
         };
@@ -7769,14 +7779,14 @@ impl App {
                     // Skipped tracks play no part, and say so in the Timeline.
                     let broken = a.as_ref().and_then(|a| a.broken.first()).map(|(t, why)| format!("{t}: {why}"));
                     if broken.is_some() && broken != self.track_error {
-                        self.set_notice(format!("A track doesn't apply and is skipped — {}", broken.as_deref().unwrap_or("")), true);
+                        self.set_notice(format!("A track doesn't apply and is skipped — {}", broken.as_deref().unwrap_or("")), Tone::Error);
                     }
                     self.track_error = broken;
                     a
                 }
                 Err(e) => {
                     if self.track_error.as_deref() != Some(e.as_str()) {
-                        self.set_notice(format!("Tracks not playing: {e}"), true);
+                        self.set_notice(format!("Tracks not playing: {e}"), Tone::Error);
                     }
                     self.track_error = Some(e);
                     None
@@ -7831,7 +7841,7 @@ impl App {
                 if self.track_invalid.as_deref() != Some(who.as_str()) {
                     self.set_notice(
                         format!("Track '{who}' has taken a value the scene can't use; holding the last frame that worked ({e})"),
-                        true,
+                        Tone::Error,
                     );
                     self.track_invalid = Some(who);
                 }

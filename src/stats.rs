@@ -275,7 +275,8 @@ pub fn print(path: &std::path::Path) {
         s.lit as f64 / total * 100.0
     );
     if s.empty_pct > 80.0 {
-        println!("         note: >80% empty — attractor may be too small in frame");
+        println!("         note: >80% empty: the camera may be far off (--info's shape says),");
+        println!("               or the form is thin; growing the maps won't fill the frame");
     }
 
     println!();

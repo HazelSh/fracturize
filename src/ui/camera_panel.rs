@@ -341,7 +341,7 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new(err.clone())
                 .small()
-                .color(ui.visuals().warn_fg_color),
+                .color(super::theme::warn(ui.visuals())),
         );
     }
     if let Some(path) = load {
@@ -501,7 +501,7 @@ pub(super) fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_defaul
                 "Add one more keypoint to fly this path instead of the default orbit.",
             )
             .small()
-            .color(ui.visuals().warn_fg_color),
+            .color(super::theme::warn(ui.visuals())),
         );
     }
 

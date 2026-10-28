@@ -225,8 +225,14 @@ mod tests {
             let mut c = Client::connect_at(&p).unwrap();
             c.call("echo", json!({ "x": 3 }))
         });
+        // Look through every event: the refused second start probed the
+        // socket by connecting, and that probe's `Gone` can arrive in the
+        // same drain as the call. Taking only the first dropped the call.
         let call = loop {
-            if let Some(Event::Call(c)) = server.drain().into_iter().next() {
+            if let Some(c) = server.drain().into_iter().find_map(|e| match e {
+                Event::Call(c) => Some(c),
+                Event::Gone(_) => None,
+            }) {
                 break c;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));

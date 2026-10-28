@@ -848,6 +848,125 @@ fn screen_extent(
     (range(&mut xs), range(&mut ys), inside as f32 / n, behind)
 }
 
+/// Columns of the grid [`silhouette`] bins the screen into; rows follow the
+/// aspect.
+const SILHOUETTE_COLS: usize = 32;
+/// Steps of the walk the silhouette is measured on: a few dozen points in a
+/// lit cell, at a coverage typical of a scene.
+const SILHOUETTE_STEPS: usize = 40_000;
+
+/// Where the *visible* material sits on screen: the extent of the lit cells
+/// of a coarse grid, across and down, as fractions of the frame. The grid
+/// reaches half a frame past every edge, so material that spills out has a
+/// measured extent (below 0 or past 1) rather than a clamped one, which is
+/// what lets centring move toward the whole form and not just the part in
+/// view. A cell is lit when it holds at least a hundredth of what a dense
+/// cell does (the 95th percentile of occupied ones), and at least four
+/// points. That is the log tonemap's view of it: a wing a hundred times
+/// sparser than the core still shows, and is counted, where a percentile of
+/// the points would have trimmed it away; stray dust does not, and isn't.
+/// `None` when nothing lands within reach of the frame.
+fn silhouette(
+    points: &[Vec3],
+    camera: &crate::camera::OrbitCamera,
+    aspect: f32,
+) -> Option<([f32; 2], [f32; 2])> {
+    // Cells per frame width, and the grid twice the frame each way.
+    let cols = SILHOUETTE_COLS * 2;
+    let rows = (((SILHOUETTE_COLS as f32 / aspect).round() as usize).max(1)) * 2;
+    let view_proj = camera.view_proj(aspect);
+    let mut grid = vec![0u32; cols * rows];
+    for &p in points {
+        if let Some((x, y)) = crate::camera::world_to_screen(p, view_proj, 1.0, 1.0) {
+            let (gx, gy) = ((x + 0.5) / 2.0, (y + 0.5) / 2.0);
+            if (0.0..1.0).contains(&gx) && (0.0..1.0).contains(&gy) {
+                grid[(gy * rows as f32) as usize * cols + (gx * cols as f32) as usize] += 1;
+            }
+        }
+    }
+    let mut occupied: Vec<u32> = grid.iter().copied().filter(|&c| c > 0).collect();
+    if occupied.is_empty() {
+        return None;
+    }
+    occupied.sort_unstable();
+    let dense = occupied[((occupied.len() - 1) as f32 * 0.95) as usize];
+    let lit = (dense / 100).max(4);
+    let (mut c0, mut c1, mut r0, mut r1) = (cols, 0, rows, 0);
+    for r in 0..rows {
+        for c in 0..cols {
+            if grid[r * cols + c] >= lit {
+                c0 = c0.min(c);
+                c1 = c1.max(c + 1);
+                r0 = r0.min(r);
+                r1 = r1.max(r + 1);
+            }
+        }
+    }
+    let frame = |k: usize, n: usize| k as f32 / n as f32 * 2.0 - 0.5;
+    (c1 > c0).then(|| ([frame(c0, cols), frame(c1, cols)], [frame(r0, rows), frame(r1, rows)]))
+}
+
+/// How much of the frame has to be empty on an axis before where the walk sits
+/// on it is a choice worth naming. Under this the walk all but fills the axis:
+/// a close-up, which has no margins to balance.
+const LOPSIDED_EMPTY: f32 = 0.25;
+/// How lopsided the margins must be, on such an axis, for `notes` to say so:
+/// one margin four times the other. A rule-of-thirds placement is about 0.5.
+const LOPSIDED_NOTE: f32 = 0.6;
+/// A form that runs past one edge is a crop, which is a choice, so its axis
+/// is flagged only when the far side leaves more than this much of the frame
+/// bare: a subject cut off at one edge with half the frame empty beside it.
+const SPILL_NOTE_EMPTY: f32 = 0.5;
+
+/// Where a walk sits on one axis of the frame, from its 95% range there: the
+/// margin before it less the margin after it, over the empty space the two
+/// leave. 0 is centred, +1 flush against the far edge (right, or bottom) with
+/// all the room on the near side, -1 the other way round. Returned with that
+/// empty space, since a lopsidedness only means something when there is room
+/// to be lopsided in. A side the walk spills past counts as no margin.
+fn lopsided(range: [f32; 2]) -> (f32, f32) {
+    let before = range[0].max(0.0);
+    let after = (1.0 - range[1]).max(0.0);
+    let empty = before + after;
+    let side = if empty > 1e-6 { (before - after) / empty } else { 0.0 };
+    (side, empty)
+}
+
+/// Whether a silhouette runs past an edge of the frame on this axis.
+fn spills(range: [f32; 2]) -> bool {
+    range[0] < 0.0 || range[1] > 1.0
+}
+
+/// The focus that puts the middle of the walk in the middle of the frame: a
+/// pan, so the camera keeps its turn and distance. Solved at the walk's own
+/// depth rather than the focus's (the two differ whenever the focus is off the
+/// attractor, which is the case this is for), then refined by projecting
+/// again, since perspective makes one step only nearly right. Returns the
+/// focus and where the walk would land on screen from it.
+fn centring_focus(
+    points: &[Vec3],
+    camera: &crate::camera::OrbitCamera,
+    aspect: f32,
+    centre: Vec3,
+) -> Option<(Vec3, [f32; 2], [f32; 2])> {
+    let mut cam = *camera;
+    let (mut x, mut y) = silhouette(points, &cam, aspect)?;
+    for _ in 0..4 {
+        let dx = (x[0] + x[1]) * 0.5 - 0.5;
+        let dy = (y[0] + y[1]) * 0.5 - 0.5;
+        if dx.abs() < 0.01 && dy.abs() < 0.01 {
+            break;
+        }
+        let depth = (centre - cam.eye()).dot(cam.forward()).max(cam.distance * 0.05);
+        let half_h = depth * cam.fov.tan_half();
+        let half_w = half_h * aspect;
+        // Screen y runs down and the camera's up runs up.
+        cam.focus += cam.right() * (dx * 2.0 * half_w) - cam.up() * (dy * 2.0 * half_h);
+        (x, y) = silhouette(points, &cam, aspect)?;
+    }
+    Some((cam.focus, x, y))
+}
+
 /// An aspect ratio as people say it: `16:9` for the ones with names, else
 /// `1.33:1`.
 fn aspect_name(aspect: f32) -> String {
@@ -1060,6 +1179,101 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         inside * 100.0,
         if behind > 0.0 { format!(", {:.1}% behind the camera", behind * 100.0) } else { String::new() }
     ));
+    // How evenly the walk sits in what it leaves empty. Still a fact rather
+    // than a verdict, but a form crowded into one side of an otherwise empty
+    // frame is rarely meant, and it was the commonest framing slip in small
+    // models' scenes: a focus left at the origin while the attractor sat off
+    // to one side. A close-up has no margins, so an axis the walk all but
+    // fills says `fills` and is never flagged.
+    // Per axis: its lopsidedness and empty space, the words for where a walk
+    // sits at +1 and at -1, the side it then leaves bare, and the dimension.
+    struct Axis {
+        lop: (f32, f32),
+        /// The form runs past one edge of this axis (past both, it fills).
+        spills: bool,
+        sits: [&'static str; 2],
+        bare: [&'static str; 2],
+        dim: &'static str,
+    }
+    // An infinite zoom renders the band, not the bounded attractor these
+    // points are a walk of, so where they sit says nothing about the picture.
+    let long_walk = if composite {
+        None
+    } else {
+        crate::trace::walk_points_n(&scene.transforms, &enabled, SILHOUETTE_STEPS)
+    };
+    let walk = long_walk.as_deref().unwrap_or(&points);
+    let seen = if scene.zoom.is_some() { None } else { silhouette(walk, effective, subject.aspect) };
+    let pct = |r: [f32; 2]| format!("{:>5.0}% to {:>5.0}%", r[0] * 100.0, r[1] * 100.0);
+    match seen {
+        Some((sx, sy)) => {
+            s.text(format!("{:<19} x {}    y {}", "silhouette", pct(sx), pct(sy)));
+            let axes = [
+                Axis { lop: lopsided(sx), spills: spills(sx), sits: ["right", "left"], bare: ["left", "right"], dim: "width" },
+                Axis { lop: lopsided(sy), spills: spills(sy), sits: ["low", "high"], bare: ["top", "bottom"], dim: "height" },
+            ];
+            let side = |a: &Axis| -> String {
+                let (v, empty) = a.lop;
+                if empty < LOPSIDED_EMPTY {
+                    format!("{:>6} {:<6}", "fills", "")
+                } else if a.spills {
+                    format!("{:>+6.2} {:<6}", v, "spills")
+                } else if v.abs() < 0.05 {
+                    format!("{:>+6.2} {:<6}", 0.0, "even")
+                } else {
+                    format!("{:>+6.2} {:<6}", v, a.sits[usize::from(v < 0.0)])
+                }
+            };
+            s.text(format!("{:<19} x {}  y {}", "balance", side(&axes[0]), side(&axes[1])));
+            match centring_focus(walk, effective, subject.aspect, m.center) {
+                Some((focus, cx, cy)) => {
+                    let flag = format!("-S camera.focus=[{:.3}, {:.3}, {:.3}]", focus.x, focus.y, focus.z);
+                    s.text(format!("{:<19} {}", "to centre it", flag));
+                    s.text(format!("{:<19} x {}    y {}", "centred, it shows", pct(cx), pct(cy)));
+                    // One note for both axes, so the flag is said once.
+                    let (mut sits, mut bare, mut empties) = (Vec::new(), Vec::new(), Vec::new());
+                    for a in &axes {
+                        let (v, empty) = a.lop;
+                        let floor = if a.spills { SPILL_NOTE_EMPTY } else { LOPSIDED_EMPTY };
+                        if empty >= floor && v.abs() >= LOPSIDED_NOTE {
+                            let k = usize::from(v < 0.0);
+                            sits.push(a.sits[k]);
+                            bare.push(a.bare[k]);
+                            empties.push(format!("{:.0}% of the {}", empty * 100.0, a.dim));
+                        }
+                    }
+                    if !sits.is_empty() {
+                        notes.add(
+                            "shape",
+                            format!(
+                                "the attractor sits {} in the frame and leaves the {} bare ({} \
+                                 empty, nearly all on one side). {} centres it; a close-up would \
+                                 fill the frame instead",
+                                sits.join(" and "),
+                                bare.join(" and "),
+                                empties.join(" and "),
+                                flag
+                            ),
+                        );
+                    }
+                }
+                None => {
+                    s.text(format!("{:<19} n/a: the walk leaves the frame", "to centre it"));
+                    s.text(format!("{:<19} n/a", "centred, it shows"));
+                }
+            }
+        }
+        None => {
+            let why = if scene.zoom.is_some() { "n/a: infinite zoom renders the band" } else { "n/a: nothing lands in the frame" };
+            for row in ["silhouette", "balance", "to centre it", "centred, it shows"] {
+                s.text(format!("{:<19} {}", row, why));
+            }
+        }
+    }
+    s.text("silhouette is where the material shows, past the edges too: the");
+    s.text("lit cells of a 32-column grid, lit at a hundredth of a dense cell.");
+    s.text("Balance is its margins, before less after over both: 0 is even, 1");
+    s.text("flush to an edge; a form that spills past one is cropped, by choice.");
     s.text("radius is the 95th percentile of the walk's distance from the centre;");
     s.text("box and on screen hold the middle 95% of it. On screen, 0% to 100%");
     s.text(format!(
@@ -1104,7 +1318,11 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
     if off > m.radius {
         notes.add(
             "camera",
-            format!("focus is {:.2} from the centre, outside the {:.2} radius", off, m.radius),
+            format!(
+                "focus is {:.2} from the centre, outside the {:.2} radius; \
+                 -S camera.focus=[{:.3}, {:.3}, {:.3}] looks at the centre",
+                off, m.radius, m.center.x, m.center.y, m.center.z
+            ),
         );
     }
 

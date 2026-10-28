@@ -245,7 +245,7 @@ fn profile_bar(ui: &mut egui::Ui, app: &mut App, s: &RandomSettings) -> Option<P
         }
     }
     if let Some(e) = &app.ui_state.dice_profile_error {
-        ui.colored_label(ui.visuals().warn_fg_color, e);
+        ui.colored_label(super::theme::warn(ui.visuals()), e);
     }
     action
 }

@@ -453,7 +453,7 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
     // While an option is previewed the scene on screen isn't yours, and the
     // readout says so where it would say what it is.
     if let Some(label) = app.preview_label() {
-        let resp = ui.add(egui::Button::new(egui::RichText::new(label).color(ui.visuals().warn_fg_color)).frame(false).truncate());
+        let resp = ui.add(egui::Button::new(egui::RichText::new(label).color(super::theme::warn(ui.visuals()))).frame(false).truncate());
         hinted(
             resp,
             &mut app.ui_state,

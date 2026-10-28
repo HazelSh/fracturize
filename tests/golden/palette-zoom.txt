@@ -17,6 +17,14 @@ shape    centre     ( 0.021,  0.023,  0.021)
          the scene sets      distance 3.400, point_size 0.0018
          on screen           x    50% to    51%    y    47% to    52%
          in frame            100.0% of the walk
+         silhouette          n/a: infinite zoom renders the band
+         balance             n/a: infinite zoom renders the band
+         to centre it        n/a: infinite zoom renders the band
+         centred, it shows   n/a: infinite zoom renders the band
+         silhouette is where the material shows, past the edges too: the
+         lit cells of a 32-column grid, lit at a hundredth of a dense cell.
+         Balance is its margins, before less after over both: 0 is even, 1
+         flush to an edge; a form that spills past one is cropped, by choice.
          radius is the 95th percentile of the walk's distance from the centre;
          box and on screen hold the middle 95% of it. On screen, 0% to 100%
          is the 16:9 frame, left to right and top to bottom

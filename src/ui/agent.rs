@@ -35,8 +35,8 @@ pub fn light_row(ui: &mut egui::Ui, app: &mut App) {
     let light = app.agent_light();
     ui.horizontal(|ui| {
         let color = match light.state {
-            LightState::Connected => egui::Color32::from_rgb(90, 200, 110),
-            LightState::Working | LightState::Waiting => ui.visuals().warn_fg_color,
+            LightState::Connected => super::theme::SUCCESS,
+            LightState::Working | LightState::Waiting => super::theme::warn(ui.visuals()),
             LightState::Off => ui.visuals().weak_text_color(),
         };
         let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());

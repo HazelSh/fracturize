@@ -150,7 +150,7 @@ pub fn danger_button(
         _ => egui::RichText::new(text),
     });
     if state == ArmState::Ready {
-        button = button.fill(ui.visuals().error_fg_color.gamma_multiply(0.55));
+        button = button.fill(super::theme::error(ui.visuals()).gamma_multiply(0.55));
     }
 
     let resp = ui
@@ -261,7 +261,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.add_space(6.0);
             // The error already says what went wrong ("Failed to write scene
             // file: Permission denied"); a prefix would only restate it.
-            ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color));
+            ui.label(egui::RichText::new(err).color(super::theme::error(ui.visuals())));
             ui.label(
                 egui::RichText::new(
                     "Nothing has been lost. Try Save as… to save it somewhere \

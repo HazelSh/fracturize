@@ -1406,10 +1406,14 @@ Things it rests on:
   changed since the request is listed, not overwritten. An option that moves
   the framing moves the live camera too, or the next Ctrl+S, which writes the
   live framing, would quietly undo it. A tweak carries those values as well.
-- **What goes out is what the person sees**: a request's or proposal's scene
-  carries the live framing and those live values (`scene_to_send`), and "with
-  a render" is the `S` screenshot of the view, written beside the message
-  (`App::screenshot_to`) before it's posted.
+- **What goes out is what the person sees, except where they're standing**: a
+  request's or proposal's scene carries those live values (`scene_to_send`)
+  but keeps its own framing, because orbiting to look at a 3D scene is not a
+  change to propose. "with this view" sends the live framing as the scene's
+  camera, and "with a render" implies it — the `S` screenshot of the view,
+  written beside the message (`App::screenshot_to`) before it's posted, is of
+  a view, and the scene has to say which. The MCP `get_state` gives the scene
+  with its own framing and the live one beside it, labelled as such.
 - **Keep** copies an option (or its tweak) to a new `scenes/<thread>-<n><id>.toml`,
   never over a file: the one way a thread's scene reaches the project.
 
@@ -3931,6 +3935,22 @@ share of the walk inside it — beside a world-space `box`. Both hold the middle
 purpose: a compact attractor centred with a margin is the common framing, not
 the only good one, and a close-up or a form that bursts past every edge is a
 choice the report cannot tell from a mistake.
+
+**Balance is the one framing it does flag**, because filling the frame is a
+choice and crowding one side of an empty frame rarely is — it was the
+commonest slip in small models' scenes, a focus left at the origin with the
+attractor off to one side. `silhouette` is where the material *shows*: the lit
+cells of a 32-column grid reaching half a frame past each edge, lit at a
+hundredth of a dense cell (the log tonemap's view, so a sparse wing counts and
+stray dust doesn't), from a 40k-step walk. `balance` per axis is
+`(before − after) / (before + after)` over its margins: 0 even, ±1 flush to an
+edge, and `fills` when under a quarter of the axis is empty — a close-up has
+no margins to balance, and is never flagged. `to centre it` is the
+`-S camera.focus=` pan (turn and distance kept, solved at the walk's depth
+and refined by reprojecting) and `centred, it shows` where that lands. `notes`
+speaks when an axis has room and one margin is four times the other (|balance|
+≥ 0.6; rule-of-thirds is about 0.5). Infinite zoom says n/a: it renders the
+band, not the bounded walk.
 
 `camera` gives the framing as directions too: `forward`, `right` and `up` in
 world space, then `axes`, which says where each world axis points on screen —

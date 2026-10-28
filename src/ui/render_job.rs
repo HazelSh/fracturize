@@ -28,10 +28,8 @@ use super::num;
 /// the line it lands in.
 const ELAPSED_CHARS: usize = 36;
 
-/// The app's established "this is healthy/good" green — the p99 sparkline in
-/// `ui::status_bar` uses the same value for a frametime under budget. Reused
-/// here rather than invented fresh, so "done" reads the same everywhere.
-const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(90, 220, 120);
+/// "Done" reads the same everywhere: the theme's success green.
+const DONE_GREEN: egui::Color32 = super::theme::SUCCESS;
 
 /// Size presets, plus the custom escape hatch.
 /// Output sizes, smallest first.
@@ -355,7 +353,7 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
 
     if let Some(err) = app.job_error() {
         let err = err.to_string();
-        ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
+        ui.label(egui::RichText::new(err).color(super::theme::error(ui.visuals())).small());
     } else if let Some(done) = app.job_done().cloned() {
         match done {
             Ok((path, outcome)) => draw_done_panel(ui, app, &path, outcome),
@@ -367,7 +365,7 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
                 );
             }
             Err(e) => {
-                ui.label(egui::RichText::new(e).color(ui.visuals().error_fg_color).small());
+                ui.label(egui::RichText::new(e).color(super::theme::error(ui.visuals())).small());
             }
         }
     }
@@ -1153,7 +1151,7 @@ fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
     }
 
     if let Some(reason) = params.rejection(limit) {
-        ui.label(egui::RichText::new(reason).color(ui.visuals().error_fg_color).small());
+        ui.label(egui::RichText::new(reason).color(super::theme::error(ui.visuals())).small());
     }
 }
 
@@ -1191,7 +1189,7 @@ fn draw_done_panel(
     let started = app.ui_state.render_job.started.clone();
     let is_view = matches!(started.as_ref().map(|s| s.kind), Some(JobKind::ViewDescriptor));
     let partial = outcome.is_partial();
-    let accent = if partial { ui.visuals().warn_fg_color } else { DONE_GREEN };
+    let accent = if partial { super::theme::warn(ui.visuals()) } else { DONE_GREEN };
     let heading = match (partial, is_view) {
         (true, _) => "Stopped early",
         (false, true) => "View saved",
@@ -1374,9 +1372,9 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             ui.label(egui::RichText::new(pos).small().weak());
         }
         if cancelling {
-            ui.label(egui::RichText::new("stopping…").color(ui.visuals().warn_fg_color));
+            ui.label(egui::RichText::new("stopping…").color(super::theme::warn(ui.visuals())));
         } else if paused {
-            ui.label(egui::RichText::new("paused").color(ui.visuals().warn_fg_color));
+            ui.label(egui::RichText::new("paused").color(super::theme::warn(ui.visuals())));
         }
     });
 

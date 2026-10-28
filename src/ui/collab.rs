@@ -33,6 +33,8 @@ pub struct CollabUi {
     pub composer: String,
     /// Attach a render of the view to what's sent.
     pub render: bool,
+    /// Send the live framing as the scene's camera.
+    pub view: bool,
     /// Say which transform is selected.
     pub selection: bool,
     /// The note being written for Send back or Reject: (message, option, verb).
@@ -112,13 +114,14 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             }
             Do::Withdraw(m) => app.collab_withdraw(&m),
             Do::Request(text) => {
-                let (render, sel) = (app.ui_state.collab.render, app.ui_state.collab.selection);
-                app.collab_request(&text, render, sel);
+                let c = &app.ui_state.collab;
+                let (render, view, sel) = (c.render, c.view, c.selection);
+                app.collab_request(&text, render, view, sel);
                 app.ui_state.collab.composer.clear();
             }
             Do::Propose(text) => {
-                let render = app.ui_state.collab.render;
-                app.collab_propose_mine(&text, render);
+                let (render, view) = (app.ui_state.collab.render, app.ui_state.collab.view);
+                app.collab_propose_mine(&text, render, view);
                 app.ui_state.collab.composer.clear();
             }
         }
@@ -142,7 +145,7 @@ fn header(ui: &mut egui::Ui, app: &mut App, todo: &mut Vec<Do>, blink: &mut bool
     );
     let Some(label) = app.preview_label() else { return };
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).strong().color(ui.visuals().warn_fg_color));
+        ui.label(egui::RichText::new(label).strong().color(super::theme::warn(ui.visuals())));
         let resp = ui.add(egui::Button::new("Hold to compare").sense(egui::Sense::click_and_drag()));
         *blink = resp.is_pointer_button_down_on();
         hinted(
@@ -180,8 +183,27 @@ fn composer(ui: &mut egui::Ui, app: &mut App, todo: &mut Vec<Do>) {
         hinted(
             resp,
             &mut app.ui_state,
-            "Send a picture of the view as it is now with the message",
+            "Send a picture of the view as it is now with the message. The framing goes with \
+             it, so the picture and the scene agree.",
             "toggle: attach a render of the view",
+        );
+        let render = app.ui_state.collab.render;
+        let mut view = app.ui_state.collab.view || render;
+        let resp = ui.add_enabled(!render, egui::Checkbox::new(&mut view, "with this view"));
+        if !render {
+            app.ui_state.collab.view = view;
+        }
+        hinted(
+            resp,
+            &mut app.ui_state,
+            if render {
+                "A render is of this view, so the view goes with it. Untick \"with a render\" to \
+                 send the scene's own framing."
+            } else {
+                "Send the framing you're looking through as the scene's camera. Unticked, the \
+                 scene goes with its own saved framing, and turning it to look around isn't sent."
+            },
+            "toggle: send the framing you're looking through",
         );
         let selected = app.selected_transform().is_some();
         let resp = ui.add_enabled(selected, egui::Checkbox::new(&mut app.ui_state.collab.selection, "about the selection"));
@@ -257,7 +279,7 @@ fn messages(ui: &mut egui::Ui, app: &mut App, todo: &mut Vec<Do>) {
                 ui.separator();
             }
             for (id, e) in &thread.broken {
-                ui.colored_label(ui.visuals().error_fg_color, format!("{id}: can't read it: {e}"));
+                ui.colored_label(super::theme::error(ui.visuals()), format!("{id}: can't read it: {e}"));
             }
         });
     app.collab.thread = Some(thread);
@@ -285,7 +307,7 @@ fn message(ui: &mut egui::Ui, app: &mut App, thread: &Thread, m: &Message, me: &
         ui.label(if mine { who.weak() } else { who.strong() });
         ui.label(egui::RichText::new(thread::when(h.created)).small().weak());
         if !state.is_empty() {
-            let color = if state == "waiting on you" { ui.visuals().warn_fg_color } else { ui.visuals().weak_text_color() };
+            let color = if state == "waiting on you" { super::theme::warn(ui.visuals()) } else { ui.visuals().weak_text_color() };
             ui.label(egui::RichText::new(state).small().color(color));
         }
         if mine && thread.waiting(m) {
@@ -375,7 +397,7 @@ fn card(ui: &mut egui::Ui, app: &mut App, thread: &Thread, m: &Message, o: &thre
             hinted(resp, &mut app.ui_state, format!("What it changes from the scene it was made from: {summary}"), "the option's changes");
             if tweaked {
                 let t = if previewing { "tweaking…".to_string() } else { format!("tweaked: {}", summary_tweak(app, m, o)) };
-                ui.label(egui::RichText::new(t).small().color(ui.visuals().warn_fg_color));
+                ui.label(egui::RichText::new(t).small().color(super::theme::warn(ui.visuals())));
             }
             if let Some(v) = verdict {
                 ui.label(egui::RichText::new(v.name()).small());
