@@ -51,6 +51,10 @@ pub enum Kind {
     Request,
     Proposal,
     Response,
+    /// Text that wants no answer: progress, a question in passing, an
+    /// agent's report at the end of its turns. It never leaves anything
+    /// waiting, and it doesn't count as answering what it replies to.
+    Note,
 }
 
 impl Kind {
@@ -59,6 +63,7 @@ impl Kind {
             Kind::Request => "request",
             Kind::Proposal => "proposal",
             Kind::Response => "response",
+            Kind::Note => "note",
         }
     }
 }
@@ -360,7 +365,9 @@ impl Thread {
     /// Whether a message still wants an answer: a request or proposal that
     /// nothing replies to and that hasn't been withdrawn.
     pub fn waiting(&self, m: &Message) -> bool {
-        m.header.kind != Kind::Response && m.withdrawn.is_none() && self.replies_to(&m.id).next().is_none()
+        matches!(m.header.kind, Kind::Request | Kind::Proposal)
+            && m.withdrawn.is_none()
+            && self.replies_to(&m.id).all(|r| r.header.kind == Kind::Note)
     }
 
     /// Messages waiting for someone other than `me`.

@@ -170,7 +170,7 @@ impl App {
     /// selected transform, and a render of the view if `render`.
     pub fn collab_request(&mut self, text: &str, render: bool, selection: bool) {
         let me = self.collab_me();
-        let to = self.collab.thread.as_ref().map_or("agent".to_string(), |t| t.other_party(&me, "agent"));
+        let to = self.collab_to();
         let mut header = Header::new(Kind::Request, &me, &to, text);
         if selection && let Some(i) = self.selected_transform() {
             header.selection.push(self.scene.transform_names.get(i).cloned().flatten().unwrap_or_else(|| i.to_string()));
@@ -194,7 +194,7 @@ impl App {
     pub fn collab_propose_mine(&mut self, text: &str, render: bool) {
         let me = self.collab_me();
         let thread = self.collab.thread.as_ref();
-        let to = thread.map_or("agent".to_string(), |t| t.other_party(&me, "agent"));
+        let to = self.collab_to();
         let mut header = Header::new(Kind::Proposal, &me, &to, text);
         header.ask = Some(thread::Ask::Free);
         header.replying_to = thread.and_then(|t| {
@@ -233,6 +233,9 @@ impl App {
     /// The screenshot a staged message was waiting for has been written (or
     /// failed): post it.
     pub(super) fn collab_screenshot_done(&mut self, written: Option<&Path>) {
+        if self.agent_screenshot_done(written) {
+            return;
+        }
         let Some(mut staged) = self.collab.staged.take() else { return };
         if let Some(path) = written.filter(|p| p.exists()) {
             staged.draft.files.insert(staged.name.clone(), thread::Content::Copy(path.to_path_buf()));

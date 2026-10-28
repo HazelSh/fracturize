@@ -180,6 +180,10 @@ pub struct Prefs {
     /// screen-relative default layout in `ui::default_layout`.
     #[serde(default)]
     pub window_geometry: BTreeMap<String, [f32; 4]>,
+    /// Who answers the Collaborate window's messages, and how to reach them
+    /// (`[agent]`, AGENT-COLLAB-PLAN.md §4.6).
+    #[serde(default)]
+    pub agent: crate::agent::AgentPrefs,
 }
 
 impl Default for Prefs {
@@ -203,6 +207,7 @@ impl Default for Prefs {
             browser_folder: None,
             browser_sort: Default::default(),
             window_geometry: BTreeMap::new(),
+            agent: Default::default(),
         }
     }
 }

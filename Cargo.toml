@@ -66,6 +66,13 @@ rav1e = { version = "0.8.1", default-features = false, features = ["threading"] 
 # nasm needed — it falls back to the C kernels).
 openh264 = "0.9"
 
+# Agent collaboration (AGENT-COLLAB-PLAN.md §2): the GUI's socket and the
+# `fracturize mcp` bridge speak JSON lines, and the local-model backend talks
+# to llama-server's OpenAI-compatible API. Blocking HTTP, no TLS (it is only
+# ever 127.0.0.1), and no async runtime.
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
+
 # Clean Ctrl-C for long renders (see src/interrupt.rs): a signal handler that
 # lets an accumulating render finish its lap and save rather than losing it.
 # Already in the tree as a transitive dependency, so this costs nothing to

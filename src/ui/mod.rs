@@ -20,6 +20,7 @@ use winit::window::Window;
 
 use crate::prefs::PanelPrefs;
 
+pub mod agent;
 pub mod axis_widget;
 pub mod browser;
 pub mod camera_panel;

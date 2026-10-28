@@ -86,6 +86,7 @@ src/
     mutate.rs      # Mutate window: profile, strength, the mutation grid
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
     collab.rs      # Collaborate: the thread, option cards, the composer, conflicts
+    agent.rs       # The connection light, and Agent settings
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
@@ -118,6 +119,11 @@ src/
   thread.rs      # Threads with an agent: the message format on disk, reading, posting
   collab.rs      # The CLI side of a thread: --request, --propose, --respond, --wait-reply…
   app_collab.rs  # The GUI side: preview (a sandbox), apply (a merge), send back, keep
+  bridge.rs      # The window's socket: JSON lines, one bridge, the client end
+  mcp.rs         # `fracturize mcp`: stdio MCP server, tools, channel push
+  agent.rs       # [agent] prefs, the headless Claude backend, with-llm
+  agent_local.rs # The local-model backend: author.py's loop, in the window
+  app_agent.rs   # The window's side: socket calls, dispatch, the runs
   scene_browser.rs# The Scenes window's model: places, a folder's scenes, parsed, sorted
   symmetry.rs    # Finite subgroups of SO(3) (C/D/T/O/I) by closure, plus
                  # `repeat` progressions, which are not groups
@@ -1342,7 +1348,8 @@ Phase 2 of `AGENT-COLLAB-PLAN.md`: requests, proposals and responses about one
 scene, kept as files under `renders/collab/<scene-stem>/` (gitignored, so a
 thread never reaches the public repo). Either side can send any kind. An agent
 takes part with nothing but the CLI; the person with the Collaborate window.
-No socket or bridge yet (phase 3), so an agent waits with `--wait-reply`.
+A Claude Code session can also be connected to the window live, and the window
+can drive a backend itself; see "The agent connection" below.
 
 ```sh
 fracturize --list-threads [--waiting]             # every thread, and what's waiting on whom
@@ -1407,10 +1414,78 @@ Things it rests on:
   never over a file: the one way a thread's scene reaches the project.
 
 Not yet: a re-render of a tweak with the proposal's settings (a sent-back
-tweak goes as a scene, without a picture); "delivered" and "seen" states,
-which need the bridge; a thread picker for other scenes' threads (the window
+tweak goes as a scene, without a picture); a thread picker for other scenes' threads (the window
 shows the scene on screen's); the hold-to-blink *key* (a held button for now —
 the key is Hazel's to choose); and tweaks surviving a restart.
+
+## The agent connection: `fracturize mcp`, and the backends
+
+Phases 3–5 of `AGENT-COLLAB-PLAN.md`. The thread (above) is the workflow; this
+is what gets a message to an agent the moment it's sent, and back.
+
+```
+ Claude Code ──stdio MCP──▶ fracturize mcp ──JSON lines──▶ the window
+   (a session)               (src/mcp.rs)    $XDG_RUNTIME_DIR/fracturize/gui.sock (src/bridge.rs)
+ llama-server ◀──HTTP── the window's own loop (src/agent_local.rs)
+```
+
+```sh
+claude mcp add --scope project fracturize -- fracturize mcp      # once
+claude -n fracturize --dangerously-load-development-channels server:fracturize
+```
+
+Who answers is `[agent] backend` in prefs, picked in Agent settings (the
+Collaborate window's header): `claude-channel` (default: a session you
+started; nothing is spawned), `claude-headless` (the window runs `claude -p
+--resume <id>` per message, with the same bridge), `local` (a model on
+llama-server, started through with-llm's preset if nothing answers), or
+`none`. The header's light says who's connected or working, with Stop.
+
+Things it rests on:
+
+- **The socket carries only what needs the live window**: `hello`,
+  `get_state` (the scene as `scene_to_send` makes it), `get_render` (the `S`
+  screenshot path), and three courtesies: `posted` (rescan now), `delivered`
+  and `seen` (message states, kept in memory because a message is written
+  once). Every thread operation the bridge does itself, on files, through
+  `thread.rs`, like the CLI. So the MCP tools work with no window (only
+  `get_state`/`get_render` say they need one), and the bridge `chdir`s to the
+  window's working directory on `hello` so relative paths agree.
+- **One bridge at a time.** A second `hello` is refused naming the first. The
+  socket is taken over only if nobody answers on it (a window that died).
+- **The push is a file watcher**, in the bridge: once a second it reads every
+  thread and sends each new message for it (`for_me`: not from it, and `to`
+  it, `agent`, or nobody) as `notifications/claude/channel`, meta keys being
+  identifiers (`kind`, `thread`, `message`, `from`, `scene`). Messages already
+  there at connect are not replayed, but what's waiting is said once.
+  Channels need the interactive session; `-p` ignores the dev flag, which is
+  why headless is told about the message in its prompt instead.
+- **A new message kind, `note`**: text that wants no answer (progress, a
+  report). It never waits and doesn't count as answering what it replies to,
+  so a progress note leaves a request "waiting".
+- **Dispatch** (`app_agent.rs`): with headless or local chosen and no session
+  connected, each new message from the person (request, own proposal, a
+  send-back) starts the backend, one at a time — only messages since the
+  window opened or the backend was chosen. Options without a render get one
+  from this binary (`mcp::render_option`, a small still in the window's
+  renderer, splat without a window).
+- **The local loop is `tools/llm-author/author.py`'s protocol and welfare
+  rules, unchanged**, reading its prompts from there (plus `sendback.md` and
+  `report.md`): each scene a card at once, `max_turns` replies, then an
+  optional report as a note; DONE/STOP honoured on the spot, STOP never
+  questioned; two repairs a turn; a full-budget reply without a scene ends
+  it; a repeat asked about once. Transcripts in llm-author's format under the
+  thread's `transcripts/`, so `review.sh` reads them. The conversation carries
+  on into the next message in that thread until the window closes.
+- **VRAM**: `with-llm --fits -m <preset>` is with-llm's own rule
+  (weights + projector + 1200 MiB), shown in Agent settings; with-llm refuses
+  to start one that doesn't fit and the window says why. The server is held
+  up by `with-llm … -- cat` on a pipe, so closing the window stops it (if
+  with-llm started it).
+
+Not yet: the local backend's tools mode (the setting exists; whole-scene
+runs), a re-render of a tweak, and a thread picker. The channel flag is a
+research preview's and may change; headless is the way round it.
 
 ## The scene browser
 

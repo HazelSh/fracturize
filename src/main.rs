@@ -24,6 +24,10 @@ mod scene_browser;
 mod scene_diff;
 mod thread;
 mod collab;
+mod bridge;
+mod mcp;
+mod agent;
+mod agent_local;
 mod scene_source;
 mod set;
 mod stats;
@@ -2888,6 +2892,13 @@ fn run_diff(args: &Args) -> i32 {
 fn main() {
     // Initialize logging
     env_logger::init();
+
+    // `fracturize mcp`: the one subcommand (AGENT-COLLAB-PLAN.md §7), a
+    // long-running stdio server rather than a do-one-thing flag.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("mcp") {
+        std::process::exit(mcp::run(&argv[2..]));
+    }
 
     // Parse CLI args
     let mut args = Args::parse();

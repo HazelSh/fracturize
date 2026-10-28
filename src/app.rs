@@ -17,6 +17,8 @@ use crate::view::View;
 
 #[path = "app_collab.rs"]
 mod collab;
+#[path = "app_agent.rs"]
+pub(crate) mod agent;
 
 /// Seconds since the epoch, for unique output filenames
 pub fn unix_timestamp() -> u64 {
@@ -1195,6 +1197,10 @@ pub struct App {
     /// Threads with the agent: the Collaborate window's state. See
     /// `app_collab`.
     pub(crate) collab: collab::Collab,
+    /// The agent connection: the socket a session's bridge reaches the
+    /// window on, and the backends the window drives itself. See
+    /// `app_agent`.
+    pub(crate) agent: agent::AgentState,
     /// Whether the window has keyboard focus, so a new message for the person
     /// can be announced to the desktop only when they aren't looking.
     pub focused: bool,
@@ -1586,6 +1592,7 @@ impl App {
             pending_screenshot: false,
             screenshot_to: None,
             collab: Default::default(),
+            agent: Default::default(),
             focused: true,
         };
         app.refresh_zoom();

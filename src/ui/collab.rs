@@ -43,6 +43,8 @@ pub struct CollabUi {
     /// "3 values, +1 transform" per (message folder, option, tweaked), and the matrix
     /// generation a tweak's was counted at.
     summaries: HashMap<(String, String, bool), (u64, String)>,
+    /// The light and Agent settings (`ui::agent`).
+    pub agent: super::agent::AgentUi,
 }
 
 impl CollabUi {
@@ -66,7 +68,9 @@ enum Do {
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.poll_collab(false);
+    app.poll_agent();
     draw_conflicts(ctx, app);
+    super::agent::draw_settings(ctx, app);
     if !app.ui_state.panels.collab_open {
         // Let go of "compare" even with the window shut.
         app.set_preview_blink(false);
@@ -122,6 +126,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 }
 
 fn header(ui: &mut egui::Ui, app: &mut App, todo: &mut Vec<Do>, blink: &mut bool) {
+    super::agent::light_row(ui, app);
     let dir = app.collab_dir_shown();
     let resp = ui.add(
         egui::Label::new(egui::RichText::new(format!("Thread: {}", dir.display())).small().weak())
@@ -232,8 +237,10 @@ fn messages(ui: &mut egui::Ui, app: &mut App, todo: &mut Vec<Do>) {
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(
-                "No messages about this scene yet. Send a request below, then point an agent \
-                 at it:\n\n  fracturize -s <scene> --thread\n  fracturize -s <scene> --wait-reply",
+                "No messages about this scene yet. Send a request below: whoever Agent settings \
+                 names answers it, a Claude session you started, Claude run headless, or a \
+                 local model. With files only, an agent reads it with\n\n  fracturize -s \
+                 <scene> --thread\n  fracturize -s <scene> --wait-reply",
             )
             .weak(),
         );
@@ -261,10 +268,15 @@ fn message(ui: &mut egui::Ui, app: &mut App, thread: &Thread, m: &Message, me: &
     let mine = h.from == me;
     let state = if m.withdrawn.is_some() {
         "withdrawn"
-    } else if h.kind == Kind::Response {
+    } else if matches!(h.kind, Kind::Response | Kind::Note) {
         ""
     } else if thread.waiting(m) {
-        if mine { "waiting on them" } else { "waiting on you" }
+        // What the agent has done with it, where the window knows.
+        match app.message_state(m).filter(|_| mine) {
+            Some(s) => s,
+            None if mine => "waiting on them",
+            None => "waiting on you",
+        }
     } else {
         "answered"
     };
