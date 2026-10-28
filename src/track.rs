@@ -33,10 +33,6 @@
 //! [`Extrapolate::fold`] is the one time-folding function; `CameraPath::sample`
 //! folds by the same rule.
 //!
-//! The old spelling — `[camera] path_loop / path_seconds / path_ease /
-//! path_zoom_periods` with `[[camera.path]]` keypoints — still loads, its keys
-//! placed when the old flight passed them, and saving writes the track.
-//!
 //! # Evaluating: the scene at time `t` is the scene with `-S` applied
 //!
 //! [`Animator`] holds the scene as TOML (with its `[[track]]` tables taken
@@ -118,10 +114,10 @@ impl Extrapolate {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "hold" | "once" => Some(Self::Hold),
-            "repeat" | "loop" | "closed" => Some(Self::Repeat),
-            "pingpong" | "ping-pong" => Some(Self::PingPong),
-            "offset" | "repeat-offset" => Some(Self::Offset),
+            "hold" => Some(Self::Hold),
+            "repeat" => Some(Self::Repeat),
+            "pingpong" => Some(Self::PingPong),
+            "offset" => Some(Self::Offset),
             _ => None,
         }
     }
@@ -771,7 +767,6 @@ impl TrackDef {
         }
         let kind = match self.extrapolate.as_deref() {
             None => LoopKind::Once,
-            Some("zoom") => LoopKind::Zoom,
             Some(s) => match Extrapolate::parse(s) {
                 Some(Extrapolate::Hold) => LoopKind::Once,
                 Some(Extrapolate::PingPong) => LoopKind::PingPong,
@@ -809,11 +804,11 @@ impl TrackDef {
                     ));
                 }
             };
-            let v = &v;
-            let t = v.t.filter(|t| t.is_finite()).ok_or_else(|| {
-                format!("{who}: key {} has no `t` — when, in seconds, the camera is there", i + 1)
-            })?;
-            if let Some(prev) = out.last().and_then(|p: &crate::scene::PathKeyDef| p.t) {
+            let t = v.t;
+            if !t.is_finite() {
+                return Err(format!("{who}: key {}'s `t` must be a number of seconds", i + 1));
+            }
+            if let Some(prev) = out.last().map(|p: &crate::scene::PathKeyDef| p.t) {
                 if t <= prev {
                     return Err(format!(
                         "{who}: keys must be in time order, each later than the last \
@@ -821,7 +816,7 @@ impl TrackDef {
                     ));
                 }
             }
-            out.push(*v);
+            out.push(v);
         }
         if out.is_empty() {
             return Err(format!("{who}: no keys"));
@@ -843,8 +838,7 @@ impl TrackDef {
             ),
             Some(p) => {
                 let keys = self.camera_keys()?;
-                let span = keys.last().and_then(|k| k.t).unwrap_or(0.0)
-                    - keys.first().and_then(|k| k.t).unwrap_or(0.0);
+                let span = keys.last().map_or(0.0, |k| k.t) - keys.first().map_or(0.0, |k| k.t);
                 if p <= span {
                     return Err(format!(
                         "the camera track: `period` {p} must be longer than its keys' span \

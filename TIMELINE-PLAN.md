@@ -83,13 +83,14 @@ What was settled, against the questions below:
 - **The file**: `[[track]] target = "camera"`, `extrapolate` (hold / pingpong /
   repeat / offset = the zoom loop), `period` (a loop's lap), `zoom_periods`,
   `ease`, then `[[track.keys]]` tables with `t` and a view's camera fields.
-  Written first among the tracks; comments on the old `[[camera.path]]` keys
-  move onto the new ones. The old spelling still loads.
+  Written first among the tracks. Every scene in the repo, and every render's
+  embedded scene, was ported (comments kept), and the old reader deleted: the
+  project is pre-alpha, and code is a cost.
 - **Easing** is now coming to rest at the first and last key (zero end
   tangents), not a smoothstep on the whole lap, so every key is passed at its
-  own time. Old eased paths load with their keys placed when the smoothstep
-  passed them, so they fly nearly as before (ammonite,
-  taking_a_line_for_an_orbit and random-1785761947 are the shipped ones).
+  own time. The eased scenes were ported with their keys placed when the
+  smoothstep passed them, so they fly nearly as before (ammonite,
+  taking_a_line_for_an_orbit, random-1785761947, lemniscate_2).
 - **The default orbit** stays four quarter-turn keys on a repeat, never
   written until edited.
 - **Views as keys**: yes — the Timeline keys the framing on screen, or a saved

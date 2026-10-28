@@ -90,7 +90,7 @@ distance = 3.0
 focus = [0.0, 0.0, 0.0]
 
 [[track.keys]]
-t = 17.9984
+t = 18.0
 yaw = 0.0
 pitch = 1.42
 distance = 0.0117

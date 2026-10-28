@@ -2640,15 +2640,6 @@ distance = 3.4
 yaw = 0.0
 pitch = 1.12
 focus = [0.0, 0.0, 0.0]
-path_loop = "closed"
-path_seconds = 8.0
-[[camera.path]]
-yaw = 0.0
-pitch = 0.4
-[[camera.path]]
-yaw = 1.5708
-pitch = 0.4
-turns = 1
 
 [palette]
 interpolate = "oklab"
@@ -2691,6 +2682,20 @@ weight = 0.09
 map = "bough"
 radius = 3.2
 levels = 14
+
+[[track]]
+target = "camera"
+extrapolate = "repeat"
+period = 8.0
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 0.4
+[[track.keys]]
+t = 4.0
+yaw = 1.5708
+pitch = 0.4
+turns = 1
 "##;
 
     /// Write the fixture somewhere `Scene::load_reporting` can read it —

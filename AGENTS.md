@@ -1734,9 +1734,7 @@ roll = 0.0                # optional: rotation about the view axis, radians
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
 # into the framing/distance and never written back
 # The camera's motion is its track: `[[track]] target = "camera"`, below with
-# the others. `path_loop`, `path_seconds`, `path_ease`, `path_zoom_periods`
-# and `[[camera.path]]` keypoints are its old spelling: they still load (keys
-# placed when the old flight passed them) and saving writes the track.
+# the others.
 
 [zoom]                    # optional: infinite zoom (see "Infinite Zoom")
 map = "whorl"             # a transform name, or its index as a string
@@ -1801,8 +1799,8 @@ extrapolate = "repeat"    # what happens after the last key:
                           #   period = <s>, the lap back round to key 1, so the
                           #              way home is whatever the last key leaves
                           #   "offset"   close under the [zoom] symmetry, so it
-                          #              loops as an endless zoom ("zoom" works
-                          #              too); zoom_periods = N periods a lap
+                          #              loops as an endless zoom;
+                          #              zoom_periods = N periods a lap
 period = 14.0
 # ease = true             # come to rest at the first and last key; default on
                           # for hold and pingpong, meaningless on the loops

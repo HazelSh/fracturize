@@ -188,26 +188,6 @@ pub enum LoopKind {
 }
 
 impl LoopKind {
-    /// The scene-file spelling.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Once => "once",
-            Self::PingPong => "pingpong",
-            Self::Closed => "closed",
-            Self::Zoom => "zoom",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "once" | "open" => Some(Self::Once),
-            "pingpong" | "ping-pong" => Some(Self::PingPong),
-            "closed" | "loop" => Some(Self::Closed),
-            "zoom" => Some(Self::Zoom),
-            _ => None,
-        }
-    }
-
     /// A phrase for logs, `--info` and the CLI.
     pub fn label(self) -> &'static str {
         match self {
@@ -354,8 +334,7 @@ pub struct CameraPath {
     ///
     /// A key is a view at a moment, as every other track's key is a value at
     /// a moment. Empty (or the wrong length, mid-edit) means the keys are
-    /// spaced [`KEY_SPACING`] apart from 0, which is what a path authored
-    /// before keys had times meant by leaving `path_seconds` out.
+    /// spaced [`KEY_SPACING`] apart from 0.
     pub times: Vec<f32>,
     /// A looping path's lap, in seconds: from the first key round to
     /// arriving back at it (`Closed`), or at its image under the zoom
@@ -486,9 +465,8 @@ impl CameraPath {
     }
 
     /// Scale every key's time (and the period) so that playback takes
-    /// `seconds`, keeping the first key where it is. How a path written with
-    /// `path_seconds` gets its key times, and what the Camera window's
-    /// duration field does.
+    /// `seconds`, keeping the first key where it is: the Camera window's
+    /// duration field.
     pub fn retime_to(&mut self, seconds: f32) {
         let k = seconds.max(0.1) / self.duration();
         let t0 = self.start();
@@ -497,33 +475,6 @@ impl CameraPath {
             self.period = Some(self.lap() * k);
         }
         self.times = times;
-    }
-
-    /// Key times for a path written before keys had them: evenly spaced in
-    /// path time over `seconds` (or 3s a segment traversed), and, where the
-    /// path eased, moved to when the camera actually passed each key. Easing
-    /// was a smoothstep on the whole lap then, so key `i` was reached at
-    /// `smoothstep⁻¹(i / segments)` of it; with those times and easing as
-    /// coming to rest at the ends, the flight is close to what it was and the
-    /// file says truthfully when each view is seen.
-    pub fn legacy_times(&mut self, seconds: Option<f32>) {
-        let segs = self.segments().max(1);
-        let total = seconds.unwrap_or(KEY_SPACING * segs as f32 * self.loops.passes()).max(0.1);
-        let lap = total / self.loops.passes();
-        let eased = self.eased() && !self.loops.closes();
-        let unease = |x: f32| {
-            if !eased {
-                return x;
-            }
-            let (mut lo, mut hi) = (0.0f32, 1.0f32);
-            for _ in 0..40 {
-                let m = 0.5 * (lo + hi);
-                if m * m * (3.0 - 2.0 * m) < x { lo = m } else { hi = m }
-            }
-            0.5 * (lo + hi)
-        };
-        self.times = (0..self.keys.len()).map(|i| lap * unease(i as f32 / segs as f32)).collect();
-        self.period = self.loops.closes().then_some(lap);
     }
 
     /// The seconds each segment lasts, `i` wrapping like [`segment_turn`].
@@ -1166,50 +1117,6 @@ mod golden {
             yaws
         );
         let _ = std::fs::remove_file(&tmp);
-    }
-
-    /// How far each scene in `FRACTURIZE_FLIGHT_DIR` flies from the recorded
-    /// golden of the scene with the same name, whatever its hash says: the
-    /// check that a format migration moved no flight. Run deliberately:
-    ///     FRACTURIZE_FLIGHT_DIR=/tmp/migrated cargo test --release \
-    ///         flights_against_golden -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn flights_against_golden() {
-        let Ok(dir) = std::env::var("FRACTURIZE_FLIGHT_DIR") else { return };
-        let stored = std::fs::read_to_string(GOLDEN).unwrap();
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
-            .collect();
-        files.sort();
-        for file in files {
-            let name = file.file_stem().unwrap().to_string_lossy().into_owned();
-            let was: Vec<Vec<f64>> = stored
-                .lines()
-                .filter(|l| l.starts_with(&format!("{name} ")) && !l.contains(" -- "))
-                .map(|l| l.split(' ').skip(2).filter_map(|x| x.parse().ok()).collect())
-                .collect();
-            if was.is_empty() {
-                eprintln!("{name:<28} not in the golden");
-                continue;
-            }
-            let scene = crate::scene::Scene::load(&file).unwrap();
-            let base = scene.camera();
-            let default = CameraPath::full_orbit(&base);
-            let path = resolve(scene.camera_path.as_ref(), &default);
-            let mut drift = 0.0f64;
-            for (i, w) in was.iter().enumerate() {
-                let cam = path.sample(i as f32 / SAMPLES as f32, Fov::default());
-                let (e, f, u) = (cam.eye(), cam.forward(), cam.up());
-                let now = [e.x, e.y, e.z, f.x, f.y, f.z, u.x, u.y, u.z, cam.distance];
-                for (a, b) in w.iter().zip(now) {
-                    drift = drift.max((a - b as f64).abs());
-                }
-            }
-            eprintln!("{name:<28} max drift {drift:.6}");
-        }
     }
 
     #[test]

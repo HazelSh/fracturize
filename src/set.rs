@@ -247,13 +247,6 @@ const CAMERA_FIELDS: &[&str] = struct_fields!(
     pitch,
     roll,
     rotvec,
-    path_loop,
-    path_zoom_periods,
-    path_seconds,
-    path_ease,
-    path_closed,
-    path_zoom_loop,
-    path,
 );
 const ZOOM_FIELDS: &[&str] = struct_fields!(
     _assert_zoom_def_exhaustive,
