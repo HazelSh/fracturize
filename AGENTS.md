@@ -4403,7 +4403,7 @@ app = subprocess.Popen(['./target/release/fracturize', '--scene', scene], env=en
 d = display.Display(':79')                      # python-xlib; there is no xdotool
 ```
 
-Five things that will each cost you a run:
+Six things that will each cost you a run, or cost Hazel her desktop:
 
 - **Capture the Xephyr *root*, not the app's window.** `get_image` on the app's
   own window returns blank — it is a GL surface and its contents are not in the
@@ -4419,6 +4419,16 @@ Five things that will each cost you a run:
   the app keyboard focus and XTest key events go nowhere — silently, with no
   log line. Pointer events are fine. Drive an action through its button (Undo
   and Redo are on the toolbar), or `set_input_focus` on the app's window first.
+- **Stop what you started, by the PID you started, and check it's gone.**
+  Xephyr is a real window on Hazel's desktop, and one left running sits there
+  until she asks whose it is (2026-10-30: a cleanup step that found it again
+  by matching its command line didn't kill it, and nothing checked). Keep the
+  handles from launch — `xe.kill()` / `app.kill()` on the `Popen` objects
+  above, or `$!` saved from a shell — rather than searching at the end, and
+  never `pkill -f`, whose pattern matches your own shell. Then confirm:
+  `pgrep -x Xephyr` and `pgrep -x fracturize` should show nothing of yours
+  (Hazel may have her own fracturize open; compare PIDs). A cleanup you didn't
+  verify is a cleanup you didn't do.
 - **To hold the camera still, load a view with `-v`, not a keystroke.** Applying
   a view pauses the orbit as a documented side effect. Toggling camera motion
   with `o` depends on focus having landed where you assumed, and when it
