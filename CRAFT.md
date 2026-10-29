@@ -988,3 +988,17 @@ recorded dead end is worth as much as a recipe.
   rendering; reading eight moments was enough to find that Parasol's own
   framing crops the canopy once the lace grows.
 
+
+- **2026-10-29, Hazel (measured by Opus 5.5). A collapse is fixed by a turn,
+  not by more.** When a scene falls to a point or a line, the fix that works
+  is to turn one map well round (30-90°, about an axis across the line; a turn
+  about the line itself does nothing) and move the maps away from the origin
+  and each other. Two plain `linear` maps at ±(0.5, 0.5, 0), scale 0.5: a
+  line. Turn one (60, 0, 45) and pull them apart, and the line breaks into 3D
+  specks (z spread 0 → 0.45) but stays at dimension 1, since two maps at 0.5
+  can't be more than a curve. Raise both to 0.72 (§ the scale table: two maps
+  want about 0.7) and it grows into a branching 3D dragon form, dimension
+  2.11. Raising the scale *without* the turn leaves it a line. Small models
+  reach for more maps and variations here, and the old advice ("turn a map a
+  few degrees") was too timid to work; the primer and `--info`'s collapse
+  notes now say this.

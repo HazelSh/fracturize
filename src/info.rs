@@ -1141,7 +1141,8 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
         notes.add(
             "shape",
             "the attractor is a single point: every map fixes the same point, \
-             so the walk never leaves it — give the maps different translations",
+             so the walk never leaves it — give the maps different translations, \
+             away from the origin, and turn one of them 30-90°",
         );
         s.text(format!("{:<19} n/a: a single point", "to fill the frame"));
         s.text(format!("{:<19} n/a: a single point", "for crisp points"));
@@ -1154,7 +1155,8 @@ fn shape_section(subject: &Subject, effective: &crate::camera::OrbitCamera, note
             notes.add(
                 "shape",
                 "the attractor is nearly a line: every copy falls along one \
-                 direction — turn a map a few degrees, or add one off that line",
+                 direction — turn one map 30-90° about an axis across the line, \
+                 and move the maps away from the origin",
             );
         }
         s.text(format!("{:<19} -S camera.distance={:.2}", "to fill the frame", framed));

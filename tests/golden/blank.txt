@@ -3,8 +3,8 @@ scene    untitled                                                      --blank
 
 notes    3
          shape   the attractor is nearly a line: every copy falls along one
-                 direction — turn a map a few degrees, or add one off that
-                 line
+                 direction — turn one map 30-90° about an axis across the
+                 line, and move the maps away from the origin
          render  point_size 0.0120 is over the 0.0045 crisp bound at 1080p
          colour  the gradient is flat (swing 0.02) — renders unshaded
 
