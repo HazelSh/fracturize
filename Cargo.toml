@@ -46,6 +46,11 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 bytemuck = { version = "1.19", features = ["derive"] }
 half = { version = "2.4", features = ["bytemuck"] }
 
+# Opening a finished render in the system's own viewer: ShellExecute on
+# Windows, `open` on macOS, xdg-open (with gio/kde fallbacks, and WSL) on Linux.
+# Each platform's rules for this are fiddly, and the crate is small.
+open = "5"
+
 # Image output
 image = "0.25"
 # Direct, for PNG text chunks: `image`'s convenience wrapper has no passthrough

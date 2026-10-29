@@ -995,13 +995,11 @@ pub struct App {
 
     /// The running render job, if any (see `start_job`). One at a time.
     job: Option<JobHandle>,
-    /// The last finished job's outcome, kept so the dialog can report it
-    /// after the handle is gone.
-    /// The last finished job: where it was written and whether it ran to the
-    /// target, or why it failed. Carrying [`crate::render_job::Outcome`]
-    /// rather than a bare path is what stops a render stopped at 40% being
-    /// reported as a finished one — every display site has to say which it was.
-    job_done: Option<Result<(std::path::PathBuf, crate::render_job::Outcome), String>>,
+    /// The last finished job, kept so the dialog can report it after the
+    /// handle is gone. Its result carries [`crate::render_job::Outcome`]
+    /// rather than a bare path, which is what stops a render stopped at 40%
+    /// being reported as a finished one — every display site has to say which.
+    job_done: Option<crate::render_job::FinishedJob>,
     /// Why the last launch was refused (memory limit, bad size) — set instead
     /// of starting, so the dialog can say why rather than doing nothing.
     job_error: Option<String>,
@@ -4642,6 +4640,7 @@ impl App {
             return;
         }
         self.job_error = None;
+        self.job_done = None;
         // The camera keeps flying. The job takes a *snapshot* — `current_view`
         // below, and a clone of the scene — and everything after that runs on
         // its own thread and device, so there is no moving target to protect
@@ -4662,7 +4661,13 @@ impl App {
                 Ok((p, _)) => log::info!("View descriptor written: {}", p.display()),
                 Err(e) => log::error!("View descriptor failed: {}", e),
             }
-            self.job_done = Some(result);
+            self.job_done = Some(crate::render_job::FinishedJob {
+                result,
+                params,
+                secs: 0.0,
+                log: Vec::new(),
+                seen: false,
+            });
             return;
         }
 
@@ -4911,8 +4916,15 @@ impl App {
                 Err(e) if e == CANCELLED => log::info!("Render job cancelled, nothing written"),
                 Err(e) => log::error!("Render job failed: {}", e),
             }
-            self.job = None;
-            self.job_done = Some(result);
+            if let Some(job) = self.job.take() {
+                self.job_done = Some(crate::render_job::FinishedJob {
+                    result,
+                    secs: job.working_elapsed(),
+                    params: job.params,
+                    log: job.log,
+                    seen: false,
+                });
+            }
         }
     }
 
@@ -4926,10 +4938,16 @@ impl App {
     }
 
     /// The last finished job's outcome, shown until the next one starts.
-    pub fn job_done(
-        &self,
-    ) -> Option<&Result<(std::path::PathBuf, crate::render_job::Outcome), String>> {
+    pub fn job_done(&self) -> Option<&crate::render_job::FinishedJob> {
         self.job_done.as_ref()
+    }
+
+    /// The dialog has shown the finished job, so the status bar stops
+    /// announcing it.
+    pub fn mark_job_seen(&mut self) {
+        if let Some(done) = self.job_done.as_mut() {
+            done.seen = true;
+        }
     }
 
     /// Why the last launch attempt was refused, if it was.
@@ -6828,6 +6846,18 @@ impl App {
         }
         self.prefs.threads = Some(n);
         self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// The render-job preset last chosen, by name: what the dialog opens on.
+    pub fn render_preset(&self) -> Option<&str> {
+        self.prefs.render_preset.as_deref()
+    }
+
+    pub fn set_render_preset(&mut self, name: Option<String>) {
+        if self.prefs.render_preset != name {
+            self.prefs.render_preset = name;
+            self.prefs_dirty_since = Some(std::time::Instant::now());
+        }
     }
 
     /// Fraction of the GPU a render job may take. See [`prefs::Prefs::gpu_share`].

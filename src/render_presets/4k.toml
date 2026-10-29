@@ -1,0 +1,12 @@
+description = "A finished 4K still: 3840×2160 at 1,000 samples a pixel"
+output = "still"
+width = 3840
+height = 2160
+samples = "accumulate"
+spp = 1000
+rounds = 96
+supersample = 2
+filter = "gaussian"
+filter_radius = 0.5
+density_estimation = 0.0
+bit_depth = 8

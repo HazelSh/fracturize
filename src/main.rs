@@ -43,6 +43,7 @@ mod random_list;
 mod record;
 mod renorm;
 mod render_job;
+mod render_preset;
 mod rot;
 mod ui;
 mod version;

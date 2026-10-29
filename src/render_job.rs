@@ -733,6 +733,34 @@ impl Outcome {
     }
 }
 
+/// A job that has ended, kept after its handle is gone.
+///
+/// Kept whole — what was asked for, how long it worked, its log — because the
+/// dialog reports on it *after* the fact, and very often after it was closed
+/// while the job ran (it says the render keeps going without it, and it does).
+/// The dialog used to snapshot the kind and a start time itself when Start was
+/// clicked, which could only measure the time if the dialog happened to be
+/// open at the finish, and could not show the log at all.
+#[derive(Clone, Debug)]
+pub struct FinishedJob {
+    /// Where it was written and whether it ran to the target, or why it failed.
+    pub result: Result<(PathBuf, Outcome), String>,
+    pub params: JobParams,
+    /// Working seconds, pauses left out.
+    pub secs: f32,
+    pub log: Vec<String>,
+    /// Whether the dialog has shown it. Until it has, the status bar says a
+    /// render finished: one closed while it ran has nowhere else to say so.
+    pub seen: bool,
+}
+
+impl FinishedJob {
+    /// The file it wrote, if it wrote one.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.result.as_ref().ok().map(|(p, _)| p.as_path())
+    }
+}
+
 /// Bytes as something a person can compare against a GPU spec sheet.
 pub fn human_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;

@@ -1,0 +1,11 @@
+description = "A quick look at the animation: 854×480, 24 fps MP4, 8M points"
+output = "mp4"
+width = 854
+height = 480
+points = 8000000
+rounds = 96
+supersample = 1
+filter = "gaussian"
+filter_radius = 0.5
+fps = 24
+quality = 50

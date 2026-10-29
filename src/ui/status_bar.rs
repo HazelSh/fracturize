@@ -154,6 +154,28 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         // while you watched them.
                         num::text_cell(ui, &text, JOB_CHARS);
                         ui.spinner();
+                    } else if let Some(done) = app.job_done().filter(|d| !d.seen) {
+                        // A job finished with its window closed has nowhere
+                        // else to say so: the dialog told you to close it and
+                        // watch here. Stays until the result has been shown.
+                        let (text, color) = match &done.result {
+                            Ok((_, o)) if o.is_partial() => ("render stopped early", super::theme::warn(ui.visuals())),
+                            Ok(_) => ("render done", super::theme::SUCCESS),
+                            Err(_) => ("render failed", super::theme::error(ui.visuals())),
+                        };
+                        ui.add_space(10.0);
+                        let resp = ui.add(
+                            egui::Button::new(egui::RichText::new(text).color(color)).frame(false),
+                        );
+                        let resp = hinted(
+                            resp,
+                            &mut app.ui_state,
+                            "A render job has finished. Click to see it, and to open the file.",
+                            "click: show the finished render",
+                        );
+                        if resp.clicked() {
+                            super::render_job::open(app);
+                        }
                     }
 
                     ui.add_space(6.0);

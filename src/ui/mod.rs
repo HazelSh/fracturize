@@ -293,6 +293,7 @@ pub enum WindowKey {
     Xaos,
     Collab,
     Timeline,
+    RenderJob,
 }
 
 impl WindowKey {
@@ -311,6 +312,7 @@ impl WindowKey {
             Self::Xaos => "xaos",
             Self::Collab => "collab",
             Self::Timeline => "timeline",
+            Self::RenderJob => "render_job",
         }
     }
 
@@ -362,6 +364,8 @@ impl WindowKey {
             Self::Mutate => egui::vec2(360.0, 340.0),
             // The transport row, the ruler and the camera's row.
             Self::Timeline => egui::vec2(560.0, 140.0),
+            // The preset bar above and Start below, with a few rows between.
+            Self::RenderJob => egui::vec2(380.0, 360.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -424,6 +428,11 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
             egui::pos2((right_x - 400.0).max(20.0), top + 380.0),
             egui::vec2(380.0, 380.0),
         ),
+        // Tall enough to show the whole form on most screens.
+        WindowKey::RenderJob => (
+            egui::pos2(360.0, top + 30.0),
+            egui::vec2(460.0, (screen.height() - top - 80.0).clamp(360.0, 760.0)),
+        ),
         // Wide and low, docked above the status bar: time runs left to right,
         // and wants all the width there is.
         WindowKey::Timeline => {
@@ -457,6 +466,19 @@ pub fn window(ctx: &egui::Context, app: &crate::app::App, key: WindowKey, title:
         .default_size(size)
         .min_size(min)
         .resizable(true)
+}
+
+/// A titled section of a settings window: a heading that folds what is under
+/// it away. Open to start with, and remembered once folded. `window` keeps two
+/// windows' sections of the same name apart, and the id is salted by the
+/// title's first word, so a title carrying a count keeps its state.
+pub fn section(ui: &mut egui::Ui, window: &str, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let salt = title.split(' ').next().unwrap_or(title).to_string();
+    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+        .id_salt((window.to_string(), salt))
+        .default_open(true)
+        .show(ui, add);
+    ui.add_space(4.0);
 }
 
 /// Read a panel's current rect back out of egui and remember it, so the

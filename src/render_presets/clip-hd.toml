@@ -1,0 +1,11 @@
+description = "A finished 1080p animation to upload: 30 fps MP4, 40M points, supersampled 2×"
+output = "mp4"
+width = 1920
+height = 1080
+points = 40000000
+rounds = 96
+supersample = 2
+filter = "gaussian"
+filter_radius = 0.5
+fps = 30
+quality = 60

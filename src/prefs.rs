@@ -163,6 +163,11 @@ pub struct Prefs {
     /// — it silently resets every preference the person has.
     #[serde(default)]
     pub gpu_share: Option<f32>,
+    /// The render-job preset last chosen, by name (`render_preset::list`), so
+    /// the dialog opens on it. A preset is quality, not a machine setting, but
+    /// which one you reach for is a habit that follows you between scenes.
+    #[serde(default)]
+    pub render_preset: Option<String>,
     /// Folders added to the scene browser's places, after the built-in ones
     /// (`scene_browser::builtin_places`).
     #[serde(default)]
@@ -203,6 +208,7 @@ impl Default for Prefs {
             point_count: None,
             threads: None,
             gpu_share: None,
+            render_preset: None,
             browser_places: Vec::new(),
             browser_folder: None,
             browser_sort: Default::default(),
