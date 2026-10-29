@@ -493,6 +493,8 @@ struct Env {
     limit: u64,
     volume: bool,
     grade: Option<String>,
+    /// The window's size, for the render's shape to be compared against.
+    window: (u32, u32),
 }
 
 fn draw_setup(ui: &mut egui::Ui, app: &mut App) {
@@ -512,6 +514,7 @@ fn draw_setup(ui: &mut egui::Ui, app: &mut App) {
         limit: app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT,
         volume: app.render_mode == crate::app::RenderMode::Volume,
         grade: inherited_grade(app),
+        window: app.surface_size(),
     };
     // The form is drawn on its own, beside the hint state, rather than through
     // `app`: the tables hand their rows `&mut UiState`, which lives in `app`.
@@ -544,11 +547,9 @@ fn sections(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &En
         );
         return;
     }
-    super::section(ui, SECTIONS, "Size", |ui| size(ui, st, f));
+    super::section(ui, SECTIONS, "Size", |ui| size(ui, st, f, env));
     super::section(ui, SECTIONS, "Quality", |ui| quality(ui, st, f, env));
-    if f.mode == Mode::Animation {
-        super::section(ui, SECTIONS, "Animation", |ui| animation(ui, st, f));
-    }
+    super::section(ui, SECTIONS, "Animation", |ui| animation(ui, st, f));
     super::section(ui, SECTIONS, "Look", |ui| look(ui, st, f, env));
     super::section(ui, SECTIONS, "This machine", |ui| machine(ui, st, f, env));
 }
@@ -559,55 +560,118 @@ fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
 
 /// The two columns every table here has: what, and its control.
 const SETTING_VALUE: [Col<'static>; 2] = [
-    Col::name("Setting", "What the control sets. A row greys while it doesn't apply, and says why on hover."),
+    Col::name(
+        "Setting",
+        "What the control sets. A row indented under another depends on it; a greyed row says \
+         what it needs beside its name.",
+    ),
     Col::new("Value", "Drag, or click to type an exact value", VALUE_W),
 ];
 
 /// A switch table: what, and on or off.
 const SETTING_TICK: [Col<'static>; 2] = [
-    Col::name("Setting", "What the switch does. A row greys while it doesn't apply, and says why on hover."),
+    Col::name("Setting", "What the switch does. A greyed row says what it needs beside its name."),
     Col::tick("On", "Ticked, it's on"),
 ];
 
-/// One row: a name greyed when `on` is false, and its control.
+/// How far a dependent row's name is indented, per level.
+const INDENT: f32 = 12.0;
+
+/// A row's name, and how it stands with the rows it depends on.
+///
+/// Which controls switch which others used to be said only on hover. Two
+/// things say it on the page now: a row that depends on the one above is
+/// **indented** under it, and a row that can't be used says **what it needs**
+/// beside its name, in words that name the control that would free it
+/// ("needs Samples: accumulate", "stills only"). The note is a short form of the
+/// tooltip, which still has the whole reason.
+#[derive(Clone, Copy)]
+struct Name<'a> {
+    text: &'a str,
+    depth: u8,
+    on: bool,
+    note: Option<&'a str>,
+}
+
+fn name(text: &str) -> Name<'_> {
+    Name { text, depth: 0, on: true, note: None }
+}
+
+impl<'a> Name<'a> {
+    /// Indented under the row it depends on.
+    fn under(self, depth: u8) -> Self {
+        Self { depth, ..self }
+    }
+
+    /// Greyed, saying what it needs, unless `needs` is `None`.
+    fn needs(self, needs: Option<&'a str>) -> Self {
+        Self { on: needs.is_none(), note: needs, ..self }
+    }
+
+    /// A note shown without greying the row: for a control only part of
+    /// which is unavailable, like one segment of a radio.
+    fn note(self, note: Option<&'a str>) -> Self {
+        Self { note, ..self }
+    }
+
+    /// The name, and the note beside it unless the caller shows it elsewhere.
+    fn draw(self, ui: &mut egui::Ui, st: &mut UiState, tip: &str, with_note: bool) {
+        ui.add_space(self.depth as f32 * INDENT);
+        ui.add_enabled_ui(self.on, |ui| {
+            let resp = ui.add(egui::Label::new(self.text).sense(egui::Sense::hover()));
+            hinted(resp, st, tip, self.text);
+        });
+        if let Some(note) = self.note.filter(|_| with_note) {
+            note_label(ui, st, note, tip, self.text);
+        }
+    }
+}
+
+fn note_label(ui: &mut egui::Ui, st: &mut UiState, note: &str, tip: &str, name: &str) {
+    let resp = ui.add(egui::Label::new(egui::RichText::new(note).small().weak()).sense(egui::Sense::hover()));
+    hinted(resp, st, tip, name);
+}
+
+/// One row: its name, and its control.
+///
+/// A row that can't be used shows what it needs **in place of its control**:
+/// the control's value means nothing while it doesn't apply, the value column
+/// has the room to name the row that would free it, and beside a long name at
+/// a deep indent the note was cut off. The row, its name and its tooltip stay,
+/// so the feature still says it exists.
 fn row(
     body: &mut egui_extras::TableBody<'_>,
     st: &mut UiState,
-    on: bool,
-    name: &str,
+    name: Name<'_>,
     tip: &str,
     value: impl FnOnce(&mut egui::Ui, &mut UiState),
 ) {
     let h = table::row_height(body.ui_mut());
+    let in_value = (!name.on).then_some(name.note).flatten();
     body.row(h, |mut row| {
-        row.col(|ui| {
-            ui.add_enabled_ui(on, |ui| {
-                let resp = ui.add(egui::Label::new(name).sense(egui::Sense::hover()));
-                hinted(resp, st, tip, name);
-            });
-        });
+        row.col(|ui| name.draw(ui, st, tip, in_value.is_none()));
         row.col(|ui| {
             ui.spacing_mut().slider_width = VALUE_W - 70.0;
-            ui.add_enabled_ui(on, |ui| value(ui, st));
+            match in_value {
+                Some(note) => note_label(ui, st, note, tip, name.text),
+                None => {
+                    ui.add_enabled_ui(name.on, |ui| value(ui, st));
+                }
+            }
         });
     });
 }
 
 /// A switch row.
-fn tick_row(body: &mut egui_extras::TableBody<'_>, st: &mut UiState, on: bool, name: &str, tip: &str, value: &mut bool) -> bool {
+fn tick_row(body: &mut egui_extras::TableBody<'_>, st: &mut UiState, name: Name<'_>, tip: &str, value: &mut bool) -> bool {
     let h = table::row_height(body.ui_mut());
     let mut changed = false;
     body.row(h, |mut row| {
+        row.col(|ui| name.draw(ui, st, tip, true));
         row.col(|ui| {
-            ui.add_enabled_ui(on, |ui| {
-                let resp = ui.add(egui::Label::new(name).sense(egui::Sense::hover()));
-                hinted(resp, st, tip, name);
-            });
-        });
-        row.col(|ui| {
-            ui.add_enabled_ui(on, |ui| {
+            ui.add_enabled_ui(name.on, |ui| {
                 let resp = table::tick(ui, value);
-                changed = hinted(resp, st, tip, &format!("click: {name}")).changed();
+                changed = hinted(resp, st, tip, &format!("click: {}", name.text)).changed();
             });
         });
     });
@@ -675,7 +739,8 @@ fn output(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
         } else {
             "Only for stills: video is 8 bits by codec."
         };
-        if tick_row(body, st, still, "16-bit PNG", tip, &mut sixteen) {
+        let only = (!still).then_some("stills only");
+        if tick_row(body, st, name("16-bit PNG").needs(only), tip, &mut sixteen) {
             f.bit_depth =
                 if sixteen { crate::offline::BitDepth::Sixteen } else { crate::offline::BitDepth::Eight };
         }
@@ -684,20 +749,21 @@ fn output(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
         } else {
             "Animations can't have a transparent background"
         };
-        tick_row(body, st, still, "Transparent background", tip, &mut f.transparent);
+        tick_row(body, st, name("Transparent background").needs(only), tip, &mut f.transparent);
     });
 }
 
-fn size(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
+fn size(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
+    let (ww, wh) = env.window;
     table::show(ui, st, "fracturize_render_job_size", &SETTING_VALUE, |body, st| {
-        row(body, st, true, "Width × height", "The output size in pixels", |ui, st| {
+        row(body, st, name("Width × height"), "The output size in pixels", |ui, st| {
             let resp = ui.add(num::Drag::new(&mut f.width).range(16..=16384));
             hinted(resp, st, "Output width in pixels", "drag: output width");
             ui.label("×");
             let resp = ui.add(num::Drag::new(&mut f.height).range(16..=16384));
             hinted(resp, st, "Output height in pixels", "drag: output height");
         });
-        row(body, st, true, "Common size", "Pick a standard size", |ui, st| {
+        row(body, st, name("Common size"), "Pick a standard size, or the window's shape", |ui, st| {
             let current = SIZE_PRESETS
                 .iter()
                 .find(|(_, w, h)| (*w, *h) == (f.width, f.height))
@@ -706,19 +772,76 @@ fn size(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
                 .selected_text(current)
                 .width(VALUE_W - 12.0)
                 .show_ui(ui, |ui| {
-                    for (name, w, h) in SIZE_PRESETS {
-                        let resp = ui.selectable_label((w, h) == (f.width, f.height), format!("{name}  ({w}×{h})"));
+                    let (w, h) = window_shaped(f.width, ww, wh);
+                    let resp = ui.selectable_label(false, format!("the window's shape  ({w}×{h})"));
+                    let tip = "Keep this width and set the height to give the window's shape, so the \
+                               render frames exactly what you see";
+                    if hinted(resp, st, tip, "click: match the window's shape").clicked() {
+                        (f.width, f.height) = (w, h);
+                    }
+                    ui.separator();
+                    for (label, w, h) in SIZE_PRESETS {
+                        let resp = ui.selectable_label((w, h) == (f.width, f.height), format!("{label}  ({w}×{h})"));
                         if hinted(resp, st, &format!("{w}×{h}"), "click: use this output size").clicked() {
                             (f.width, f.height) = (w, h);
                         }
                     }
                 });
-            hinted(combo.response, st, "Pick a standard size, or set your own above", "click: pick a size");
+            hinted(combo.response, st, "Pick a standard size, or the window's shape", "click: pick a size");
+        });
+        let tip = "Width over height. The render keeps the window's vertical view, so its shape \
+                   decides how much is seen at the sides.";
+        row(body, st, name("Aspect ratio"), tip, |ui, _| {
+            ui.label(egui::RichText::new(aspect_label(f.width, f.height)).monospace());
         });
     });
+    // Always one line, so changing the size never moves what's below.
+    caption(ui, &against_window(f.width, f.height, ww, wh)).on_hover_text(
+        "The render keeps the window's vertical field of view: top and bottom match what you \
+         see, and a wider shape shows more at the left and right, a narrower one less.",
+    );
 }
 
-/// Samples, then the smoothing that sits on top of them.
+/// `w:h` in lowest terms when that is a ratio people say (16:9, 4:3, 1:1),
+/// else `1.41:1`.
+fn aspect_label(w: u32, h: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let g = gcd(w, h).max(1);
+    let (a, b) = (w / g, h / g);
+    if a <= 32 && b <= 32 {
+        format!("{a}:{b}")
+    } else {
+        format!("{}:1", num::fixed(w as f32 / h.max(1) as f32, 2))
+    }
+}
+
+/// The render's shape against the window's, in words.
+fn against_window(w: u32, h: u32, ww: u32, wh: u32) -> String {
+    let win = format!("the window ({})", aspect_label(ww, wh));
+    let r = (w as f32 / h.max(1) as f32) / (ww as f32 / wh.max(1) as f32);
+    if (r - 1.0).abs() < 0.01 {
+        format!("Same shape as {win}: it frames what you see.")
+    } else if r > 1.0 {
+        format!("Wider than {win}: shows more at the sides than you see.")
+    } else {
+        format!("Narrower than {win}: cuts off some of the sides.")
+    }
+}
+
+/// `width` kept, the height that gives the window's shape: even, since video
+/// needs even sizes, and within what the size fields take.
+fn window_shaped(width: u32, ww: u32, wh: u32) -> (u32, u32) {
+    let h = (width as f32 * wh as f32 / ww.max(1) as f32 / 2.0).round() as u32 * 2;
+    (width, h.clamp(16, 16384))
+}
+
+/// The renderer and the samples first, then the smoothing on top of them.
+///
+/// The renderer is here, not with the look, because it decides what the
+/// sample choice under it can be: only splat accumulates. It used to sit at
+/// the foot of the form, three sections away from the radio it greyed.
 ///
 /// The two sample modes are a genuine choice rather than a preference, because
 /// they scale in opposite directions and the dialog cannot hide which one you
@@ -730,15 +853,33 @@ fn size(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
 ///   `points / pixels` and falls as the output grows — 21.7 samples/px at 720p
 ///   and 2.4 at 4K from the settings this dialog used to default to. That is
 ///   the grain, and it is why accumulation is the default.
-///
-/// Accumulation is greyed rather than hidden where the renderer can't do it,
-/// carrying the same reason the CLI gives.
 fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
     let why_not = f.why_not_accumulate();
     let accumulating = f.accumulating();
     table::show(ui, st, "fracturize_render_job_quality", &SETTING_VALUE, |body, st| {
         table::group_row(body, "Samples");
-        row(body, st, true, "Samples", "How the render gathers its samples", |ui, st| {
+        let tip = "Which renderer draws the picture: starts as the window has it. Only splat can \
+                   accumulate.";
+        row(body, st, name("Renderer"), tip, |ui, st| {
+            #[derive(Clone, Copy, PartialEq)]
+            enum R {
+                Points,
+                Splat,
+            }
+            let chosen = super::radio::radio(st, "render_job_renderer", if f.splat { R::Splat } else { R::Points })
+                .option(R::Points, "points", "Opaque points, every one at full brightness", "click: points renderer")
+                .option(R::Splat, "splat", "Density, built up and toned like a flame", "click: splat renderer")
+                .show(ui);
+            if let Some(r) = chosen {
+                f.splat = r == R::Splat;
+            }
+        });
+        let short = match (f.splat, f.mode) {
+            (false, _) => Some("accumulate needs splat"),
+            (true, Mode::Still) => None,
+            (true, _) => Some("accumulate: stills only"),
+        };
+        row(body, st, name("Samples").under(1).note(short), "How the render gathers its samples", |ui, st| {
             use render_preset::Samples as S;
             let current = if accumulating { S::Accumulate } else { S::OnePass };
             let chosen = super::radio::radio(st, "render_job_samples", current)
@@ -774,18 +915,33 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
             let tip = "Samples per pixel. More is cleaner and slower: 10× the samples is about 3× \
                        less noise. 100 is a good everyday value. Above about 30,000, also tick \
                        16-bit PNG, or the file can't hold the extra detail.";
-            row(body, st, true, "Samples per pixel", tip, |ui, st| {
+            row(body, st, name("Samples per pixel").under(2), tip, |ui, st| {
                 let resp = ui.add(egui::Slider::new(&mut f.spp, 1..=10_000).logarithmic(true));
                 hinted(resp, st, tip, "drag: samples per output pixel");
             });
         } else {
             let tip = "Extra rounds of the chaos game after the points are filled in. Settles the \
                        points further without adding more of them. Costs almost nothing.";
-            row(body, st, true, "Extra rounds", tip, |ui, st| {
+            row(body, st, name("Extra rounds").under(2), tip, |ui, st| {
                 let resp = ui.add(egui::Slider::new(&mut f.accumulate, 1..=512).logarithmic(true));
                 hinted(resp, st, tip, "drag: extra rounds of the chaos game");
             });
         }
+        // Density estimation sits with the samples rather than with the
+        // filter, even though both are blurs: it needs a *histogram* to read a
+        // density from, so it lives or dies with the choice above it.
+        let tip = if accumulating {
+            "Smooths the grainy, sparse parts of the picture while leaving the dense, detailed \
+             parts sharp. Much of what gives Apophysis renders their look. Try around 0.3 before \
+             going to 1.0."
+        } else {
+            "Needs Samples set to accumulate."
+        };
+        let needs = (!accumulating).then_some("needs Samples: accumulate");
+        row(body, st, name("Density estimation").under(2).needs(needs), tip, |ui, st| {
+            let resp = ui.add(egui::Slider::new(&mut f.density_estimation, 0.0..=1.0).fixed_decimals(2));
+            hinted(resp, st, tip, "drag: density-estimation strength");
+        });
         // The same slider means two different things, so it says which. Under
         // accumulation it is a working set — measured, varying it 6x at a
         // fixed sample target moved the wall clock under 25% — and telling
@@ -798,7 +954,7 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
             "How many points to render. More looks better. This only applies to the render; the \
              live view keeps its own point count."
         };
-        row(body, st, true, "Points", tip, |ui, st| {
+        row(body, st, name("Points"), tip, |ui, st| {
             let mut millions = f.points as f32 / 1e6;
             let resp = ui.add(
                 egui::Slider::new(&mut millions, 0.5..=env.max_points_m)
@@ -813,20 +969,6 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
                 f.points = (millions * 1e6).round() as usize;
             }
         });
-        // Density estimation sits with the samples rather than with the
-        // filter, even though both are blurs: it needs a *histogram* to read a
-        // density from, so it lives or dies with the choice two rows up.
-        let tip = if accumulating {
-            "Smooths the grainy, sparse parts of the picture while leaving the dense, detailed \
-             parts sharp. Much of what gives Apophysis renders their look. Try around 0.3 before \
-             going to 1.0."
-        } else {
-            "Needs Samples set to accumulate."
-        };
-        row(body, st, accumulating, "Density estimation", tip, |ui, st| {
-            let resp = ui.add(egui::Slider::new(&mut f.density_estimation, 0.0..=1.0).fixed_decimals(2));
-            hinted(resp, st, tip, "drag: density-estimation strength");
-        });
 
         // Supersampling is cost/quality at fixed artistic intent, like the
         // rows above — nothing here changes what the picture *is*. It is the
@@ -835,7 +977,7 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
         let tip = "Render at this many times the size, then scale down. Smooths jagged edges, and \
                    is the biggest quality improvement here. 2× costs about 4× the memory and time. \
                    1 turns it off.";
-        row(body, st, true, "Supersample", tip, |ui, st| {
+        row(body, st, name("Supersample"), tip, |ui, st| {
             let max = crate::gpu::points::downsample::MAX_SUPERSAMPLE;
             let resp = ui.add(num::Drag::new(&mut f.supersample).range(1..=max).suffix("×"));
             hinted(resp, st, tip, "drag: supersampling factor");
@@ -843,13 +985,14 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
         // Greyed rather than hidden at 1x, so the kernel choice can still say
         // it exists.
         let ss = f.supersample > 1;
+        let needs = (!ss).then_some("needs Supersample 2× or more");
         let tip = if ss {
             "The shape used to scale down. Gaussian is soft and safe; lanczos is sharpest but rings \
              around small bright points."
         } else {
             "Only used when Supersample is above 1×"
         };
-        row(body, st, ss, "Filter", tip, |ui, st| {
+        row(body, st, name("Filter").under(1).needs(needs), tip, |ui, st| {
             let combo = egui::ComboBox::from_id_salt("render_job_filter")
                 .selected_text(f.filter.label())
                 .width(VALUE_W - 12.0)
@@ -867,7 +1010,7 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
         } else {
             "Only used when Supersample is above 1×"
         };
-        row(body, st, ss, "Filter radius", tip, |ui, st| {
+        row(body, st, name("Filter radius").under(1).needs(needs), tip, |ui, st| {
             use crate::gpu::points::downsample::{MAX_FILTER_RADIUS, MIN_FILTER_RADIUS};
             let resp = ui.add(
                 num::Drag::new(&mut f.filter_radius).speed(0.05).range(MIN_FILTER_RADIUS..=MAX_FILTER_RADIUS).suffix(" px"),
@@ -876,8 +1019,10 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
         });
     });
 
-    if accumulating {
-        let params = f.params();
+    // Always one line, whichever way the samples are gathered: it used to
+    // appear and vanish with accumulation, moving everything below it.
+    let params = f.params();
+    let text = if accumulating {
         // Tiles are not a detail to hide: past the binding limit the chaos
         // game runs once per tile, so this line is where a job quietly stops
         // costing seconds and starts costing minutes.
@@ -886,57 +1031,58 @@ fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
             Ok(p) => format!(" · {} tiles ({}x{})", p.tiles.len(), p.cols, p.rows),
             Err(_) => String::from(" · too large"),
         };
-        caption(ui, &format!("{} laps · {} histogram{}", params.laps(), human_bytes(params.histogram_bytes()), tiling))
-            .on_hover_text(
-                "How many passes the render will take, and how much GPU memory the image needs. \
-                 If it's too big for the graphics card in one piece, it's rendered in tiles and \
-                 stitched together, which takes longer.",
-            );
-    }
+        format!("{} laps · {} histogram{}", params.laps(), human_bytes(params.histogram_bytes()), tiling)
+    } else {
+        let pixels = (f.width as u64 * f.height as u64).max(1);
+        format!("one pass · about {} samples/px, from the points", num::fixed(f.points as f32 / pixels as f32, 1))
+    };
+    caption(ui, &text).on_hover_text(if accumulating {
+        "How many passes the render will take, and how much GPU memory the image needs. If it's \
+         too big for the graphics card in one piece, it's rendered in tiles and stitched \
+         together, which takes longer."
+    } else {
+        "One pass draws each point once, so the samples per pixel are the points over the \
+         pixels: the same points look grainier the larger the image."
+    });
 }
 
+/// Shown for every kind of render and greyed for a still, so switching the
+/// output kind doesn't add and remove a section under the pointer.
 fn animation(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
+    let only = (f.mode != Mode::Animation).then_some("for avif or mp4 output");
+    let why = |tip: &str| if only.is_some() { "Only for animations: pick avif or mp4 under Output".to_string() } else { tip.to_string() };
     table::show(ui, st, "fracturize_render_job_animation", &SETTING_VALUE, |body, st| {
-        row(body, st, true, "Frame rate", "Frames per second", |ui, st| {
+        let tip = why("Frames per second");
+        row(body, st, name("Frame rate").needs(only), &tip, |ui, st| {
             let resp = ui.add(num::Drag::new(&mut f.fps).range(1..=120).suffix(" fps"));
-            hinted(resp, st, "Frames per second", "drag: frame rate");
+            hinted(resp, st, &tip, "drag: frame rate");
         });
-        let tip = "Length of the animation. Starts at the timeline's own length";
-        row(body, st, true, "Length", tip, |ui, st| {
+        let tip = why("Length of the animation. Starts at the timeline's own length");
+        row(body, st, name("Length").needs(only), &tip, |ui, st| {
             let resp = ui.add(num::Drag::new(&mut f.seconds).speed(0.1).range(0.1..=600.0).suffix(" s"));
-            hinted(resp, st, tip, "drag: duration");
+            hinted(resp, st, &tip, "drag: duration");
         });
         let codec = f.format.codec_label();
-        let tip = format!("{codec} quality, 0 to 100. Higher looks better and makes a bigger file.");
-        row(body, st, true, &format!("Quality ({codec})"), &tip, |ui, st| {
+        let tip = why(&format!("{codec} quality, 0 to 100. Higher looks better and makes a bigger file."));
+        row(body, st, name("Codec quality").needs(only), &tip, |ui, st| {
             let resp = ui.add(num::Drag::new(&mut f.quality).range(0..=100));
             hinted(resp, st, &tip, &format!("drag: {codec} quality"));
         });
     });
 }
 
-/// What the render looks like: taken from the window each time the dialog
-/// opens, and not part of a preset, which is about size and quality.
+/// What the render looks like beyond the renderer: taken from the window each
+/// time the dialog opens, and not part of a preset.
 fn look(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
     caption(ui, "As the window has it when this opens. Not part of a preset.");
     table::show(ui, st, "fracturize_render_job_look", &SETTING_VALUE, |body, st| {
-        let tip = "Which renderer draws the picture. Splat is the one that can accumulate.";
-        row(body, st, true, "Renderer", tip, |ui, st| {
-            #[derive(Clone, Copy, PartialEq)]
-            enum R {
-                Points,
-                Splat,
-            }
-            let chosen = super::radio::radio(st, "render_job_renderer", if f.splat { R::Splat } else { R::Points })
-                .option(R::Points, "points", "Opaque points, every one at full brightness", "click: points renderer")
-                .option(R::Splat, "splat", "Density, built up and toned like a flame", "click: splat renderer")
-                .show(ui);
-            if let Some(r) = chosen {
-                f.splat = r == R::Splat;
-            }
-        });
-        let tip = if f.splat { "Brightness, for the splat renderer" } else { "Only for the splat renderer" };
-        row(body, st, f.splat, "Exposure", tip, |ui, st| {
+        let tip = if f.splat {
+            "Brightness, for the splat renderer"
+        } else {
+            "Only for the splat renderer: set Renderer to splat, under Quality"
+        };
+        let needs = (!f.splat).then_some("needs Renderer: splat");
+        row(body, st, name("Exposure").needs(needs), tip, |ui, st| {
             let resp = ui.add(num::Drag::new(&mut f.exposure).speed(0.05).range(0.01..=100.0));
             hinted(resp, st, tip, "drag: splat exposure");
         });
@@ -944,14 +1090,14 @@ fn look(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
     // What this job inherits rather than owns. The grade is a live control in
     // the Render window, where you can see it working, so it is not
     // duplicated here as three more sliders — but an inherited setting that
-    // is never shown is a trap, so it is stated when there is one.
-    if f.splat {
-        if let Some(grade) = &env.grade {
-            caption(ui, &format!("Grade from the Render window: {grade}")).on_hover_text(
-                "Gamma and vibrancy are set in the Render window, where you can see them working. \
-                 The render uses whatever is set there.",
-            );
-        }
+    // is never shown is a trap, so it is stated when there is one, whatever
+    // the renderer, so the line doesn't come and go with it.
+    if let Some(grade) = &env.grade {
+        let text = if f.splat { format!("Grade from the Render window: {grade}") } else { format!("Grade (splat only): {grade}") };
+        caption(ui, &text).on_hover_text(
+            "Gamma and vibrancy are set in the Render window, where you can see them working. A \
+             splat render uses whatever is set there.",
+        );
     }
     if env.volume {
         // Said out loud rather than leaving the job to render something other
@@ -977,9 +1123,10 @@ fn machine(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
             "How much of the graphics card the render may use. At 1.00 it's fastest, but the \
              desktop may stutter. 0.50 takes about twice as long and leaves room for everything else."
         } else {
-            "Only paces an accumulating still, between its passes"
+            "Only paces an accumulating still, between its passes: set Samples to accumulate"
         };
-        row(body, st, accumulating, "GPU share", tip, |ui, st| {
+        let needs = (!accumulating).then_some("needs Samples: accumulate");
+        row(body, st, name("GPU share").needs(needs), tip, |ui, st| {
             let resp = ui.add(egui::Slider::new(&mut f.gpu_share, 0.05..=1.0).fixed_decimals(2));
             hinted(resp, st, tip, "drag: share of the GPU this render may take");
         });
@@ -993,9 +1140,9 @@ fn machine(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env
                 env.max_threads
             )
         } else {
-            "Only used to encode animations".to_string()
+            "Only used to encode animations: pick avif or mp4 under Output".to_string()
         };
-        row(body, st, animation, "Encoder threads", &tip, |ui, st| {
+        row(body, st, name("Encoder threads").needs((!animation).then_some("for avif or mp4 output")), &tip, |ui, st| {
             let resp = ui.add(num::Drag::new(&mut f.threads).range(1..=env.max_threads));
             hinted(resp, st, &tip, "drag: CPU threads for encoding");
         });
@@ -1928,6 +2075,30 @@ mod tests {
 
         assert_eq!(filename_trouble(&dir.join("nothing-here.png")), None);
         assert_eq!(filename_trouble(std::path::Path::new("")), None);
+    }
+
+    /// A ratio people say is said that way; one they don't is a decimal, not
+    /// `427:240` or `4961:3508`.
+    #[test]
+    fn an_aspect_ratio_reads_as_people_say_it() {
+        assert_eq!(aspect_label(1920, 1080), "16:9");
+        assert_eq!(aspect_label(640, 480), "4:3");
+        assert_eq!(aspect_label(1080, 1080), "1:1");
+        assert_eq!(aspect_label(1080, 1350), "4:5");
+        assert_eq!(aspect_label(854, 480), "1.78:1");
+        assert_eq!(aspect_label(4961, 3508), "1.41:1");
+    }
+
+    /// The window keeps its vertical view in a render, so wider shows more at
+    /// the sides and narrower cuts some off; matching it is one click.
+    #[test]
+    fn the_shape_is_judged_against_the_window() {
+        assert!(against_window(1920, 1080, 1280, 720).starts_with("Same shape"));
+        assert!(against_window(1920, 1080, 1000, 1000).starts_with("Wider"));
+        assert!(against_window(1080, 1080, 1920, 1080).starts_with("Narrower"));
+        let (w, h) = window_shaped(1920, 1440, 860);
+        assert_eq!((w, h % 2), (1920, 0), "keeps the width, and an even height for video");
+        assert!(against_window(w, h, 1440, 860).starts_with("Same shape"));
     }
 
     /// Zero samples per pixel is not a render. The slider cannot reach it, but

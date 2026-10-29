@@ -3065,14 +3065,27 @@ rendering).
 - **The setup form is in sections**, each a house table (`ui::table`) under a
   folding heading (`ui::section`, shared with Random settings), ordered by the
   questions people ask: Output (kind, filename, 16-bit and transparency, which
-  describe the file), Size, Quality (samples, points, density estimation, then
-  supersampling and its filter), Animation (only for a clip), then the two
-  that aren't chosen here: **Look** (renderer, exposure, the inherited grade;
-  read from the window each time the dialog opens) and **This machine** (GPU
-  share, encoder threads; remembered in prefs). A preset bar is pinned above
-  and the cost estimate and Start below, so the cost sits beside the button
-  that commits to it however far the form is scrolled. Controls that don't
-  apply are greyed in place with the reason on hover.
+  describe the file), Size (with the aspect ratio, and how it compares with
+  the window: a render keeps the window's *vertical* view, so a wider shape
+  shows more at the sides; "the window's shape" is in the common sizes),
+  Quality (renderer, samples, points, density estimation, then supersampling
+  and its filter), Animation, then the two that aren't chosen here: **Look**
+  (exposure, the inherited grade; read from the window each time the dialog
+  opens) and **This machine** (GPU share, encoder threads; remembered in
+  prefs). The renderer is in Quality, not Look, because it decides what the
+  sample choice under it can be. A preset bar is pinned above and the cost
+  estimate and Start below, so the cost sits beside the button that commits
+  to it however far the form is scrolled.
+
+  **Toggling a control never moves the form.** Nothing appears or vanishes
+  with a choice: the line under Quality is laps and histogram when
+  accumulating and the samples/px a pass comes to when not, Animation is
+  there for a still too (greyed), the grade line doesn't depend on the
+  renderer. **And what switches what is on the page**, not only on hover: a
+  row that depends on the one above is indented under it, and a row that
+  can't be used shows what it needs ("needs Samples: accumulate") in place of
+  its control, naming the row that would free it. Switch rows, whose column
+  is too narrow for that, carry the note beside their name.
 - **Presets** (`src/render_preset.rs`) name a job's size and quality, as
   Apophysis's `Render presets.av` does: output kind, size, samples (accumulate
   to `spp`, or one pass with `points`/`rounds`), supersample, filter and
