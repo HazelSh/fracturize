@@ -126,6 +126,65 @@ impl Preset {
     }
 }
 
+impl Preset {
+    /// The preset said as command-line flags, in a fixed order: what
+    /// `--render-preset` comes to, and what `--render-presets` prints, so a
+    /// preset can be read, pasted and edited flag by flag.
+    ///
+    /// `output` has no flag (the `--render` extension decides it) and density
+    /// estimation is left out at 0, which is what no flag means.
+    pub fn flags(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push = |flag: &str, v: Option<String>| {
+            if let Some(v) = v {
+                out.push(format!("--{flag} {v}"));
+            }
+        };
+        push("width", self.width.map(|v| v.to_string()));
+        push("height", self.height.map(|v| v.to_string()));
+        if self.samples != Some(Samples::OnePass) {
+            push("spp", self.spp.map(|v| v.to_string()));
+        }
+        push("points", self.points.map(|v| v.to_string()));
+        if self.samples == Some(Samples::OnePass) {
+            push("accumulate", self.rounds.map(|v| v.to_string()));
+        }
+        push("supersample", self.supersample.map(|v| v.to_string()));
+        push("filter", self.filter.map(|f| f.label().to_string()));
+        push("filter-radius", self.filter_radius.map(|v| v.to_string()));
+        push("density-estimation", self.density_estimation.filter(|d| *d > 0.0).map(|v| v.to_string()));
+        push("bit-depth", self.bit_depth.map(|v| v.to_string()));
+        push("fps", self.fps.map(|v| v.to_string()));
+        push("quality", self.quality.map(|v| v.to_string()));
+        out
+    }
+
+    /// The file extension `output` means, for saying a preset is for clips.
+    pub fn extension(&self) -> Option<&'static str> {
+        self.output.map(|o| match o {
+            Output::Still => "png",
+            Output::Avif => "avif",
+            Output::Mp4 => "mp4",
+        })
+    }
+}
+
+/// What `--render-preset` names: a `.toml` path, or a preset's name.
+pub fn resolve(arg: &str) -> Result<Entry, String> {
+    let as_path = Path::new(arg);
+    if arg.ends_with(".toml") || arg.contains(std::path::MAIN_SEPARATOR) {
+        if !as_path.is_file() {
+            return Err(format!("no such file {arg}"));
+        }
+        let name = as_path.file_stem().and_then(|s| s.to_str()).unwrap_or(arg).to_string();
+        return Ok(Entry { name, path: Some(as_path.to_path_buf()) });
+    }
+    find(arg).ok_or_else(|| {
+        let names: Vec<_> = list().into_iter().map(|e| e.name).collect();
+        format!("no render preset named '{arg}' (have: {}; --render-presets shows each)", names.join(", "))
+    })
+}
+
 /// Read a preset file's text.
 pub fn parse(text: &str) -> Result<Preset, String> {
     let preset: Preset = toml::from_str(text).map_err(|e| e.message().to_string())?;
@@ -234,7 +293,20 @@ pub fn save(name: &str, preset: &Preset) -> Result<Entry, String> {
     save_in(&dir, &name, preset)
 }
 
+/// [`save`], refusing a name already taken. The command line has no undo and
+/// no Save-over-it button, so it only ever makes a new file.
+pub fn save_new(name: &str, preset: &Preset) -> Result<Entry, String> {
+    let checked = check_name(name)?;
+    if let Some(path) = user_dir().map(|d| d.join(format!("{checked}.toml"))).filter(|p| p.exists()) {
+        return Err(format!("a render preset '{checked}' exists ({}); pick another name, or delete it first", path.display()));
+    }
+    save(&checked, preset)
+}
+
 fn save_in(dir: &Path, name: &str, preset: &Preset) -> Result<Entry, String> {
+    // What it writes, it must read back: a value the dialog can't take is
+    // refused here rather than found on the next load.
+    preset.check()?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("{name}.toml"));
     std::fs::write(&path, to_toml_string(preset)).map_err(|e| format!("{}: {e}", path.display()))?;

@@ -80,7 +80,8 @@ trust when the tool silently does something they didn't ask for.
 **Already served by:** post-affine; xaos with Apophysis 7X's goes-to /
 comes-from view and linked maps; palette mode with `.ugr`/`.gradient` and
 `.flame` palette import; per-transform `color_value`; typed inspector fields;
-render jobs, supersampling, density estimation and the grade; Ctrl+Y as redo.
+render jobs with presets (theirs saved by name, as in Apophysis), supersampling,
+density estimation and the grade; Ctrl+Y as redo.
 
 **Gaps:**
 - As Rook, I want to import a `.flame` file's transforms, not just its
@@ -343,7 +344,8 @@ tools.
 screen capture; subscenes, with `--solo` to render one layer alone; camera
 paths and `--path-t` frames; `.mp4` for upload pipelines; zoom loops that
 close exactly; render records, so an agent can read what a file was made
-from; AGENTS.md and the CLI for the agent.
+from; `--render-preset` and `--save-render-preset`, so a render recipe is
+one name both sides use; AGENTS.md and the CLI for the agent.
 
 **Gaps:**
 - As Remy, I want transparent animation (a PNG sequence, or a codec with

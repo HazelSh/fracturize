@@ -72,6 +72,7 @@ src/
   derive.rs      # --derive: print a map turned about a world axis / spun about its own
   stats.rs       # --stats: image numbers, empty measured against the recorded background
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
+  render_preset.rs # Render presets: named size+quality files, built-ins in render_presets/
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
     toolbar.rs     # Top strip: File menu, panel toggles, undo/redo, quick controls
@@ -90,7 +91,7 @@ src/
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
-  render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
+    render_job.rs  # Render job window: presets, sectioned setup, progress, the result
     camera_panel.rs# Framing, saved views, the camera path (incl. how it loops)
     axis_widget.rs # Corner orientation cross; click a ball to look down that axis
     radio.rs       # Segmented one-of-n radio, used by all three such settings
@@ -3047,6 +3048,50 @@ with its parameters visible, an estimate, and a way to stop it. The model is
 full framerate while a job goes (measured: 119 FPS with a 240-frame animation
 rendering).
 
+- **Three stages, one window**: setup, running, finished. Finished is the
+  running view with the bar replaced by the result, so the log stays where it
+  was being read; **New render** goes back to the same settings with a fresh
+  filename. It used to drop straight back to the form with a small notice
+  above Start, which put "did it work, and where is it?" among the next job's
+  settings. The app keeps the ended job whole (`render_job::FinishedJob`:
+  result, params, working time, log, `seen`), because the dialog is often
+  closed while a job runs; until the result has been shown, the status bar
+  says "render done" (or stopped early, or failed), and clicking it opens it.
+- **The result opens with one click.** The result panel is a button: it opens
+  the file in the system's own viewer, through the `open` crate (ShellExecute
+  on Windows, `open` on macOS, xdg-open with gio/kde fallbacks and WSL on
+  Linux), detached. Beside it, Open and Show folder (the folder, not the file
+  selected in it: that needs a different call on every desktop).
+- **The setup form is in sections**, each a house table (`ui::table`) under a
+  folding heading (`ui::section`, shared with Random settings), ordered by the
+  questions people ask: Output (kind, filename, 16-bit and transparency, which
+  describe the file), Size, Quality (samples, points, density estimation, then
+  supersampling and its filter), Animation (only for a clip), then the two
+  that aren't chosen here: **Look** (renderer, exposure, the inherited grade;
+  read from the window each time the dialog opens) and **This machine** (GPU
+  share, encoder threads; remembered in prefs). A preset bar is pinned above
+  and the cost estimate and Start below, so the cost sits beside the button
+  that commits to it however far the form is scrolled. Controls that don't
+  apply are greyed in place with the reason on hover.
+- **Presets** (`src/render_preset.rs`) name a job's size and quality, as
+  Apophysis's `Render presets.av` does: output kind, size, samples (accumulate
+  to `spp`, or one pass with `points`/`rounds`), supersample, filter and
+  radius, density estimation, bit depth, and a clip's fps and quality. Never
+  the look and never the machine: a preset that switched a splat piece to
+  points would change the picture under the name of rendering it bigger.
+  Every key is optional and one left out leaves the form's value. Built-ins
+  are compiled from `src/render_presets/`, cheapest first: `quick-look`,
+  `preview` (the dialog's long-standing defaults, and the first one used),
+  `hd`, `4k`, `4k-fine`, `print-a3`, `print-a2`, `clip-preview`, `clip-hd`;
+  their descriptions give sizes and densities, never durations. The person's
+  own are `~/.config/fracturize/render-presets/<name>.toml`. The picker groups
+  Built in / Yours with descriptions on hover; the name carries a `*` while
+  the settings differ from what the preset says (only the keys it says: a
+  built-in leaves points to the dialog); Save, Save as, Revert, and Delete
+  (armed, `danger_button`). The last preset chosen is remembered in prefs
+  (`render_preset`) and the session's first opening applies it; after that the
+  form keeps its settings between openings. `--render-preset` is the same
+  thing on the command line (see "View Files & Offline Rendering").
 - **Modes**: still (PNG), animation along the camera path in either `.avif`
   (AV1) or `.mp4` (H.264), or view descriptor — write a `.toml` view of this
   framing and render it later. The Output row has a button per file kind, so
@@ -3066,8 +3111,8 @@ rendering).
 - **Pause / cancel.** `JobControl` is checked in three loops in `offline.rs`:
   the `fill_points` accumulation frames, the per-tile loop, and the animation
   frame loop. Pause is a sleep loop — crude but correct, since the work is
-  already chunked and the job's device is its own. Cancel takes two clicks
-  (armed for 4s).
+  already chunked and the job's device is its own. Stop is a
+  `danger_button`, and keeps the work (below).
 - **Cancelling keeps the work.** The chaos game is an *anytime* algorithm: a
   buffer stopped at 60% is the same picture as one stopped at 100%, just
   noisier. So stopping a job renders and saves what it has, and every render
@@ -3091,14 +3136,14 @@ rendering).
   since the sample table cannot describe a clip with fewer.
 - **Threads are a machine setting.** One job-scoped value (`JobParams.threads`),
   defaulting to `render_job::default_threads()` = one less than the machine
-  has, exposed as `--threads N` and as a control in the dialog's animation
-  block. Both encoders read *that* value; they used to call
+  has, exposed as `--threads N` and as This machine's encoder threads in the
+  dialog. Both encoders read *that* value; they used to call
   `available_parallelism()` each and hand the codec every core, which on the
   4-core no-SMT desktop left nothing for the desktop itself. It lives in prefs
   and on the command line and **never** in a scene or view — a sidecar may
   record what was used, as information, but nothing should replay it, because
-  `threads = 16` is wrong advice on the T490. The dialog's control sits in the
-  animation block because encoding is the only thing it steers today; a still's
+  `threads = 16` is wrong advice on the T490. The dialog's control is greyed
+  for a still, because encoding is the only thing it steers today; a still's
   PNG deflate is one short single-threaded pass.
 - The time estimate runs on *working* time, not wall clock: pauses are
   subtracted, or the projected remaining time climbs while progress is frozen,
@@ -4094,6 +4139,28 @@ encode+save | total`) to stdout so you can budget effort. Options:
   Point count is a *render* property, not a scene property: the scene's
   `point_count` is just the interactive default (16 bytes/point of GPU memory).
 - `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
+- `--render-preset NAME|FILE` — a render preset's size and quality (see
+  "Render Jobs"), filling each of `--width --height --spp --points
+  --accumulate --supersample --filter --filter-radius --density-estimation
+  --bit-depth --fps --quality` only where it wasn't typed; it prints the flags
+  it came to, and `(yours kept: …)`. Its `spp` is a density target exactly as
+  an `--effort` tier is, and degrades the same way (accumulates only for a
+  single `--splat` still, otherwise the nearest point buffer, with a note);
+  `--effort` wins over it. Its density estimation is dropped, with a note,
+  where nothing accumulates, and a preset made for the other kind of file
+  (a clip preset on a `.png`) lends its size and quality and says so. It
+  never sets `--splat`, exposure or the grade. `--render-presets` lists every
+  preset with its description and the exact flags it comes to;
+  `--save-render-preset NAME` writes what this command line comes to as one
+  of the person's presets (the dialog lists it under Yours), never over an
+  existing one, and without `--render` saves and exits. So an agent can hand
+  a person a render recipe in the form their dropdown takes:
+
+  ```
+  fracturize --render-presets
+  fracturize -s s.toml --splat --render-preset hd -r renders/s.png
+  fracturize --render-preset print-a3 --density-estimation 0.3 --save-render-preset a3-soft
+  ```
 - `--transparent` — RGBA output for compositing (PNG only; see "Background
   & Transparent Output").
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`
