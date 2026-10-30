@@ -1371,6 +1371,14 @@ impl ScaleDef {
     }
 }
 
+/// How track paths reach layer `layer`'s maps (`track::MapLayer`).
+pub fn map_layer(subscenes: &[crate::subscene::Subscene], layer: u16) -> crate::track::MapLayer<'_> {
+    match layer as usize {
+        0 => crate::track::MapLayer::Own,
+        k => crate::track::MapLayer::Subscene { name: &subscenes[k - 1].name, index: k - 1 },
+    }
+}
+
 fn default_weight() -> f64 {
     1.0
 }
@@ -2474,6 +2482,11 @@ impl Scene {
         let pos = self.transforms[..at].iter().filter(|t| t.layer == layer).count();
         crate::xaos::insert_column(&mut self.transforms, layer, pos);
         crate::xaos::shift_row(&mut spec.xaos, pos);
+        crate::track::follow_maps(
+            &mut self.tracks,
+            map_layer(&self.subscenes, layer),
+            crate::track::ListChange::Inserted(pos),
+        );
         self.transforms.insert(at, spec);
         self.transform_names.insert(at, name);
         self.colors.insert(at, color);
@@ -2543,6 +2556,12 @@ impl Scene {
         let pos = self.layer_position(idx);
         let mut implied = self.implied_colours();
         implied.remove(idx);
+        // The map's own tracks go with it; every other track stays on its map.
+        crate::track::follow_maps(
+            &mut self.tracks,
+            map_layer(&self.subscenes, layer),
+            crate::track::ListChange::Removed(pos, self.transform_names[idx].as_deref()),
+        );
         self.transforms.remove(idx);
         self.transform_names.remove(idx);
         self.colors.remove(idx);

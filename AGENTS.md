@@ -45,6 +45,7 @@ checklist to run before handing a build over.
 | `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
 | `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
 | `TIMELINE-PLAN.md` | Open questions on the timeline: auto-key, and moving the camera path into `[[track]]` form |
+| `ANIMATION-PLAN.md` | The timeline as a DAW's automation section: what DAW, Blender and VFX users expect, the loop seam, morphs, the agent side |
 | `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
 | `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
 | `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
@@ -1188,7 +1189,28 @@ so every recorded `--random --seed N` still rolls the same flame (checked
 against a build from before the dice: byte-identical `--info`). The one
 exception is the transform count: off, it is the base's, and nothing is drawn
 for it. A roll that keeps the whole form keeps the base's camera, point size
-and look too — it's the same flame, recoloured.
+and look too — it's the same flame, recoloured — and its name, author and
+infinite zoom.
+
+**The dice change values; they don't throw away what they didn't draw.** A
+roll draws only the scene's own maps, so a composite's **subscenes** come
+through every roll whole, with the composite's framing. `[zoom]` stays
+wherever its map still qualifies on what was drawn (`Renorm::build`, and
+`xaos::zoom_conflict`). And **animation is carried, as offsets**
+(`track::rebase`): an animated value the dice change takes its keys with it
+— a number's keys move by the change, a pose's turn by the rotation that
+changed it, each keeping its route to the next key, and a stepped key that
+held the old value holds the new one — so a mutation of a keyed value shows
+instead of being overridden at every moment. A mutation rebases after each
+operator; one that adds or removes a map has already moved the paths
+(`follow_maps`). A roll carries tracks **by position**
+(`track::carry_onto_roll`) — the base's third map's animation onto the
+roll's third map, under whatever name it has now — and drops only those on a
+map the roll doesn't have, as deleting a map does. The camera's flight moves
+with the framing (focus shifted, distance scaled), and a zoom loop that has
+lost its zoom loops back to its first key. With every part on and the blank
+scene as base (`--random`) there is nothing to carry, so recorded seeds roll
+what they always did.
 
 **Profiles are files and have names.** Built in, compiled from
 `src/dice/profiles/` so they exist wherever the app is started from:
@@ -2927,12 +2949,20 @@ Things it rests on, each found the hard way:
   around the frame's drawing (`App::render`). Keyed off the history position,
   so a paused timeline costs nothing.
 - **A track that doesn't resolve is reported, never refused**, like an xaos
-  dead end: delete the map a track moves and it points at nothing, and a scene
-  the app saved must open again. `Animator` skips it and says why — `--info`
-  notes, stderr from a render, the Timeline. Renaming a map renames it in its
-  tracks (`track::rename_map`). Refused at load are only malformed tracks:
+  dead end: a hand-edited file can aim one at nothing, and a scene the app
+  saved must open again. `Animator` skips it and says why — `--info` notes,
+  stderr from a render, the Timeline. Refused at load are only malformed tracks:
   camera targets (the path is the camera's track), two tracks on one target,
   interpolated strings, mixed sources.
+- **Tracks stay on their maps when maps come and go.** An unnamed map is
+  reached by position (`transform.3…`, `subscene.smoke.transform.1…`), so
+  `Scene::insert_transform` / `remove_transform` rewrite every position-named
+  path (`track::follow_maps`), xaos targets included, and removing a subscene
+  does the same one level up (`follow_subscenes`). A deleted map's tracks go
+  with it, as do other maps' xaos tracks toward it; one Ctrl+Z brings both
+  back. Renaming a map renames it in its tracks, in any layer
+  (`track::rename_map`). Without this, deleting map 1 handed map 2's
+  animation to what had been map 3, silently.
 - **One Euler angle is only meaningful in its triple.** A track on
   `transform.x.rotation.y` sets one angle of the triple the scene *writes*,
   and a saved scene respells a rotation with |y| > 90° on the other branch;

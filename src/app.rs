@@ -3355,6 +3355,7 @@ impl App {
             }
         }
         self.scene.subscenes.remove(k - 1);
+        crate::track::follow_subscenes(&mut self.scene.tracks, crate::track::ListChange::Removed(k - 1, Some(&name)));
         self.scene.xaos_matrix_layers.retain(|&l| l as usize != k);
         for l in &mut self.scene.xaos_matrix_layers {
             if *l as usize > k {
@@ -6271,11 +6272,10 @@ impl App {
         let before = self.edit_snapshot();
         // Tracks name maps the way `-S` does: by name, or by index where there
         // is none. Carry them over, or a rename leaves them aimed at nothing.
-        if self.scene.transforms[idx].layer == 0 {
-            let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
-            let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
-            crate::track::rename_map(&mut self.scene.tracks, &old, &new);
-        }
+        let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
+        let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
+        let layer = crate::scene::map_layer(&self.scene.subscenes, self.scene.transforms[idx].layer);
+        crate::track::rename_map(&mut self.scene.tracks, layer, &old, &new);
         self.scene.transform_names[idx] = name;
         self.commit_edit(
             format!("Rename T{}", idx),
