@@ -591,7 +591,36 @@ pub(super) fn finish(
     if !p.background.on() {
         scene.background = base.background;
     }
+    // A roll draws the scene's own maps and nothing else, so a composite's
+    // subscenes come through it whole, maps, placement, colour and all —
+    // and with them the author's framing of the composition, which a camera
+    // fitted to the scene's own maps alone would crop.
+    let composite = !base.subscenes.is_empty();
+    if composite {
+        scene.subscenes = base.subscenes.clone();
+        scene.root_share = base.root_share;
+        scene.root_visible = base.root_visible;
+        scene.xaos_matrix_layers.extend(base.xaos_matrix_layers.iter().filter(|&&l| l != 0));
+        for (i, t) in base.transforms.iter().enumerate().filter(|(_, t)| t.layer != 0) {
+            scene.transforms.push(t.clone());
+            scene.transform_names.push(base.transform_names.get(i).cloned().flatten());
+            scene.colors.push(base.colors.get(i).copied().unwrap_or(Vec3::ONE));
+        }
+    }
+    if p.no_form() || composite {
+        scene.camera_focus = base.camera_focus;
+        scene.camera_distance = base.camera_distance;
+        scene.camera_orientation = base.camera_orientation;
+    }
     if p.no_form() {
+        // The same flame, recoloured: it keeps its name, its author, and
+        // which colours it left to their positions (re-checked against the
+        // values, so a colour the roll did change is written down).
+        scene.name = base.name.clone();
+        scene.author = base.author.clone();
+        scene.colours_left_out = base.colours_left_out.clone();
+        scene.decay = base.decay;
+        scene.points_per_frame = base.points_per_frame;
         scene.camera_focus = base.camera_focus;
         scene.camera_distance = base.camera_distance;
         scene.camera_orientation = base.camera_orientation;
@@ -603,6 +632,31 @@ pub(super) fn finish(
         scene.haze = base.haze;
         scene.exposure = base.exposure;
     }
+    // Infinite zoom stays wherever its map still qualifies on what was drawn:
+    // always, when the form is kept; on a new form, if the same map is still
+    // plain, contracting, and allowed after every map that fires.
+    scene.zoom = base.zoom.clone().filter(|z| {
+        crate::renorm::Renorm::build(z, &scene.transforms, scene.camera_distance).is_ok()
+            && crate::xaos::zoom_conflict(&scene.transforms, &scene.transform_names, z.map).is_none()
+    });
+    // A roll changes values; it doesn't throw the animation away. Tracks
+    // follow their maps onto the roll and move with the values drawn, and the
+    // camera's flight moves with the framing (unchanged when the form is
+    // kept, since the framing is then the base's).
+    scene.tracks = crate::track::carry_onto_roll(base, &scene);
+    scene.camera_path = base.camera_path.clone().map(|mut path| {
+        let (shift, ratio) = (scene.camera_focus - base.camera_focus, scene.camera_distance / base.camera_distance);
+        for key in &mut path.keys {
+            key.focus += shift;
+            key.distance *= ratio;
+        }
+        // A zoom loop closes under the zoom map's symmetry; without a zoom the
+        // file wouldn't load, so it loops back to its first key instead.
+        if scene.zoom.is_none() && matches!(path.loops, crate::path::Loop::Zoom(_)) {
+            path.loops = crate::path::Loop::Closed;
+        }
+        path
+    });
     scene
 }
 
