@@ -400,7 +400,7 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | drag a whole subscene's gizmo | move / turn / resize the entire subscene (select its row in the Subscenes window first); its tips resize uniformly, and alt+scroll over it sets its share of the points |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
-| drag a row's weight bar | change that transform's chaos weight |
+| drag along the Weight share bar (under the Transforms list) | set the selected transform's share of the weight, the rest held |
 | alt+click a row's eye | solo it; alt+click again brings everything back |
 | click an xaos edge (overlay on) | open its popover: multiplier, probability, cut/restore, only exit |
 | alt+scroll over an xaos edge | scale its multiplier — the weight lever, one level down |
@@ -709,7 +709,7 @@ where "start a new document" lives in every program.
 
 | Window | What lives there |
 |--------|------------------|
-| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
+| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, filter box past a dozen) with a Weight share bar under it, plus a detail pane grouped Weight / Appearance / Shape / Variations / Symmetry / Post-affine / Xaos, under a header whose name is click-to-edit |
 | History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
 | Mutate | The dice profile picker, mutation strength (the profile's), 3×3 / 5×5, New, Mutate, Undo, Settings… — then the mutation grid: the scene in the middle, its mutations around it, click one to make it the scene. See "The mutation grid" |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
@@ -868,14 +868,21 @@ Conventions worth keeping:
   action row's Rename button stays, because click-to-edit is invisible until
   you hover the right four words and the button is what says the gesture is
   there.
-- **A control stacked on top of another says where it is.** The weight bar
-  along a tab's bottom edge is registered after the tab and so takes the
-  pointer inside its own strip — which means every pixel it covers is a place
-  where clicking does not do what the tab under it advertises. So the strip is
-  small (`BAR_GRAB`, centred on the drawn bar) and it *shows* itself on hover,
-  growing into a full-width track with the value filled in. It was 40% of the
-  tab, silently, with only the cursor to say so — and the cursor changes at the
-  top of the screen, nowhere near the thing it is talking about.
+- **The rail is for choosing, and nothing else lives on a tab.** A tab is
+  swatch, name and eye. Each tab used to carry a draggable weight bar along its
+  bottom edge, registered after the tab, so a strip of every tab was a place
+  where a click adjusted a weight instead of selecting — however small the
+  strip was made and however it showed itself on hover, it was a hazard in a
+  list whose job is to be clicked and scrolled. It came out. The weight lives
+  in the inspector's first block, and how it is spread is the **Weight share**
+  bar under the list (`draw_weight_share`): one fixed-size bar of the layer's
+  enabled maps, the selected one first in its colour, the rest dimmed; drag
+  along it to set the selected map's share with the others' weight held, so
+  the scale doesn't move under the pointer. Under xaos a tick marks its walk
+  share.
+- **The inspector's blocks are in the order you wander into them**, roughly
+  Apophysis's: Weight, Appearance, Shape, Variations, Symmetry, Post-affine,
+  Xaos. Not the order a map runs in (Shape, Variations, Post-affine, group).
 - **Gizmo indicators** (`src/indicators.rs`) draw the selected transform's
   relationship to the grey identity cell: an offset vector from the world
   origin with an arrowhead and a length label, and the rotation as an axis
@@ -2204,7 +2211,7 @@ Four facts drive every view of it, and are worth teaching anyone who uses it:
    cut can make a class absorbing and drain everything else (cut `spine`'s two
    other exits in `parasol` and the whole picture collapses onto the spine).
    So walk share sits beside weight share in `--info`, the inspector, the
-   rail's weight bars (a tick) and the matrix window.
+   Weight share bar under the rail (a tick) and the matrix window.
 3. **Dimension changes formula** to Mauldin–Williams — the `d` where the
    spectral radius of `[i→j allowed]·Σ(sⱼe)ᵈ` is 1 — over the maps the walk
    actually visits. `--info` prints it beside the dimension without the cuts.
