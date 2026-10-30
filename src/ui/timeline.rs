@@ -1,15 +1,33 @@
 //! The Timeline window (FEATURE-PLANS.md item 8): the one clock the camera and
 //! every `[[track]]` share, drawn wide and low.
 //!
-//! A ruler in seconds with the playhead on it; under it a row for the camera
-//! and a row per track. Drag along the ruler or an empty stretch of a row to
-//! scrub. Each track's row draws its keys as diamonds and its value as a faint
-//! curve behind them, scaled to the row — the curve view the plan asks for,
-//! small. Click a row to select its track, a diamond to select its key; drag a
-//! diamond to retime it. The eye mutes a track; right-click a row for its menu.
+//! A ruler in seconds, pinned above the rows so it never scrolls away, with
+//! the playhead on it and a loop strip along its top; under it a row for the
+//! camera and a row per track. Each track's row draws its keys as diamonds and
+//! its value as a faint curve behind them, scaled to the row — the curve view
+//! the plan asks for, small. Click a row to select its track, a diamond to
+//! select its key; drag a diamond to retime it. The eye mutes a track.
 //!
 //! Only the ruler scrubs. A press on a row selects it and moves nothing else,
 //! so choosing a track never shifts the camera.
+//!
+//! **Navigating** (ANIMATION-PLAN.md §2.2–2.3): Ctrl+scroll over the lanes
+//! zooms about the moment under the pointer, Shift+scroll or a middle-drag
+//! moves along, "Whole" shows the whole timeline again. Zoomed in, playback
+//! that runs off the end turns the page — a jump, never a glide.
+//!
+//! **Right-click** (§2.4): on a lane, a key there or a paste; on a key, copy,
+//! paste over, duplicate at the playhead, delete; on the camera's row, key the
+//! framing there, or a view's own menu; on the ruler, the loop's ends.
+//!
+//! **Snapping** (§2.5, the magnet; Ctrl does the other thing for one drag): a
+//! dragged key, a loop end and the playhead land on any row's keys, the
+//! playhead, the loop's ends, the timeline's ends and the ruler's finer ticks
+//! when they come within a few points. Always a few *points*, so how far it
+//! reaches in seconds follows the zoom.
+//!
+//! **The loop region** (§3) is drawn in the ruler's strip and goes round with
+//! the toolbar's loop on (`App::loop_region`, session state).
 //!
 //! The camera row's link attaches the camera to the timeline or detaches it.
 //! Attached, it flies its path on the clock, playing and scrubbing; detached,
@@ -27,13 +45,14 @@
 //! until it is keyed again. Rows are named the same way; the `-S` path is only
 //! in tooltips. Every edit is undoable; scrubbing and attaching aren't edits.
 //!
-//! **No auto-key.** Editing a tracked value in the inspector edits the scene's
-//! own value — which a rate or cycle moves about, and which keys override.
-//! Whether an inspector edit should instead key the playhead is Hazel's call
-//! (FEATURE-PLANS item 10), so key values are edited here.
+//! **Keying from the scene is record** (the toolbar's ring, `ui::transport`):
+//! armed, every edit keys what it changes at the playhead (`App::autokey`).
+//! Disarmed, editing a tracked value in the inspector edits the scene's own
+//! value — which a rate or cycle moves about, and which keys override — as it
+//! always did.
 //!
-//! Not yet: zooming the ruler — it always shows one timeline's length, paging
-//! along when the playhead runs past it.
+//! Not yet: a curve you can drag in value as well as time, box selection and
+//! moving many keys at once, per-key interpolation, markers, a tempo grid.
 //!
 //! The playhead moves because time moves, which is content, not chrome; the
 //! zero-animation rule still holds for everything else here.
@@ -48,8 +67,72 @@ const LABEL_W: f32 = 220.0;
 const DETAIL_W: f32 = 300.0;
 /// How close, in points, a press has to land to a diamond to take it.
 const KEY_GRAB: f32 = 7.0;
-const RULER_H: f32 = 18.0;
+/// The loop strip along the top of the ruler...
+const LOOP_H: f32 = 9.0;
+/// ...and the whole ruler, ticks under it.
+const RULER_H: f32 = 28.0;
 const ROW_H: f32 = 22.0;
+/// How close, in points, a dragged moment has to come to something to snap
+/// onto it.
+const SNAP_PX: f32 = 7.0;
+/// How near a press in the loop strip has to be to an end of the region to
+/// move that end.
+const LOOP_GRAB: f32 = 6.0;
+/// The shortest span zooming in reaches, in seconds.
+const MIN_SPAN: f64 = 0.05;
+
+/// What a drag in the ruler's loop strip is doing.
+#[derive(Clone, Copy, Debug)]
+pub enum LoopDrag {
+    Start,
+    End,
+    /// Sliding the whole region, held `grab` seconds in from its start.
+    Move { grab: f64 },
+    /// Drawing a new region out from `anchor`.
+    Make { anchor: f64 },
+}
+
+/// Where the lanes are across the window, and which seconds they show. The
+/// ruler and the rows under it share one, so a tick and a key at the same
+/// moment line up whatever the rows' scroll.
+#[derive(Clone, Copy)]
+struct Geo {
+    left: f32,
+    width: f32,
+    t0: f64,
+    t1: f64,
+}
+
+impl Geo {
+    fn x(&self, t: f64) -> f32 {
+        self.left + ((t - self.t0) / (self.t1 - self.t0)) as f32 * self.width
+    }
+
+    /// The moment at `x`, kept to the lanes and never before zero.
+    fn t(&self, x: f32) -> f64 {
+        (self.t0 + ((x - self.left) / self.width).clamp(0.0, 1.0) as f64 * (self.t1 - self.t0)).max(0.0)
+    }
+
+    fn lane(&self, top: f32, bottom: f32) -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(self.left, top), egui::pos2(self.left + self.width, bottom))
+    }
+
+    /// The ruler's tick steps at this zoom: a labelled one with room for its
+    /// label, and the finer one between, which snapping also lands on.
+    fn grid(&self) -> (f64, f64) {
+        let span = self.t1 - self.t0;
+        let step = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0]
+            .into_iter()
+            .find(|s| (self.width as f64) / (span / s) >= 48.0)
+            .unwrap_or(300.0);
+        let parts = match step {
+            s if s == 0.25 || s == 2.0 || s == 0.02 || s == 120.0 => 4.0,
+            s if s == 15.0 || s == 30.0 => 3.0,
+            _ => 5.0,
+        };
+        (step, step / parts)
+    }
+}
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     let mut open = app.ui_state.panels.timeline_open;
@@ -59,7 +142,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Timeline, "Timeline")
         .open(&mut open)
         .show(ctx, |ui| {
-            draw_transport(ui, app);
+            draw_header(ui, app);
             ui.separator();
             // Selection can go stale under it: undo takes a track away.
             let ui_state = &mut app.ui_state;
@@ -71,8 +154,16 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.horizontal_top(|ui| {
                 let down = egui::Layout::top_down(egui::Align::Min);
                 ui.allocate_ui_with_layout(egui::vec2(lanes_w, h), down, |ui| {
+                    // Room on the right for the rows' scroll bar, so the
+                    // ruler and the rows under it map time to the same x.
+                    let left = ui.max_rect().left() + LABEL_W;
+                    let width = (ui.available_width() - LABEL_W - 10.0).max(60.0);
+                    let area = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(lanes_w, h));
+                    navigate(ui, app, area, left, width);
+                    let geo = geometry(app, left, width);
+                    draw_ruler(ui, app, &geo);
                     egui::ScrollArea::vertical().id_salt("timeline_lanes").auto_shrink([false, false]).show(ui, |ui| {
-                        draw_lanes(ui, app);
+                        draw_rows(ui, app, &geo);
                     });
                 });
                 ui.separator();
@@ -87,7 +178,10 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.timeline_open = open;
 }
 
-fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
+/// The window's own controls. The transport itself — record, return to
+/// start, the time, loop — is in the toolbar (`ui::transport`); this Play
+/// runs the clock and leaves the camera as attached or detached as it is.
+fn draw_header(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let playing = app.is_playing();
         let w = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
@@ -103,45 +197,49 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             "Play or pause the timeline. Every track plays; the camera follows only if it \
-             is attached (the link on the camera row). O, Z or Space fly the camera \
-             instead: they attach it and play.",
+             is attached (the link on the camera row). The toolbar's Play, and O, Z or \
+             Space, fly the camera too: they attach it and play.",
             if playing { "click: pause" } else { "click: play from the playhead" },
         );
         if resp.clicked() {
             app.toggle_playback();
         }
 
-        let len = app.timeline_length();
-        let resp = num::text_cell(
-            ui,
-            &format!("{} / {} s", num::cell(app.playhead() as f32, 2, 7), num::cell(len as f32, 2, 7)),
-            19,
-        );
-        hinted(
-            resp,
-            &mut app.ui_state,
-            "The playhead, and the timeline's length: the camera path or the tracks, \
-             whichever runs longer. An animation render plays exactly this.",
-            "the playhead and the timeline's length",
-        );
-
-        let has_tracks = !app.scene.tracks.is_empty();
-        let mut looping = app.loop_playback;
-        let resp = ui.add_enabled(has_tracks, egui::Checkbox::new(&mut looping, (icons::REPEAT, "Loop")));
+        let snap = app.ui_state.timeline_snap;
+        let resp = ui.add(egui::Button::selectable(snap, (icons::MAGNET, "Snap")));
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            if has_tracks {
-                "Go round to the start at the end of the timeline, rather than stopping \
-                 there. Not saved: this is how you are watching, not the scene."
+            if snap {
+                "Snapping: a dragged key, a new key, the loop's ends and the playhead land on \
+                 other keys (any track's, and the camera's), the playhead, the loop's ends \
+                 and the ruler's ticks when they come near. Hold Ctrl to drag freely. Click \
+                 to turn it off."
             } else {
-                "This scene has no tracks, so the camera path's own loop setting (Camera \
-                 window) is what decides whether playback goes round"
+                "Snapping is off: keys go where you drop them. Hold Ctrl to snap for one \
+                 drag. Click to turn it on."
             },
-            "toggle: loop playback",
+            if snap { "click: stop snapping" } else { "click: snap" },
         );
-        if resp.changed() {
-            app.loop_playback = looping;
+        if resp.clicked() {
+            app.ui_state.timeline_snap = !snap;
+        }
+
+        let zoomed = app.ui_state.timeline_view.is_some();
+        let resp = ui.add_enabled(zoomed, egui::Button::new((icons::CORNERS_OUT, "Whole")));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if zoomed {
+                "Show the whole timeline again"
+            } else {
+                "Showing the whole timeline. Ctrl+scroll over the lanes zooms in on the \
+                 pointer; Shift+scroll or a middle-drag moves along."
+            },
+            "click: show the whole timeline",
+        );
+        if resp.clicked() {
+            app.ui_state.timeline_view = None;
         }
 
         if let Some(who) = app.track_invalid() {
@@ -152,9 +250,9 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
             );
         } else if let Some(e) = app.track_error() {
             ui.label(egui::RichText::new(format!("{} {e}", icons::X)).small().color(super::theme::warn(ui.visuals())));
-        } else if !has_tracks {
+        } else if app.scene.tracks.is_empty() {
             ui.label(
-                egui::RichText::new("No tracks yet: \"Animate a parameter\" on the right starts one")
+                egui::RichText::new("No tracks yet: \"Animate a parameter\" on the right starts one, or arm record")
                     .small()
                     .weak(),
             );
@@ -162,60 +260,319 @@ fn draw_transport(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// The seconds the lanes show: one timeline's length, paged so the playhead
-/// is always on it.
-fn visible_span(app: &App) -> (f64, f64) {
-    let len = app.timeline_length().max(0.1);
-    let page = (app.playhead() / len).floor().max(0.0);
-    (page * len, page * len + len)
+/// Zoom and scroll the lanes in time, from the pointer over them: Ctrl+scroll
+/// zooms about the moment under the pointer, Shift+scroll (or a sideways
+/// scroll) moves along, a middle-drag drags the lanes. Read before the rows'
+/// scroll area takes the wheel for itself.
+fn navigate(ui: &egui::Ui, app: &mut App, area: egui::Rect, left: f32, width: f32) {
+    let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| area.contains(*p) && p.x >= left) else { return };
+    let (zoom, scroll, shift, middle) = ui.input(|i| {
+        (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers.shift, i.pointer.middle_down().then(|| i.pointer.delta().x))
+    });
+    let geo = geometry(app, left, width);
+    let (t0, t1) = (geo.t0, geo.t1);
+    let span = t1 - t0;
+    let len = app.timeline_length().max(1.0);
+    let mut view = (t0, t1);
+    if (zoom - 1.0).abs() > 1e-4 {
+        let at = geo.t(p.x);
+        let new = (span / zoom as f64).clamp(MIN_SPAN, len * 8.0);
+        let a = at - (at - t0) * new / span;
+        view = (a, a + new);
+    }
+    // A sideways scroll, or Shift with a plain wheel (on platforms that don't
+    // turn that into a sideways one already).
+    let dx = if scroll.x.abs() > 0.0 { scroll.x } else if shift { scroll.y } else { 0.0 };
+    let drag = middle.unwrap_or(0.0);
+    let dx = dx + drag;
+    if dx.abs() > 0.0 {
+        let dt = -(dx / width) as f64 * (view.1 - view.0);
+        view = (view.0 + dt, view.1 + dt);
+    }
+    if view != (t0, t1) {
+        // Never before zero: the lanes slide back rather than show nothing.
+        if view.0 < 0.0 {
+            view = (0.0, view.1 - view.0);
+        }
+        app.ui_state.timeline_view = Some(view);
+    }
 }
 
-fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
-    // Frozen while a key is dragged: the timeline's length follows its last
-    // key, and the ruler pages by the playhead, so a ruler that rescaled under
-    // the drag fed the key's own motion back into where the pointer maps to —
-    // a key dragged left past the playhead jumped right.
-    let dragging = app.ui_state.timeline_drag_key.is_some() || app.ui_state.timeline_drag_camera.is_some();
-    let (t0, t1) = match app.ui_state.timeline_span {
+/// The seconds the lanes show. Held still while something on them is being
+/// dragged: the timeline's length follows its last key and the view pages by
+/// the playhead, so a ruler that rescaled under a drag fed the key's own
+/// motion back into where the pointer maps to (a key dragged left past the
+/// playhead jumped right).
+fn geometry(app: &mut App, left: f32, width: f32) -> Geo {
+    let ui_state = &app.ui_state;
+    let dragging = ui_state.timeline_drag_key.is_some()
+        || ui_state.timeline_drag_camera.is_some()
+        || ui_state.timeline_loop_drag.is_some();
+    let (t0, t1) = match ui_state.timeline_span {
         Some(span) if dragging => span,
         _ => visible_span(app),
     };
+    Geo { left, width, t0, t1 }
+}
+
+/// Zoomed in, the span you zoomed to, turned a page when playback runs off
+/// its end (a jump, not a scroll: the chrome doesn't animate). Otherwise one
+/// timeline's length, paged so the playhead is always on it.
+fn visible_span(app: &mut App) -> (f64, f64) {
+    let p = app.playhead();
+    match app.ui_state.timeline_view {
+        Some((a, b)) => {
+            let span = b - a;
+            if app.is_playing() && (p < a || p > b) {
+                let a = p;
+                app.ui_state.timeline_view = Some((a, a + span));
+                (a, a + span)
+            } else {
+                (a, b)
+            }
+        }
+        None => {
+            let len = app.timeline_length().max(0.1);
+            let page = (p / len).floor().max(0.0);
+            (page * len, page * len + len)
+        }
+    }
+}
+
+/// `t` moved onto whatever is near it, with snapping on (or off and Ctrl
+/// held): another key on any row, the camera's included; the playhead; the
+/// loop's ends; the start and end of the timeline; the ruler's ticks. `own`
+/// is the moment being dragged away from, which is no place to snap to.
+fn snap(ui: &egui::Ui, app: &App, geo: &Geo, t: f64, own: Option<f64>, playhead: bool) -> f64 {
+    let ctrl = ui.input(|i| i.modifiers.ctrl);
+    if app.ui_state.timeline_snap == ctrl {
+        return t.max(0.0);
+    }
+    let mut near: Vec<f64> = app.key_times();
+    if let Some(o) = own {
+        near.retain(|k| (k - o).abs() > 1e-6);
+    }
+    near.extend([0.0, app.timeline_length()]);
+    if playhead {
+        near.push(app.playhead());
+    }
+    if let Some((a, b)) = app.loop_region {
+        near.extend([a, b]);
+    }
+    let (_, minor) = geo.grid();
+    near.push((t / minor).round() * minor);
+    let x = geo.x(t);
+    near.into_iter()
+        .map(|c| (c, (geo.x(c) - x).abs()))
+        .filter(|&(_, d)| d <= SNAP_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or(t, |(c, _)| c)
+        .max(0.0)
+}
+
+/// The ruler, pinned above the rows: the loop strip along its top, the ticks
+/// under it. Press in the ticks to move the playhead; press in the strip to
+/// draw a loop region, or grab its ends or its middle.
+fn draw_ruler(ui: &mut egui::Ui, app: &mut App, geo: &Geo) {
     let full_w = ui.available_width();
-    let lane_w = (full_w - LABEL_W).max(60.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(full_w, RULER_H), egui::Sense::click_and_drag());
+    let lane = geo.lane(rect.top(), rect.bottom());
+    let strip = geo.lane(rect.top(), rect.top() + LOOP_H);
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(lane, 0.0, visuals.extreme_bg_color);
+    painter.rect_filled(strip, 0.0, visuals.faint_bg_color);
+    let label = |y: f32, s: &str| {
+        painter.text(
+            egui::pos2(rect.left() + 4.0, y),
+            egui::Align2::LEFT_CENTER,
+            s,
+            egui::FontId::proportional(10.0),
+            visuals.weak_text_color(),
+        );
+    };
+    label(strip.center().y, "loop");
+    label((strip.bottom() + rect.bottom()) / 2.0, &format!("seconds · {} fps", app.frame_rate()));
+
+    // The loop region: lit while looping is on, a ghost while it's off.
+    if let Some((a, b)) = app.loop_region {
+        let r = egui::Rect::from_min_max(egui::pos2(geo.x(a), strip.top()), egui::pos2(geo.x(b), strip.bottom()))
+            .intersect(strip);
+        if r.width() > 0.0 {
+            let c = visuals.selection.bg_fill;
+            painter.rect_filled(r, 2.0, if app.loop_playback { c } else { c.gamma_multiply(0.35) });
+        }
+    }
+
+    // Ticks: a labelled one where there's room, finer ones between.
+    let (step, minor) = geo.grid();
+    let font = egui::FontId::monospace(10.0);
+    let mut i = (geo.t0 / minor).ceil() as i64;
+    loop {
+        let t = i as f64 * minor;
+        if t > geo.t1 + 1e-9 {
+            break;
+        }
+        let x = geo.x(t);
+        let major = ((t / step).round() * step - t).abs() < minor * 0.01;
+        let h = if major { 6.0 } else { 3.0 };
+        painter.line_segment(
+            [egui::pos2(x, lane.bottom() - h), egui::pos2(x, lane.bottom())],
+            visuals.widgets.noninteractive.fg_stroke,
+        );
+        if major {
+            let decimals = if step < 0.1 || step == 0.25 { 2 } else if step < 1.0 { 1 } else { 0 };
+            painter.text(
+                egui::pos2(x + 2.0, strip.bottom() + 1.0),
+                egui::Align2::LEFT_TOP,
+                num::fixed(t as f32, decimals),
+                font.clone(),
+                visuals.weak_text_color(),
+            );
+        }
+        i += 1;
+    }
+    // Where the timeline ends, and the playhead.
+    let end = geo.x(app.timeline_length());
+    if end <= lane.right() {
+        painter.line_segment([egui::pos2(end, strip.bottom()), egui::pos2(end, lane.bottom())], egui::Stroke::new(1.0, visuals.weak_text_color()));
+    }
+    let px = geo.x(app.playhead());
+    if (lane.left()..=lane.right()).contains(&px) {
+        let c = visuals.selection.stroke.color;
+        painter.line_segment([egui::pos2(px, strip.bottom()), egui::pos2(px, lane.bottom())], egui::Stroke::new(1.5, c));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(px - 5.0, strip.bottom()),
+                egui::pos2(px + 5.0, strip.bottom()),
+                egui::pos2(px, strip.bottom() + 6.0),
+            ],
+            c,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    // A press in the strip works the loop; anywhere else on the ruler, the
+    // playhead.
+    let origin = ui.input(|i| i.pointer.press_origin());
+    let in_strip = origin.is_some_and(|o| o.y < strip.bottom() && o.x >= lane.left());
+    if resp.drag_started() && in_strip {
+        if let Some(o) = origin {
+            let t = geo.t(o.x);
+            let near = |at: f64| (geo.x(at) - o.x).abs() <= LOOP_GRAB;
+            app.ui_state.timeline_loop_drag = Some(match app.loop_region {
+                Some((a, _)) if near(a) => LoopDrag::Start,
+                Some((_, b)) if near(b) => LoopDrag::End,
+                Some((a, b)) if (a..=b).contains(&t) => LoopDrag::Move { grab: t - a },
+                _ => LoopDrag::Make { anchor: snap(ui, app, geo, t, None, true) },
+            });
+            app.ui_state.timeline_span = Some((geo.t0, geo.t1));
+        }
+    }
+    if let Some(p) = resp.interact_pointer_pos() {
+        match app.ui_state.timeline_loop_drag {
+            Some(drag) if resp.dragged() => {
+                let (a, b) = app.loop_region.unwrap_or((0.0, 0.0));
+                let t = geo.t(p.x);
+                let region = match drag {
+                    LoopDrag::Start => (snap(ui, app, geo, t, Some(a), true), b),
+                    LoopDrag::End => (a, snap(ui, app, geo, t, Some(b), true)),
+                    LoopDrag::Move { grab } => {
+                        let start = snap(ui, app, geo, (t - grab).max(0.0), Some(a), true);
+                        (start, start + (b - a))
+                    }
+                    LoopDrag::Make { anchor } => (anchor, snap(ui, app, geo, t, None, true)),
+                };
+                if (region.1 - region.0).abs() > 1e-3 {
+                    app.set_loop_region(Some(region));
+                }
+            }
+            None if !in_strip && (resp.dragged() || resp.clicked()) => {
+                app.scrub_to(snap(ui, app, geo, geo.t(p.x), None, false));
+            }
+            _ => {}
+        }
+    }
+    if resp.drag_stopped() {
+        app.ui_state.timeline_loop_drag = None;
+    }
+
+    // Right-click: set the loop's ends from here.
+    if resp.secondary_clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            app.ui_state.timeline_menu_at = Some((usize::MAX, snap(ui, app, geo, geo.t(p.x), None, true), None));
+        }
+    }
+    let hover_strip = ui.ctx().pointer_hover_pos().is_some_and(|p| p.y < strip.bottom());
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if hover_strip {
+            "The loop strip. Drag along it to make a loop region; drag an end of the region \
+             to move that end, or its middle to slide it. With loop on (the toolbar), \
+             playback goes round inside it. Right-click for more."
+        } else {
+            "The ruler, in seconds. Click or drag to move the playhead: the tracks follow \
+             it, and so does the camera if it is attached. Scrubbing isn't an edit. \
+             Right-click to set the loop from here."
+        },
+        if hover_strip {
+            "drag: make or move the loop region · right-click: loop menu"
+        } else {
+            "click or drag: move the playhead · right-click: loop menu"
+        },
+    );
+    resp.context_menu(|ui| {
+        let Some((usize::MAX, t, _)) = app.ui_state.timeline_menu_at else {
+            ui.close();
+            return;
+        };
+        ui.label(egui::RichText::new(format!("at {t:.2} s")).small().strong());
+        let (a, b) = app.loop_region.unwrap_or((0.0, app.timeline_length()));
+        for (label, region, tip) in [
+            ("Loop from here", (t, b.max(t + 0.1)), "Start the loop region here"),
+            ("Loop to here", (a.min(t - 0.1).max(0.0), t), "End the loop region here"),
+        ] {
+            let r = ui.button(label);
+            let r = hinted(r, &mut app.ui_state, tip, "click: set the loop region");
+            if r.clicked() {
+                app.set_loop_region(Some(region));
+                ui.close();
+            }
+        }
+        let r = ui.add_enabled(app.loop_region.is_some(), egui::Button::new("Loop the whole timeline"));
+        let r = hinted(r, &mut app.ui_state, "Clear the loop region: looping goes round the whole timeline", "click: clear the region");
+        if r.clicked() {
+            app.set_loop_region(None);
+            ui.close();
+        }
+        let r = ui.button((icons::PLAY, "Move the playhead here"));
+        let r = hinted(r, &mut app.ui_state, "Put the playhead at this moment", "click: move the playhead");
+        if r.clicked() {
+            app.scrub_to(t);
+            ui.close();
+        }
+    });
+}
+
+/// The camera's row and a row per track, under the ruler.
+fn draw_rows(ui: &mut egui::Ui, app: &mut App, geo: &Geo) {
+    let full_w = ui.available_width();
     let row_count = 1 + app.scene.tracks.len();
-    let lanes_h = RULER_H + ROW_H * row_count as f32;
+    let lanes_h = ROW_H * row_count as f32;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(full_w, lanes_h), egui::Sense::click_and_drag());
-    let lane = egui::Rect::from_min_size(egui::pos2(rect.left() + LABEL_W, rect.top()), egui::vec2(lane_w, lanes_h));
-    let x_of = |t: f64| lane.left() + ((t - t0) / (t1 - t0)) as f32 * lane.width();
-    let t_of = |x: f32| t0 + ((x - lane.left()) / lane.width()).clamp(0.0, 1.0) as f64 * (t1 - t0);
+    let lane = geo.lane(rect.top(), rect.bottom());
+    let x_of = |t: f64| geo.x(t);
 
     let visuals = ui.visuals().clone();
     let painter = ui.painter_at(rect);
     painter.rect_filled(lane, 0.0, visuals.extreme_bg_color);
-
-    // Ruler: a tick a second, a label where they have room.
-    let ruler = egui::Rect::from_min_size(lane.min, egui::vec2(lane.width(), RULER_H));
-    let span = t1 - t0;
-    let step = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0]
-        .into_iter()
-        .find(|s| (lane.width() as f64) / (span / s) >= 48.0)
-        .unwrap_or(300.0);
-    let font = egui::FontId::monospace(10.0);
-    let mut t = (t0 / step).ceil() * step;
-    while t <= t1 + 1e-9 {
-        let x = x_of(t);
-        painter.line_segment(
-            [egui::pos2(x, ruler.bottom() - 5.0), egui::pos2(x, ruler.bottom())],
-            visuals.widgets.noninteractive.fg_stroke,
-        );
-        painter.text(
-            egui::pos2(x + 2.0, ruler.top() + 1.0),
-            egui::Align2::LEFT_TOP,
-            num::fixed(t as f32, if step < 1.0 { 2 } else { 0 }),
-            font.clone(),
-            visuals.weak_text_color(),
-        );
-        t += step;
+    // The loop region, faintly, down every lane.
+    if let Some((a, b)) = app.active_loop_region() {
+        let r = egui::Rect::from_min_max(egui::pos2(geo.x(a), lane.top()), egui::pos2(geo.x(b), lane.bottom())).intersect(lane);
+        if r.width() > 0.0 {
+            painter.rect_filled(r, 0.0, visuals.selection.bg_fill.gamma_multiply(0.12));
+        }
     }
 
     // Rows: the camera, then each track, named as the parameter picker names
@@ -224,9 +581,9 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
     let mut hovered_row = None;
     let pointer = ui.ctx().pointer_hover_pos();
     for row in 0..row_count {
-        let top = rect.top() + RULER_H + row as f32 * ROW_H;
+        let top = rect.top() + row as f32 * ROW_H;
         let row_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), top), egui::vec2(full_w, ROW_H));
-        let lane_row = egui::Rect::from_min_max(egui::pos2(lane.left(), top), egui::pos2(lane.right(), top + ROW_H));
+        let lane_row = geo.lane(top, top + ROW_H);
         if row % 2 == 1 {
             painter.rect_filled(lane_row, 0.0, visuals.faint_bg_color);
         }
@@ -245,84 +602,113 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
             draw_camera_row(&painter, app, row_rect, lane_row, &x_of, &visuals);
         } else {
             let key = if selected { app.ui_state.timeline_key } else { None };
-            draw_track_row(&painter, &app.scene.tracks[row - 1], &names[row - 1], row_rect, lane_row, (t0, t1), &x_of, &visuals, key);
+            draw_track_row(&painter, &app.scene.tracks[row - 1], &names[row - 1], row_rect, lane_row, (geo.t0, geo.t1), &x_of, &visuals, key);
         }
     }
 
-    // The playhead, over everything.
-    let px = x_of(app.playhead());
+    // The end of the timeline, and the playhead, over everything.
+    let end = geo.x(app.timeline_length());
+    if end <= lane.right() {
+        painter.line_segment([egui::pos2(end, lane.top()), egui::pos2(end, lane.bottom())], egui::Stroke::new(1.0, visuals.weak_text_color().gamma_multiply(0.6)));
+    }
+    let px = geo.x(app.playhead());
     painter.line_segment(
         [egui::pos2(px, lane.top()), egui::pos2(px, lane.bottom())],
         egui::Stroke::new(1.5, visuals.selection.stroke.color),
     );
 
-    // A press on the ruler scrubs, and only there: the playhead is the
-    // ruler's. A press on a row selects it — a track's, and the diamond under
-    // the pointer, which a drag then retimes; or the camera's — and moves
-    // nothing else, so picking a track never shifts the camera.
+    // A press on a row selects it — a track's, and the diamond under the
+    // pointer, which a drag then retimes; or the camera's — and moves
+    // nothing else, so picking a track never shifts the camera. Only the
+    // ruler moves the playhead.
     let row_at = |y: f32| -> Option<usize> {
-        let r = ((y - rect.top() - RULER_H) / ROW_H).floor();
+        let r = ((y - rect.top()) / ROW_H).floor();
         (r >= 0.0 && (r as usize) < row_count).then_some(r as usize)
     };
-    if resp.drag_started() || resp.clicked() {
+    // The key under `p` on `row`: a camera key, or a track's.
+    let key_at = |app: &App, row: usize, p: egui::Pos2| -> Option<usize> {
+        let near = |t: f64| (x_of(t) - p.x).abs();
+        if row == 0 {
+            if app.path_is_default() {
+                return None;
+            }
+            camera_key_times(app, lane, &x_of)
+                .into_iter()
+                .map(|o| (o.key, near(o.t)))
+                .filter(|&(_, d)| d <= KEY_GRAB)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(k, _)| k)
+        } else {
+            let Source::Keys { keys, .. } = &app.scene.tracks.get(row - 1)?.source else { return None };
+            keys.iter()
+                .enumerate()
+                .map(|(k, key)| (k, near(key.t)))
+                .filter(|&(_, d)| d <= KEY_GRAB)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(k, _)| k)
+        }
+    };
+    let primary = !ui.input(|i| i.pointer.middle_down());
+    if primary && (resp.drag_started() || resp.clicked() || resp.secondary_clicked()) {
         // Where the press *began*: by the time egui calls it a drag the
         // pointer is already past its threshold, and a diamond is smaller.
-        let origin = ui.input(|i| i.pointer.press_origin());
+        let origin = if resp.secondary_clicked() { None } else { ui.input(|i| i.pointer.press_origin()) };
         if let Some(p) = origin.or(resp.interact_pointer_pos()) {
             app.ui_state.timeline_drag_key = None;
             app.ui_state.timeline_drag_camera = None;
-            if row_at(p.y) == Some(0) {
-                app.ui_state.timeline_camera = true;
-                app.ui_state.timeline_track = None;
-                app.ui_state.timeline_key = None;
-                if !app.path_is_default() {
-                    let hit = camera_key_times(app, lane, &x_of)
-                        .into_iter()
-                        .map(|o| (o, (x_of(o.t) - p.x).abs()))
-                        .filter(|&(_, d)| d <= KEY_GRAB)
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .map(|(o, _)| o);
-                    app.ui_state.timeline_camera_key = hit.map(|o| o.key);
-                    if let Some(o) = hit.filter(|o| o.primary) {
-                        app.ui_state.timeline_drag_camera = Some(o.key);
-                        app.ui_state.timeline_span = Some((t0, t1));
-                    }
-                }
-            }
-            if let Some(r) = row_at(p.y).filter(|&r| r > 0) {
-                let i = r - 1;
-                app.ui_state.timeline_camera = false;
-                if app.ui_state.timeline_track != Some(i) {
+            let row = row_at(p.y);
+            let hit = row.and_then(|r| key_at(app, r, p));
+            match row {
+                Some(0) => {
+                    app.ui_state.timeline_camera = true;
+                    app.ui_state.timeline_track = None;
                     app.ui_state.timeline_key = None;
-                }
-                app.ui_state.timeline_track = Some(i);
-                if let Source::Keys { keys, .. } = &app.scene.tracks[i].source {
-                    let hit = keys
-                        .iter()
-                        .enumerate()
-                        .map(|(k, key)| (k, (x_of(key.t) - p.x).abs()))
-                        .filter(|&(_, d)| d <= KEY_GRAB)
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .map(|(k, _)| k);
-                    if hit.is_some() {
-                        app.ui_state.timeline_key = hit;
-                        app.ui_state.timeline_drag_key = hit.map(|k| (i, k));
-                        app.ui_state.timeline_span = Some((t0, t1));
+                    app.ui_state.timeline_camera_key = hit;
+                    // Only a key's own diamond drags, not its repeats on
+                    // later laps.
+                    let own = hit.filter(|&k| {
+                        camera_key_times(app, lane, &x_of).iter().any(|o| o.key == k && o.primary && (x_of(o.t) - p.x).abs() <= KEY_GRAB)
+                    });
+                    if let Some(k) = own.filter(|_| !resp.secondary_clicked()) {
+                        app.ui_state.timeline_drag_camera = Some(k);
+                        app.ui_state.timeline_span = Some((geo.t0, geo.t1));
                     }
                 }
+                Some(r) => {
+                    let i = r - 1;
+                    app.ui_state.timeline_camera = false;
+                    if app.ui_state.timeline_track != Some(i) || hit.is_some() {
+                        app.ui_state.timeline_key = hit;
+                    }
+                    app.ui_state.timeline_track = Some(i);
+                    if let Some(k) = hit.filter(|_| !resp.secondary_clicked()) {
+                        app.ui_state.timeline_drag_key = Some((i, k));
+                        app.ui_state.timeline_span = Some((geo.t0, geo.t1));
+                    }
+                }
+                None => {}
+            }
+            if resp.secondary_clicked() {
+                app.ui_state.timeline_menu_at = row.map(|r| (r, snap(ui, app, geo, geo.t(p.x), None, true), hit));
             }
         }
     }
-    let on_ruler = ui
-        .input(|i| i.pointer.press_origin())
-        .is_some_and(|o| o.y < rect.top() + RULER_H && o.x >= lane.left());
     if let Some(p) = resp.interact_pointer_pos() {
-        if resp.dragged() || resp.clicked() {
+        if resp.dragged() && primary {
             match (app.ui_state.timeline_drag_key, app.ui_state.timeline_drag_camera) {
-                (Some((i, k)), _) if resp.dragged() => app.set_key_time(i, k, t_of(p.x)),
-                (None, Some(k)) if resp.dragged() => app.set_camera_key_time(k, t_of(p.x)),
-                (Some(_), _) | (None, Some(_)) => {}
-                (None, None) if on_ruler => app.scrub_to(t_of(p.x)),
+                (Some((i, k)), _) => {
+                    let own = match &app.scene.tracks.get(i).map(|t| &t.source) {
+                        Some(Source::Keys { keys, .. }) => keys.get(k).map(|key| key.t),
+                        _ => None,
+                    };
+                    let t = snap(ui, app, geo, geo.t(p.x), own, true);
+                    app.set_key_time(i, k, t);
+                }
+                (None, Some(k)) => {
+                    let own = Some(app.camera_path().time(k) as f64);
+                    let t = snap(ui, app, geo, geo.t(p.x), own, true);
+                    app.set_camera_key_time(k, t);
+                }
                 (None, None) => {}
             }
         }
@@ -332,16 +718,14 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         app.ui_state.timeline_drag_camera = None;
     }
     let row_hint = match hovered_row {
-        Some(0) => "the camera · click a diamond: select that view · drag it: retime it · link: attach or detach".to_string(),
-        Some(r) => format!("{} · click: select · drag a diamond: retime it · right-click: menu", names[r - 1]),
-        None => "drag: scrub the playhead".to_string(),
+        Some(0) => "the camera · click a diamond: select that view · drag it: retime it · right-click: key here, or that view's menu".to_string(),
+        Some(r) => format!("{} · click: select · drag a diamond: retime it · right-click: key here, or that key's menu", names[r - 1]),
+        None => String::new(),
     };
     let tooltip = match hovered_row {
         Some(0) => camera_description(app),
         Some(r) => format!("{}\n{}", names[r - 1], track_description(&app.scene.tracks[r - 1])),
-        None => "The ruler, in seconds. Drag along it to scrub: the tracks follow the \
-                 playhead, and so does the camera if it is attached. Scrubbing isn't an edit."
-            .to_string(),
+        None => String::new(),
     };
     let resp = hinted(resp, &mut app.ui_state, tooltip, &row_hint);
 
@@ -349,10 +733,7 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
     // painted rows so each gets its own hint: the camera's attach link, and
     // each track's mute eye.
     {
-        let link_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + 2.0, rect.top() + RULER_H + 1.0),
-            egui::vec2(20.0, ROW_H - 2.0),
-        );
+        let link_rect = egui::Rect::from_min_size(egui::pos2(rect.left() + 2.0, rect.top() + 1.0), egui::vec2(20.0, ROW_H - 2.0));
         let attached = app.camera_attached();
         let link = ui.put(link_rect, egui::Button::new(if attached { icons::ATTACHED } else { icons::DETACHED }).frame(false));
         let link = hinted(
@@ -373,7 +754,7 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         }
     }
     for i in 0..app.scene.tracks.len() {
-        let top = rect.top() + RULER_H + (i + 1) as f32 * ROW_H;
+        let top = rect.top() + (i + 1) as f32 * ROW_H;
         let eye_rect = egui::Rect::from_min_size(egui::pos2(rect.left() + 2.0, top + 1.0), egui::vec2(20.0, ROW_H - 2.0));
         let muted = app.scene.tracks[i].mute;
         let eye = ui.put(eye_rect, egui::Button::new(if muted { icons::EYE_SLASH } else { icons::EYE }).frame(false));
@@ -393,42 +774,168 @@ fn draw_lanes(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
-    // Right-click a track's row for its menu.
-    let menu_row = hovered_row.filter(|&r| r > 0);
     resp.context_menu(|ui| {
-        let Some(r) = menu_row.or(app.ui_state.timeline_menu_row) else {
-            ui.close();
-            return;
-        };
-        app.ui_state.timeline_menu_row = Some(r);
-        let i = r - 1;
-        let Some(track) = app.scene.tracks.get(i) else {
-            ui.close();
-            return;
-        };
-        let muted = track.mute;
-        ui.label(egui::RichText::new(names.get(i).cloned().unwrap_or_default()).small().strong());
-        let resp = ui.button(if muted { (icons::EYE, "Unmute") } else { (icons::EYE_SLASH, "Mute") });
-        let resp = hinted(resp, &mut app.ui_state, "Mute or unmute this track", "click: mute / unmute");
-        if resp.clicked() {
-            app.set_track_muted(i, !muted);
-            ui.close();
-        }
-        let resp = ui.button((icons::TRASH, "Delete track"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Remove this track from the scene; the value goes back to what the scene authors. \
-             Ctrl+Z brings it back.",
-            "click: delete this track",
-        );
-        if resp.clicked() {
-            app.delete_track(i);
-            ui.close();
+        match app.ui_state.timeline_menu_at {
+            Some((0, t, key)) => camera_menu(ui, app, t, key),
+            Some((r, t, key)) if r != usize::MAX && r - 1 < app.scene.tracks.len() => {
+                let name = names.get(r - 1).cloned().unwrap_or_default();
+                track_menu(ui, app, r - 1, &name, t, key);
+            }
+            _ => ui.close(),
         }
     });
-    if !resp.context_menu_opened() {
-        app.ui_state.timeline_menu_row = None;
+}
+
+/// Right-click on the camera's row: key it here, or work on the view under
+/// the pointer.
+fn camera_menu(ui: &mut egui::Ui, app: &mut App, t: f64, key: Option<usize>) {
+    match key {
+        Some(k) => {
+            let p = app.camera_path().clone();
+            if k >= p.keys.len() {
+                ui.close();
+                return;
+            }
+            ui.label(egui::RichText::new(format!("View {} of {}, at {:.2} s", k + 1, p.keys.len(), p.time(k))).small().strong());
+            let r = ui.button((icons::CAMERA, "Go to this view"));
+            let r = hinted(r, &mut app.ui_state, "Put the playhead on this view, with the camera attached", "click: go to this view");
+            if r.clicked() {
+                app.scrub_to(p.time(k) as f64);
+                app.set_camera_attached(true);
+                ui.close();
+            }
+            let r = ui.button((icons::REFRESH, "Re-key with this framing"));
+            let r = hinted(r, &mut app.ui_state, "Replace this view with the framing on screen, at the same time", "click: re-key this view");
+            if r.clicked() {
+                app.rekey_camera(k);
+                ui.close();
+            }
+            let r = ui.button((icons::TRASH, "Delete this view"));
+            let r = hinted(r, &mut app.ui_state, "Remove this view from the camera's track. Ctrl+Z brings it back.", "click: delete this view");
+            if r.clicked() {
+                app.remove_path_key_at(k);
+                app.ui_state.timeline_camera_key = None;
+                ui.close();
+            }
+        }
+        None => {
+            ui.label(egui::RichText::new(format!("The camera, at {t:.2} s")).small().strong());
+            let r = ui.button((icons::PLUS, "Key the camera here"));
+            let r = hinted(
+                r,
+                &mut app.ui_state,
+                "Make the framing on screen the camera's view at this moment",
+                "click: key this framing here",
+            );
+            if r.clicked() {
+                app.key_camera_at(t, None);
+                ui.close();
+            }
+        }
+    }
+}
+
+/// Right-click on a track's row: a key here, or the key under the pointer's
+/// copy, paste, duplicate and delete; then the track's own mute and delete.
+fn track_menu(ui: &mut egui::Ui, app: &mut App, i: usize, name: &str, t: f64, key: Option<usize>) {
+    let Some(Track { source, mute, .. }) = app.scene.tracks.get(i).cloned() else {
+        ui.close();
+        return;
+    };
+    ui.label(egui::RichText::new(name).small().strong());
+    let keys = match &source {
+        Source::Keys { keys, .. } => Some(keys.clone()),
+        _ => None,
+    };
+    let clip = app.ui_state.timeline_clip.clone();
+    // A copied value goes only onto a track keyed with the same kind.
+    let pastes = |keys: &[crate::track::Key]| {
+        clip.as_ref().is_some_and(|c| keys.iter().all(|k| std::mem::discriminant(&k.value) == std::mem::discriminant(c)))
+    };
+    match (&keys, key) {
+        (Some(keys), Some(k)) if k < keys.len() => {
+            let at = keys[k].t;
+            ui.label(egui::RichText::new(format!("key at {at:.2} s")).small().weak());
+            let r = ui.button((icons::COPY, "Copy"));
+            let r = hinted(r, &mut app.ui_state, "Copy this key's value, to paste onto another moment or another track like it", "click: copy this key");
+            if r.clicked() {
+                app.ui_state.timeline_clip = Some(keys[k].value.clone());
+                ui.close();
+            }
+            let r = ui.add_enabled(pastes(keys), egui::Button::new("Paste over it"));
+            let r = hinted(
+                r,
+                &mut app.ui_state,
+                if clip.is_some() { "Give this key the copied value" } else { "Copy a key first" },
+                "click: paste the copied value here",
+            );
+            if r.clicked() {
+                app.add_key_at(i, at, clip.clone());
+                ui.close();
+            }
+            let here = app.playhead();
+            let r = ui.add_enabled((here - at).abs() > 1e-3, egui::Button::new((icons::PLUS, format!("Duplicate at the playhead ({here:.2} s)"))));
+            let r = hinted(r, &mut app.ui_state, "A copy of this key at the playhead", "click: duplicate this key");
+            if r.clicked() {
+                if let Some(k) = app.add_key_at(i, here, Some(keys[k].value.clone())) {
+                    app.ui_state.timeline_key = Some(k);
+                }
+                ui.close();
+            }
+            let r = ui.button((icons::TRASH, "Delete key"));
+            let r = hinted(r, &mut app.ui_state, "Delete this key (the last one takes the track with it). Ctrl+Z brings it back.", "click: delete this key");
+            if r.clicked() {
+                app.delete_key(i, k);
+                app.ui_state.timeline_key = None;
+                ui.close();
+            }
+        }
+        (Some(keys), _) => {
+            ui.label(egui::RichText::new(format!("at {t:.2} s")).small().weak());
+            let r = ui.button((icons::PLUS, "Add a key here"));
+            let r = hinted(r, &mut app.ui_state, "A key here holding the value the track has at this moment, so nothing changes until you set it", "click: key here");
+            if r.clicked() {
+                if let Some(k) = app.add_key_at(i, t, None) {
+                    app.ui_state.timeline_key = Some(k);
+                }
+                ui.close();
+            }
+            let r = ui.add_enabled(pastes(keys), egui::Button::new("Paste key here"));
+            let r = hinted(
+                r,
+                &mut app.ui_state,
+                if clip.is_some() { "A key here with the copied value" } else { "Copy a key first: right-click one" },
+                "click: paste a key here",
+            );
+            if r.clicked() {
+                if let Some(k) = app.add_key_at(i, t, clip.clone()) {
+                    app.ui_state.timeline_key = Some(k);
+                }
+                ui.close();
+            }
+        }
+        (None, _) => {
+            ui.label(egui::RichText::new("A rate or a cycle: its numbers are on the right").small().weak());
+        }
+    }
+    ui.separator();
+    let r = ui.button(if mute { (icons::EYE, "Unmute track") } else { (icons::EYE_SLASH, "Mute track") });
+    let r = hinted(r, &mut app.ui_state, "Mute or unmute this track", "click: mute / unmute");
+    if r.clicked() {
+        app.set_track_muted(i, !mute);
+        ui.close();
+    }
+    let r = ui.button((icons::TRASH, "Delete track"));
+    let r = hinted(
+        r,
+        &mut app.ui_state,
+        "Remove this track from the scene; the value goes back to what the scene authors. \
+         Ctrl+Z brings it back.",
+        "click: delete this track",
+    );
+    if r.clicked() {
+        app.delete_track(i);
+        ui.close();
     }
 }
 

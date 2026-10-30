@@ -112,6 +112,17 @@ const SECTIONS: &[(&str, &[Row])] = &[
         ],
     ),
     (
+        "Timeline",
+        &[
+            ("Left / Right", "a frame back / on (Shift: the key before / after)", Some(HelpAction::StepFrame)),
+            ("ctrl+scroll on lanes", "zoom the timeline in or out", None),
+            ("shift+scroll, middle-drag", "move along the timeline", None),
+            ("right-click a lane", "key here; on a key, copy / paste / duplicate / delete", None),
+            ("ctrl while dragging a key", "snap the other way from the magnet", None),
+            ("", "record (toolbar, the red ring): every edit keys the playhead", None),
+        ],
+    ),
+    (
         "Transforms",
         &[
             ("click gizmo dot", "select that transform", None),

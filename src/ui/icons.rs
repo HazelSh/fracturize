@@ -163,3 +163,11 @@ pub const ATTACHED: &str = LINK;
 pub const DETACHED: &str = "\u{E2E4}";
 /// The parameter picker's search field (Phosphor "magnifying-glass")
 pub const SEARCH: &str = "\u{E30C}";
+/// Transport: record (Phosphor "record"; tinted red when armed)
+pub const RECORD: &str = "\u{E3EE}";
+/// Transport: return to start (Phosphor "skip-back")
+pub const SKIP_BACK: &str = "\u{E5A4}";
+/// Timeline: snapping (Phosphor "magnet")
+pub const MAGNET: &str = "\u{E682}";
+/// Timeline: show the whole timeline (Phosphor "corners-out")
+pub const CORNERS_OUT: &str = "\u{E1D0}";

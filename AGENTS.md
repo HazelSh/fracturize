@@ -565,6 +565,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Enter | enable/disable selected transform |
 | G / Tab | toggle transform gizmos and their name labels |
 | O, Z, or Space | play / stop the timeline: the camera flying its path, and every track (three keys, one action) |
+| Left / Right | the playhead a frame back / on, at the Render job's fps (Shift: to the key before / after, on any row) |
 | Y / Shift+Y | add the current framing as a camera key after the last one (the playhead goes to it) / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
@@ -680,7 +681,7 @@ the drawable area, so aspect and picking math are unaffected by which panels
 are open. The toolbar runs
 
 ```
-File  Explore | Transforms  Subscenes | Camera  Render | Undo Redo | quick controls … scene name | Help
+File  Explore | Transforms  Subscenes | Camera  Render | Undo Redo | quick controls | transport … scene name | Help
 ```
 
 ordered by task rather than by module: where does a scene come from, what am I
@@ -720,7 +721,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
-| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
+| Timeline | Wide and low, above the status bar: its own clock-only Play, Snap, Whole; a ruler pinned above the rows (click to scrub, the loop strip along its top), the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it, snapping); eye to mute; right-click a lane or a key for its menu. Ctrl+scroll zooms, Shift+scroll and middle-drag move along. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -2953,8 +2954,43 @@ Things it rests on, each found the hard way:
 - `.avif`/`.mp4` render the timeline; the summary line says the class and
   whether it loops.
 
-**In the app**: the Timeline window (toolbar, film strip).
+**In the app**: the transport in the toolbar, and the Timeline window
+(toolbar, film strip).
 
+- **The transport lives in the toolbar** (`ui::transport`), so it is there
+  with the Timeline closed: record, return to start, play/pause, the time and
+  loop. The time reads in seconds and in frames at the Render job's fps (so a
+  frame is a frame of the file it would write), and takes a typed moment
+  while paused — `12.5`, `300f`, `1:02.5`. Left/Right step a frame,
+  Shift+Left/Right jump between keys.
+- **Record keys what an edit changes** (`App::autokey`, from `commit_edit`).
+  Armed, an edit's changes come out of `scene_diff` as `-S` paths and each is
+  keyed at the playhead, its track made if there isn't one, in the edit's own
+  undo step. A vector keys all three of its parts whichever moved (a map
+  picked up and moved is pinned on every axis) and any rotation keys the whole
+  pose; a value a rate or cycle moves is left to it. **While armed and paused,
+  the authored scene is synced to the frame at the playhead** for keyed tracks
+  (`sync_record_base`), so the inspector and the gizmos edit what's on screen
+  and the key is the value you set rather than a jump from the authored one.
+  That sync isn't an edit and never changes the picture (keys override the
+  authored value), but Ctrl+S writes it. Disarmed, nothing has changed: an
+  inspector edit edits the authored value.
+- **The ruler is pinned; the lanes zoom.** Ctrl+scroll over the lanes zooms
+  about the pointer, Shift+scroll or a middle-drag moves along, Whole goes
+  back; zoomed in, playback that runs off the end turns the page (a jump).
+- **The loop region** (`App::loop_region`, session state like
+  `loop_playback`) is drawn in the strip along the ruler's top: drag to make
+  one, its ends or middle to move it, or right-click the ruler. With loop on,
+  playback goes round inside it, the default orbit carried across the seam as
+  at the timeline's end, and play from outside it starts at its beginning.
+- **Snapping** is the magnet (on by default; Ctrl flips it for one drag):
+  keys, loop ends and the playhead land on any row's keys (the camera's
+  included), the playhead, the loop's ends, the timeline's ends and the
+  ruler's finer ticks within `SNAP_PX` points.
+- **Right-click** a lane to key there or paste; a key to copy, paste over,
+  duplicate at the playhead or delete; the camera's row to key the framing
+  there or work on a view. A copied value pastes only onto a track keyed
+  with the same kind of value.
 - **The transport is a clock, and the camera is attached to it or not.** The
   camera row's link attaches it (it flies its path on the clock, playing and
   scrubbing) or detaches it (it stays where you put it while the tracks play).
@@ -2988,15 +3024,18 @@ and the two fed back into the drag); "Key at playhead" adds a key holding the
 curve's value there; a new track on any `-S` path starts with one key at the
 playhead holding the scene's value, so it changes nothing until keyed again.
 All of those, and mute and delete, are undoable edits; scrubbing is view
-state, like orbiting. **No auto-key**: editing a tracked value in the
+state, like orbiting. Without record, editing a tracked value in the
 inspector edits the scene's own value, which a rate or cycle moves about and
-keys override — key values are edited in the Timeline. A Render job still renders the
+keys override. A Render job still renders the
 frame at the playhead; an animation's length defaults to the timeline's, and
 its estimate charges a refill per frame when the attractor moves.
 
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
-keying from the inspector (and with it the auto-key question, which is
-Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper,
+vector tracks (a position keyed as one `[x, y, z]`; record keys three
+number tracks instead), the curve editor proper (dragging a key's value as
+well as its time), box selection and moving many keys at once, per-key
+interpolation, markers and a tempo grid (`ANIMATION-PLAN.md`), the loop
+region as scene data,
 spin/turn rate tracks and post-rotation poses (TIMELINE-PLAN §3 C), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 

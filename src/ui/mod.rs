@@ -48,6 +48,7 @@ pub mod shortcuts;
 pub mod status_bar;
 pub mod subscenes;
 pub mod toolbar;
+pub mod transport;
 pub mod transforms;
 pub mod xaos;
 
@@ -130,9 +131,6 @@ pub struct UiState {
     pub xaos_edge: Option<(usize, usize)>,
     /// An overlay edge's right-click menu, pinned where it opened.
     pub xaos_edge_menu: Option<((usize, usize), Option<egui::Pos2>)>,
-    /// The Timeline row whose context menu is open, held while the pointer
-    /// is on the menu rather than the row.
-    pub timeline_menu_row: Option<usize>,
     /// The toolbar ran out of room last frame, so its window toggles show
     /// icons without captions (`toolbar::draw`).
     pub toolbar_compact: bool,
@@ -150,6 +148,21 @@ pub struct UiState {
     /// The camera's selected key, and the one a drag is retiming.
     pub timeline_camera_key: Option<usize>,
     pub timeline_drag_camera: Option<usize>,
+    /// The span the lanes show, when zoomed in (ctrl+scroll); `None` shows
+    /// the whole timeline, paged by the playhead.
+    pub timeline_view: Option<(f64, f64)>,
+    /// A dragged key, a new key and a loop point snap to keys and to the
+    /// ruler's ticks (the magnet; ctrl inverts it for one drag).
+    pub timeline_snap: bool,
+    /// A copied key's value, for pasting onto a track of the same kind.
+    pub timeline_clip: Option<crate::track::KeyValue>,
+    /// What a drag in the ruler's loop strip is doing.
+    pub timeline_loop_drag: Option<timeline::LoopDrag>,
+    /// The right-click menu's target, pinned when it opened: the row, the
+    /// moment under the pointer, and the key there if any.
+    pub timeline_menu_at: Option<(usize, f64, Option<usize>)>,
+    /// The toolbar's time field while it is being typed into.
+    pub transport_time_edit: Option<String>,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -231,7 +244,6 @@ impl UiState {
             xaos_overlay: false,
             xaos_edge: None,
             xaos_edge_menu: None,
-            timeline_menu_row: None,
             toolbar_compact: false,
             timeline_track: None,
             timeline_key: None,
@@ -241,6 +253,12 @@ impl UiState {
             timeline_camera: false,
             timeline_camera_key: None,
             timeline_drag_camera: None,
+            timeline_view: None,
+            timeline_snap: true,
+            timeline_clip: None,
+            timeline_loop_drag: None,
+            timeline_menu_at: None,
+            transport_time_edit: None,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),

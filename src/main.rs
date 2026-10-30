@@ -2677,6 +2677,17 @@ impl ApplicationHandler for AppWrapper {
                             app.delete_selected_transform();
                             return;
                         }
+                        PhysicalKey::Code(c @ (KeyCode::ArrowLeft | KeyCode::ArrowRight)) => {
+                            // The playhead: a frame at a time, or with Shift to
+                            // the key before or after (on any row).
+                            let forward = c == KeyCode::ArrowRight;
+                            if app.shift_held {
+                                app.jump_to_key(forward);
+                            } else {
+                                app.step_frames(if forward { 1 } else { -1 });
+                            }
+                            return;
+                        }
                         PhysicalKey::Code(KeyCode::Home) => {
                             // "Frame selected", on the key everyone binds it to.
                             app.frame_selected_transform();
