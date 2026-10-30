@@ -10,6 +10,7 @@ pub mod compute;
 pub mod density;
 pub mod downsample;
 pub mod emphasis;
+pub mod mask;
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod moments;
 pub mod renderer;

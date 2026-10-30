@@ -137,6 +137,7 @@ src/
       splat.rs     # Splat mode: additive log-density accumulation + tonemap;
                    # also volume mode's passes (spans, slices, weighted emission)
       volume.rs    # Volume mode's uniform, reference length, slice constants
+      mask.rs      # Mute/solo: the per-point map record, the mask, the mixer rules
       moments.rs   # The retired moment reconstruction, kept for the reference
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
@@ -402,6 +403,7 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | double-click a Transforms row | rename it inline |
 | drag a row's weight bar | change that transform's chaos weight |
 | alt+click a row's eye | solo it; alt+click again brings everything back |
+| click a row's M / S | mute / solo the points that map placed — a view, not an edit (alt+click S: this map alone, again to clear) |
 | click an xaos edge (overlay on) | open its popover: multiplier, probability, cut/restore, only exit |
 | alt+scroll over an xaos edge | scale its multiplier — the weight lever, one level down |
 | right-click an xaos edge | its menu: cut, restore, only exit, linked map |
@@ -709,7 +711,7 @@ where "start a new document" lives in every program.
 
 | Window | What lives there |
 |--------|------------------|
-| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
+| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, mute, solo, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
 | History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
 | Mutate | The dice profile picker, mutation strength (the profile's), 3×3 / 5×5, New, Mutate, Undo, Settings… — then the mutation grid: the scene in the middle, its mutations around it, click one to make it the scene. See "The mutation grid" |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
@@ -936,6 +938,47 @@ Conventions worth keeping:
   control in this UI was at one point saying nothing at all.
 - When testing anything that touches prefs, set an isolated `XDG_CONFIG_HOME`
   rather than writing the developer's real `~/.config/fracturize/prefs.toml`.
+
+### Mute and solo: a view of which map placed what
+
+FEATURE-PLANS item 14 (`src/gpu/points/mask.rs`). Each tab on the Transforms
+rail has **M** and **S** beside its eye, with mixing-desk rules: if anything is
+soloed only the soloed maps' points are drawn, otherwise all but the muted
+ones. **It is not the eye.** The eye takes a map out of the IFS and the
+attractor changes; mute and solo leave the walk exactly as it is and stop
+drawing the points a map placed last — `--isolate`'s partition, for any set of
+maps, live. So it is session state like orbiting: not in the file, not in the
+history, and cleared when maps are added or removed (it is held by position).
+The status bar says "k of n maps drawn" while it is on, and clicking that
+clears it.
+
+- **A change shows on the next frame.** `--isolate` drops points as they are
+  written, which would take the ring's thirteen seconds. Instead the chaos
+  pass records each point's GPU slot (one up, so 0 is "not yet") in
+  `point_maps`, binding 10, and the vertex stages clip against the mask
+  (`hidden()` in render.wgsl and splat.wgsl, which replaced
+  `isolate_dropped` at the four call sites). Word 0 of the mask is "on", then
+  a bit per GPU slot.
+- **The record costs four bytes a point** and is allocated the first time
+  anything is muted or soloed, then kept, as emphasis keeps its sensitivity.
+  The chaos pass writes it only when `arrayLength(&point_maps)` reaches the
+  ring's capacity, which is the whole on-switch: no parameter word was free.
+  While the first lap fills it the ring churns at the fill rate, and
+  unrecorded points count as hidden, so a first solo densifies in.
+- **Every other renderer binds 16-byte stand-ins** with the mask off, so
+  offline renders, thumbnails and render jobs never see it (checked
+  byte-identical against `main` in both renderers). The live renderers rebind
+  when `PointCompute::mask_binding`'s generation changes.
+- **Exposure stays normalised by every point**, so a soloed part is at the
+  brightness it has in the whole picture, as with `--isolate`.
+- **The emphasis glow stands down while it is on**: the glow measures every
+  point, hidden ones included, and would light material that isn't drawn.
+- **Under infinite zoom the zoom map's part looks like the whole picture.** Its
+  points, renormalised by the zoom map's inverse, are the same set an octave
+  over, so muting it thins the density and leaves the shape alone. Not a bug.
+- Not yet: edge mode (`from>to`, which `--isolate` has), a view-file key or
+  CLI flag for rendering a part (one map is `--isolate`), and carrying it
+  across adding or deleting a map.
 
 ### Deferred on purpose
 

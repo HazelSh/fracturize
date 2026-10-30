@@ -368,6 +368,25 @@ pub struct PointCompute {
     composite: bool,
     /// Scene index -> GPU index, for the emphasis target.
     gpu_order: Vec<usize>,
+    /// Mute/solo (see `mask.rs`): which map placed each point — a stand-in
+    /// until something is first muted or soloed — and the mask the renderers
+    /// clip against, with what was last written to it.
+    map_buffer: wgpu::Buffer,
+    mask_buffer: wgpu::Buffer,
+    mask_words: Vec<u32>,
+    mask_generation: u64,
+    /// `written_total` when the map record was allocated: until a lap has
+    /// been written since, some points have no map recorded.
+    maps_since: Option<u64>,
+}
+
+fn create_mask_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("map_mask"),
+        size: size.max(16),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// The xaos row buffer, with headroom: a live edit that adds an exception or
@@ -602,6 +621,19 @@ impl ChaosPipelines {
                     },
                     count: None,
                 },
+                // Which map placed each point, for mute/solo (see mask.rs).
+                // The ninth storage binding here: past the WebGPU default of
+                // eight, so it relies on the device asking for the adapter's.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -753,6 +785,8 @@ impl PointCompute {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let map_buffer = super::mask::stand_in(device, "point_maps_placeholder");
+        let mask_buffer = create_mask_buffer(device, 16);
         let stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("emphasis_stats_buffer"),
             size: 16,
@@ -831,6 +865,10 @@ impl PointCompute {
                     binding: 9,
                     resource: xaos_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: map_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -868,6 +906,13 @@ impl PointCompute {
             num_layers: table.layers.len() as u32,
             composite: table.composite,
             gpu_order: table.order.clone(),
+            map_buffer,
+            mask_buffer,
+            mask_words: vec![0],
+            // Unique even for the stand-ins, so a renderer that outlives one
+            // compute always moves over to the next one's pair.
+            mask_generation: super::mask::next_generation(),
+            maps_since: None,
         }
     }
 
@@ -1036,6 +1081,62 @@ impl PointCompute {
         self.rebuild_bind_group(device);
     }
 
+    /// Mute/solo: hide the points these maps placed (by scene index), or
+    /// nothing with `None`. Cheap to call every frame: the mask is only
+    /// written when it changes, and the per-point record is allocated once,
+    /// the first time anything is hidden.
+    pub fn set_hidden(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, hidden: Option<&[bool]>) {
+        let words = super::mask::mask_words(hidden, &self.gpu_order);
+        if words == self.mask_words {
+            return;
+        }
+        if hidden.is_some() {
+            self.ensure_map_buffer(device);
+        }
+        let bytes = (words.len() * 4) as u64;
+        if self.mask_buffer.size() < bytes {
+            self.mask_buffer = create_mask_buffer(device, bytes.next_power_of_two());
+            self.mask_generation = super::mask::next_generation();
+        }
+        queue.write_buffer(&self.mask_buffer, 0, bytemuck::cast_slice(&words));
+        self.mask_words = words;
+    }
+
+    /// What the renderers bind to clip against the mute/solo mask.
+    pub fn mask_binding(&self) -> super::mask::Binding {
+        super::mask::Binding {
+            maps: self.map_buffer.clone(),
+            mask: self.mask_buffer.clone(),
+            generation: self.mask_generation,
+        }
+    }
+
+    /// Allocate the real per-point map record, once, and rebind.
+    fn ensure_map_buffer(&mut self, device: &wgpu::Device) {
+        let wanted = self.buffer_capacity as u64 * 4;
+        if self.map_buffer.size() >= wanted {
+            return;
+        }
+        log::info!("Mute/solo: allocating {:.1} MB of per-point map record", wanted as f64 / (1024.0 * 1024.0));
+        self.map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("point_maps"),
+            size: wanted,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        self.mask_generation = super::mask::next_generation();
+        self.maps_since = Some(self.written_total);
+        self.rebuild_bind_group(device);
+    }
+
+    /// Whether the mask is on and the ring still holds points written before
+    /// the map record existed — hidden until they are replaced, so callers
+    /// should churn at the fill rate meanwhile, as for the emphasis.
+    pub fn mask_filling(&self) -> bool {
+        self.mask_words[0] != 0
+            && self.maps_since.is_some_and(|m| self.written_total - m < self.buffer_capacity as u64)
+    }
+
     /// After a buffer the bind group holds has been replaced.
     fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1052,6 +1153,7 @@ impl PointCompute {
                 wgpu::BindGroupEntry { binding: 7, resource: self.layer_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.layer_colormap_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 9, resource: self.xaos_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: self.map_buffer.as_entire_binding() },
             ],
         });
     }

@@ -171,6 +171,11 @@ const MAX_LAYERS: u32 = 16u;
 // then one entry per exception, sorted by target:
 //   (target as bits, cumulative x-mass, gap position, cumulative base mass).
 @group(0) @binding(9) var<storage, read> xaos_rows: array<vec4<f32>>;
+// Mute/solo (src/gpu/points/mask.rs): the map that placed each point, as its
+// GPU slot one up, parallel to `points`, so 0 means "not recorded yet". A
+// sixteen-byte stand-in while nothing is muted or soloed, which `arrayLength`
+// tells apart from the real thing — that is the whole on-switch.
+@group(0) @binding(10) var<storage, read_write> point_maps: array<u32>;
 const XAOS_NO_ROW: u32 = 0xFFFFFFFFu;
 
 const PI: f32 = 3.14159265358979;
@@ -935,6 +940,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
         }
         points[output_idx] = Point(out_pos, word);
+        if arrayLength(&point_maps) >= params.buffer_capacity {
+            point_maps[output_idx] = transform_idx + 1u;
+        }
         // Behind the flag because the buffer bound here is a sixteen-byte
         // stand-in when the emphasis is off — see `sensitivity` above.
         if params.emphasis_enabled != 0u {

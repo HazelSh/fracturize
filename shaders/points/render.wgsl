@@ -101,6 +101,32 @@ fn isolate_dropped(pos: vec3<f32>) -> bool {
     return abs(pos.x) > 1.0e36;
 }
 
+// Mute/solo, a view (src/gpu/points/mask.rs): which map placed each point,
+// one up (0 = not recorded yet), and the mask — word 0 is "on", then one bit
+// a GPU slot, set to hide. Sixteen-byte stand-ins with word 0 = 0 in every
+// renderer that isn't the live window's, so `point_maps` is never read there.
+@group(0) @binding(3) var<storage, read> point_maps: array<u32>;
+@group(0) @binding(4) var<storage, read> map_mask: array<u32>;
+
+// Whether a point is drawn at all: `--isolate` dropped it, or the mute/solo
+// mask hides the map that placed it. A point whose map isn't recorded yet is
+// hidden while the mask is on, so a solo fills in rather than flashing the
+// whole picture first.
+fn hidden(i: u32, pos: vec3<f32>) -> bool {
+    if isolate_dropped(pos) {
+        return true;
+    }
+    if map_mask[0] == 0u {
+        return false;
+    }
+    let m = point_maps[i];
+    if m == 0u {
+        return true;
+    }
+    let s = m - 1u;
+    return ((map_mask[1u + s / 32u] >> (s % 32u)) & 1u) != 0u;
+}
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) corner_index: u32,
@@ -110,7 +136,7 @@ fn vs_main(
 
     // Transform to clip space
     let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
-    let depth = select(clip.w, -1.0, isolate_dropped(point.position));
+    let depth = select(clip.w, -1.0, hidden(point_index, point.position));
 
     // Handle points behind camera - move them off screen
     if depth <= 0.0 {
@@ -170,7 +196,7 @@ fn vs_point(@builtin(vertex_index) point_index: u32) -> VertexOutput {
     let point = points[point_index];
 
     let clip = camera.view_proj * vec4<f32>(point.position, 1.0);
-    let depth = select(clip.w, -1.0, isolate_dropped(point.position));
+    let depth = select(clip.w, -1.0, hidden(point_index, point.position));
 
     var out: VertexOutput;
     if depth <= 0.0 {
