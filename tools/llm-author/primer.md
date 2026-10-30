@@ -96,8 +96,17 @@ out for a plain map (`linear = 1.0`). Weights around 1 in total are safest.
 
 Use at least two maps, and give them **different translations**. If every map
 leaves the same point where it is, the whole picture collapses onto that one
-point. Add **a few degrees of rotation** somewhere, too: two unrotated maps make
-only a straight line. The report says if either has happened.
+point. Two unrotated maps make only a straight line. The report says if either
+has happened.
+
+**If it collapses, turn one map and move the maps apart.** This is the fix
+that works, and it is better than adding maps or variations. Give one map a
+real turn, 30-90°, about an axis that crosses the line (a turn about the line
+itself changes nothing), and translate the maps well away from the origin and
+from each other. Two plain `linear` maps treated this way, each at a scale of
+about 0.7 (the table below), already grow into 3D dragon-curve forms; at 0.5
+they stay a sparse scatter. The warning below about small tilts is for adding depth
+to a form you already have, not for rescuing a collapsed one.
 
 ## Numbers that predict the look
 
@@ -122,10 +131,12 @@ Keep every scale below 1 unless a variation brings points back.
 
 **Weight is share, and share is colour.** A map with weight 0.1 among maps of
 weight 1 gets a small share of the points, so its colour barely shows. To see a
-hue, give its map share.
+hue, give its map share. Weights only matter relative to each other: raising
+every weight together changes nothing, and it does not add points.
 
 **Small doses work best:**
-- Tilt out of plane: 5-12° reads as 3D. 25° or more dissolves into fuzz.
+- Tilt out of plane, on a form that already works: 5-12° reads as 3D. 25° or
+  more dissolves into fuzz.
 - A thin "stem" map (like `scale = [0.05, 0.6, 0.05]`) at 1-2% of the weight
   can hold a plant-like form up. More than that and its streaks take over.
 - Symmetry alone looks like wallpaper. One extra map *outside* the group, at a
@@ -135,7 +146,8 @@ hue, give its map share.
 sepia), in linear RGB, so 0.02 is already a visible dark colour. Raise
 `color_speed` (0.6-0.8) to keep each branch its own colour; lower it (0.3) to
 blend. `color_mode = "mix"` blends the transform colours as RGB, so paths
-through different maps get different colours.
+through different maps get different colours. `color_contrast` does nothing in
+`mix` mode; leave it out there.
 
 ## What you will get back
 
@@ -144,7 +156,10 @@ After each scene you get a short report:
 - **notes**: problems found, or `none`. Read this first.
 - **shape**: where the fractal sits, and suggested values for `camera.distance`
   and `point_size`. Copy them.
-- **dimension**: under 2.1 is lace, 2.1-2.6 a surface, over 2.7 a solid.
+- **dimension**, with a word for it: under 1.7 `dust`, then `lace` (to 2.1),
+  `shell` (to 2.6), `solid` (to 3) and `overfull` (3 or more). `overfull`
+  means too much material: shrink the scales, don't grow them. A delicate
+  idea wants lace or shell; `solid` is a lump, whatever it was meant to be.
 - **an image**, if you can see: four views of your scene from around it.
 
 A broken file gets the loader's error instead; fix it and resend the scene.

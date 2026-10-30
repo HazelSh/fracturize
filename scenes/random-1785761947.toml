@@ -16,32 +16,6 @@ distance = 4.8842
 yaw = 2.3794
 pitch = 0.6802
 roll = 0.1531
-path_loop = "pingpong"
-
-[[camera.path]]
-rotvec = [-0.009941, -2.711492, -1.564703]
-distance = 2.74
-focus = [0.1372, -0.4809, 0.2576]
-
-[[camera.path]]
-rotvec = [-1.562227, 0.280175, 0.282969]
-distance = 1.1795
-focus = [-0.2074, 0.1803, -0.3361]
-
-[[camera.path]]
-rotvec = [-0.435933, -2.188707, -1.418158]
-distance = 0.6965
-focus = [0.0677, 0.307, -0.2508]
-
-[[camera.path]]
-rotvec = [-0.452536, -2.019029, -0.645725]
-distance = 0.2998
-focus = [0.0677, 0.307, -0.2508]
-
-[[camera.path]]
-rotvec = [0.841235, -2.149209, -1.313221]
-distance = 0.0941
-focus = [0.0789, 0.336, -0.2273]
 
 [[transform]]
 name = "t0"
@@ -70,3 +44,38 @@ color = [0.8382, 0.6023, 0.2557]
 weight = 1.1916
 color_value = 1.0
 variations = { horseshoe = 0.2382, linear = 0.7618 }
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "pingpong"
+
+[[track.keys]]
+t = 0.0
+rotvec = [-0.009941, -2.711492, -1.564703]
+distance = 2.74
+focus = [0.1372, -0.4809, 0.2576]
+
+[[track.keys]]
+t = 3.9162
+rotvec = [-1.562227, 0.280175, 0.282969]
+distance = 1.1795
+focus = [-0.2074, 0.1803, -0.3361]
+
+[[track.keys]]
+t = 6.0
+rotvec = [-0.435933, -2.188707, -1.418158]
+distance = 0.6965
+focus = [0.0677, 0.307, -0.2508]
+
+[[track.keys]]
+t = 8.0838
+rotvec = [-0.452536, -2.019029, -0.645725]
+distance = 0.2998
+focus = [0.0677, 0.307, -0.2508]
+
+[[track.keys]]
+t = 12.0
+rotvec = [0.841235, -2.149209, -1.313221]
+distance = 0.0941
+focus = [0.0789, 0.336, -0.2273]

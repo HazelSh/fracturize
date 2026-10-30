@@ -14,6 +14,7 @@ mod history;
 mod indicators;
 mod offline;
 mod palette;
+mod params;
 mod path;
 mod prefs;
 mod trace;
@@ -23,6 +24,10 @@ mod scene_browser;
 mod scene_diff;
 mod thread;
 mod collab;
+mod bridge;
+mod mcp;
+mod agent;
+mod agent_local;
 mod scene_source;
 mod set;
 mod stats;
@@ -38,6 +43,7 @@ mod random_list;
 mod record;
 mod renorm;
 mod render_job;
+mod render_preset;
 mod rot;
 mod ui;
 mod version;
@@ -91,6 +97,10 @@ Examples:
   # A still, at a quality preset (-r is short for --render)
   fracturize -s scenes/blossom.toml -r out.png --effort large
 
+  # A still from a render preset: the Render job dialog's, by name
+  fracturize --render-presets
+  fracturize -s scenes/blossom.toml --splat --render-preset hd -r out.png
+
   # Endless zoom about a transform, named or numbered as --info lists them
   fracturize -s scenes/rimefall.toml --zoom descent --zoom-levels 18 -r deep.png
 
@@ -136,7 +146,10 @@ struct Args {
     /// `transform.<name-or-index>.weight=0.5`,
     /// `transform.facet-1.variations.absfold=0.15`,
     /// `transform.0.translation.y=1.25`, `subscene.<name>.share=2`,
-    /// `subscene.<name>.transform.<name-or-index>.weight=0.5`. Arrays index by x/y/z or 0/1/2, or
+    /// `subscene.<name>.transform.<name-or-index>.weight=0.5`,
+    /// `symmetry.<index-or-motif>.group=Cyc12` (a block is its index, or any
+    /// motif in its applies_to; sweep a group with a list,
+    /// `symmetry.0.group=Cyc12,Cyc18,Cyc30`). Arrays index by x/y/z or 0/1/2, or
     /// take a whole value (`transform.a.scale=[0.05,0.6,0.05]`). This is the
     /// general form of --palette and --zoom. A path that doesn't resolve is an
     /// error, never silently ignored.
@@ -600,7 +613,7 @@ struct Args {
     /// Render headlessly and exit — .png, .avif or .mp4 [else a window]
     ///
     /// A .png path renders a still or a contact sheet. A .avif or .mp4 path
-    /// renders an animation along the scene's [[camera.path]], or a full orbit
+    /// renders an animation along the scene's camera track, or a full orbit
     /// if it has none. .avif is AV1: small, and loops like a GIF. .mp4 is
     /// H.264, which upload sites accept. Prints each tile's camera (for
     /// sheets) and a timing breakdown to stdout.
@@ -628,6 +641,35 @@ struct Args {
     /// Explicit --points / --spp override it.
     #[arg(long, value_name = "PRESET", value_parser = parse_effort, help_heading = "Offline render")]
     effort: Option<Effort>,
+
+    /// Size and quality from a render preset; your own flags win [none]
+    ///
+    /// The Render job dialog's presets, by name (a built-in or one of yours),
+    /// or a preset .toml file. It fills in --width, --height, --spp, --points,
+    /// --accumulate, --supersample, --filter, --filter-radius,
+    /// --density-estimation, --bit-depth, --fps and --quality, each only where
+    /// you didn't give it. It prints the flags it came to.
+    ///
+    /// It never sets the look: --splat, --exposure and the grade stay yours. A
+    /// preset's sample target is a density, like --effort's, so it
+    /// accumulates only for a single --splat still and otherwise renders the
+    /// nearest point buffer, with a note. --effort, if given, wins over it.
+    #[arg(long, value_name = "NAME|FILE", help_heading = "Offline render")]
+    render_preset: Option<String>,
+
+    /// List the render presets, each with the flags it comes to, and exit
+    #[arg(long, help_heading = "Offline render")]
+    render_presets: bool,
+
+    /// Save this command's size and quality flags as a render preset [none]
+    ///
+    /// Written to ~/.config/fracturize/render-presets/NAME.toml, where the
+    /// Render job dialog lists it under Yours. Takes what --render-preset and
+    /// your flags come to, with the usual defaults for the rest, and the
+    /// output kind from --render's extension. Never overwrites: a name
+    /// already taken is refused. Without --render it saves and exits.
+    #[arg(long, value_name = "NAME", help_heading = "Offline render")]
+    save_render_preset: Option<String>,
 
     /// Point buffer capacity — more points is denser [--effort, else scene]
     ///
@@ -869,7 +911,7 @@ struct Args {
     #[arg(long, default_value = "30", value_name = "N", help_heading = "Animation")]
     fps: u32,
 
-    /// Animation duration [the path's own: path_seconds, or 3s a segment]
+    /// Animation duration [the timeline's: the camera track, or the tracks]
     #[arg(long, value_name = "SECONDS", help_heading = "Animation")]
     seconds: Option<f32>,
 
@@ -962,7 +1004,10 @@ struct Args {
     /// `transform.facet-1.variations.absfold=0.05:0.55` walks --sweep-steps
     /// values between the ends; `palette.name=ember,abyss,peacock` uses the
     /// list verbatim (checked for first, so a value containing a comma is
-    /// never read as a range). Give it twice and you get a grid, not a strip:
+    /// never read as a range). Arrays work in both forms: a list splits only
+    /// between values (`meta.background=[0,0,0],[0.03,0,0.03]`), and a range
+    /// between two arrays walks each component
+    /// (`meta.background=[0,0,0]:[0.05,0.01,0.04]`). Give it twice and you get a grid, not a strip:
     /// the first varies across columns, the second down rows, so two sweeps
     /// of --sweep-steps 4 make a 4x4 sheet of 16 tiles, every combination of
     /// the two. A third --sweep is refused. Composes with --set, which sets the
@@ -1481,6 +1526,183 @@ fn roll_palette(
 /// asking someone to imagine the gradient is not a listing, so each one comes
 /// with its gradient — as hex stops, which survive a pipe, and with `--color`
 /// as a swatch too.
+/// What `--render-preset` did to the command line, for the render to finish
+/// applying: the parts that depend on what kind of render this turns out to be.
+struct AppliedPreset {
+    name: String,
+    /// The preset's sample target, unless --spp or --effort was typed.
+    spp: Option<u32>,
+    /// Its density estimation, above 0 and unless typed: only an
+    /// accumulating render can take it.
+    density_estimation: Option<f32>,
+    /// The file kind it was made for.
+    extension: Option<&'static str>,
+    output: Option<render_preset::Output>,
+}
+
+/// Fill in what a render preset says, wherever the flag wasn't typed, and say
+/// on stdout what that came to.
+fn apply_render_preset(args: &mut Args, matches: &clap::ArgMatches, arg: &str) -> Result<AppliedPreset, String> {
+    let entry = render_preset::resolve(arg)?;
+    let p = render_preset::load(&entry)?;
+    let typed = |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
+    let mut kept: Vec<&str> = Vec::new();
+    macro_rules! fill {
+        ($field:ident, $flag:literal, $v:expr) => {
+            if let Some(v) = $v {
+                if typed(stringify!($field)) {
+                    kept.push($flag);
+                } else {
+                    args.$field = v;
+                }
+            }
+        };
+    }
+    let one_pass = p.samples == Some(render_preset::Samples::OnePass);
+    fill!(width, "--width", p.width);
+    fill!(height, "--height", p.height);
+    fill!(points, "--points", p.points.map(Some));
+    if one_pass {
+        fill!(accumulate, "--accumulate", p.rounds.map(Some));
+    }
+    fill!(supersample, "--supersample", p.supersample.map(Some));
+    fill!(filter, "--filter", p.filter.map(Some));
+    fill!(filter_radius, "--filter-radius", p.filter_radius.map(|r| Some(r as f32)));
+    fill!(
+        bit_depth,
+        "--bit-depth",
+        p.bit_depth.map(|b| Some(if b == 16 { offline::BitDepth::Sixteen } else { offline::BitDepth::Eight }))
+    );
+    fill!(fps, "--fps", p.fps);
+    fill!(quality, "--quality", p.quality);
+    let spp = if one_pass || p.spp.is_none() {
+        None
+    } else if typed("spp") || typed("effort") {
+        kept.push(if typed("spp") { "--spp" } else { "--effort" });
+        None
+    } else {
+        p.spp
+    };
+    let density_estimation = match p.density_estimation.filter(|d| *d > 0.0) {
+        Some(_) if typed("density_estimation") => {
+            kept.push("--density-estimation");
+            None
+        }
+        d => d.map(|d| d as f32),
+    };
+
+    // The preset said as flags, less the ones typed over: what this command
+    // now amounts to, in the words it would have taken to type it.
+    let said: Vec<String> = p
+        .flags()
+        .into_iter()
+        .filter(|f| !kept.iter().any(|k| f.split(' ').next() == Some(*k)))
+        .collect();
+    println!(
+        "render preset {}: {}{}",
+        entry.name,
+        if said.is_empty() { "nothing left to set".to_string() } else { said.join(" ") },
+        if kept.is_empty() { String::new() } else { format!(" (yours kept: {})", kept.join(" ")) },
+    );
+    Ok(AppliedPreset { name: entry.name, spp, density_estimation, extension: p.extension(), output: p.output })
+}
+
+/// A render preset from what this command line comes to.
+fn preset_from_args(args: &Args, applied: Option<&AppliedPreset>) -> render_preset::Preset {
+    use render_preset::{Output, Samples};
+    let output = match args.render.as_deref().map(|r| crate::video::Format::from_path(std::path::Path::new(r))) {
+        Some(Some(crate::video::Format::Avif)) => Some(Output::Avif),
+        Some(Some(crate::video::Format::Mp4)) => Some(Output::Mp4),
+        Some(None) => Some(Output::Still),
+        None => applied.and_then(|a| a.output),
+    };
+    let spp = args.spp.or(args.effort.map(|e| e.spp())).or(applied.and_then(|a| a.spp));
+    let supersample = args.supersample.unwrap_or(DEFAULT_SUPERSAMPLE);
+    let clip = matches!(output, Some(Output::Avif | Output::Mp4));
+    let mut said = vec![format!("{}×{}", args.width, args.height)];
+    match spp {
+        Some(s) if !clip => said.push(format!("{s} samples a pixel")),
+        _ => {}
+    }
+    if supersample > 1 {
+        said.push(format!("supersampled {supersample}×"));
+    }
+    if clip {
+        said.push(format!("{} fps", args.fps));
+    }
+    let round = |v: f32| (v as f64 * 1000.0).round() / 1000.0;
+    render_preset::Preset {
+        description: format!("Saved from the command line: {}", said.join(", ")),
+        output,
+        width: Some(args.width),
+        height: Some(args.height),
+        samples: Some(if spp.is_some() { Samples::Accumulate } else { Samples::OnePass }),
+        spp,
+        rounds: Some(args.accumulate.unwrap_or(offline::DEFAULT_ACCUMULATE)),
+        points: args.points,
+        supersample: Some(supersample),
+        filter: Some(args.filter.unwrap_or_default()),
+        filter_radius: Some(round(
+            args.filter_radius.unwrap_or(crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS),
+        )),
+        density_estimation: args
+            .density_estimation
+            .or(applied.and_then(|a| a.density_estimation))
+            .filter(|d| *d > 0.0)
+            .map(round),
+        bit_depth: Some(if args.bit_depth == Some(offline::BitDepth::Sixteen) { 16 } else { 8 }),
+        fps: Some(args.fps),
+        quality: Some(args.quality),
+    }
+}
+
+/// `items` laid out from `indent`, broken between items and never inside one,
+/// so a wrapped `--flag value` still pastes.
+fn wrap_items<'a>(items: impl IntoIterator<Item = &'a str>, indent: usize) -> String {
+    const WIDTH: usize = 78;
+    let pad = " ".repeat(indent);
+    let mut out = String::new();
+    let mut line = pad.clone();
+    for item in items {
+        if line.len() > indent && line.len() + 1 + item.len() > WIDTH {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line = pad.clone();
+        }
+        if line.len() > indent {
+            line.push(' ');
+        }
+        line.push_str(item);
+    }
+    out.push_str(line.trim_end());
+    out
+}
+
+/// `--render-presets`: every preset, what it's for, and the flags it comes to.
+fn print_render_presets() {
+    println!("Render presets, for --render-preset NAME (or a preset .toml file). A flag");
+    println!("you type wins over the preset's. Built in, cheapest first, then yours.");
+    for entry in render_preset::list() {
+        println!();
+        let place = match &entry.path {
+            None => "built in".to_string(),
+            Some(p) => p.display().to_string(),
+        };
+        match render_preset::load(&entry) {
+            Ok(p) => {
+                let kind = p.extension().map(|e| format!(" · for .{e}")).unwrap_or_default();
+                println!("{}  ({place}{kind})", entry.name);
+                if !p.description.is_empty() {
+                    println!("{}", wrap_items(p.description.split_whitespace(), 2));
+                }
+                let flags = p.flags();
+                println!("{}", wrap_items(flags.iter().map(String::as_str), 2));
+            }
+            Err(e) => println!("{}  ({place})\n{}", entry.name, wrap_items(e.split_whitespace(), 2)),
+        }
+    }
+}
+
 fn print_palette_library(color: bool) {
     println!("{} built-in palettes:\n", palette::library::len());
     let width = palette::library::names().iter().map(|n| n.len()).max().unwrap_or(8);
@@ -2099,30 +2321,30 @@ impl Effort {
             Effort::Huge => 10_000,
         }
     }
+}
 
-    /// The point buffer to back that target with.
-    ///
-    /// Two different jobs, so two different answers:
-    ///
-    /// * **Accumulating**, the ring is a *working set* whose only job is keeping
-    ///   the GPU busy between folds. Bigger is not better past a point, and the
-    ///   memory is worth more to the histogram (32 bytes a texel), which is what
-    ///   decides whether a large supersampled render runs at all. Capped at 20M.
-    /// * **Ring path**, the buffer *is* the sample count, so it has to hold the
-    ///   whole target — and it caps at 100M, which is the ceiling slice 4b
-    ///   exists to remove. Above `small` at 1080p the cap bites and the tier
-    ///   cannot be delivered without accumulating; `--effort` says so out loud
-    ///   rather than quietly under-rendering.
-    fn points(self, pixels: u64, accumulating: bool) -> usize {
-        let want = self.spp() as u64 * pixels;
-        let cap = if accumulating { 20_000_000 } else { 100_000_000 };
-        want.clamp(1_000_000, cap) as usize
-    }
+/// The ring path's ceiling: the largest buffer a density is backed with
+/// without accumulating. Past it, only accumulation reaches the density.
+const RING_CAP: usize = 100_000_000;
 
-    /// Whether the ring path can actually reach this tier at this size.
-    fn reachable_without_accumulating(self, pixels: u64) -> bool {
-        self.spp() as u64 * pixels <= 100_000_000
-    }
+/// The point buffer to back a density of `spp` samples per pixel with: an
+/// `--effort` tier's, or a render preset's.
+///
+/// Two different jobs, so two different answers:
+///
+/// * **Accumulating**, the ring is a *working set* whose only job is keeping
+///   the GPU busy between folds. Bigger is not better past a point, and the
+///   memory is worth more to the histogram (32 bytes a texel), which is what
+///   decides whether a large supersampled render runs at all. Capped at 20M.
+/// * **Ring path**, the buffer *is* the sample count, so it has to hold the
+///   whole target — and it caps at 100M, which is the ceiling slice 4b
+///   exists to remove. Above `small` at 1080p the cap bites and the tier
+///   cannot be delivered without accumulating; `--effort` says so out loud
+///   rather than quietly under-rendering.
+fn density_points(spp: u32, pixels: u64, accumulating: bool) -> usize {
+    let want = spp as u64 * pixels;
+    let cap = if accumulating { 20_000_000 } else { RING_CAP };
+    want.clamp(1_000_000, cap as u64) as usize
 }
 
 /// The tonemap grade: flags over the view over neutral, field by field.
@@ -2893,8 +3115,50 @@ fn main() {
     // Initialize logging
     env_logger::init();
 
+    // `fracturize mcp`: the one subcommand (AGENT-COLLAB-PLAN.md §7), a
+    // long-running stdio server rather than a do-one-thing flag.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("mcp") {
+        std::process::exit(mcp::run(&argv[2..]));
+    }
+
     // Parse CLI args
-    let mut args = Args::parse();
+    // Matches kept beside the args: a render preset fills only what wasn't
+    // typed, and for a flag with a clap default the value alone can't say.
+    let matches = <Args as clap::CommandFactory>::command().get_matches();
+    let mut args = <Args as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if args.render_presets {
+        print_render_presets();
+        return;
+    }
+    if args.render_preset.is_some() && args.render.is_none() && args.save_render_preset.is_none() {
+        eprintln!("--render-preset is read by --render and --save-render-preset; give one of them");
+        std::process::exit(2);
+    }
+    let preset = args.render_preset.clone().map(|arg| {
+        apply_render_preset(&mut args, &matches, &arg).unwrap_or_else(|e| {
+            eprintln!("--render-preset: {e}");
+            std::process::exit(2);
+        })
+    });
+    if let Some(name) = args.save_render_preset.clone() {
+        let p = preset_from_args(&args, preset.as_ref());
+        match render_preset::save_new(&name, &p) {
+            Ok(entry) => println!(
+                "saved render preset {} to {}: {}",
+                entry.name,
+                entry.path.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                p.flags().join(" ")
+            ),
+            Err(e) => {
+                eprintln!("--save-render-preset: {e}");
+                std::process::exit(2);
+            }
+        }
+        if args.render.is_none() {
+            return;
+        }
+    }
     // A dice profile is read by three things; with none of them it would be
     // read by nothing, which is a mistake worth saying out loud.
     if args.random_config.is_some() && !args.random && args.mutations.is_none() && args.random_sheet.is_none() {
@@ -3205,26 +3469,33 @@ fn main() {
             || args.edge_grid
             || crate::video::Format::from_path(std::path::Path::new(out)).is_some();
         let tier_accumulates = splat_render && !many_images;
-        let accumulating = args.spp.is_some() || (args.effort.is_some() && tier_accumulates);
-        let effort_points = args.effort.map(|e| e.points(pixels, accumulating));
-        let effort_spp = args.effort.and_then(|e| tier_accumulates.then(|| e.spp()));
-        if let Some(e) = args.effort {
+        // A sample density asked for by name: an --effort tier, else a render
+        // preset's target. Both are a density rather than a request to
+        // accumulate, so both degrade to a point buffer the same way.
+        let target: Option<(u32, String)> = args
+            .effort
+            .map(|e| (e.spp(), format!("--effort {}", e.name())))
+            .or_else(|| preset.as_ref().and_then(|p| p.spp.map(|s| (s, format!("--render-preset {}", p.name)))));
+        let accumulating = args.spp.is_some() || (target.is_some() && tier_accumulates);
+        let target_points = target.as_ref().map(|(s, _)| density_points(*s, pixels, accumulating));
+        let target_spp = target.as_ref().and_then(|(s, _)| tier_accumulates.then_some(*s));
+        if let Some((s, by)) = &target {
             if splat_render && many_images && args.spp.is_none() && args.points.is_none() {
+                let n = density_points(*s, pixels, false);
                 eprintln!(
-                    "note: --effort {} renders this as a {:.1}M point buffer per image \
+                    "note: {by} renders this as a {:.1}M point buffer per image \
                      (~{} samples/px) rather than accumulating: accumulation makes one still, \
                      and this output is several images.",
-                    e.name(),
-                    e.points(pixels, false) as f64 / 1e6,
-                    (e.points(pixels, false) as u64 / pixels.max(1)).max(1),
+                    n as f64 / 1e6,
+                    (n as u64 / pixels.max(1)).max(1),
                 );
             }
-            if !tier_accumulates && !e.reachable_without_accumulating(pixels) {
+            if !tier_accumulates && *s as u64 * pixels > RING_CAP as u64 {
                 eprintln!(
-                    "note: --effort {} is {} samples/px, which at {}x{} needs a {}M point \
+                    "note: {by} is {s} samples/px, which at {}x{} needs a {}M point \
                      buffer — past the {}M cap, so this renders at the cap. {}",
-                    e.name(), e.spp(), args.width, args.height,
-                    e.spp() as u64 * pixels / 1_000_000, 100,
+                    args.width, args.height,
+                    *s as u64 * pixels / 1_000_000, RING_CAP / 1_000_000,
                     if splat_render {
                         "Only a single still accumulates past it."
                     } else {
@@ -3234,11 +3505,40 @@ fn main() {
                 );
             }
         }
-        if let Some(n) = args.points.or(effort_points) {
+        if let Some(n) = args.points.or(target_points) {
             scene.point_count = n;
         }
         let accumulate = args.accumulate.unwrap_or(offline::DEFAULT_ACCUMULATE);
-        let spp = args.spp.or(effort_spp);
+        let spp = args.spp.or(target_spp);
+        // A preset's density estimation needs a histogram, which only an
+        // accumulating render has; elsewhere it is dropped, said once, rather
+        // than refused for a flag nobody typed.
+        if let Some(p) = &preset {
+            if let Some(de) = p.density_estimation {
+                if spp.is_some() {
+                    args.density_estimation = Some(de);
+                } else {
+                    eprintln!(
+                        "note: --render-preset {} asks for density estimation {de}, which needs an \
+                         accumulating render (a single --splat still); rendering without it.",
+                        p.name
+                    );
+                }
+            }
+            // The --render extension decides the output; a preset made for the
+            // other kind still lends its size and quality, and says so.
+            let ext = std::path::Path::new(out).extension().and_then(|e| e.to_str()).unwrap_or("png");
+            let clip = |e: &str| e == "avif" || e == "mp4";
+            if let Some(want) = p.extension {
+                if clip(want) != clip(ext) {
+                    eprintln!(
+                        "note: --render-preset {} is for .{want} files; this renders .{ext} from \
+                         its size and quality.",
+                        p.name
+                    );
+                }
+            }
+        }
 
         let view = args.view.as_ref().map(|path| {
             View::load(path).unwrap_or_else(|e| panic!("Failed to load view '{}': {}", path, e))
@@ -3418,10 +3718,10 @@ fn main() {
             )
         } else {
             match (args.sweep.is_empty(), args.mutations) {
-                _ if args.time_grid.is_some() => run_time_grid(params, &args, grid, effort_points),
-                _ if args.map_grid => run_map_grid(params, &args, grid, effort_points),
-                _ if args.edge_grid => run_edge_grid(params, &args, grid, effort_points),
-                (false, _) => run_sweep(params, &args, grid, effort_points),
+                _ if args.time_grid.is_some() => run_time_grid(params, &args, grid, target_points),
+                _ if args.map_grid => run_map_grid(params, &args, grid, target_points),
+                _ if args.edge_grid => run_edge_grid(params, &args, grid, target_points),
+                (false, _) => run_sweep(params, &args, grid, target_points),
                 _ if args.random_sheet.is_some() => {
                     let n = args.random_sheet.unwrap_or(0);
                     if !matches!(grid, offline::GridMode::Single) {
@@ -3578,6 +3878,31 @@ mod tests {
             .map(|a| a.get_id().to_string())
             .collect();
         assert!(silent.is_empty(), "no default and no [fallback] note: {}", silent.join(", "));
+    }
+
+    /// `--render-presets` prints each preset as flags for an agent to paste, so
+    /// every one of them has to be a command this parser takes — and takes to
+    /// mean what the preset says.
+    #[test]
+    fn a_preset_said_as_flags_is_the_preset() {
+        for entry in render_preset::list().into_iter().filter(|e| e.is_builtin()) {
+            let p = render_preset::load(&entry).unwrap();
+            let flags = p.flags();
+            let argv = std::iter::once("fracturize").chain(flags.iter().flat_map(|f| f.split(' ')));
+            let args = Args::try_parse_from(argv).unwrap_or_else(|e| panic!("{}: {e}", entry.name));
+            let back = preset_from_args(&args, None);
+            assert_eq!((back.width, back.height), (p.width, p.height), "{}", entry.name);
+            assert_eq!(back.spp, if p.samples == Some(render_preset::Samples::OnePass) { None } else { p.spp });
+            assert_eq!(back.supersample, p.supersample, "{}", entry.name);
+            assert_eq!(back.filter_radius, p.filter_radius, "{}", entry.name);
+            if p.bit_depth.is_some() {
+                assert_eq!(back.bit_depth, p.bit_depth, "{}", entry.name);
+            }
+            if p.fps.is_some() {
+                assert_eq!((back.fps, back.quality), (p.fps, p.quality), "{}", entry.name);
+            }
+            assert!(flags.iter().all(|f| f.len() < 78), "{}", entry.name);
+        }
     }
 
     /// Short flags are rationed: they go to the handful of options typed over

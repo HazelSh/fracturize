@@ -188,26 +188,6 @@ pub enum LoopKind {
 }
 
 impl LoopKind {
-    /// The scene-file spelling.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Once => "once",
-            Self::PingPong => "pingpong",
-            Self::Closed => "closed",
-            Self::Zoom => "zoom",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "once" | "open" => Some(Self::Once),
-            "pingpong" | "ping-pong" => Some(Self::PingPong),
-            "closed" | "loop" => Some(Self::Closed),
-            "zoom" => Some(Self::Zoom),
-            _ => None,
-        }
-    }
-
     /// A phrase for logs, `--info` and the CLI.
     pub fn label(self) -> &'static str {
         match self {
@@ -347,11 +327,26 @@ pub struct CameraPath {
     pub routes: Vec<Route>,
     /// How playback gets from the last frame back to the first.
     pub loops: Loop,
-    /// Ease in/out (smoothstep on path time); None = the loop's own default
+    /// Ease in/out (smoothstep on the lap's time); None = the loop's own
+    /// default
     pub ease: Option<bool>,
-    /// Suggested playback/render duration; None = 3s per segment traversed
-    pub seconds: Option<f32>,
+    /// When the camera passes each key, in seconds: one per key, rising.
+    ///
+    /// A key is a view at a moment, as every other track's key is a value at
+    /// a moment. Empty (or the wrong length, mid-edit) means the keys are
+    /// spaced [`KEY_SPACING`] apart from 0.
+    pub times: Vec<f32>,
+    /// A looping path's lap, in seconds: from the first key round to
+    /// arriving back at it (`Closed`), or at its image under the zoom
+    /// symmetry (`Zoom`). The closing segment is whatever is left after the
+    /// last key. None = one more [`KEY_SPACING`] after the last key. Unused by
+    /// `Once` and `PingPong`, whose lap is their keys' span.
+    pub period: Option<f32>,
 }
+
+/// Seconds between keys where nobody said: what three seconds a segment
+/// always meant.
+pub const KEY_SPACING: f32 = 3.0;
 
 /// Which path to fly: the scene's own keypoints when there are enough of them
 /// to interpolate, otherwise the default.
@@ -371,16 +366,6 @@ pub fn resolve<'a>(authored: Option<&'a CameraPath>, default: &'a CameraPath) ->
     }
 }
 
-/// Uniform Catmull-Rom: interpolate between p1 and p2 with neighbors p0, p3
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    0.5 * ((2.0 * p1)
-        + (-p0 + p2) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
-}
-
 /// The running sums `B̃ⱼ = Σ_{m≥j} Bₘ` of the Catmull-Rom weights, for j = 1,2,3.
 ///
 /// `B̃` rather than `B` because the spline is built from *displacements*
@@ -391,25 +376,127 @@ fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
 /// `B̃(0) = (1,0,0)` and `B̃(1) = (1,1,0)`, so the curve passes through its
 /// keys; and `B̃₁+B̃₂+B̃₃ = 1+u` exactly, so equal displacements give a
 /// constant-rate sweep.
+#[cfg(test)]
+/// Uniform Catmull-Rom between p1 and p2 with neighbours p0, p3: the scalar
+/// spline the cumulative form must reproduce.
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+}
+
+#[cfg(test)]
 fn cumulative_basis(u: f32) -> [f32; 3] {
+    timed_basis(u, 1.0, 1.0)
+}
+
+/// The same running sums for keys that are *not* evenly spaced in time.
+///
+/// Catmull-Rom is a Hermite spline whose tangent at a key is the mean of the
+/// velocities either side of it. With times, those are velocities per second
+/// — `½(d₀/D₀ + d₁/D₁)` — and in the segment's own parameter (length `D₁`) the
+/// neighbours' displacements are weighted by `r₀ = D₁/D₀` and `r₂ = D₁/D₂`:
+///
+/// ```text
+/// B̃₁ = 1 + ½·h₁₀·r₀    B̃₂ = ½·h₁₀ + h₀₁ + ½·h₁₁    B̃₃ = ½·h₁₁·r₂
+/// ```
+///
+/// At `r₀ = r₂ = 1` this is exactly [`cumulative_basis`], so an evenly timed
+/// path flies the uniform spline it always did. Uneven times keep the camera's
+/// *speed* continuous through a key rather than its parameter velocity: a key
+/// moved later slows the run into it instead of putting a kink in it. The
+/// endpoint identities hold for any ratios (`h₁₀` and `h₁₁` vanish at both
+/// ends), so keys are still hit exactly.
+fn timed_basis(u: f32, r0: f32, r2: f32) -> [f32; 3] {
     let (u2, u3) = (u * u, u * u * u);
-    [
-        1.0 + 0.5 * u3 - u2 + 0.5 * u,
-        -u3 + 1.5 * u2 + 0.5 * u,
-        0.5 * (u3 - u2),
-    ]
+    let h10 = u3 - 2.0 * u2 + u;
+    let h01 = -2.0 * u3 + 3.0 * u2;
+    let h11 = u3 - u2;
+    [1.0 + 0.5 * h10 * r0, 0.5 * h10 + h01 + 0.5 * h11, 0.5 * h11 * r2]
 }
 
 impl CameraPath {
-    /// A path through `keys`, taking the short way round on every segment.
+    /// A path through `keys`, taking the short way round on every segment,
+    /// [`KEY_SPACING`] apart.
     pub fn new(keys: Vec<PathKey>, loops: Loop) -> Self {
         Self {
             keys,
             routes: Vec::new(),
             loops,
             ease: None,
-            seconds: None,
+            times: Vec::new(),
+            period: None,
         }
+    }
+
+    /// When the camera passes key `i`, in seconds.
+    pub fn time(&self, i: usize) -> f32 {
+        if self.times.len() == self.keys.len() {
+            self.times[i]
+        } else {
+            KEY_SPACING * i as f32
+        }
+    }
+
+    /// Every key's time, spelled out: what a file or the Timeline shows.
+    pub fn key_times(&self) -> Vec<f32> {
+        (0..self.keys.len()).map(|i| self.time(i)).collect()
+    }
+
+    /// The first key's time: where a lap starts.
+    pub fn start(&self) -> f32 {
+        if self.keys.is_empty() { 0.0 } else { self.time(0) }
+    }
+
+    /// One lap, in seconds: the keys' span for a one-shot or one way of a
+    /// ping-pong; the period for the two closing loops.
+    pub fn lap(&self) -> f32 {
+        let n = self.keys.len();
+        let span = if n == 0 { 0.0 } else { self.time(n - 1) - self.time(0) };
+        if self.loops.closes() {
+            self.period.unwrap_or(span + KEY_SPACING).max(span + 1e-3)
+        } else {
+            span
+        }
+        .max(0.1)
+    }
+
+    /// Scale every key's time (and the period) so that playback takes
+    /// `seconds`, keeping the first key where it is: the Camera window's
+    /// duration field.
+    pub fn retime_to(&mut self, seconds: f32) {
+        let k = seconds.max(0.1) / self.duration();
+        let t0 = self.start();
+        let times: Vec<f32> = self.key_times().iter().map(|t| t0 + (t - t0) * k).collect();
+        if self.loops.closes() {
+            self.period = Some(self.lap() * k);
+        }
+        self.times = times;
+    }
+
+    /// The seconds each segment lasts, `i` wrapping like [`segment_turn`].
+    /// Past the ends of a path that doesn't close there is no segment; those
+    /// borrow the nearest real one's length, which only ever multiplies a
+    /// zero displacement.
+    ///
+    /// [`segment_turn`]: Self::segment_turn
+    fn segment_seconds(&self, i: isize) -> f32 {
+        let n = self.keys.len();
+        let segs = self.segments() as isize;
+        if segs == 0 {
+            return 1.0;
+        }
+        let i = if self.loops.closes() { i.rem_euclid(segs) } else { i.clamp(0, segs - 1) } as usize;
+        let d = if i + 1 < n {
+            self.time(i + 1) - self.time(i)
+        } else {
+            // The closing segment: what the lap leaves after the last key.
+            self.start() + self.lap() - self.time(n - 1)
+        };
+        d.max(1e-4)
     }
 
     /// Whether playback loops: the last frame runs into the first.
@@ -446,12 +533,10 @@ impl CameraPath {
         }
     }
 
-    /// Playback duration: explicit `seconds`, or 3s per segment *traversed* —
-    /// which a ping-pong does twice over.
+    /// Playback duration: one lap — twice over for a ping-pong, which flies
+    /// its keys out and back.
     pub fn duration(&self) -> f32 {
-        self.seconds
-            .unwrap_or(3.0 * self.segments().max(1) as f32 * self.loops.passes())
-            .max(0.1)
+        self.lap() * self.loops.passes()
     }
 
     fn eased(&self) -> bool {
@@ -482,6 +567,100 @@ impl CameraPath {
         self.routes.resize(self.segments(), Route::default());
     }
 
+    /// Make `times` say every key's time explicitly, so a key can be added,
+    /// removed or retimed without the others moving.
+    pub fn spell_times(&mut self) {
+        if self.times.len() != self.keys.len() {
+            self.times = (0..self.keys.len()).map(|i| KEY_SPACING * i as f32).collect();
+        }
+    }
+
+    /// Put a key at `t` seconds, keeping the keys in time order: replaces the
+    /// framing of a key already there, otherwise inserts one. Returns its
+    /// index. The route on each segment it touches goes back to the short way,
+    /// since the journey it named no longer exists.
+    ///
+    /// On a looping path the period stretches to keep the closing segment at
+    /// least as long as it was, when a key lands past the old last one.
+    pub fn key_at(&mut self, t: f32, key: PathKey) -> usize {
+        self.spell_times();
+        if let Some(i) = self.times.iter().position(|x| (x - t).abs() < 1e-3) {
+            self.keys[i] = key;
+            return i;
+        }
+        let closing = if self.keys.is_empty() { KEY_SPACING } else { self.segment_seconds(self.segments() as isize - 1) };
+        let was_last = self.times.last().copied();
+        let i = self.times.iter().position(|x| *x > t).unwrap_or(self.times.len());
+        self.keys.insert(i, key);
+        self.times.insert(i, t);
+        if i < self.routes.len() {
+            self.routes[i] = Route::default();
+            self.routes.insert(i, Route::default());
+        }
+        self.fit_routes();
+        if self.loops.closes() && was_last.is_some_and(|l| t > l) {
+            let start = self.start();
+            if self.period.is_some_and(|p| start + p < t + closing) || self.period.is_none() {
+                self.period = Some(t + closing - start);
+            }
+        }
+        i
+    }
+
+    /// Where a key appended after the last one goes: [`KEY_SPACING`] later, or
+    /// 0 for the first. On a loop it goes where the lap would have closed, so
+    /// the closing segment keeps its length after it.
+    pub fn times_or_spacing_after_last(&self) -> f32 {
+        match self.keys.len() {
+            0 => 0.0,
+            n if self.loops.closes() => self.start() + self.lap().max(self.time(n - 1) - self.start() + KEY_SPACING),
+            n => self.time(n - 1) + KEY_SPACING,
+        }
+    }
+
+    /// Take key `i` away, keeping every other key's time.
+    pub fn remove_key(&mut self, i: usize) {
+        if i >= self.keys.len() {
+            return;
+        }
+        self.spell_times();
+        self.keys.remove(i);
+        self.times.remove(i);
+        if i < self.routes.len() {
+            self.routes.remove(i);
+        }
+        if i > 0 && i - 1 < self.routes.len() {
+            self.routes[i - 1] = Route::default();
+        }
+        self.fit_routes();
+    }
+
+    /// Move key `i` to `t`, clamped strictly between its neighbours so the
+    /// keys stay in order (a retime never reorders: that would change which
+    /// journey each route names). On a loop the last key also stays before
+    /// the lap's end.
+    pub fn set_key_time(&mut self, i: usize, t: f32) {
+        if i >= self.keys.len() {
+            return;
+        }
+        self.spell_times();
+        const GAP: f32 = 0.01;
+        let lo = if i > 0 { self.times[i - 1] + GAP } else { f32::NEG_INFINITY };
+        let hi = if i + 1 < self.times.len() {
+            self.times[i + 1] - GAP
+        } else if self.loops.closes() {
+            self.start() + self.lap() - GAP
+        } else {
+            f32::INFINITY
+        };
+        // Moving the first key moves where the lap starts; keep the lap's end.
+        let end = self.start() + self.lap();
+        self.times[i] = t.clamp(lo, hi.max(lo));
+        if i == 0 && self.loops.closes() && self.period.is_some() {
+            self.period = Some(end - self.times[0]);
+        }
+    }
+
     /// A seamless full-turn orbit at the given base framing.
     ///
     /// This is *the* path for a scene that authors none — the same object in
@@ -503,12 +682,14 @@ impl CameraPath {
                 ..PathKey::from_camera(base)
             })
             .collect();
+        let period = tau / ORBIT_RATE;
         Self {
             keys,
             routes: vec![Route::default(); 4],
             loops: Loop::Closed,
             ease: Some(false),
-            seconds: Some(tau / ORBIT_RATE),
+            times: (0..4).map(|i| i as f32 * period / 4.0).collect(),
+            period: Some(period),
         }
     }
 
@@ -620,16 +801,18 @@ impl CameraPath {
             Extrapolate::Repeat | Extrapolate::Offset => t.rem_euclid(1.0),
             Extrapolate::PingPong => 1.0 - (2.0 * t.rem_euclid(1.0) - 1.0).abs(),
         };
-        // Easing *after* the fold, which is what makes the turnaround smooth:
-        // smoothstep has zero derivative at both ends, so the camera decelerates
-        // into each end of the path and accelerates back out. Fold an eased t
-        // instead and you get a corner — full speed straight into a reversal.
-        let t = if self.eased() { t * t * (3.0 - 2.0 * t) } else { t };
-
-        let x = t * segs as f32;
-        // For open paths t=1 must land inside the last segment
-        let seg = (x.floor() as isize).min(segs as isize - 1);
-        let u = x - seg as f32;
+        // The lap's own time, then which segment it falls in. The fold above
+        // works in fractions so the ping-pong triangle and the ease stay what
+        // they always were; this turns the fraction into seconds along the
+        // keys, where each segment is as long as its keys say.
+        let tau = self.start() + t * self.lap();
+        let mut seg: isize = 0;
+        while (seg as usize) + 1 < segs && tau >= self.segment_end(seg as usize) {
+            seg += 1;
+        }
+        let seg_start = self.time(seg as usize);
+        let d1 = self.segment_seconds(seg);
+        let u = ((tau - seg_start) / d1).clamp(0.0, 1.0);
 
         let (k0, k1, k2, k3) = (
             self.key(seg - 1),
@@ -641,7 +824,7 @@ impl CameraPath {
         // The cumulative form: start at the key *before* the segment and walk
         // three weighted displacements. At u=0 the weights are (1,0,0), which
         // lands exactly on k1; at u=1 they are (1,1,0), which lands exactly on
-        // k2. Keys are hit whatever the windings say.
+        // k2. Keys are hit whatever the windings — or the key times — say.
         //
         // The neighbour turns are split before weighting. B̃₁ overshoots 1
         // (peak 1.074) and B̃₃ undershoots 0 (trough −0.074) — that is what
@@ -655,7 +838,26 @@ impl CameraPath {
         // weight — all of the previous segment's, none of the next's — and
         // only the sub-π principal parts are smoothed. Both parts share the
         // segment's axis, so each pair still composes as one turn.
-        let b = cumulative_basis(u);
+        let mut b = timed_basis(
+            u,
+            d1 / self.segment_seconds(seg - 1),
+            d1 / self.segment_seconds(seg + 1),
+        );
+        // Easing is coming to rest at the ends: the tangent at the first and
+        // last key is zero instead of half the segment's own displacement
+        // (which is what a clamped neighbour leaves it). So the camera starts
+        // from still, settles into the last key, and a ping-pong turns round
+        // smoothly — and every key is still passed at its own time, which a
+        // smoothstep on the whole lap (what easing used to be) could not say.
+        if self.eased() && !self.loops.closes() {
+            let (u2, u3) = (u * u, u * u * u);
+            if seg == 0 {
+                b[1] -= 0.5 * (u3 - 2.0 * u2 + u);
+            }
+            if seg as usize + 1 == segs {
+                b[1] -= 0.5 * (u3 - u2);
+            }
+        }
         let prev = self.segment_turn(seg - 1);
         let next = self.segment_turn(seg + 1);
         let orientation = k0
@@ -664,13 +866,33 @@ impl CameraPath {
             .then_body(self.segment_turn(seg) * b[1])
             .then_body(next.principal() * b[2]);
 
-        let cr = |f: fn(&PathKey) -> f32| catmull_rom(f(&k0), f(&k1), f(&k2), f(&k3), u);
+        // The scalar channels on the same weights, as displacements from k0.
+        let cr = |f: fn(&PathKey) -> f32| {
+            let (p0, p1, p2, p3) = (f(&k0), f(&k1), f(&k2), f(&k3));
+            p0 + b[0] * (p1 - p0) + b[1] * (p2 - p1) + b[2] * (p3 - p2)
+        };
         OrbitCamera {
             orientation,
             distance: cr(|k| k.distance.max(1e-3).ln()).exp(),
             focus: Vec3::new(cr(|k| k.focus.x), cr(|k| k.focus.y), cr(|k| k.focus.z)),
             fov,
         }
+    }
+
+    /// When segment `i` ends, in seconds from the lap's start time.
+    fn segment_end(&self, i: usize) -> f32 {
+        if i + 1 < self.keys.len() {
+            self.time(i + 1)
+        } else {
+            self.start() + self.lap()
+        }
+    }
+
+    /// The path at `seconds` on the timeline (the first key's time is where
+    /// a lap starts). See [`sample`](Self::sample) for the fraction form.
+    pub fn sample_at(&self, seconds: f64, fov: Fov) -> OrbitCamera {
+        let start = self.start() as f64;
+        self.sample(((seconds - start) / self.duration() as f64) as f32, fov)
     }
 }
 
@@ -871,10 +1093,10 @@ mod golden {
         let _ = std::fs::remove_file(&tmp);
         scene.save(&tmp).unwrap();
 
-        // Only the [[camera.path]] keys; the base [camera] block has a yaw too.
+        // Only the camera track's keys; the base [camera] block has a yaw too.
         let text = std::fs::read_to_string(&tmp).unwrap();
         let yaws: Vec<f64> = text
-            .split("[[camera.path]]")
+            .split("[[track.keys]]")
             .skip(1)
             .filter_map(|block| {
                 block
@@ -1006,7 +1228,7 @@ mod tests {
     /// A 0.6 spiral about the origin, twisting 34° per period about Y —
     /// `wellspiral`'s descent map, as a loop closing over `periods` periods.
     fn zoom_loop_path(periods: u32, keys: Vec<PathKey>) -> CameraPath {
-        CameraPath {
+        let mut p = CameraPath {
             keys,
             routes: Vec::new(),
             loops: Loop::Zoom(ZoomLoop {
@@ -1016,8 +1238,11 @@ mod tests {
                 turn: Turn::about(Vec3::Y, 34f32.to_radians() * periods as f32),
             }),
             ease: None,
-            seconds: Some(10.0),
-        }
+            times: Vec::new(),
+            period: None,
+        };
+        p.retime_to(10.0);
+        p
     }
 
     fn linear_path(loops: Loop) -> CameraPath {
@@ -1030,7 +1255,8 @@ mod tests {
             routes: Vec::new(),
             loops,
             ease: Some(false),
-            seconds: None,
+            times: Vec::new(),
+            period: None,
         }
     }
 
@@ -1103,7 +1329,8 @@ mod tests {
             routes: Vec::new(),
             loops: Loop::Once,
             ease: Some(false),
-            seconds: None,
+            times: Vec::new(),
+            period: None,
         };
         let segs = p.segments();
         for i in 0..=40 {
@@ -1162,7 +1389,8 @@ mod tests {
             routes: Vec::new(),
             loops: Loop::Closed,
             ease: Some(false),
-            seconds: None,
+            times: Vec::new(),
+            period: None,
         };
         let swept = swept_about_y(&p, 0.0, 1.0, 256);
         assert!((swept - tau).abs() < 1e-2, "swept {} rad, wanted a forward full turn", swept);
@@ -1216,7 +1444,8 @@ mod tests {
             routes: vec![Route::Turns(1); 2],
             loops: Loop::Once,
             ease: Some(false),
-            seconds: None,
+            times: Vec::new(),
+            period: None,
         };
         let mut last = 0.0f32;
         for i in 1..=32 {
@@ -1436,7 +1665,8 @@ mod tests {
             routes: vec![Route::Turns(3), Route::default(), Route::default()],
             loops: Loop::Once,
             ease: Some(false),
-            seconds: None,
+            times: Vec::new(),
+            period: None,
         };
 
         // The corkscrew itself still happens: segment 0 sweeps its three whole
@@ -1501,7 +1731,8 @@ mod tests {
                 turn: twist,
             }),
             ease: None,
-            seconds: Some(10.0),
+            times: vec![0.0],
+            period: Some(10.0),
         };
         let swept = swept_about_y(&path, 0.0, SEAM, 256);
         assert!(
@@ -1538,7 +1769,8 @@ mod tests {
                 turn: Turn::about(Vec3::Y, per_period * 4.0),
             }),
             ease: None,
-            seconds: Some(10.0),
+            times: vec![0.0],
+            period: Some(10.0),
         };
         let swept = swept_about_y(&path, 0.0, SEAM, 512).to_degrees();
         assert!(
@@ -1666,16 +1898,113 @@ mod tests {
 
         // Twice the journey at the same speed, rather than the same journey
         // twice as fast.
-        let secs = |p: &CameraPath| CameraPath { seconds: None, ..p.clone() }.duration();
-        assert_eq!(secs(&pong), 2.0 * secs(&once));
-        assert_eq!(
-            CameraPath { seconds: Some(9.0), ..pong.clone() }.duration(),
-            9.0,
-            "a pinned duration is still the whole loop"
-        );
+        assert_eq!(pong.duration(), 2.0 * once.duration());
+        let mut nine = pong.clone();
+        nine.retime_to(9.0);
+        assert!((nine.duration() - 9.0).abs() < 1e-5, "a pinned duration is still the whole loop");
     }
 
     // -- defaults, resolution, housekeeping --------------------------------
+
+    // -- key times ------------------------------------------------------------
+
+    fn timed(times: &[f32], loops: Loop) -> CameraPath {
+        let yaws = [0.2f32, 1.0, 1.5, 2.6, 3.1];
+        let mut p = CameraPath::new(
+            times.iter().zip(yaws).map(|(_, y)| key(y, 0.3, 3.0 + y, Vec3::new(y, 0.0, 0.0))).collect(),
+            loops,
+        );
+        p.times = times.to_vec();
+        p.ease = Some(false);
+        p
+    }
+
+    /// A key is a view at a moment: the camera is there at that time, however
+    /// unevenly the moments fall.
+    #[test]
+    fn uneven_keys_are_hit_at_their_times() {
+        let p = timed(&[0.0, 1.0, 5.0, 5.5, 9.0], Loop::Once);
+        assert!((p.duration() - 9.0).abs() < 1e-6);
+        for (i, &t) in [0.0f32, 1.0, 5.0, 5.5, 9.0].iter().enumerate() {
+            let c = p.sample_at(t as f64, Fov::default());
+            let k = p.keys[i];
+            assert!(c.orientation.angle_to(k.orientation) < 1e-4, "key {i} at {t}s");
+            assert!((c.distance - k.distance).abs() < 1e-4 && (c.focus - k.focus).length() < 1e-4);
+        }
+    }
+
+    /// Uneven times keep the camera's *speed* continuous through a key — what
+    /// the per-second tangents are for. A uniform spline reparameterized by
+    /// time would jump in speed by the ratio of the two segments' lengths.
+    #[test]
+    fn speed_runs_through_an_unevenly_timed_key() {
+        let p = timed(&[0.0, 1.0, 5.0, 6.0, 7.0], Loop::Once);
+        // Speed is continuous through a key; acceleration is not (Catmull-Rom
+        // is C¹), so it is measured close to the key.
+        let speed = |t: f64| {
+            let h = 2e-4;
+            let a = p.sample_at(t - h, Fov::default()).focus.x;
+            let b = p.sample_at(t + h, Fov::default()).focus.x;
+            (b - a) / (2.0 * h as f32)
+        };
+        for t in [1.0, 5.0, 6.0] {
+            let (before, after) = (speed(t - 0.001), speed(t + 0.001));
+            assert!(
+                (before - after).abs() < 0.02 * before.abs().max(after.abs()).max(0.05),
+                "speed jumps at {t}s: {before} -> {after}"
+            );
+        }
+    }
+
+    /// A loop's closing segment is what its period leaves after the last key.
+    #[test]
+    fn a_loop_closes_over_its_period() {
+        let mut p = timed(&[0.0, 2.0, 3.0], Loop::Closed);
+        p.period = Some(10.0);
+        assert_eq!(p.duration(), 10.0);
+        let at = |t: f64| p.sample_at(t, Fov::default());
+        assert!(at(10.0).orientation.angle_to(p.keys[0].orientation) < 1e-4, "back home at the period");
+        assert!(at(12.0).orientation.angle_to(p.keys[1].orientation) < 1e-4, "and round again");
+        // Seven seconds of closing segment: halfway home is well past key 2.
+        assert!(at(6.5).orientation.angle_to(p.keys[2].orientation) > 0.1);
+    }
+
+    /// Keying at the playhead inserts in time order, replaces a key already
+    /// there, and leaves every other key's time alone; retiming never
+    /// reorders.
+    #[test]
+    fn keying_and_retiming_keep_the_keys_in_order() {
+        let mut p = timed(&[0.0, 3.0, 6.0], Loop::Once);
+        let k = key(9.0, 0.1, 2.0, Vec3::ZERO);
+        assert_eq!(p.key_at(4.0, k), 2);
+        assert_eq!(p.key_times(), vec![0.0, 3.0, 4.0, 6.0]);
+        assert_eq!(p.routes.len(), p.segments());
+        assert_eq!(p.key_at(3.0, k), 1, "a key already there is replaced");
+        assert_eq!(p.keys.len(), 4);
+        p.set_key_time(1, 100.0);
+        assert!(p.time(1) < p.time(2), "a retime is clamped short of its neighbour");
+        p.remove_key(0);
+        assert_eq!(p.keys.len(), 3);
+        assert_eq!(p.routes.len(), p.segments());
+        assert!((p.time(0) - p.times[0]).abs() < 1e-6);
+
+        // A key past the end of a loop stretches the period to keep the
+        // closing segment as long as it was.
+        let mut l = timed(&[0.0, 2.0], Loop::Closed);
+        l.period = Some(4.0);
+        l.key_at(5.0, k);
+        assert!((l.lap() - 7.0).abs() < 1e-5, "{}", l.lap());
+    }
+
+    /// `retime_to` is the duration field: every key keeps its share of it.
+    #[test]
+    fn retiming_scales_every_key() {
+        let mut p = timed(&[1.0, 2.0, 5.0], Loop::PingPong);
+        p.retime_to(16.0);
+        assert!((p.duration() - 16.0).abs() < 1e-5);
+        assert_eq!(p.time(0), 1.0, "the first key stays put");
+        assert!((p.time(1) - 3.0).abs() < 1e-5 && (p.time(2) - 9.0).abs() < 1e-5);
+    }
 
     #[test]
     fn full_orbit_matches_auto_orbit() {

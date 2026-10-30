@@ -913,6 +913,94 @@ recorded dead end is worth as much as a recipe.
   `no-self-loops` strips a symmetric motif of its own lace, since the lace *is*
   the motif following itself.
 
+- **2026-10-23, Opus 5.5. A gas ring (`scenes/hob_opus55.toml`): the group's
+  order draws the outline, and the defect lands one scale down.** Two motifs
+  under a `Cyc` group plus one map outside it.
+
+  **A squashed ring is a ring; stand it on edge.** The first draft squashed
+  each jet vertically (`[0.1, 0.3, 0.1]`) and measured a Y-spread of 0.085:
+  all jets sit at one height, so the attractor's height `H` solves
+  `H = s_y·H` and goes to zero. The mini-hobs read as little crowns. Height
+  has to come from turning the ring's *diameter* upright: scale one axis of
+  the ring thin, then rotate ~70° about the tangent so the diameter becomes
+  the flame's height. Each jet is then a standing loop, limb-bright like a
+  real hollow cone.
+
+  **The group's order is a shape control, not a count.** At `Cyc12` and
+  `Cyc18` the loops were separate eggs, closed and rounded. Six variations
+  on the mantle (julia, swirl, horseshoe, bent, spherical, to 0.45) failed
+  to pinch a tip: with the variation weights summing past 1, they mostly
+  enlarge the map. At `Cyc30` neighbouring loops overlap, and the overlap
+  draws a row of pointed tongues along the rim. d went 1.72 → 2.05 on the
+  same motif. When the motif won't take the shape, try the orbit.
+
+  **A defect is inherited.** Every jet is a copy of the whole ring, yellow
+  flame included, so every jet carries a small copy of the defect. In
+  palette mode the cone's `color_speed` pulls that copy's index back from
+  0.8 towards 0.47, through the palette's white stop at 0.62, so each blue
+  flame grows a white-hot inner cone that nobody authored. It reads exactly
+  like a gas flame's inner cone. Checked: with `-S
+  transform.catch.color_value=0.47` the white disappears and the loops stay.
+  §3.6 says a defect's *shape* is decided the moment it exists; this is the
+  same fact seen from the copies' side. What a defect adds to the motifs is
+  also decided by its geometry, so place it with their copies in mind. A
+  bigger `catch` (scale.x 0.4 → 0.7) also sprouts fine spikes at every
+  jet's tip.
+
+  **`julia` forks in world space.** Its random branch is a point reflection
+  through the origin *after* the affine, so on a map far off-centre the
+  second fork lands across the ring. In most orbit views the yellow flame's
+  twin floated in the middle of the burner. Fine for a centred map,
+  surprising on a placed one.
+
+  **`--density-estimation` did nothing here, which was the answer.** A
+  premixed flame is laminar and crisp, so the lace is true to the subject.
+  The softness belongs to the one diffusion flame, which got `swirl`.
+
+  Tooling found on the way, and fixed: a sweep sheet framed every tile from
+  the base scene, so `--sweep camera.pitch=…` gave identical tiles under
+  honest-looking labels (AGENTS.md, Parameter sweeps). Also fixed the same
+  day: `-S symmetry.<index-or-motif>.<field>` now reaches `[[symmetry]]`, so
+  `--sweep 'symmetry.0.group=Cyc12,Cyc18,Cyc30'` is one command.
+
+  **Hazel's verdict, worth keeping: the self-similarity read as glitching in
+  the fine detail.** A flame is not a ring, so the small rings inside each
+  flame look like artefacts, not structure. Self-similarity is a feature
+  when the subject's parts are already like its whole, and a defect when
+  the IFS has to hide it. See the next entry.
+
+- **2026-10-23, Opus 5.5. Romanesco (`scenes/romanesco_opus55.toml`): one
+  map, a repeat, and the tail of the spiral as one more map.** Chosen as the
+  answer to the Hob verdict above: a subject that is self-similar in life.
+  `bud` is the whole head at uniform scale. Uniform matters: squash it and
+  you get Fiddlehead's conifer, because the part stops resembling the whole.
+  A golden-angle repeat whose step has its fixed point at the apex puts the
+  buds on a logarithmic spiral on a cone.
+
+  **Packing is the repeat's `shrink`, not the bud's scale.** At shrink 0.93
+  to 0.95 the buds stood apart as separate trees on a hill, whatever the bud
+  size. At 0.97 they packed into a cone of cones, the Romanesco silhouette,
+  d = 2.25 (shell). One `--sweep symmetry.bud.shrink × transform.bud.scale`
+  sheet found it.
+
+  **A truncated repeat is finished exactly by one map.** `MAX_REPEAT` is 64.
+  Copies past N are `S^N` applied to the whole attractor, so a plain map
+  equal to `S^N` (scale `cᴺ`, turn `N·turn`, lift `step·(1−cᴺ)/(1−c)` for a
+  step along the axis) *is* the infinite tail, not an approximation.
+  Without it the tip is a hole, and so is every bud's tip.
+
+  **And it needs far more than one copy's weight.** A repeat gives each copy
+  `w/N` whatever its size, but `S^N` stands in for infinitely many copies.
+  At `w/64` its region was a dark well that looked like a colour bug: the
+  haze off made no difference, `--isolate apex` showed a thin scatter. 0.12,
+  about eight copies' worth, matched the density at the seam. When a map's
+  region renders dark under splat, check whether it is under-sampled before
+  touching the palette.
+
+  **`color = "orbit"` is `fract(color_value + k/N)`.** It is a ramp only if
+  `color_value = 0`, and then copy index reads as age: dark base, pale tip,
+  repeated inside every bud. At the default 0.5 the ramp starts mid-palette
+  and wraps through the dark end partway up the form.
 
 - **2026-10-25, Opus 5.5. Inversion groups, and why the Mandelbox isn't one.**
   `scenes/apollonian_spheres.toml`, `scenes/indras_pearls.toml`.
@@ -988,3 +1076,17 @@ recorded dead end is worth as much as a recipe.
   rendering; reading eight moments was enough to find that Parasol's own
   framing crops the canopy once the lace grows.
 
+
+- **2026-10-29, Hazel (measured by Opus 5.5). A collapse is fixed by a turn,
+  not by more.** When a scene falls to a point or a line, the fix that works
+  is to turn one map well round (30-90°, about an axis across the line; a turn
+  about the line itself does nothing) and move the maps away from the origin
+  and each other. Two plain `linear` maps at ±(0.5, 0.5, 0), scale 0.5: a
+  line. Turn one (60, 0, 45) and pull them apart, and the line breaks into 3D
+  specks (z spread 0 → 0.45) but stays at dimension 1, since two maps at 0.5
+  can't be more than a curve. Raise both to 0.72 (§ the scale table: two maps
+  want about 0.7) and it grows into a branching 3D dragon form, dimension
+  2.11. Raising the scale *without* the turn leaves it a line. Small models
+  reach for more maps and variations here, and the old advice ("turn a map a
+  few degrees") was too timid to work; the primer and `--info`'s collapse
+  notes now say this.

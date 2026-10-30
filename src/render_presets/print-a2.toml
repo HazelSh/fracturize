@@ -1,0 +1,12 @@
+description = "An A2 poster at 300 ppi (7016×4961, landscape), 2,000 samples a pixel, 16-bit. Rendered in tiles"
+output = "still"
+width = 7016
+height = 4961
+samples = "accumulate"
+spp = 2000
+rounds = 96
+supersample = 2
+filter = "gaussian"
+filter_radius = 0.5
+density_estimation = 0.0
+bit_depth = 16

@@ -284,7 +284,7 @@ fn draw_block_body(ui: &mut egui::Ui, app: &mut App, idx: usize, me: usize, sum:
     });
 
     if let Some(e) = app.zoom_error.as_deref().filter(|e| e.contains("xaos")) {
-        ui.label(egui::RichText::new(e).small().color(ui.visuals().warn_fg_color));
+        ui.label(egui::RichText::new(e).small().color(super::theme::warn(ui.visuals())));
     }
 }
 
@@ -577,7 +577,7 @@ fn draw_window_body(ui: &mut egui::Ui, app: &mut App) {
             let col = app.scene.colors.get(i).copied().unwrap_or(glam::Vec3::ONE);
             painter.rect_filled(bar, 1.0, color32(col));
             if drained {
-                painter.rect_stroke(full, 1.0, egui::Stroke::new(1.0, ui.visuals().warn_fg_color), egui::StrokeKind::Inside);
+                painter.rect_stroke(full, 1.0, egui::Stroke::new(1.0, super::theme::warn(ui.visuals())), egui::StrokeKind::Inside);
             }
             let resp = ui.interact(full, ui.id().with(("xaos_share", i)), egui::Sense::hover());
             hinted(
@@ -598,7 +598,7 @@ fn draw_window_body(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new(format!("Dead end: {} — nothing may follow, so the walk restarts from the plain weights there.", names.join(", ")))
                 .small()
-                .color(ui.visuals().warn_fg_color),
+                .color(super::theme::warn(ui.visuals())),
         );
     }
 }

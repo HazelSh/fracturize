@@ -29,7 +29,7 @@ use crate::history::{EditSnapshot, History};
 use crate::scene::Scene;
 use crate::thread::{self, Answer, Draft, Header, Kind, Thread, Verdict};
 
-use super::App;
+use super::{App, Tone};
 
 /// How often the thread is read again while nothing else asks.
 const RESCAN: Duration = Duration::from_millis(1500);
@@ -151,19 +151,19 @@ impl App {
     }
 
     /// The scene as the person sees it, to send: the live values that only
-    /// reach the scene on a save, and the framing they're looking through.
-    fn scene_to_send(&self) -> Scene {
+    /// reach the scene on a save, and, `with_view`, the framing they're
+    /// looking through. Without it the scene keeps its own framing: orbiting
+    /// to look around is how anyone reads a 3D scene, and it isn't a change
+    /// to propose or a view to ask about until the person says it is.
+    pub(super) fn scene_to_send(&self, with_view: bool) -> Scene {
         let snap = match &self.collab.preview {
             Some(p) => p.live.clone(),
             None => self.edit_snapshot(),
         };
-        let mut scene = snap.scene.clone();
-        scene.set_camera(&self.camera);
-        scene.point_size = snap.point_size;
-        scene.color_falloff = snap.color_falloff;
-        scene.color_contrast = snap.color_contrast;
-        scene.haze = snap.haze_amount;
-        scene.exposure = snap.exposure;
+        let mut scene = as_saved(&snap);
+        if with_view {
+            scene.set_camera(&self.camera);
+        }
         scene
     }
 
@@ -172,17 +172,19 @@ impl App {
     }
 
     /// Post a request: the text, the scene as it is (as `base.toml`), the
-    /// selected transform, and a render of the view if `render`.
-    pub fn collab_request(&mut self, text: &str, render: bool, selection: bool) {
+    /// selected transform, and a render of the view if `render`. The live
+    /// framing goes in the scene only `with_view`, which a render implies:
+    /// the picture is of a view, and the scene has to say which.
+    pub fn collab_request(&mut self, text: &str, render: bool, with_view: bool, selection: bool) {
         let me = self.collab_me();
-        let to = self.collab.thread.as_ref().map_or("agent".to_string(), |t| t.other_party(&me, "agent"));
+        let to = self.collab_to();
         let mut header = Header::new(Kind::Request, &me, &to, text);
         if selection && let Some(i) = self.selected_transform() {
             header.selection.push(self.scene.transform_names.get(i).cloned().flatten().unwrap_or_else(|| i.to_string()));
         }
         let mut draft = Draft::new(header);
-        if let Err(e) = draft.scene("base.toml", &self.scene_to_send()) {
-            self.set_notice(format!("Couldn't send: {e}"), true);
+        if let Err(e) = draft.scene("base.toml", &self.scene_to_send(with_view || render)) {
+            self.set_notice(format!("Couldn't send: {e}"), Tone::Error);
             return;
         }
         if render {
@@ -196,10 +198,10 @@ impl App {
     /// saved (or, unsaved, the thread's first base). It answers the newest
     /// request waiting on the person, if there is one — "frame it the way
     /// you'd hang it" — and otherwise asks what the agent would do with it.
-    pub fn collab_propose_mine(&mut self, text: &str, render: bool) {
+    pub fn collab_propose_mine(&mut self, text: &str, render: bool, with_view: bool) {
         let me = self.collab_me();
         let thread = self.collab.thread.as_ref();
-        let to = thread.map_or("agent".to_string(), |t| t.other_party(&me, "agent"));
+        let to = self.collab_to();
         let mut header = Header::new(Kind::Proposal, &me, &to, text);
         header.ask = Some(thread::Ask::Free);
         header.replying_to = thread.and_then(|t| {
@@ -207,7 +209,7 @@ impl App {
         });
         let saved = self.scene_path.as_deref().and_then(|p| Scene::load(p).ok());
         let first_base = thread.and_then(|t| t.messages.iter().find_map(|m| m.base().and_then(Result::ok)));
-        let mine = self.scene_to_send();
+        let mine = self.scene_to_send(with_view || render);
         let base = saved.or(first_base).unwrap_or_else(|| mine.clone());
         header.options.push(thread::Opt {
             id: "mine".into(),
@@ -217,7 +219,7 @@ impl App {
         });
         let mut draft = Draft::new(header);
         if let Err(e) = draft.scene("base.toml", &base).and_then(|()| draft.scene("mine.toml", &mine)) {
-            self.set_notice(format!("Couldn't send: {e}"), true);
+            self.set_notice(format!("Couldn't send: {e}"), Tone::Error);
             return;
         }
         if render {
@@ -238,6 +240,9 @@ impl App {
     /// The screenshot a staged message was waiting for has been written (or
     /// failed): post it.
     pub(super) fn collab_screenshot_done(&mut self, written: Option<&Path>) {
+        if self.agent_screenshot_done(written) {
+            return;
+        }
         let Some(mut staged) = self.collab.staged.take() else { return };
         if let Some(path) = written.filter(|p| p.exists()) {
             staged.draft.files.insert(staged.name.clone(), thread::Content::Copy(path.to_path_buf()));
@@ -258,8 +263,8 @@ impl App {
         let kind = draft.header.kind.name();
         let dir = self.collab_dir();
         match thread::post(&dir, &self.thread_scene_name(), draft) {
-            Ok(id) => self.set_notice(format!("Sent {id} to {}", dir.display()), false),
-            Err(e) => self.set_notice(format!("Couldn't send the {kind}: {e}"), true),
+            Ok(id) => self.set_notice(format!("Sent {id} to {}", dir.display()), Tone::Success),
+            Err(e) => self.set_notice(format!("Couldn't send the {kind}: {e}"), Tone::Error),
         }
         self.poll_collab(true);
     }
@@ -269,8 +274,10 @@ impl App {
     fn tweak_of(&self, message: &str, option: &str) -> Option<Scene> {
         let p = self.collab.preview.as_ref();
         if p.is_some_and(|p| p.message == message && p.option == option) && self.preview_tweaked() {
-            let shown = p.and_then(|p| p.blink.as_ref()).map_or(&self.scene, |b| &b.scene);
-            return Some(shown.clone());
+            return Some(match p.and_then(|p| p.blink.as_ref()) {
+                Some(b) => as_saved(b),
+                None => as_saved(&self.edit_snapshot()),
+            });
         }
         self.collab.tweaks.get(&(message.to_string(), option.to_string())).cloned()
     }
@@ -321,7 +328,7 @@ impl App {
         }
         let (scene, _) = match self.option_scene(message, option) {
             Ok(s) => s,
-            Err(e) => return self.set_notice(format!("Can't preview: {e}"), true),
+            Err(e) => return self.set_notice(format!("Can't preview: {e}"), Tone::Error),
         };
         let live = self.edit_snapshot();
         let history = std::mem::replace(&mut self.history, History::new());
@@ -336,7 +343,7 @@ impl App {
         self.set_preview_blink(false);
         let Some(p) = self.collab.preview.take() else { return };
         if self.history.top_serial().is_some() {
-            self.collab.tweaks.insert((p.message.clone(), p.option.clone()), self.scene.clone());
+            self.collab.tweaks.insert((p.message.clone(), p.option.clone()), as_saved(&self.edit_snapshot()));
         }
         self.history = p.history;
         self.saved_serial = p.saved_serial;
@@ -383,14 +390,17 @@ impl App {
     pub fn collab_apply(&mut self, message: &str, option: &str) {
         let (theirs, base) = match self.option_scene(message, option) {
             Ok(s) => s,
-            Err(e) => return self.set_notice(format!("Can't apply: {e}"), true),
+            Err(e) => return self.set_notice(format!("Can't apply: {e}"), Tone::Error),
         };
         if self.collab.preview.is_some() {
             self.leave_preview();
         }
         let dir = self.scene_dir();
-        match crate::scene_diff::merge(&base, &self.scene, &theirs, &BTreeSet::new(), &dir) {
-            Ok(m) if m.conflicts.is_empty() => self.commit_apply(message, option, &base, &theirs, m.scene),
+        // Mine as a save would write it, so a haze or exposure changed since
+        // the request is a change of mine the merge can see, and conflicts.
+        let mine = as_saved(&self.edit_snapshot());
+        match crate::scene_diff::merge(&base, &mine, &theirs, &BTreeSet::new(), &dir) {
+            Ok(m) if m.conflicts.is_empty() => self.commit_apply(message, option, m.scene),
             Ok(m) => {
                 let n = m.conflicts.len();
                 self.collab.pending_apply = Some(PendingApply {
@@ -402,7 +412,7 @@ impl App {
                     theirs,
                 });
             }
-            Err(e) => self.set_notice(format!("Can't apply {option}: {e}"), true),
+            Err(e) => self.set_notice(format!("Can't apply {option}: {e}"), Tone::Error),
         }
     }
 
@@ -412,9 +422,10 @@ impl App {
         let take: BTreeSet<String> =
             p.conflicts.iter().zip(&p.take_theirs).filter(|(_, t)| **t).map(|(c, _)| c.path.clone()).collect();
         let dir = self.scene_dir();
-        match crate::scene_diff::merge(&p.base, &self.scene, &p.theirs, &take, &dir) {
-            Ok(m) => self.commit_apply(&p.message, &p.option, &p.base, &p.theirs, m.scene),
-            Err(e) => self.set_notice(format!("Can't apply {}: {e}", p.option), true),
+        let mine = as_saved(&self.edit_snapshot());
+        match crate::scene_diff::merge(&p.base, &mine, &p.theirs, &take, &dir) {
+            Ok(m) => self.commit_apply(&p.message, &p.option, m.scene),
+            Err(e) => self.set_notice(format!("Can't apply {}: {e}", p.option), Tone::Error),
         }
     }
 
@@ -426,18 +437,24 @@ impl App {
             .map_or(PathBuf::from("."), Path::to_path_buf)
     }
 
-    fn commit_apply(&mut self, message: &str, option: &str, base: &Scene, theirs: &Scene, merged: Scene) {
+    fn commit_apply(&mut self, message: &str, option: &str, merged: Scene) {
         let before = self.edit_snapshot();
-        // The live values only reach the scene on a save, so the merge saw
-        // the scene's copies; where the proposal didn't change one, the live
-        // value stands.
-        let pick = |theirs_v: f32, base_v: f32, merged_v: f32, live: f32| if theirs_v != base_v { merged_v } else { live };
-        self.point_size = pick(theirs.point_size, base.point_size, merged.point_size, self.point_size);
-        self.color_falloff = pick(theirs.color_falloff, base.color_falloff, merged.color_falloff, self.color_falloff);
-        self.color_contrast = pick(theirs.color_contrast, base.color_contrast, merged.color_contrast, self.color_contrast);
-        self.haze_amount = pick(theirs.haze, base.haze, merged.haze, self.haze_amount);
-        self.exposure = pick(theirs.exposure, base.exposure, merged.exposure, self.exposure);
+        // The merge was of the scene as a save would write it, so its values
+        // for these are already mine where the proposal left them alone.
+        self.point_size = merged.point_size;
+        self.color_falloff = merged.color_falloff;
+        self.color_contrast = merged.color_contrast;
+        self.haze_amount = merged.haze;
+        self.exposure = merged.exposure;
+        // A proposal that reframes has to move the camera too: Ctrl+S writes
+        // the live framing, so a framing left only in the scene was undone by
+        // the next save.
+        let framing = |s: &Scene| (s.camera_orientation, s.camera_distance, s.camera_focus);
+        let reframed = framing(&merged) != framing(&self.scene);
         self.scene = merged;
+        if reframed {
+            self.camera = self.camera_for(&self.scene);
+        }
         self.transform_enabled.resize(self.scene.transforms.len(), true);
         self.bump_matrix_generation();
         self.after_scene_shape_change();
@@ -478,7 +495,7 @@ impl App {
         if let Some((name, scene)) = draft_scene
             && let Err(e) = draft.scene(&name, &scene)
         {
-            return self.set_notice(format!("Couldn't send the tweak: {e}"), true);
+            return self.set_notice(format!("Couldn't send the tweak: {e}"), Tone::Error);
         }
         self.post_draft(draft);
     }
@@ -488,7 +505,7 @@ impl App {
     pub fn collab_keep(&mut self, message: &str, option: &str) {
         let (scene, _) = match self.option_scene(message, option) {
             Ok(s) => s,
-            Err(e) => return self.set_notice(format!("Can't keep: {e}"), true),
+            Err(e) => return self.set_notice(format!("Can't keep: {e}"), Tone::Error),
         };
         let stem = self.collab_dir().file_name().map_or("thread".into(), |s| s.to_string_lossy().into_owned());
         let n = self.collab.thread.as_ref().and_then(|t| t.get(message)).map_or(0, |m| m.number());
@@ -499,19 +516,32 @@ impl App {
             k += 1;
         }
         match scene.save(&path) {
-            Ok(()) => self.set_notice(format!("Kept {option} as {}", path.display()), false),
-            Err(e) => self.set_notice(format!("Couldn't keep {option}: {e}"), true),
+            Ok(()) => self.set_notice(format!("Kept {option} as {}", path.display()), Tone::Success),
+            Err(e) => self.set_notice(format!("Couldn't keep {option}: {e}"), Tone::Error),
         }
     }
 
     pub fn collab_withdraw(&mut self, message: &str) {
         let Some(t) = &self.collab.thread else { return };
         match thread::withdraw(t, message, "") {
-            Ok(id) => self.set_notice(format!("Withdrew {id}"), false),
-            Err(e) => self.set_notice(format!("Can't withdraw: {e}"), true),
+            Ok(id) => self.set_notice(format!("Withdrew {id}"), Tone::Success),
+            Err(e) => self.set_notice(format!("Can't withdraw: {e}"), Tone::Error),
         }
         self.poll_collab(true);
     }
+}
+
+/// The scene as a save would write it: with the values that live outside it
+/// until then (point size, colour, haze, exposure). A tweak is sent and kept
+/// as this, so a tweak of the haze alone isn't a tweak of nothing.
+fn as_saved(snap: &EditSnapshot) -> Scene {
+    let mut scene = snap.scene.clone();
+    scene.point_size = snap.point_size;
+    scene.color_falloff = snap.color_falloff;
+    scene.color_contrast = snap.color_contrast;
+    scene.haze = snap.haze_amount;
+    scene.exposure = snap.exposure;
+    scene
 }
 
 /// What history tracks, for a scene that arrives whole.

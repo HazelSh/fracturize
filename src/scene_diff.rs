@@ -360,16 +360,21 @@ pub fn render(changes: &[Change]) -> String {
     s
 }
 
-/// One line for a card: "4 values, +1 transform". Unused until the
-/// proposal cards exist (AGENT-COLLAB-PLAN.md phase 2).
-#[allow(dead_code)]
+/// One line for a proposal card: "4 values, +1 transform, 1 block
+/// rewritten".
 pub fn summary(changes: &[Change]) -> String {
     let n = |f: &dyn Fn(&Change) -> bool| changes.iter().filter(|c| f(c)).count();
     let plural = |k: usize, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
     let mut parts = Vec::new();
-    let values = n(&|c| matches!(c, Change::Set(_) | Change::Unset(_) | Change::Replaced(_)));
+    let values = n(&|c| matches!(c, Change::Set(_) | Change::Unset(_)));
     if values > 0 {
         parts.push(plural(values, "value", "values"));
+    }
+    // A symmetry, a camera path or an xaos matrix, rewritten whole: not a
+    // value, and a card that counted it as one listed fewer lines than it said.
+    let blocks = n(&|c| matches!(c, Change::Replaced(_)));
+    if blocks > 0 {
+        parts.push(plural(blocks, "block rewritten", "blocks rewritten"));
     }
     for (kind, word) in [("transform", "transform"), ("subscene", "subscene")] {
         let added = n(&|c| matches!(c, Change::Added { kind: k, .. } if k == kind));

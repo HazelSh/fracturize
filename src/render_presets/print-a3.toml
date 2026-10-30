@@ -1,0 +1,12 @@
+description = "An A3 print at 300 ppi (4961×3508, landscape), 2,000 samples a pixel, 16-bit"
+output = "still"
+width = 4961
+height = 3508
+samples = "accumulate"
+spp = 2000
+rounds = 96
+supersample = 2
+filter = "gaussian"
+filter_radius = 0.5
+density_estimation = 0.0
+bit_depth = 16

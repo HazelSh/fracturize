@@ -32,16 +32,6 @@ yaw = 0.45
 pitch = 1.05
 focus = [0.0, 0.0, 0.0]
 
-path_loop = "zoom"
-path_zoom_periods = 1
-path_seconds = 16.0
-
-[[camera.path]]
-yaw = 0.45
-pitch = 1.05
-distance = 3.2
-focus = [0.0, 0.0, 0.0]
-
 [palette]
 interpolate = "oklab"
 cyclic = true
@@ -118,4 +108,17 @@ variations = { linear = 1.0 }
 map = "core_spin"
 radius = 5.5
 levels = 14.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 16.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.45
+pitch = 1.05
+distance = 3.2
+focus = [0.0, 0.0, 0.0]
 

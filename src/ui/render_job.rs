@@ -1,26 +1,44 @@
-//! The render-job dialog: set up a batch render, watch it, stop it.
+//! The render-job dialog: set up a batch render, watch it, see what it made.
 //!
 //! Everything here exists because a big render is a commitment. The old HQ
 //! render was a button with no parameters and no exit; this asks what you
 //! want, tells you what it will cost before you agree to it, shows where it
-//! has got to, and takes two clicks to throw away.
+//! has got to, takes two clicks to throw away, and when it's done, stays on the
+//! result — one click opens it — until you ask for the next one.
+//!
+//! Three stages, one window: **setup** (the form), **running**, and
+//! **finished**. Finished is the running view with the bar replaced by the
+//! result, so the log stays where you were reading it. It used to drop
+//! straight back to the form with a small notice above Start, which put the
+//! answer to "did it work, and where is it?" in among the next job's settings.
+//!
+//! The form is in sections, ordered by the questions in the order people ask
+//! them: what am I making (Output), how big (Size), how good (Quality), and
+//! then the things that are inherited or remembered rather than chosen here
+//! (Look, from the window; This machine, from prefs). A **preset** above them
+//! sets Output, Size and Quality in one go (`crate::render_preset`).
 //!
 //! Quality settings are job-scoped — changing them here doesn't touch the
 //! interactive point count or prefs, so a 100M-point batch and a comfortable
-//! exploration buffer can coexist.
+//! exploration buffer can coexist. The form keeps its settings between
+//! openings for the rest of the session; the first opening starts from the
+//! preset last chosen.
 
-use std::path::PathBuf;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::render_job::{
-    format_duration, format_duration_cell, format_estimate, human_bytes, JobKind, JobParams,
-    Outcome, Samples,
+    format_duration, format_duration_cell, format_estimate, human_bytes, FinishedJob, JobKind, JobParams,
+    Samples,
 };
+use crate::render_preset::{self, Preset};
 
+use super::confirm::Arm;
 use super::hints::hinted;
 use super::icons;
 use super::num;
+use super::table::{self, Col};
+use super::UiState;
 
 /// Character budget for the elapsed/remaining readout: two seven-character
 /// duration cells plus `" elapsed · about "` and `" left"`. Sized to the
@@ -28,52 +46,43 @@ use super::num;
 /// the line it lands in.
 const ELAPSED_CHARS: usize = 36;
 
-/// The app's established "this is healthy/good" green — the p99 sparkline in
-/// `ui::status_bar` uses the same value for a frametime under budget. Reused
-/// here rather than invented fresh, so "done" reads the same everywhere.
-const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(90, 220, 120);
+/// "Done" reads the same everywhere: the theme's success green.
+const DONE_GREEN: egui::Color32 = super::theme::SUCCESS;
 
-/// Size presets, plus the custom escape hatch.
+/// Width of a table's value column: room for a slider and its number.
+const VALUE_W: f32 = 210.0;
+
+/// Section ids, kept apart from other windows' sections of the same name.
+const SECTIONS: &str = "fracturize_render_job_section";
+
 /// Output sizes, smallest first.
 ///
 /// The low end matters more than the high end: most renders are a check on
 /// whether the framing and the point count are right, and a 640x480 answers
 /// that in a fraction of the time. The list used to start at 720p, which made
 /// the cheapest available answer four times the cost of the one you wanted.
-const SIZE_PRESETS: [(&str, u32, u32); 6] = [
+const SIZE_PRESETS: [(&str, u32, u32); 8] = [
     ("SD", 640, 480),
     ("480p", 854, 480),
     ("720p", 1280, 720),
     ("1080p", 1920, 1080),
+    ("square 1080", 1080, 1080),
     ("1440p", 2560, 1440),
     ("4K", 3840, 2160),
+    ("A3 at 300 ppi", 4961, 3508),
 ];
 
-/// A frozen record of what a job was asked to do, captured the instant
-/// "Start" is clicked — not read live off the form later, because the form
-/// is the *next* job's setup the moment this one is running: `draw_form`'s
-/// fields stay editable under a finished job's summary so the next render can
-/// be queued up without closing the dialog, and a live read would let that
-/// editing relabel a job already in flight or already done.
-///
-/// This is what lets the completed-job panel say something a bare
-/// `Result<PathBuf, String>` (the only thing `App::job_done` carries — see
-/// the report) can't: what kind of job it was, how many frames, how long it
-/// took. `settled_secs` is filled in exactly once, the first frame this
-/// dialog observes the job is no longer running — frozen there, so the
-/// figure doesn't read as a live counter for as long as the dialog happens to
-/// stay open afterward.
+/// The dialog's form. Kept whole rather than derived from `JobParams` so
+/// switching modes doesn't lose the other mode's settings.
 #[derive(Clone)]
-pub struct StartedJob {
-    pub kind: JobKind,
-    pub clicked_at: Instant,
-    pub settled_secs: Option<f32>,
-}
-
-/// The dialog's in-progress form. Kept whole rather than derived from
-/// `JobParams` so switching modes doesn't lose the other mode's settings.
 pub struct RenderJobForm {
     pub open: bool,
+    /// Whether the form has been filled in this session. The first opening
+    /// takes the remembered preset; later ones keep what you left.
+    seeded: bool,
+    /// Show the finished job rather than the form. Set by Start; New render
+    /// clears it.
+    showing_result: bool,
     pub mode: Mode,
     pub filename: String,
     /// Set once the user edits the filename, so mode changes stop rewriting it
@@ -109,16 +118,20 @@ pub struct RenderJobForm {
     /// Which animation file to write. Only read when `mode` is `Animation`,
     /// but kept across a switch to Still and back so the choice sticks.
     pub format: crate::video::Format,
-    /// CPU threads the encoder may use. Seeded from prefs in [`open`] and
-    /// written back when it changes: a machine setting, so it follows the
-    /// person across scenes rather than living with the job's artwork.
-    /// Fraction of the GPU the render may take. A machine setting like
-    /// `threads`, seeded from prefs.
+    /// Fraction of the GPU the render may take. A machine setting, seeded
+    /// from prefs in [`open`] and written back when it changes.
     pub gpu_share: f32,
+    /// CPU threads the encoder may use. A machine setting like `gpu_share`.
     pub threads: usize,
-    /// A snapshot of the job launched from this form, if `Start` has been
-    /// clicked and the launch wasn't rejected. See `StartedJob`.
-    pub started: Option<StartedJob>,
+    /// The preset these settings came from, and what it says: what the
+    /// picker's `*` is measured against.
+    preset: Option<(render_preset::Entry, Preset)>,
+    /// The Save as name being typed, while it is.
+    preset_save_as: Option<String>,
+    preset_error: Option<String>,
+    preset_delete: Arm,
+    /// Why opening the finished file failed, if it did.
+    open_error: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -132,12 +145,14 @@ impl Default for RenderJobForm {
     fn default() -> Self {
         Self {
             open: false,
+            seeded: false,
+            showing_result: false,
             mode: Mode::Still,
             filename: String::new(),
             filename_touched: false,
             // 720p, not 1440p: the first render of a scene is usually a check
             // rather than a keeper, and a default should cost what the common
-            // case is worth.
+            // case is worth. The `preview` preset says the same.
             width: 1280,
             height: 720,
             points: 20_000_000,
@@ -149,10 +164,7 @@ impl Default for RenderJobForm {
             // accumulation can't run; see `samples`.
             use_accumulate: true,
             // `medium` on the CLI's `--effort` ladder: the lowest tier that
-            // beats the old default at every output size. `small` is nearly
-            // free but regresses at 720p, which is this dialog's default size,
-            // and a default that makes the common case worse is not a good
-            // default however cheap it is.
+            // beats the old default at every output size.
             spp: 100,
             // Off by default: it is the most distinctive thing here and also
             // the most opinionated, so it is opt-in rather than something a
@@ -162,8 +174,7 @@ impl Default for RenderJobForm {
             exposure: 1.0,
             transparent: false,
             // Same default as `--render`: a filtered 2x image is simply a
-            // better picture than a native one of the same scene, and the
-            // 4x-fill cost is the one worth paying by default.
+            // better picture than a native one of the same scene.
             supersample: 2,
             filter: crate::gpu::Filter::Gaussian,
             filter_radius: crate::gpu::points::downsample::DEFAULT_FILTER_RADIUS,
@@ -173,8 +184,12 @@ impl Default for RenderJobForm {
             quality: 60,
             format: crate::video::Format::Avif,
             gpu_share: 1.0,
-            threads: crate::render_job::default_threads(),
-            started: None,
+            threads: 1,
+            preset: None,
+            preset_save_as: None,
+            preset_error: None,
+            preset_delete: Arm::default(),
+            open_error: None,
         }
     }
 }
@@ -195,6 +210,18 @@ impl RenderJobForm {
         }
     }
 
+    /// Why this form can't accumulate, if it can't. Exactly the conditions
+    /// [`samples`](Self::samples) enforces, in words for the greyed control.
+    fn why_not_accumulate(&self) -> Option<&'static str> {
+        if !self.splat {
+            Some("Only with the splat renderer (Look, below).")
+        } else if self.mode != Mode::Still {
+            Some("Only for stills: every frame of an animation has its own camera.")
+        } else {
+            None
+        }
+    }
+
     /// What this form is asking the renderer for.
     ///
     /// The accumulating path is **still + splat only**, and that is enforced
@@ -205,11 +232,15 @@ impl RenderJobForm {
     /// build a `Samples::Accumulate` the renderer would refuse would be a
     /// second place for that rule to drift out of step.
     pub fn samples(&self) -> Samples {
-        if self.use_accumulate && self.splat && self.mode == Mode::Still {
+        if self.use_accumulate && self.why_not_accumulate().is_none() {
             Samples::Accumulate { spp: self.spp.max(1) }
         } else {
             Samples::Ring { accumulate: self.accumulate }
         }
+    }
+
+    fn accumulating(&self) -> bool {
+        self.samples().spp().is_some()
     }
 
     /// The density estimation this job will actually run.
@@ -220,8 +251,7 @@ impl RenderJobForm {
     /// to read. A one-pass render silently ignoring a non-zero setting would be
     /// worse than the control being off — the slider is disabled and says why.
     pub fn density(&self) -> crate::gpu::points::density::DensityEstimation {
-        let amount =
-            if self.samples().spp().is_some() { self.density_estimation } else { 0.0 };
+        let amount = if self.accumulating() { self.density_estimation } else { 0.0 };
         crate::gpu::points::density::DensityEstimation { amount }.clamped()
     }
 
@@ -243,41 +273,168 @@ impl RenderJobForm {
             threads: self.threads,
         }
     }
+
+    /// Take what `preset` says, leaving everything it doesn't mention.
+    fn apply(&mut self, p: &Preset) {
+        use render_preset::{Output, Samples as S};
+        match p.output {
+            Some(Output::Still) => self.mode = Mode::Still,
+            Some(Output::Avif) => (self.mode, self.format) = (Mode::Animation, crate::video::Format::Avif),
+            Some(Output::Mp4) => (self.mode, self.format) = (Mode::Animation, crate::video::Format::Mp4),
+            None => {}
+        }
+        fn set<T>(slot: &mut T, v: Option<T>) {
+            if let Some(v) = v {
+                *slot = v;
+            }
+        }
+        set(&mut self.width, p.width);
+        set(&mut self.height, p.height);
+        set(&mut self.use_accumulate, p.samples.map(|s| s == S::Accumulate));
+        set(&mut self.spp, p.spp);
+        set(&mut self.accumulate, p.rounds);
+        set(&mut self.points, p.points);
+        set(&mut self.supersample, p.supersample);
+        set(&mut self.filter, p.filter);
+        set(&mut self.filter_radius, p.filter_radius.map(|r| r as f32));
+        set(&mut self.density_estimation, p.density_estimation.map(|d| d as f32));
+        set(
+            &mut self.bit_depth,
+            p.bit_depth.map(|b| {
+                if b == 16 { crate::offline::BitDepth::Sixteen } else { crate::offline::BitDepth::Eight }
+            }),
+        );
+        set(&mut self.fps, p.fps);
+        set(&mut self.quality, p.quality);
+    }
+
+    /// Everything a preset can say, as this form has it.
+    fn to_preset(&self, description: String) -> Preset {
+        use render_preset::{Output, Samples as S};
+        // Three decimals: what the controls show, and what reads back the same.
+        let round = |v: f32| (v as f64 * 1000.0).round() / 1000.0;
+        Preset {
+            description,
+            output: match (self.mode, self.format) {
+                (Mode::Still, _) => Some(Output::Still),
+                (Mode::Animation, crate::video::Format::Avif) => Some(Output::Avif),
+                (Mode::Animation, crate::video::Format::Mp4) => Some(Output::Mp4),
+                (Mode::ViewDescriptor, _) => None,
+            },
+            width: Some(self.width),
+            height: Some(self.height),
+            samples: Some(if self.use_accumulate { S::Accumulate } else { S::OnePass }),
+            spp: Some(self.spp),
+            rounds: Some(self.accumulate),
+            points: Some(self.points),
+            supersample: Some(self.supersample),
+            filter: Some(self.filter),
+            filter_radius: Some(round(self.filter_radius)),
+            density_estimation: Some(round(self.density_estimation)),
+            bit_depth: Some(if self.bit_depth == crate::offline::BitDepth::Sixteen { 16 } else { 8 }),
+            fps: Some(self.fps),
+            quality: Some(self.quality),
+        }
+    }
+
+    /// Whether the settings differ from what the preset says. Only the keys
+    /// it says count: a built-in leaves the point count alone, so changing it
+    /// isn't a change to the preset.
+    fn preset_modified(&self) -> bool {
+        let Some((_, p)) = &self.preset else { return false };
+        let mut probe = self.clone();
+        probe.apply(p);
+        probe.to_preset(String::new()) != self.to_preset(String::new())
+    }
+
+    /// One line saying what these settings make, for a preset saved from them.
+    fn summary(&self) -> String {
+        let (w, h) = (self.width, self.height);
+        let mut parts = vec![match self.mode {
+            Mode::Animation => format!("{w}×{h} {} at {} fps", self.format.extension().to_uppercase(), self.fps),
+            _ => format!("{w}×{h} still"),
+        }];
+        match self.samples() {
+            Samples::Accumulate { spp } => parts.push(format!("{spp} samples a pixel")),
+            Samples::Ring { .. } => parts.push(format!("{} points", super::render_panel::format_points(self.points as f64))),
+        }
+        if self.supersample > 1 {
+            parts.push(format!("supersampled {}×", self.supersample));
+        }
+        if self.mode == Mode::Still && self.bit_depth == crate::offline::BitDepth::Sixteen {
+            parts.push("16-bit".into());
+        }
+        parts.join(", ")
+    }
 }
 
-/// Open the dialog, seeding it from what's on screen so the obvious job — "the
-/// thing I'm looking at, but properly" — takes one more click.
+/// Open the dialog.
+///
+/// A job running or a result not yet seen is shown as it is. Otherwise it
+/// opens on the form: the first time from the remembered preset, after that
+/// on the settings you left — with what follows the window (the look, the
+/// timeline's length, the machine settings) read again, and a fresh filename.
 pub fn open(app: &mut App) {
-    // A job in flight: don't reseed. The form isn't on screen right now
-    // (`draw_running` reads the job handle, not the form) and a full reset
-    // here would wipe `started` — the snapshot the completed-job panel needs
-    // — out from under a render that hasn't finished yet, if P gets pressed
-    // again while it's running (a plausible reflex, not just a corner case).
-    if app.job().is_some() {
-        app.ui_state.render_job.open = true;
+    let unseen = app.job_done().is_some_and(|d| !d.seen);
+    let running = app.job().is_some();
+    let form = &mut app.ui_state.render_job;
+    if form.open && !unseen {
         return;
     }
-    let mut form = RenderJobForm {
-        open: true,
-        threads: app.render_threads(),
-        gpu_share: app.render_gpu_share(),
-        // Volume mode seeds this as splat, and the dialog says so below: a
-        // job cannot render volume yet.
-        splat: app.render_mode.is_splat_family(),
-        exposure: app.exposure,
-        transparent: app.transparent_render,
-        // Start well above the interactive buffer without being reckless: this
-        // is the number the old one-click render used.
-        points: (app.point_capacity() as usize * 4).clamp(8_000_000, 40_000_000),
-        ..RenderJobForm::default()
-    };
-    // The timeline's length: the scene's own path, or its tracks, whichever
-    // runs longer. A scene with neither keeps the form's default.
-    if app.scene.camera_path.is_some() || !app.scene.tracks.is_empty() {
-        form.seconds = app.timeline_length() as f32;
+    form.open = true;
+    if running {
+        return;
     }
-    form.filename = default_filename(app, form.mode, form.format);
-    app.ui_state.render_job = form;
+    if unseen {
+        form.showing_result = true;
+        return;
+    }
+    form.showing_result = false;
+    reseed(app);
+}
+
+/// Read again what the form takes from the window and prefs, and on the
+/// session's first opening, apply the remembered preset.
+fn reseed(app: &mut App) {
+    if !app.ui_state.render_job.seeded {
+        let name = app.render_preset().unwrap_or(render_preset::DEFAULT).to_string();
+        let entry = render_preset::find(&name).unwrap_or_else(|| {
+            render_preset::Entry { name: render_preset::DEFAULT.into(), path: None }
+        });
+        let points = (app.point_capacity() as usize * 4).clamp(8_000_000, 40_000_000);
+        let form = &mut app.ui_state.render_job;
+        // Start well above the interactive buffer without being reckless: this
+        // is the number the old one-click render used. A preset may say
+        // otherwise; the built-in stills leave it be.
+        form.points = points;
+        if let Ok(p) = render_preset::load(&entry) {
+            form.apply(&p);
+            form.preset = Some((entry, p));
+        }
+        form.seeded = true;
+    }
+    let threads = app.render_threads();
+    let gpu_share = app.render_gpu_share();
+    // Volume mode seeds this as splat, and the dialog says so: a job cannot
+    // render volume yet.
+    let splat = app.render_mode.is_splat_family();
+    let (exposure, transparent) = (app.exposure, app.transparent_render);
+    // The timeline's length: the scene's own path, or its tracks, whichever
+    // runs longer. A scene with neither keeps what the form has.
+    let seconds = (app.scene.camera_path.is_some() || !app.scene.tracks.is_empty()).then(|| app.timeline_length() as f32);
+    let form = &mut app.ui_state.render_job;
+    form.threads = threads;
+    form.gpu_share = gpu_share;
+    form.splat = splat;
+    form.exposure = exposure;
+    form.transparent = transparent;
+    if let Some(s) = seconds {
+        form.seconds = s;
+    }
+    form.filename_touched = false;
+    form.open_error = None;
+    let (mode, format) = (form.mode, form.format);
+    app.ui_state.render_job.filename = default_filename(app, mode, format);
 }
 
 fn default_filename(app: &App, mode: Mode, format: crate::video::Format) -> String {
@@ -293,91 +450,972 @@ fn default_filename(app: &App, mode: Mode, format: crate::video::Format) -> Stri
     format!("{}/{}-{}.{}", dir, slug, stamp, kind.extension())
 }
 
+/// Rewrite the filename to follow the output kind, unless it's been typed.
+fn refresh_filename(app: &mut App) {
+    let form = &app.ui_state.render_job;
+    if !form.filename_touched {
+        let (mode, format) = (form.mode, form.format);
+        app.ui_state.render_job.filename = default_filename(app, mode, format);
+    }
+}
+
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     if !app.ui_state.render_job.open {
         return;
     }
     let mut open = true;
-    egui::Window::new("Render job")
-        .id(egui::Id::new("fracturize_render_job"))
+    super::window(ctx, app, super::WindowKey::RenderJob, "Render job")
         .open(&mut open)
         .collapsible(false)
-        .default_width(440.0)
-        .default_pos(egui::pos2(360.0, 90.0))
         .show(ctx, |ui| {
             if app.job().is_some() {
                 draw_running(ui, app);
+            } else if app.ui_state.render_job.showing_result && app.job_done().is_some() {
+                draw_finished(ui, app);
             } else {
-                draw_form(ui, app);
+                draw_setup(ui, app);
             }
         });
+    super::remember(ctx, app, super::WindowKey::RenderJob);
     if !open {
         app.ui_state.render_job.open = false;
     }
 }
 
-fn draw_form(ui: &mut egui::Ui, app: &mut App) {
-    draw_mode(ui, app);
-    ui.separator();
-    draw_filename(ui, app);
-    ui.separator();
+// --- Setup ------------------------------------------------------------------
 
-    let mode = app.ui_state.render_job.mode;
-    if mode != Mode::ViewDescriptor {
-        draw_quality(ui, app);
-        ui.separator();
-        draw_estimates(ui, app);
-        ui.separator();
-    } else {
-        ui.label(
-            egui::RichText::new(
-                "Saves this exact framing to a view file, without rendering \
-                 anything. You can load it later, or render it from the command \
-                 line (--view).",
-            )
-            .small()
-            .weak(),
+/// What the form's sections read from the app, gathered first so the form can
+/// be drawn on its own.
+struct Env {
+    max_points_m: f32,
+    max_threads: usize,
+    /// Buffer limit in bytes, for the tile plan.
+    limit: u64,
+    volume: bool,
+    grade: Option<String>,
+    /// The window's size, for the render's shape to be compared against.
+    window: (u32, u32),
+}
+
+fn draw_setup(ui: &mut egui::Ui, app: &mut App) {
+    egui::Panel::top("fracturize_render_job_preset").show(ui, |ui| {
+        preset_bar(ui, app);
+        ui.add_space(2.0);
+    });
+    egui::Panel::bottom("fracturize_render_job_foot").show(ui, |ui| {
+        ui.add_space(4.0);
+        footer(ui, app);
+        ui.add_space(2.0);
+    });
+
+    let env = Env {
+        max_points_m: app.max_point_capacity() as f32 / 1e6,
+        max_threads: App::max_render_threads(),
+        limit: app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT,
+        volume: app.render_mode == crate::app::RenderMode::Volume,
+        grade: inherited_grade(app),
+        window: app.surface_size(),
+    };
+    // The form is drawn on its own, beside the hint state, rather than through
+    // `app`: the tables hand their rows `&mut UiState`, which lives in `app`.
+    let mut form = std::mem::take(&mut app.ui_state.render_job);
+    let before = form.clone();
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        sections(ui, &mut app.ui_state, &mut form, &env);
+    });
+    app.ui_state.render_job = form;
+
+    let form = app.ui_state.render_job.clone();
+    if form.gpu_share != before.gpu_share {
+        app.set_render_gpu_share(form.gpu_share);
+    }
+    if form.threads != before.threads {
+        app.set_render_threads(form.threads);
+    }
+    if (form.mode, form.format) != (before.mode, before.format) {
+        refresh_filename(app);
+    }
+}
+
+fn sections(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
+    super::section(ui, SECTIONS, "Output", |ui| output(ui, st, f));
+    if f.mode == Mode::ViewDescriptor {
+        caption(
+            ui,
+            "Saves this exact framing to a view file, without rendering anything. You can \
+             load it later, or render it from the command line (--view).",
         );
-        ui.separator();
+        return;
+    }
+    super::section(ui, SECTIONS, "Size", |ui| size(ui, st, f, env));
+    super::section(ui, SECTIONS, "Quality", |ui| quality(ui, st, f, env));
+    super::section(ui, SECTIONS, "Animation", |ui| animation(ui, st, f));
+    super::section(ui, SECTIONS, "Look", |ui| look(ui, st, f, env));
+    super::section(ui, SECTIONS, "This machine", |ui| machine(ui, st, f, env));
+}
+
+fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(egui::RichText::new(text).small().weak())
+}
+
+/// The two columns every table here has: what, and its control.
+const SETTING_VALUE: [Col<'static>; 2] = [
+    Col::name(
+        "Setting",
+        "What the control sets. A row indented under another depends on it; a greyed row says \
+         what it needs beside its name.",
+    ),
+    Col::new("Value", "Drag, or click to type an exact value", VALUE_W),
+];
+
+/// A switch table: what, and on or off.
+const SETTING_TICK: [Col<'static>; 2] = [
+    Col::name("Setting", "What the switch does. A greyed row says what it needs beside its name."),
+    Col::tick("On", "Ticked, it's on"),
+];
+
+/// How far a dependent row's name is indented, per level.
+const INDENT: f32 = 12.0;
+
+/// A row's name, and how it stands with the rows it depends on.
+///
+/// Which controls switch which others used to be said only on hover. Two
+/// things say it on the page now: a row that depends on the one above is
+/// **indented** under it, and a row that can't be used says **what it needs**
+/// beside its name, in words that name the control that would free it
+/// ("needs Samples: accumulate", "stills only"). The note is a short form of the
+/// tooltip, which still has the whole reason.
+#[derive(Clone, Copy)]
+struct Name<'a> {
+    text: &'a str,
+    depth: u8,
+    on: bool,
+    note: Option<&'a str>,
+}
+
+fn name(text: &str) -> Name<'_> {
+    Name { text, depth: 0, on: true, note: None }
+}
+
+impl<'a> Name<'a> {
+    /// Indented under the row it depends on.
+    fn under(self, depth: u8) -> Self {
+        Self { depth, ..self }
     }
 
-    // Freeze "how long did that take" the first frame this dialog sees the
-    // job is no longer running, rather than recomputing it every frame the
-    // dialog happens to stay open afterward — a live counter past the finish
-    // line would read as the job still going. `draw_form` (this function) is
-    // only ever called once `App::job` is already `None` — see `draw`'s
-    // dispatch above — so reaching here at all is the signal.
-    if let Some(started) = app.ui_state.render_job.started.as_mut() {
-        if started.settled_secs.is_none() {
-            started.settled_secs = Some(started.clicked_at.elapsed().as_secs_f32());
+    /// Greyed, saying what it needs, unless `needs` is `None`.
+    fn needs(self, needs: Option<&'a str>) -> Self {
+        Self { on: needs.is_none(), note: needs, ..self }
+    }
+
+    /// A note shown without greying the row: for a control only part of
+    /// which is unavailable, like one segment of a radio.
+    fn note(self, note: Option<&'a str>) -> Self {
+        Self { note, ..self }
+    }
+
+    /// The name, and the note beside it unless the caller shows it elsewhere.
+    fn draw(self, ui: &mut egui::Ui, st: &mut UiState, tip: &str, with_note: bool) {
+        ui.add_space(self.depth as f32 * INDENT);
+        ui.add_enabled_ui(self.on, |ui| {
+            let resp = ui.add(egui::Label::new(self.text).sense(egui::Sense::hover()));
+            hinted(resp, st, tip, self.text);
+        });
+        if let Some(note) = self.note.filter(|_| with_note) {
+            note_label(ui, st, note, tip, self.text);
+        }
+    }
+}
+
+fn note_label(ui: &mut egui::Ui, st: &mut UiState, note: &str, tip: &str, name: &str) {
+    let resp = ui.add(egui::Label::new(egui::RichText::new(note).small().weak()).sense(egui::Sense::hover()));
+    hinted(resp, st, tip, name);
+}
+
+/// One row: its name, and its control.
+///
+/// A row that can't be used shows what it needs **in place of its control**:
+/// the control's value means nothing while it doesn't apply, the value column
+/// has the room to name the row that would free it, and beside a long name at
+/// a deep indent the note was cut off. The row, its name and its tooltip stay,
+/// so the feature still says it exists.
+fn row(
+    body: &mut egui_extras::TableBody<'_>,
+    st: &mut UiState,
+    name: Name<'_>,
+    tip: &str,
+    value: impl FnOnce(&mut egui::Ui, &mut UiState),
+) {
+    let h = table::row_height(body.ui_mut());
+    let in_value = (!name.on).then_some(name.note).flatten();
+    body.row(h, |mut row| {
+        row.col(|ui| name.draw(ui, st, tip, in_value.is_none()));
+        row.col(|ui| {
+            ui.spacing_mut().slider_width = VALUE_W - 70.0;
+            match in_value {
+                Some(note) => note_label(ui, st, note, tip, name.text),
+                None => {
+                    ui.add_enabled_ui(name.on, |ui| value(ui, st));
+                }
+            }
+        });
+    });
+}
+
+/// A switch row.
+fn tick_row(body: &mut egui_extras::TableBody<'_>, st: &mut UiState, name: Name<'_>, tip: &str, value: &mut bool) -> bool {
+    let h = table::row_height(body.ui_mut());
+    let mut changed = false;
+    body.row(h, |mut row| {
+        row.col(|ui| name.draw(ui, st, tip, true));
+        row.col(|ui| {
+            ui.add_enabled_ui(name.on, |ui| {
+                let resp = table::tick(ui, value);
+                changed = hinted(resp, st, tip, &format!("click: {}", name.text)).changed();
+            });
+        });
+    });
+    changed
+}
+
+/// What to make, where it goes, and the two things about the file itself.
+fn output(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
+    // A segmented radio, not four loose toggles: exactly one of these is
+    // always in force. See `ui::radio`.
+    let current = Output::of(f.mode, f.format);
+    let mut chooser = super::radio::radio(st, "render_output", current);
+    for (mode, format, label, tip) in OUTPUTS {
+        chooser = chooser.option(Output::of(mode, format), label, tip, "click: choose the output kind");
+    }
+    if let Some(chosen) = chooser.show(ui) {
+        let (mode, format) = OUTPUTS
+            .iter()
+            .find(|(m, fm, ..)| Output::of(*m, *fm) == chosen)
+            .map(|(m, fm, ..)| (*m, *fm))
+            .unwrap_or((Mode::Still, crate::video::Format::Avif));
+        f.mode = mode;
+        if mode == Mode::Animation {
+            f.format = format;
         }
     }
 
-    if let Some(err) = app.job_error() {
-        let err = err.to_string();
-        ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color).small());
-    } else if let Some(done) = app.job_done().cloned() {
-        match done {
-            Ok((path, outcome)) => draw_done_panel(ui, app, &path, outcome),
-            Err(e) if e == crate::render_job::CANCELLED => {
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut f.filename)
+            .desired_width(f32::INFINITY)
+            .hint_text("renders/name.png"),
+    );
+    let resp = hinted(
+        resp,
+        st,
+        "Where to save the result. Missing folders are created. A relative path starts \
+         from the folder Fracturize was launched in.",
+        "type: the output filename",
+    );
+    if resp.changed() {
+        f.filename_touched = true;
+    }
+    let path = PathBuf::from(f.filename.trim());
+    let (text, color) = match filename_trouble(&path) {
+        Some(t) => (t.message(), t.color(ui.visuals())),
+        // A blank line rather than no line. **The row must always be there**,
+        // because everything below it moves when it isn't: every absolute path
+        // is typed through `/home`, `/home/you` and so on, so this row used to
+        // blink in and out under the cursor and shuffle the form with it.
+        None => (" ", ui.visuals().text_color()),
+    };
+    ui.label(egui::RichText::new(text).color(color).small());
+
+    if f.mode == Mode::ViewDescriptor {
+        return;
+    }
+    // Both describe the *file* that leaves the app, not how the picture is
+    // drawn, so they sit with the filename rather than with quality.
+    let still = f.mode == Mode::Still;
+    table::show(ui, st, "fracturize_render_job_file", &SETTING_TICK, |body, st| {
+        let mut sixteen = f.bit_depth == crate::offline::BitDepth::Sixteen;
+        let tip = if still {
+            "Save more precise colour, at twice the file size. Worth it for a final render: \
+             smooth gradients can show visible bands at 8 bits."
+        } else {
+            "Only for stills: video is 8 bits by codec."
+        };
+        let only = (!still).then_some("stills only");
+        if tick_row(body, st, name("16-bit PNG").needs(only), tip, &mut sixteen) {
+            f.bit_depth =
+                if sixteen { crate::offline::BitDepth::Sixteen } else { crate::offline::BitDepth::Eight };
+        }
+        let tip = if still {
+            "Save with a transparent background, for layering over other images"
+        } else {
+            "Animations can't have a transparent background"
+        };
+        tick_row(body, st, name("Transparent background").needs(only), tip, &mut f.transparent);
+    });
+}
+
+fn size(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
+    let (ww, wh) = env.window;
+    table::show(ui, st, "fracturize_render_job_size", &SETTING_VALUE, |body, st| {
+        row(body, st, name("Width × height"), "The output size in pixels", |ui, st| {
+            let resp = ui.add(num::Drag::new(&mut f.width).range(16..=16384));
+            hinted(resp, st, "Output width in pixels", "drag: output width");
+            ui.label("×");
+            let resp = ui.add(num::Drag::new(&mut f.height).range(16..=16384));
+            hinted(resp, st, "Output height in pixels", "drag: output height");
+        });
+        row(body, st, name("Common size"), "Pick a standard size, or the window's shape", |ui, st| {
+            let current = SIZE_PRESETS
+                .iter()
+                .find(|(_, w, h)| (*w, *h) == (f.width, f.height))
+                .map_or("custom", |(name, ..)| name);
+            let combo = egui::ComboBox::from_id_salt("fracturize_render_job_size_preset")
+                .selected_text(current)
+                .width(VALUE_W - 12.0)
+                .show_ui(ui, |ui| {
+                    let (w, h) = window_shaped(f.width, ww, wh);
+                    let resp = ui.selectable_label(false, format!("the window's shape  ({w}×{h})"));
+                    let tip = "Keep this width and set the height to give the window's shape, so the \
+                               render frames exactly what you see";
+                    if hinted(resp, st, tip, "click: match the window's shape").clicked() {
+                        (f.width, f.height) = (w, h);
+                    }
+                    ui.separator();
+                    for (label, w, h) in SIZE_PRESETS {
+                        let resp = ui.selectable_label((w, h) == (f.width, f.height), format!("{label}  ({w}×{h})"));
+                        if hinted(resp, st, &format!("{w}×{h}"), "click: use this output size").clicked() {
+                            (f.width, f.height) = (w, h);
+                        }
+                    }
+                });
+            hinted(combo.response, st, "Pick a standard size, or the window's shape", "click: pick a size");
+        });
+        let tip = "Width over height. The render keeps the window's vertical view, so its shape \
+                   decides how much is seen at the sides.";
+        row(body, st, name("Aspect ratio"), tip, |ui, _| {
+            ui.label(egui::RichText::new(aspect_label(f.width, f.height)).monospace());
+        });
+    });
+    // Always one line, so changing the size never moves what's below.
+    caption(ui, &against_window(f.width, f.height, ww, wh)).on_hover_text(
+        "The render keeps the window's vertical field of view: top and bottom match what you \
+         see, and a wider shape shows more at the left and right, a narrower one less.",
+    );
+}
+
+/// `w:h` in lowest terms when that is a ratio people say (16:9, 4:3, 1:1),
+/// else `1.41:1`.
+fn aspect_label(w: u32, h: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let g = gcd(w, h).max(1);
+    let (a, b) = (w / g, h / g);
+    if a <= 32 && b <= 32 {
+        format!("{a}:{b}")
+    } else {
+        format!("{}:1", num::fixed(w as f32 / h.max(1) as f32, 2))
+    }
+}
+
+/// The render's shape against the window's, in words.
+fn against_window(w: u32, h: u32, ww: u32, wh: u32) -> String {
+    let win = format!("the window ({})", aspect_label(ww, wh));
+    let r = (w as f32 / h.max(1) as f32) / (ww as f32 / wh.max(1) as f32);
+    if (r - 1.0).abs() < 0.01 {
+        format!("Same shape as {win}: it frames what you see.")
+    } else if r > 1.0 {
+        format!("Wider than {win}: shows more at the sides than you see.")
+    } else {
+        format!("Narrower than {win}: cuts off some of the sides.")
+    }
+}
+
+/// `width` kept, the height that gives the window's shape: even, since video
+/// needs even sizes, and within what the size fields take.
+fn window_shaped(width: u32, ww: u32, wh: u32) -> (u32, u32) {
+    let h = (width as f32 * wh as f32 / ww.max(1) as f32 / 2.0).round() as u32 * 2;
+    (width, h.clamp(16, 16384))
+}
+
+/// The renderer and the samples first, then the smoothing on top of them.
+///
+/// The renderer is here, not with the look, because it decides what the
+/// sample choice under it can be: only splat accumulates. It used to sit at
+/// the foot of the form, three sections away from the radio it greyed.
+///
+/// The two sample modes are a genuine choice rather than a preference, because
+/// they scale in opposite directions and the dialog cannot hide which one you
+/// are on:
+///
+/// * **Accumulate** targets samples per *output* pixel, so the same setting
+///   means the same density at 720p and at A2.
+/// * **One pass** splats the filled buffer once, so its density is
+///   `points / pixels` and falls as the output grows — 21.7 samples/px at 720p
+///   and 2.4 at 4K from the settings this dialog used to default to. That is
+///   the grain, and it is why accumulation is the default.
+fn quality(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
+    let why_not = f.why_not_accumulate();
+    let accumulating = f.accumulating();
+    table::show(ui, st, "fracturize_render_job_quality", &SETTING_VALUE, |body, st| {
+        table::group_row(body, "Samples");
+        let tip = "Which renderer draws the picture: starts as the window has it. Only splat can \
+                   accumulate.";
+        row(body, st, name("Renderer"), tip, |ui, st| {
+            #[derive(Clone, Copy, PartialEq)]
+            enum R {
+                Points,
+                Splat,
+            }
+            let chosen = super::radio::radio(st, "render_job_renderer", if f.splat { R::Splat } else { R::Points })
+                .option(R::Points, "points", "Opaque points, every one at full brightness", "click: points renderer")
+                .option(R::Splat, "splat", "Density, built up and toned like a flame", "click: splat renderer")
+                .show(ui);
+            if let Some(r) = chosen {
+                f.splat = r == R::Splat;
+            }
+        });
+        let short = match (f.splat, f.mode) {
+            (false, _) => Some("accumulate needs splat"),
+            (true, Mode::Still) => None,
+            (true, _) => Some("accumulate: stills only"),
+        };
+        row(body, st, name("Samples").under(1).note(short), "How the render gathers its samples", |ui, st| {
+            use render_preset::Samples as S;
+            let current = if accumulating { S::Accumulate } else { S::OnePass };
+            let chosen = super::radio::radio(st, "render_job_samples", current)
+                .option_enabled(
+                    why_not.is_none(),
+                    S::Accumulate,
+                    "accumulate",
+                    why_not.unwrap_or(
+                        "Keep adding points until each pixel has had the number of samples you ask \
+                         for. The same setting gives the same quality at any size, and stopping \
+                         early gives a noisier version of the same picture.",
+                    ),
+                    "click: render to a sample target",
+                )
+                .option(
+                    S::OnePass,
+                    "one pass",
+                    "Render the points once. Quick, but the same settings look grainier the larger \
+                     the image.",
+                    "click: render the points once",
+                )
+                .show(ui);
+            if let Some(c) = chosen {
+                f.use_accumulate = c == S::Accumulate;
+            }
+        });
+        if accumulating {
+            // Logarithmic, and to 10,000 rather than to a comfortable number:
+            // the useful artistic band is 10-1,000, which lands at 25%-75% of a
+            // log track, and the top exists so the dial does not have to be
+            // abandoned for the command line at exactly the point the picture
+            // gets good.
+            let tip = "Samples per pixel. More is cleaner and slower: 10× the samples is about 3× \
+                       less noise. 100 is a good everyday value. Above about 30,000, also tick \
+                       16-bit PNG, or the file can't hold the extra detail.";
+            row(body, st, name("Samples per pixel").under(2), tip, |ui, st| {
+                let resp = ui.add(egui::Slider::new(&mut f.spp, 1..=10_000).logarithmic(true));
+                hinted(resp, st, tip, "drag: samples per output pixel");
+            });
+        } else {
+            let tip = "Extra rounds of the chaos game after the points are filled in. Settles the \
+                       points further without adding more of them. Costs almost nothing.";
+            row(body, st, name("Extra rounds").under(2), tip, |ui, st| {
+                let resp = ui.add(egui::Slider::new(&mut f.accumulate, 1..=512).logarithmic(true));
+                hinted(resp, st, tip, "drag: extra rounds of the chaos game");
+            });
+        }
+        // Density estimation sits with the samples rather than with the
+        // filter, even though both are blurs: it needs a *histogram* to read a
+        // density from, so it lives or dies with the choice above it.
+        let tip = if accumulating {
+            "Smooths the grainy, sparse parts of the picture while leaving the dense, detailed \
+             parts sharp. Much of what gives Apophysis renders their look. Try around 0.3 before \
+             going to 1.0."
+        } else {
+            "Needs Samples set to accumulate."
+        };
+        let needs = (!accumulating).then_some("needs Samples: accumulate");
+        row(body, st, name("Density estimation").under(2).needs(needs), tip, |ui, st| {
+            let resp = ui.add(egui::Slider::new(&mut f.density_estimation, 0.0..=1.0).fixed_decimals(2));
+            hinted(resp, st, tip, "drag: density-estimation strength");
+        });
+        // The same slider means two different things, so it says which. Under
+        // accumulation it is a working set — measured, varying it 6x at a
+        // fixed sample target moved the wall clock under 25% — and telling
+        // someone it is a quality dial there would send them tuning the one
+        // control that isn't.
+        let tip = if accumulating {
+            "How many points are worked on at a time. This doesn't affect quality (samples per \
+             pixel does), so leave it alone unless GPU memory is tight."
+        } else {
+            "How many points to render. More looks better. This only applies to the render; the \
+             live view keeps its own point count."
+        };
+        row(body, st, name("Points"), tip, |ui, st| {
+            let mut millions = f.points as f32 / 1e6;
+            let resp = ui.add(
+                egui::Slider::new(&mut millions, 0.5..=env.max_points_m)
+                    .logarithmic(true)
+                    // Shared with the interactive point-count slider so a count
+                    // reads in the same k/M units in both, and so typing an
+                    // exact value parses back.
+                    .custom_formatter(|v, _| super::render_panel::format_points(v))
+                    .custom_parser(super::render_panel::parse_points),
+            );
+            if hinted(resp, st, tip, "drag: point count for this job").changed() {
+                f.points = (millions * 1e6).round() as usize;
+            }
+        });
+
+        // Supersampling is cost/quality at fixed artistic intent, like the
+        // rows above — nothing here changes what the picture *is*. It is the
+        // one that buys the most, though, so the hint says what it is.
+        table::group_row(body, "Smoothing edges");
+        let tip = "Render at this many times the size, then scale down. Smooths jagged edges, and \
+                   is the biggest quality improvement here. 2× costs about 4× the memory and time. \
+                   1 turns it off.";
+        row(body, st, name("Supersample"), tip, |ui, st| {
+            let max = crate::gpu::points::downsample::MAX_SUPERSAMPLE;
+            let resp = ui.add(num::Drag::new(&mut f.supersample).range(1..=max).suffix("×"));
+            hinted(resp, st, tip, "drag: supersampling factor");
+        });
+        // Greyed rather than hidden at 1x, so the kernel choice can still say
+        // it exists.
+        let ss = f.supersample > 1;
+        let needs = (!ss).then_some("needs Supersample 2× or more");
+        let tip = if ss {
+            "The shape used to scale down. Gaussian is soft and safe; lanczos is sharpest but rings \
+             around small bright points."
+        } else {
+            "Only used when Supersample is above 1×"
+        };
+        row(body, st, name("Filter").under(1).needs(needs), tip, |ui, st| {
+            let combo = egui::ComboBox::from_id_salt("render_job_filter")
+                .selected_text(f.filter.label())
+                .width(VALUE_W - 12.0)
+                .show_ui(ui, |ui| {
+                    use clap::ValueEnum;
+                    for v in crate::gpu::Filter::value_variants() {
+                        ui.selectable_value(&mut f.filter, *v, v.label());
+                    }
+                });
+            hinted(combo.response, st, tip, "click: pick the filter");
+        });
+        let tip = if ss {
+            "How soft the scaling-down is, in pixels. Higher is smoother; lower is sharper but more \
+             jagged. 0.5 is the default."
+        } else {
+            "Only used when Supersample is above 1×"
+        };
+        row(body, st, name("Filter radius").under(1).needs(needs), tip, |ui, st| {
+            use crate::gpu::points::downsample::{MAX_FILTER_RADIUS, MIN_FILTER_RADIUS};
+            let resp = ui.add(
+                num::Drag::new(&mut f.filter_radius).speed(0.05).range(MIN_FILTER_RADIUS..=MAX_FILTER_RADIUS).suffix(" px"),
+            );
+            hinted(resp, st, tip, "drag: filter radius");
+        });
+    });
+
+    // Always one line, whichever way the samples are gathered: it used to
+    // appear and vanish with accumulation, moving everything below it.
+    let params = f.params();
+    let text = if accumulating {
+        // Tiles are not a detail to hide: past the binding limit the chaos
+        // game runs once per tile, so this line is where a job quietly stops
+        // costing seconds and starts costing minutes.
+        let tiling = match params.tile_plan(env.limit) {
+            Ok(p) if p.is_single() => String::new(),
+            Ok(p) => format!(" · {} tiles ({}x{})", p.tiles.len(), p.cols, p.rows),
+            Err(_) => String::from(" · too large"),
+        };
+        format!("{} laps · {} histogram{}", params.laps(), human_bytes(params.histogram_bytes()), tiling)
+    } else {
+        let pixels = (f.width as u64 * f.height as u64).max(1);
+        format!("one pass · about {} samples/px, from the points", num::fixed(f.points as f32 / pixels as f32, 1))
+    };
+    caption(ui, &text).on_hover_text(if accumulating {
+        "How many passes the render will take, and how much GPU memory the image needs. If it's \
+         too big for the graphics card in one piece, it's rendered in tiles and stitched \
+         together, which takes longer."
+    } else {
+        "One pass draws each point once, so the samples per pixel are the points over the \
+         pixels: the same points look grainier the larger the image."
+    });
+}
+
+/// Shown for every kind of render and greyed for a still, so switching the
+/// output kind doesn't add and remove a section under the pointer.
+fn animation(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm) {
+    let only = (f.mode != Mode::Animation).then_some("for avif or mp4 output");
+    let why = |tip: &str| if only.is_some() { "Only for animations: pick avif or mp4 under Output".to_string() } else { tip.to_string() };
+    table::show(ui, st, "fracturize_render_job_animation", &SETTING_VALUE, |body, st| {
+        let tip = why("Frames per second");
+        row(body, st, name("Frame rate").needs(only), &tip, |ui, st| {
+            let resp = ui.add(num::Drag::new(&mut f.fps).range(1..=120).suffix(" fps"));
+            hinted(resp, st, &tip, "drag: frame rate");
+        });
+        let tip = why("Length of the animation. Starts at the timeline's own length");
+        row(body, st, name("Length").needs(only), &tip, |ui, st| {
+            let resp = ui.add(num::Drag::new(&mut f.seconds).speed(0.1).range(0.1..=600.0).suffix(" s"));
+            hinted(resp, st, &tip, "drag: duration");
+        });
+        let codec = f.format.codec_label();
+        let tip = why(&format!("{codec} quality, 0 to 100. Higher looks better and makes a bigger file."));
+        row(body, st, name("Codec quality").needs(only), &tip, |ui, st| {
+            let resp = ui.add(num::Drag::new(&mut f.quality).range(0..=100));
+            hinted(resp, st, &tip, &format!("drag: {codec} quality"));
+        });
+    });
+}
+
+/// What the render looks like beyond the renderer: taken from the window each
+/// time the dialog opens, and not part of a preset.
+fn look(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
+    caption(ui, "As the window has it when this opens. Not part of a preset.");
+    table::show(ui, st, "fracturize_render_job_look", &SETTING_VALUE, |body, st| {
+        let tip = if f.splat {
+            "Brightness, for the splat renderer"
+        } else {
+            "Only for the splat renderer: set Renderer to splat, under Quality"
+        };
+        let needs = (!f.splat).then_some("needs Renderer: splat");
+        row(body, st, name("Exposure").needs(needs), tip, |ui, st| {
+            let resp = ui.add(num::Drag::new(&mut f.exposure).speed(0.05).range(0.01..=100.0));
+            hinted(resp, st, tip, "drag: splat exposure");
+        });
+    });
+    // What this job inherits rather than owns. The grade is a live control in
+    // the Render window, where you can see it working, so it is not
+    // duplicated here as three more sliders — but an inherited setting that
+    // is never shown is a trap, so it is stated when there is one, whatever
+    // the renderer, so the line doesn't come and go with it.
+    if let Some(grade) = &env.grade {
+        let text = if f.splat { format!("Grade from the Render window: {grade}") } else { format!("Grade (splat only): {grade}") };
+        caption(ui, &text).on_hover_text(
+            "Gamma and vibrancy are set in the Render window, where you can see them working. A \
+             splat render uses whatever is set there.",
+        );
+    }
+    if env.volume {
+        // Said out loud rather than leaving the job to render something other
+        // than the window: accumulating volume renders are not built yet.
+        caption(
+            ui,
+            "The window is in volume mode, but render jobs can't draw it yet. This job renders \
+             splat, without the depth.",
+        );
+    }
+}
+
+/// Machine settings among job settings, and they say so: what is right here is
+/// a fact about this box, so they are remembered, and no preset carries them.
+fn machine(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
+    caption(ui, "Remembered for every render on this computer. Not part of a preset.");
+    let accumulating = f.accumulating();
+    table::show(ui, st, "fracturize_render_job_machine", &SETTING_VALUE, |body, st| {
+        // This steers the *long* part of a still: the chaos game saturates the
+        // card, and on a one-GPU desktop that is the card drawing the window
+        // you are watching from.
+        let tip = if accumulating {
+            "How much of the graphics card the render may use. At 1.00 it's fastest, but the \
+             desktop may stutter. 0.50 takes about twice as long and leaves room for everything else."
+        } else {
+            "Only paces an accumulating still, between its passes: set Samples to accumulate"
+        };
+        let needs = (!accumulating).then_some("needs Samples: accumulate");
+        row(body, st, name("GPU share").needs(needs), tip, |ui, st| {
+            let resp = ui.add(egui::Slider::new(&mut f.gpu_share, 0.05..=1.0).fixed_decimals(2));
+            hinted(resp, st, tip, "drag: share of the GPU this render may take");
+        });
+        // Encoding is the only thing it steers today — a still's PNG deflate
+        // is one short single-threaded pass.
+        let animation = f.mode == Mode::Animation;
+        let tip = if animation {
+            format!(
+                "How many CPU threads to use for encoding, out of this machine's {}. The default \
+                 leaves one free so the desktop stays usable.",
+                env.max_threads
+            )
+        } else {
+            "Only used to encode animations: pick avif or mp4 under Output".to_string()
+        };
+        row(body, st, name("Encoder threads").needs((!animation).then_some("for avif or mp4 output")), &tip, |ui, st| {
+            let resp = ui.add(num::Drag::new(&mut f.threads).range(1..=env.max_threads));
+            hinted(resp, st, &tip, "drag: CPU threads for encoding");
+        });
+    });
+}
+
+/// The grade the Render window will hand the job, in words, or `None` for a
+/// neutral one — the absence of a grade, which a line every time would only
+/// make noise about.
+fn inherited_grade(app: &App) -> Option<String> {
+    if app.grade.is_neutral() {
+        return None;
+    }
+    let g = app.grade;
+    let mut parts = vec![format!("gamma {:.2}", g.gamma)];
+    if g.gamma_threshold > 0.0 {
+        parts.push(format!("threshold {:.2}", g.gamma_threshold));
+    }
+    if g.vibrancy != 1.0 {
+        parts.push(format!("vibrancy {:.2}", g.vibrancy));
+    }
+    Some(parts.join(" · "))
+}
+
+/// The preset picker and its verbs: Save, Save as…, Revert, Delete. The name
+/// carries a `*` while the settings differ from it, as a scene's does.
+fn preset_bar(ui: &mut egui::Ui, app: &mut App) {
+    let form = &app.ui_state.render_job;
+    let selected = form.preset.clone();
+    let modified = form.preset_modified();
+    let mut picked: Option<render_preset::Entry> = None;
+
+    ui.horizontal(|ui| {
+        ui.label("Preset");
+        let caption = match &selected {
+            Some((e, _)) => format!("{}{}", e.name, if modified { " *" } else { "" }),
+            None => "none".to_string(),
+        };
+        let combo = egui::ComboBox::from_id_salt("fracturize_render_job_preset")
+            .selected_text(caption)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                let entries = render_preset::list();
+                let groups: [(&str, bool); 2] = [("Built in", true), ("Yours", false)];
+                for (i, (heading, builtin)) in groups.into_iter().enumerate() {
+                    let group: Vec<_> = entries.iter().filter(|e| e.is_builtin() == builtin).collect();
+                    if group.is_empty() {
+                        continue;
+                    }
+                    if i > 0 {
+                        ui.separator();
+                    }
+                    ui.label(egui::RichText::new(heading).small().weak());
+                    for entry in group {
+                        let on = selected.as_ref().is_some_and(|(e, _)| e == entry);
+                        let resp = ui.selectable_label(on, &entry.name);
+                        // Read only for the row under the pointer.
+                        let tip = if resp.hovered() {
+                            render_preset::load(entry).map(|p| p.description).unwrap_or_else(|e| e)
+                        } else {
+                            String::new()
+                        };
+                        if hinted(resp, &mut app.ui_state, &tip, "click: use this preset").clicked() {
+                            picked = Some(entry.clone());
+                        }
+                    }
+                }
+            });
+        hinted(
+            combo.response,
+            &mut app.ui_state,
+            "Sets the output, size and quality in one go. The look and this machine's settings \
+             stay as they are.",
+            "click: pick a render preset",
+        );
+    });
+    if let Some((_, p)) = &selected {
+        if !p.description.is_empty() {
+            caption(ui, &p.description);
+        }
+    }
+
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let writable = selected.as_ref().is_some_and(|(e, _)| !e.is_builtin());
+        let resp = ui.add_enabled(writable && modified, egui::Button::new((icons::SAVE, "Save")));
+        let tip = if !writable {
+            "Built-in presets can't be changed. Save as makes one of your own."
+        } else if !modified {
+            "Nothing to save: the settings are what the preset says"
+        } else {
+            "Write these settings into the preset"
+        };
+        if hinted(resp, &mut app.ui_state, tip, "click: save the preset").clicked() {
+            action = Some(PresetAction::Save);
+        }
+        let resp = ui.button("Save as…");
+        if hinted(resp, &mut app.ui_state, "Save these settings as a new preset of your own", "click: save as a new preset")
+            .clicked()
+        {
+            app.ui_state.render_job.preset_save_as = Some(String::new());
+            app.ui_state.render_job.preset_error = None;
+        }
+        let resp = ui.add_enabled(modified, egui::Button::new((icons::UNDO, "Revert")));
+        if hinted(resp, &mut app.ui_state, "Put the settings back to what the preset says", "click: revert to the preset")
+            .clicked()
+        {
+            action = Some(PresetAction::Revert);
+        }
+        if writable {
+            let arm = app.ui_state.render_job.preset_delete;
+            let (arm, fired) = super::confirm::danger_button(
+                ui,
+                &mut app.ui_state,
+                arm,
+                icons::TRASH,
+                "Delete",
+                "Delete preset",
+                "Delete this preset's file",
+                "Delete it now. The file is removed; this can't be undone.",
+            );
+            app.ui_state.render_job.preset_delete = arm;
+            if fired {
+                action = Some(PresetAction::Delete);
+            }
+        } else {
+            let resp = ui.add_enabled(false, egui::Button::new((icons::TRASH, "Delete")));
+            hinted(resp, &mut app.ui_state, "Built-in presets can't be deleted", "a built-in preset");
+        }
+    });
+
+    if let Some(mut name) = app.ui_state.render_job.preset_save_as.take() {
+        let mut keep = true;
+        ui.horizontal(|ui| {
+            let field = ui.add(egui::TextEdit::singleline(&mut name).hint_text("name").desired_width(160.0));
+            let field = hinted(field, &mut app.ui_state, "The new preset's name: letters, digits, '-', '_'", "type: preset name");
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let resp = ui.add_enabled(!name.trim().is_empty(), egui::Button::new((icons::SAVE, "Save")));
+            if hinted(resp, &mut app.ui_state, "Save the preset under this name", "click: save as").clicked() || enter {
+                action = Some(PresetAction::SaveAs(name.clone()));
+                keep = false;
+            }
+            let resp = ui.button("Cancel");
+            if hinted(resp, &mut app.ui_state, "Don't save a new preset", "click: cancel").clicked() {
+                keep = false;
+                app.ui_state.render_job.preset_error = None;
+            }
+        });
+        if keep {
+            app.ui_state.render_job.preset_save_as = Some(name);
+        }
+    }
+    if let Some(err) = &app.ui_state.render_job.preset_error {
+        ui.label(egui::RichText::new(err).color(super::theme::error(ui.visuals())).small());
+    }
+
+    if let Some(entry) = picked {
+        action = Some(PresetAction::Load(entry));
+    }
+    if let Some(action) = action {
+        preset_action(app, action);
+    }
+}
+
+enum PresetAction {
+    Load(render_preset::Entry),
+    Save,
+    SaveAs(String),
+    Revert,
+    Delete,
+}
+
+fn preset_action(app: &mut App, action: PresetAction) {
+    let form = &mut app.ui_state.render_job;
+    form.preset_error = None;
+    let result: Result<(), String> = match action {
+        PresetAction::Load(entry) => render_preset::load(&entry).map(|p| {
+            form.apply(&p);
+            form.preset = Some((entry, p));
+        }),
+        PresetAction::Revert => {
+            if let Some((_, p)) = form.preset.clone() {
+                form.apply(&p);
+            }
+            Ok(())
+        }
+        PresetAction::Save => match form.preset.clone() {
+            Some((entry, old)) => {
+                // Keep a description someone wrote; renew one that was only
+                // ever the summary of the settings it replaces.
+                let mut was = form.clone();
+                was.apply(&old);
+                let description =
+                    if old.description.is_empty() || old.description == was.summary() { form.summary() } else { old.description };
+                let p = form.to_preset(description);
+                render_preset::save(&entry.name, &p).map(|entry| form.preset = Some((entry, p)))
+            }
+            None => Ok(()),
+        },
+        PresetAction::SaveAs(name) => {
+            let p = form.to_preset(form.summary());
+            render_preset::save(&name, &p).map(|entry| form.preset = Some((entry, p)))
+        }
+        PresetAction::Delete => match form.preset.take() {
+            Some((entry, p)) => render_preset::delete(&entry).map_err(|e| {
+                form.preset = Some((entry, p));
+                e
+            }),
+            None => Ok(()),
+        },
+    };
+    let form = &mut app.ui_state.render_job;
+    if let Err(e) = result {
+        form.preset_error = Some(e);
+        return;
+    }
+    let name = form.preset.as_ref().map(|(e, _)| e.name.clone());
+    app.set_render_preset(name);
+    refresh_filename(app);
+}
+
+/// Cost, then Start. Pinned under the form, so the answer to "what will this
+/// cost?" is beside the button that commits to it however far the form has
+/// been scrolled.
+fn footer(ui: &mut egui::Ui, app: &mut App) {
+    let params = app.ui_state.render_job.params();
+    let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
+    if app.ui_state.render_job.mode != Mode::ViewDescriptor {
+        caption(
+            ui,
+            &format!(
+                "GPU memory: {} ({} of it points), limit {}",
+                human_bytes(params.total_bytes()),
+                human_bytes(params.point_buffer_bytes()),
+                human_bytes(limit),
+            ),
+        );
+        let frames = params.kind.frames();
+        match estimate_secs(app, &params, limit) {
+            Some((low, high)) => {
                 ui.label(
-                    egui::RichText::new("Stopped before any frames were rendered, so nothing was saved.")
-                        .color(ui.visuals().weak_text_color())
-                        .small(),
+                    egui::RichText::new(format!(
+                        "Estimated time: {} ({} frame{})",
+                        format_estimate(low, high),
+                        frames,
+                        if frames == 1 { "" } else { "s" },
+                    ))
+                    .small(),
+                )
+                .on_hover_text(
+                    "A rough guess based on how fast things have run so far this session. Once the \
+                     render starts, it's replaced by a better one.",
                 );
             }
-            Err(e) => {
-                ui.label(egui::RichText::new(e).color(ui.visuals().error_fg_color).small());
+            None => {
+                caption(ui, "Estimated time: not known yet").on_hover_text(
+                    "Known once the window has drawn a few frames to measure this machine by",
+                );
             }
         }
+        if let Some(reason) = params.rejection(limit) {
+            ui.label(egui::RichText::new(reason).color(super::theme::error(ui.visuals())).small());
+        }
+    }
+    if let Some(err) = app.job_error() {
+        let err = err.to_string();
+        ui.label(egui::RichText::new(err).color(super::theme::error(ui.visuals())).small());
     }
 
     ui.horizontal(|ui| {
-        let params = app.ui_state.render_job.params();
         let named = !params.out_path.as_os_str().is_empty();
         let blocked = filename_trouble(&params.out_path).is_some_and(|t| t.blocks_start());
-        let resp = ui
-            .add_enabled(named && !blocked, egui::Button::new(format!("{} Start", icons::PLAY)));
+        let resp = ui.add_enabled(named && !blocked, egui::Button::new((icons::PLAY, "Start")));
         let resp = hinted(
             resp,
             &mut app.ui_state,
@@ -391,29 +1429,25 @@ fn draw_form(ui: &mut egui::Ui, app: &mut App) {
             "click: start the render job",
         );
         if resp.clicked() {
-            // Only snapshot a launch that will actually run — the same check
-            // `start_job` makes internally — so a rejected click (over the
-            // GPU's buffer limit, say) doesn't leave a phantom `started` for
-            // a job that never existed.
-            let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
-            if params.rejection(limit).is_none() {
-                app.ui_state.render_job.started =
-                    Some(StartedJob { kind: params.kind, clicked_at: Instant::now(), settled_secs: None });
-            }
             app.start_job(params);
+            // A refused launch leaves the form up with its reason; one that
+            // ran (or a view file, which finishes at once) is reported on.
+            app.ui_state.render_job.showing_result = app.job_error().is_none();
+            app.ui_state.render_job.open_error = None;
         }
-
-        let resp = ui.button(format!("{} Close", icons::X));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Close this window. A running job keeps going.",
-            "click: close",
-        );
-        if resp.clicked() {
+        let resp = ui.button((icons::X, "Close"));
+        if hinted(resp, &mut app.ui_state, "Close this window", "click: close").clicked() {
             app.ui_state.render_job.open = false;
         }
     });
+}
+
+/// A low/high seconds range for the job, from this session's measured
+/// throughput — `None` until the renderer has produced a frame to measure.
+fn estimate_secs(app: &App, params: &JobParams, limit: u64) -> Option<(f32, f32)> {
+    // A structure track refills the buffer every frame of an animation.
+    let refills = app.scene.tracks.iter().any(|t| !t.mute && t.class().refills());
+    crate::render_job::estimate_secs(app.measured_throughput()?, params, limit, refills)
 }
 
 /// The Output row is a file-kind chooser, so the two animation formats get a
@@ -476,75 +1510,6 @@ impl Output {
     }
 }
 
-fn draw_mode(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal(|ui| {
-        ui.label("Output");
-        // A segmented radio, not four loose toggles: exactly one of these is
-        // always in force, and "none of them" isn't a state the dialog can be
-        // in. See `ui::radio`.
-        let current = Output::of(app.ui_state.render_job.mode, app.ui_state.render_job.format);
-        let mut chooser = super::radio::radio(&mut app.ui_state, "render_output", current);
-        for (mode, format, label, tip) in OUTPUTS {
-            chooser = chooser.option(
-                Output::of(mode, format),
-                label,
-                tip,
-                "click: choose the output kind",
-            );
-        }
-        if let Some(chosen) = chooser.show(ui) {
-            let (mode, format) = OUTPUTS
-                .iter()
-                .find(|(m, f, ..)| Output::of(*m, *f) == chosen)
-                .map(|(m, f, ..)| (*m, *f))
-                .unwrap_or((Mode::Still, crate::video::Format::Avif));
-            app.ui_state.render_job.mode = mode;
-            if mode == Mode::Animation {
-                app.ui_state.render_job.format = format;
-            }
-            // The extension has to follow the choice, but not over a name the
-            // user has typed — only the default gets rewritten.
-            if !app.ui_state.render_job.filename_touched {
-                let format = app.ui_state.render_job.format;
-                app.ui_state.render_job.filename = default_filename(app, mode, format);
-            }
-        }
-    });
-}
-
-fn draw_filename(ui: &mut egui::Ui, app: &mut App) {
-    let mut name = app.ui_state.render_job.filename.clone();
-    let resp = ui.add(
-        egui::TextEdit::singleline(&mut name)
-            .desired_width(f32::INFINITY)
-            .hint_text("renders/name.png"),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "Where to save the result. Missing folders are created. A relative path \
-         starts from the folder Fracturize was launched in.",
-        "type: the output filename",
-    );
-    if resp.changed() {
-        app.ui_state.render_job.filename_touched = true;
-    }
-    app.ui_state.render_job.filename = name;
-
-    let path = PathBuf::from(app.ui_state.render_job.filename.trim());
-    let (text, color) = match filename_trouble(&path) {
-        Some(t) => (t.message(), t.color(ui.visuals())),
-        // A blank line rather than no line. **The row must always be there**,
-        // because everything below it moves when it isn't: every absolute path
-        // is typed through `/home`, `/home/you` and so on, so this row used to
-        // blink in and out under the cursor and shuffle the Start button up and
-        // down with it. A warning that relocates the button you are reaching
-        // for is worse than the thing it warns about.
-        None => (" ", ui.visuals().text_color()),
-    };
-    ui.label(egui::RichText::new(text).color(color).small());
-}
-
 /// What is wrong with the output path, if anything.
 ///
 /// Split out from the drawing so the button below can refuse the same cases the
@@ -593,588 +1558,80 @@ fn filename_trouble(path: &std::path::Path) -> Option<FilenameTrouble> {
     path.is_file().then_some(FilenameTrouble::WillOverwrite)
 }
 
-/// Samples per pixel, however they are gathered.
-///
-/// The two rows are a genuine choice rather than a preference, because they
-/// scale in opposite directions and the dialog cannot hide which one you are
-/// on:
-///
-/// * **Accumulate** targets samples per *output* pixel, so the same setting
-///   means the same density at 720p and at A2.
-/// * **One pass** splats the filled buffer once, so its density is
-///   `points / pixels` and falls as the output grows — 21.7 samples/px at 720p
-///   and 2.4 at 4K from the settings this dialog used to default to. That is
-///   the grain, and it is why accumulation is now the default.
-///
-/// Accumulation is greyed rather than hidden where the renderer can't do it,
-/// carrying the same reason the CLI gives: a control that vanishes teaches
-/// nothing about why.
-fn draw_samples(ui: &mut egui::Ui, app: &mut App) {
-    let form = &app.ui_state.render_job;
-    // Exactly the conditions `RenderJobForm::samples` enforces. An animation
-    // gives every frame its own camera, so there is no histogram to carry
-    // between them; the points renderer has no histogram at all.
-    let why_not = if !form.splat {
-        Some("Only available with the splat renderer.")
-    } else if form.mode != Mode::Still {
-        Some(
-            "Only available for stills.",
-        )
-    } else {
-        None
-    };
-    let can_accumulate = why_not.is_none();
-    let mut accumulating = form.use_accumulate && can_accumulate;
+// --- Finished ---------------------------------------------------------------
 
-    ui.horizontal(|ui| {
-        ui.label("Samples");
-        let resp = ui.add_enabled(
-            can_accumulate,
-            egui::RadioButton::new(accumulating, "accumulate"),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            why_not.unwrap_or(
-                "Keep adding points until each pixel has had the number of samples you \
-                 ask for below. The same setting gives the same quality at any size, and \
-                 stopping early gives a noisier version of the same picture.",
-            ),
-            "click: render to a sample target",
-        );
-        if resp.clicked() {
-            accumulating = true;
-        }
-        let resp = ui.radio(!accumulating, "one pass");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Render the points once. Quick, but the same settings look grainier the \
-             larger the image.",
-            "click: render the points once",
-        );
-        if resp.clicked() {
-            accumulating = false;
-        }
-    });
-    app.ui_state.render_job.use_accumulate = accumulating;
-
-    if accumulating {
-        let mut spp = app.ui_state.render_job.spp;
-        // Logarithmic, and to 10,000 rather than to a comfortable number: the
-        // useful artistic band is 10-1,000, which lands at 25%-75% of a log
-        // track, and the top exists so the dial does not have to be abandoned
-        // for the command line at exactly the point the picture gets good.
-        let resp = ui.add(
-            egui::Slider::new(&mut spp, 1..=10_000).logarithmic(true).text("samples/px"),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Samples per pixel. More is cleaner and slower: 10× the samples is about \
-             3× less noise. 100 is a good everyday value. Above about 30,000, also \
-             tick 16-bit PNG, or the file can't hold the extra detail.",
-            "drag: samples per output pixel",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.spp = spp;
-        }
-    } else {
-        let mut accum = app.ui_state.render_job.accumulate;
-        let resp =
-            ui.add(egui::Slider::new(&mut accum, 1..=512).logarithmic(true).text("accumulate"));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Extra rounds of the chaos game after the points are filled in. Settles the \
-             points further without adding more of them. Costs almost nothing.",
-            "drag: extra rounds of the chaos game",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.accumulate = accum;
-        }
-    }
-
-    let max_m = app.max_point_capacity() as f32 / 1e6;
-    let mut millions = app.ui_state.render_job.points as f32 / 1e6;
-    let resp = ui.add(
-        egui::Slider::new(&mut millions, 0.5..=max_m)
-            .logarithmic(true)
-            // Shared with the interactive point-count slider (render_panel.rs)
-            // so a count reads the same k/M units in both dialogs, and so
-            // typing an exact value actually parses back — a formatter with
-            // no matching parser leaves egui trying to `f64::from_str` its
-            // own "1.5M" on Enter, which fails silently.
-            .custom_formatter(|v, _| super::render_panel::format_points(v))
-            .custom_parser(super::render_panel::parse_points)
-            .text("points"),
-    );
-    // The same slider means two different things, so it says which. Under
-    // accumulation it is a working set — measured, varying it 6x at a fixed
-    // sample target moved the wall clock under 25% — and telling someone it is
-    // a quality dial there would send them tuning the one control that isn't.
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        if accumulating {
-            "How many points are worked on at a time. This doesn't affect quality (the \
-             sample count above does), so leave it alone unless GPU memory is tight."
-        } else {
-            "How many points to render. More looks better. This only applies to the \
-             render; the live view keeps its own point count."
-        },
-        "drag: point count for this job",
-    );
-    if resp.changed() {
-        app.ui_state.render_job.points = (millions * 1e6).round() as usize;
-    }
-
-    // Density estimation belongs here rather than with the filter, even though
-    // both are blurs: this one needs a *histogram* to read a density from, so
-    // it lives or dies with the choice made three rows up. Greyed with its
-    // reason rather than hidden, for the same cause as the radio.
-    let mut de = app.ui_state.render_job.density_estimation;
-    let resp = ui.add_enabled(
-        accumulating,
-        egui::Slider::new(&mut de, 0.0..=1.0).fixed_decimals(2).text("density estimation"),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        if accumulating {
-            "Smooths the grainy, sparse parts of the picture while leaving the dense, \
-             detailed parts sharp. Much of what gives Apophysis renders their look. Try \
-             around 0.3 before going to 1.0."
-        } else {
-            "Set Samples to accumulate to use this."
-        },
-        "drag: density-estimation strength",
-    );
-    if resp.changed() {
-        app.ui_state.render_job.density_estimation = de;
-    }
-
-    if accumulating {
-        let params = app.ui_state.render_job.params();
-        let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
-        // Tiles are not a detail to hide: past the binding limit the chaos game
-        // runs once per tile, so this line is where a job quietly stops costing
-        // seconds and starts costing minutes.
-        let tiling = match params.tile_plan(limit) {
-            Ok(p) if p.is_single() => String::new(),
-            Ok(p) => format!(" · {} tiles ({}x{})", p.tiles.len(), p.cols, p.rows),
-            Err(_) => String::from(" · too large"),
-        };
-        ui.label(
-            egui::RichText::new(format!(
-                "{} laps · {} histogram{}",
-                params.laps(),
-                human_bytes(params.histogram_bytes()),
-                tiling,
-            ))
-            .small()
-            .weak(),
-        )
-        .on_hover_text(
-            "How many passes the render will take, and how much GPU memory the image \
-             needs. If it's too big for the graphics card in one piece, it's rendered in \
-             tiles and stitched together, which takes longer.",
-        );
-
-        // A machine setting among job settings, like `threads` below, and it
-        // says so. Here rather than with the encoder because this is what
-        // steers the *long* part of a still: the chaos game saturates the card,
-        // and on a one-GPU desktop that is the card drawing the window you are
-        // watching from.
-        let mut share = app.ui_state.render_job.gpu_share;
-        let resp = ui.add(
-            egui::Slider::new(&mut share, 0.05..=1.0)
-                .fixed_decimals(2)
-                .text("GPU share"),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "How much of the graphics card the render may use. At 1.00 it's fastest, but \
-             the desktop may stutter. 0.50 takes about twice as long and leaves room for \
-             everything else. This setting is remembered.",
-            "drag: share of the GPU this render may take",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.gpu_share = share;
-            app.set_render_gpu_share(share);
-        }
-    }
+/// Open `path` in whatever the system opens that kind of file with: the image
+/// viewer for a PNG, the video player for a clip, the editor for a view file.
+/// Detached, so a viewer left open doesn't hold anything here.
+fn open_path(path: &Path) -> Result<(), String> {
+    open::that_detached(path).map_err(|e| format!("Couldn't open {}: {e}", path.display()))
 }
 
-fn draw_quality(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Size");
-        for (label, w, h) in SIZE_PRESETS {
-            let selected =
-                app.ui_state.render_job.width == w && app.ui_state.render_job.height == h;
-            let resp = ui.selectable_label(selected, label);
+/// The folder a file is in, opened in the file manager. Not "reveal": showing
+/// the file selected needs a different call on every desktop, and the folder
+/// is the part that is hard to find.
+fn open_folder(path: &Path) -> Result<(), String> {
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    open_path(dir)
+}
+
+/// The finished job: what it made, one click to open it, and the log it wrote
+/// on the way — in the place the running view had it.
+fn draw_finished(ui: &mut egui::Ui, app: &mut App) {
+    app.mark_job_seen();
+    let Some(done) = app.job_done().cloned() else { return };
+
+    egui::Panel::bottom("fracturize_render_job_done_foot").show(ui, |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let resp = ui.button((icons::PLUS, "New render"));
             let resp = hinted(
                 resp,
                 &mut app.ui_state,
-                format!("{}x{}", w, h),
-                "click: use this output size",
+                "Back to the settings, as they were for this one, with a fresh filename",
+                "click: set up another render",
             );
             if resp.clicked() {
-                app.ui_state.render_job.width = w;
-                app.ui_state.render_job.height = h;
+                app.ui_state.render_job.showing_result = false;
+                reseed(app);
             }
-        }
-    });
-
-    ui.horizontal(|ui| {
-        let mut w = app.ui_state.render_job.width;
-        let resp = ui.add(num::Drag::new(&mut w).range(16..=16384).prefix("w "));
-        let resp = hinted(resp, &mut app.ui_state, "Output width in pixels", "drag: output width");
-        if resp.changed() {
-            app.ui_state.render_job.width = w;
-        }
-        let mut h = app.ui_state.render_job.height;
-        let resp = ui.add(num::Drag::new(&mut h).range(16..=16384).prefix("h "));
-        let resp = hinted(resp, &mut app.ui_state, "Output height in pixels", "drag: output height");
-        if resp.changed() {
-            app.ui_state.render_job.height = h;
-        }
-    });
-
-    draw_samples(ui, app);
-
-    // Supersampling sits with `points` and `accumulate` because all three are
-    // cost/quality at fixed artistic intent — nothing here changes what the
-    // picture *is*. It is the one of the three that buys the most, though, so
-    // the hint says what it is rather than only what it costs.
-    ui.horizontal(|ui| {
-        let max = crate::gpu::points::downsample::MAX_SUPERSAMPLE;
-        let mut ss = app.ui_state.render_job.supersample;
-        let resp = ui.add(
-            num::Drag::new(&mut ss).range(1..=max).prefix("supersample ").suffix("x"),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Render at this many times the size, then scale down. Smooths jagged edges, \
-             and is the biggest quality improvement here. 2× costs about 4× the memory and \
-             time. 1 turns it off.",
-            "drag: supersampling factor",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.supersample = ss;
-        }
-
-        // Greyed rather than hidden at 1x, so the kernel choice can still say
-        // it exists — and `hinted` is what makes a disabled widget explain
-        // itself, since egui drops `on_hover_text` on one.
-        ui.add_enabled_ui(ss > 1, |ui| {
-            let mut filter = app.ui_state.render_job.filter;
-            egui::ComboBox::from_id_salt("render_job_filter")
-                .selected_text(filter.label())
-                .show_ui(ui, |ui| {
-                    use clap::ValueEnum;
-                    for f in crate::gpu::Filter::value_variants() {
-                        ui.selectable_value(&mut filter, *f, f.label());
-                    }
-                });
-            if filter != app.ui_state.render_job.filter {
-                app.ui_state.render_job.filter = filter;
-            }
-
-            let mut radius = app.ui_state.render_job.filter_radius;
-            let resp = ui.add(
-                num::Drag::new(&mut radius)
-                    .speed(0.05)
-                    .range(
-                        crate::gpu::points::downsample::MIN_FILTER_RADIUS
-                            ..=crate::gpu::points::downsample::MAX_FILTER_RADIUS,
-                    )
-                    .prefix("r "),
-            );
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                if ss > 1 {
-                    "How soft the scaling-down is, in pixels. Higher is smoother; lower \
-                     is sharper but more jagged. 0.5 is the default."
-                } else {
-                    "Only used when supersample is above 1×"
-                },
-                "drag: filter radius",
-            );
-            if resp.changed() {
-                app.ui_state.render_job.filter_radius = radius;
+            let resp = ui.button((icons::X, "Close"));
+            if hinted(resp, &mut app.ui_state, "Close this window", "click: close").clicked() {
+                app.ui_state.render_job.open = false;
             }
         });
+        ui.add_space(2.0);
     });
 
-    ui.horizontal(|ui| {
-        let mut splat = app.ui_state.render_job.splat;
-        let resp = ui.checkbox(&mut splat, "splat");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Use the splat renderer instead of the points renderer",
-            "click: toggle the splat renderer for this job",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.splat = splat;
-        }
-
-        ui.add_enabled_ui(splat, |ui| {
-            let mut exposure = app.ui_state.render_job.exposure;
-            let resp = ui.add(
-                num::Drag::new(&mut exposure)
-                    .speed(0.05)
-                    .range(0.01..=100.0)
-                    .prefix("exp "),
-            );
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                "Brightness, for the splat renderer",
-                "drag: splat exposure",
-            );
-            if resp.changed() {
-                app.ui_state.render_job.exposure = exposure;
-            }
-        });
-
-    });
-    if app.render_mode == crate::app::RenderMode::Volume {
-        // Said out loud rather than leaving the job to render something other
-        // than the window: the dialog accumulates by default, and accumulating
-        // volume renders are not built yet.
-        ui.label(
-            egui::RichText::new(
-                "The window is in volume mode, but render jobs can't draw it yet. \
-                 This job renders splat, without the depth.",
-            )
-            .small(),
-        );
-    }
-
-    // Bit depth rides with transparency rather than with supersampling: both
-    // describe the *file* that leaves the app, not how the picture is drawn.
-    // Stills only — animation is 8-bit by codec, and a control that pretended
-    // otherwise would be offering something the encoder cannot take.
-    let still = app.ui_state.render_job.mode == Mode::Still;
-    ui.add_enabled_ui(still, |ui| {
-        let mut sixteen = app.ui_state.render_job.bit_depth == crate::offline::BitDepth::Sixteen;
-        let resp = ui.checkbox(&mut sixteen, "16-bit PNG");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            if still {
-                "Save more precise colour, at twice the file size. Worth it for a final \
-                 render: smooth gradients can show visible bands at 8 bits."
-            } else {
-                "Only available for stills"
-            },
-            "click: toggle 16-bit PNG output",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.bit_depth = if sixteen {
-                crate::offline::BitDepth::Sixteen
-            } else {
-                crate::offline::BitDepth::Eight
-            };
-        }
-    });
-
-    // Transparency gets its own row. It was sharing a line with `splat` and its
-    // exposure, which put it inside that pair's enable/disable relationship and
-    // read as a third splat setting — it isn't one. It says what leaves the app
-    // (an alpha channel to composite against), not how the picture is drawn.
-    let animation = app.ui_state.render_job.mode == Mode::Animation;
-    ui.add_enabled_ui(!animation, |ui| {
-        let mut transparent = app.ui_state.render_job.transparent;
-        let resp = ui.checkbox(&mut transparent, "transparent background");
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            if animation {
-                "Animations can't have a transparent background"
-            } else {
-                "Save with a transparent background, for layering over other images"
-            },
-            "click: toggle transparent output",
-        );
-        if resp.changed() {
-            app.ui_state.render_job.transparent = transparent;
-        }
-    });
-
-    if app.ui_state.render_job.mode == Mode::Animation {
+    result_panel(ui, app, &done);
+    if let Some(path) = done.path() {
         ui.horizontal(|ui| {
-            let mut fps = app.ui_state.render_job.fps;
-            let resp = ui.add(num::Drag::new(&mut fps).range(1..=120).suffix(" fps"));
-            let resp = hinted(resp, &mut app.ui_state, "Frames per second", "drag: frame rate");
-            if resp.changed() {
-                app.ui_state.render_job.fps = fps;
+            let resp = ui.button((icons::FILE, "Open"));
+            if hinted(resp, &mut app.ui_state, "Open it in your usual viewer", "click: open the file").clicked() {
+                app.ui_state.render_job.open_error = open_path(path).err();
             }
-
-            let mut seconds = app.ui_state.render_job.seconds;
-            let resp = ui.add(
-                num::Drag::new(&mut seconds)
-                    .speed(0.1)
-                    .range(0.1..=600.0)
-                    .suffix("s"),
-            );
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                "Length of the animation. Starts at the camera path's own length",
-                "drag: duration",
-            );
-            if resp.changed() {
-                app.ui_state.render_job.seconds = seconds;
-            }
-
-            let mut quality = app.ui_state.render_job.quality;
-            let codec = app.ui_state.render_job.format.codec_label();
-            let resp = ui.add(num::Drag::new(&mut quality).range(0..=100).prefix("q "));
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                format!("{} quality, 0 to 100. Higher looks better and makes a bigger file.", codec),
-                &format!("drag: {} quality", codec),
-            );
-            if resp.changed() {
-                app.ui_state.render_job.quality = quality;
-            }
-        });
-
-        // A machine setting sitting among job settings, so it says so. It is
-        // in the animation block because encoding is the only thing it steers
-        // today — a still's PNG deflate is one short single-threaded pass, and
-        // a control that claimed to spread it would be describing work that
-        // isn't there.
-        ui.horizontal(|ui| {
-            let max = crate::app::App::max_render_threads();
-            let mut threads = app.ui_state.render_job.threads;
-            let resp = ui.add(
-                num::Drag::new(&mut threads)
-                    .range(1..=max)
-                    .prefix("threads "),
-            );
-            let resp = hinted(
-                resp,
-                &mut app.ui_state,
-                format!(
-                    "How many CPU threads to use for encoding, out of this machine's {}. \
-                     The default leaves one free so the desktop stays usable. This \
-                     setting is remembered.",
-                    max
-                ),
-                "drag: CPU threads for encoding",
-            );
-            if resp.changed() {
-                app.ui_state.render_job.threads = threads;
-                app.set_render_threads(threads);
+            let resp = ui.button((icons::FOLDER_OPEN, "Show folder"));
+            if hinted(resp, &mut app.ui_state, "Open the folder it's in", "click: open the folder").clicked() {
+                app.ui_state.render_job.open_error = open_folder(path).err();
             }
         });
     }
+    if let Some(err) = &app.ui_state.render_job.open_error {
+        ui.label(egui::RichText::new(err).color(super::theme::error(ui.visuals())).small());
+    }
+    if !done.log.is_empty() {
+        ui.separator();
+        log_view(ui, &done.log);
+    }
 }
 
-/// What this job inherits rather than owns.
+/// The finished job's summary, in its colour. A successful one is a button:
+/// click it to open the file.
 ///
-/// The grade is a live control in the Render window (see `render_panel`), and
-/// the job renders what you were looking at — so it is not duplicated here as
-/// three more sliders. But an inherited setting that is never shown is a trap:
-/// you would tune a grade, open this dialog, see no mention of it, and have no
-/// way to know whether the render was about to apply it. So it is stated, and
-/// only when there is something to state — a neutral grade is the absence of
-/// one, and a line saying so every time would be noise.
-fn draw_inherited(ui: &mut egui::Ui, app: &mut App) {
-    if !app.ui_state.render_job.splat || app.grade.is_neutral() {
-        return;
-    }
-    let g = app.grade;
-    let mut parts = vec![format!("gamma {:.2}", g.gamma)];
-    if g.gamma_threshold > 0.0 {
-        parts.push(format!("threshold {:.2}", g.gamma_threshold));
-    }
-    if g.vibrancy != 1.0 {
-        parts.push(format!("vibrancy {:.2}", g.vibrancy));
-    }
-    ui.label(
-        egui::RichText::new(format!("grade from the Render window: {}", parts.join(" · ")))
-            .small()
-            .weak(),
-    )
-    .on_hover_text(
-        "Gamma and vibrancy are set in the Render window, where you can see them \
-         working. The render uses whatever is set there.",
-    );
-}
-
-fn draw_estimates(ui: &mut egui::Ui, app: &mut App) {
-    draw_inherited(ui, app);
-
-    let params = app.ui_state.render_job.params();
-    let limit = app.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT;
-
-    ui.label(
-        egui::RichText::new(format!(
-            "GPU memory: {} ({} of it points), limit {}",
-            human_bytes(params.total_bytes()),
-            human_bytes(params.point_buffer_bytes()),
-            human_bytes(limit),
-        ))
-        .small(),
-    );
-
-    match estimate_secs(app, &params, limit) {
-        Some((low, high)) => {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Estimated time: {} ({} frame{})",
-                    format_estimate(low, high),
-                    params.kind.frames(),
-                    if params.kind.frames() == 1 { "" } else { "s" },
-                ))
-                .small(),
-            )
-            .on_hover_text(
-                "A rough guess based on how fast things have run so far this session. Once \
-                 the render starts, it's replaced by a better one.",
-            );
-        }
-        None => {
-            ui.label(
-                egui::RichText::new("Estimated time: not known yet")
-                    .small()
-                    .weak(),
-            );
-        }
-    }
-
-    if let Some(reason) = params.rejection(limit) {
-        ui.label(egui::RichText::new(reason).color(ui.visuals().error_fg_color).small());
-    }
-}
-
-/// A low/high seconds range for the job, from this session's measured
-/// throughput — `None` until the renderer has produced a frame to measure.
-fn estimate_secs(app: &App, params: &JobParams, limit: u64) -> Option<(f32, f32)> {
-    // A structure track refills the buffer every frame of an animation.
-    let refills = app.scene.tracks.iter().any(|t| !t.mute && t.class().refills());
-    crate::render_job::estimate_secs(app.measured_throughput()?, params, limit, refills)
-}
-
-/// The completed-this-session state: a green check, "Render done", and
-/// whatever this dialog still genuinely knows about the job that wrote
-/// `path`. Deliberately distinct from the plain warning `draw_filename`
-/// shows when the chosen output path merely happens to exist on disk — that
-/// warning is a fact about the filesystem and is unchanged by this; this
-/// panel is a fact about what this session just did, and only appears when
-/// that's true.
-/// The finished-job summary.
-///
-/// `outcome` is not decoration. A job stopped partway still writes a file, and
+/// `Outcome` is not decoration. A job stopped partway still writes a file, and
 /// the whole reason [`Outcome`] exists is that a noisier-than-asked-for render
 /// must not be presented in the same green panel as a finished one — you would
 /// come back to it a week later with no way to tell. So a partial render gets
@@ -1182,75 +1639,96 @@ fn estimate_secs(app: &App, params: &JobParams, limit: u64) -> Option<(f32, f32)
 /// *done*, and this isn't.
 ///
 /// [`Outcome`]: crate::render_job::Outcome
-fn draw_done_panel(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    path: &std::path::Path,
-    outcome: Outcome,
-) {
-    let started = app.ui_state.render_job.started.clone();
-    let is_view = matches!(started.as_ref().map(|s| s.kind), Some(JobKind::ViewDescriptor));
-    let partial = outcome.is_partial();
-    let accent = if partial { ui.visuals().warn_fg_color } else { DONE_GREEN };
-    let heading = match (partial, is_view) {
-        (true, _) => "Stopped early",
-        (false, true) => "View saved",
-        (false, false) => "Render done",
+fn result_panel(ui: &mut egui::Ui, app: &mut App, done: &FinishedJob) {
+    let is_view = matches!(done.params.kind, JobKind::ViewDescriptor);
+    let visuals = ui.visuals().clone();
+    let (accent, heading, check) = match &done.result {
+        Ok((_, o)) if o.is_partial() => (super::theme::warn(&visuals), "Stopped early", false),
+        Ok(_) if is_view => (DONE_GREEN, "View saved", true),
+        Ok(_) => (DONE_GREEN, "Render done", true),
+        Err(e) if e == crate::render_job::CANCELLED => (visuals.weak_text_color(), "Stopped", false),
+        Err(_) => (super::theme::error(&visuals), "Render failed", false),
     };
+    let path = done.path().map(Path::to_path_buf);
 
-    egui::Frame::NONE
-        .fill(accent.gamma_multiply(0.10))
-        .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.6)))
+    // Hover is last frame's, so the panel can light up before it is drawn.
+    let id = ui.id().with("fracturize_render_job_result");
+    let hovered = path.is_some() && ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let resp = egui::Frame::NONE
+        .fill(accent.gamma_multiply(if hovered { 0.2 } else { 0.1 }))
+        .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(if hovered { 1.0 } else { 0.6 })))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if !partial {
+                if check {
                     check_mark(ui, accent);
                 }
                 ui.label(egui::RichText::new(heading).color(accent).strong());
             });
-            ui.label(egui::RichText::new(format!("Wrote {}", path.display())).small());
-            if partial {
-                // Say what it *is*, not only that it was interrupted: the file
-                // is usable, and "run it again" is the whole of the fix.
-                ui.label(
-                    egui::RichText::new(
-                        "This is the picture as it was when you stopped it: the same \
-                         image, but noisier. Run it again for the full quality.",
-                    )
-                    .small()
-                    .weak(),
-                );
-            }
-
-            // Everything past here is a bonus, shown only when it's actually
-            // known — see `StartedJob`'s doc for why frame count and elapsed
-            // time aren't always available (the form can be reseeded between
-            // a job starting and its summary being read), and the report for
-            // what it would take to make them unconditional.
-            let mut details = Vec::new();
-            if let Some(s) = &started {
-                if !is_view {
-                    details.push(s.kind.label().to_string());
-                    // `kind.frames()` is what was *asked for*, which a partial
-                    // clip does not have — quoting it here would be the one
-                    // number in this panel that lies. The job log carries the
-                    // real count.
-                    let frames = s.kind.frames();
-                    if frames > 1 && !partial {
-                        details.push(format!("{} frames", frames));
+            match &done.result {
+                Ok((p, outcome)) => {
+                    let text = egui::RichText::new(p.display().to_string()).small();
+                    ui.label(if hovered { text.underline() } else { text });
+                    if outcome.is_partial() {
+                        // Say what it *is*, not only that it was interrupted:
+                        // the file is usable, and "run it again" is the fix.
+                        caption(
+                            ui,
+                            "This is the picture as it was when you stopped it: the same image, \
+                             but noisier. Run it again for the full quality.",
+                        );
                     }
                 }
-                if let Some(secs) = s.settled_secs {
-                    details.push(format!("took {}", format_duration(secs)));
+                Err(e) if e == crate::render_job::CANCELLED => {
+                    caption(ui, "Stopped before any frames were rendered, so nothing was saved.");
+                }
+                Err(e) => {
+                    ui.label(egui::RichText::new(e).small());
                 }
             }
-            if let Ok(meta) = std::fs::metadata(path) {
+            let mut details = Vec::new();
+            if !is_view {
+                let (w, h) = done.params.kind.size();
+                details.push(format!("{} {w}×{h}", done.params.kind.label()));
+                // `kind.frames()` is what was *asked for*, which a partial
+                // clip does not have — quoting it would be the one number here
+                // that lies. The log carries the real count.
+                let frames = done.params.kind.frames();
+                if frames > 1 && matches!(done.result, Ok((_, crate::render_job::Outcome::Complete))) {
+                    details.push(format!("{frames} frames"));
+                }
+                details.push(format!("took {}", format_duration(done.secs)));
+            }
+            if let Some(meta) = path.as_ref().and_then(|p| std::fs::metadata(p).ok()) {
                 details.push(human_bytes(meta.len()));
             }
             if !details.is_empty() {
-                ui.label(egui::RichText::new(details.join(" · ")).small().weak());
+                caption(ui, &details.join(" · "));
+            }
+        })
+        .response;
+    let Some(path) = path else { return };
+    let resp = resp.interact(egui::Sense::click());
+    ui.ctx().data_mut(|d| d.insert_temp(id, resp.hovered()));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let tip = if is_view { "Click to open the view file" } else { "Click to open it in your usual viewer" };
+    if hinted(resp, &mut app.ui_state, tip, "click: open the file").clicked() {
+        app.ui_state.render_job.open_error = open_path(&path).err();
+    }
+}
+
+fn log_view(ui: &mut egui::Ui, log: &[String]) {
+    egui::ScrollArea::vertical()
+        .id_salt("fracturize_job_log")
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for line in log {
+                ui.label(egui::RichText::new(line).small().monospace());
             }
         });
 }
@@ -1273,12 +1751,8 @@ fn check_mark(ui: &mut egui::Ui, color: egui::Color32) {
     ui.painter().line_segment([p1, p2], stroke);
 }
 
-/// Which of the two named progress bars (if either) a job's current phase
-/// name belongs to.
-///
-/// Coupled to the literal phase strings `src/offline.rs` passes to
-/// `JobControl::phase` — `"setting up"`, `"filling points"`, `"rendering"` /
-/// `"rendering frames"`, `"saving"` / `"encoding"` — because there is no
+// --- Running ----------------------------------------------------------------
+
 /// A progress bar's three states.
 ///
 /// `NotStarted` and `Done` are what a *per-phase* bar needed, and the job now
@@ -1364,7 +1838,69 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
         )
     };
 
-    ui.label(egui::RichText::new(out.display().to_string()).small().weak());
+    egui::Panel::bottom("fracturize_render_job_run_foot").show(ui, |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let resp = ui.button(if paused { (icons::PLAY, "Resume") } else { (icons::PAUSE, "Pause") });
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Pause the render without losing progress",
+                "click: pause / resume the job",
+            );
+            if resp.clicked() {
+                if let Some(job) = app.job_mut() {
+                    let p = job.paused();
+                    job.set_paused(!p);
+                }
+            }
+
+            // Two stages: `Stop` arms it, it counts down disabled, then it
+            // comes back as a red `Stop render`. See `ui::confirm::danger_button`.
+            if cancelling {
+                let resp = ui.add_enabled(false, egui::Button::new((icons::TRASH, "Stopping…")));
+                hinted(
+                    resp,
+                    &mut app.ui_state,
+                    "Stopping. What has been rendered so far is being saved.",
+                    "the render is stopping",
+                );
+            } else {
+                let (arm, fired) = super::confirm::danger_button(
+                    ui,
+                    &mut app.ui_state,
+                    cancel_arm,
+                    icons::TRASH,
+                    "Stop",
+                    "Stop render",
+                    "Stop the render early and save what it has so far",
+                    "Stop now. What's rendered so far is saved, noisier than a finished render. An \
+                     animation stopped before its first frame saves nothing.",
+                );
+                if let Some(job) = app.job_mut() {
+                    job.cancel_arm = arm;
+                    if fired {
+                        job.cancel_now();
+                    }
+                }
+            }
+
+            let resp = ui.button((icons::X, "Close"));
+            let resp = hinted(
+                resp,
+                &mut app.ui_state,
+                "Close this window. The render keeps going: the status bar shows its progress, and \
+                 says when it's done",
+                "click: close",
+            );
+            if resp.clicked() {
+                app.ui_state.render_job.open = false;
+            }
+        });
+        ui.add_space(2.0);
+    });
+
+    caption(ui, &out.display().to_string());
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(phase.label()).strong());
         // Where in the work, when there is an interior worth naming — `pass
@@ -1374,9 +1910,9 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
             ui.label(egui::RichText::new(pos).small().weak());
         }
         if cancelling {
-            ui.label(egui::RichText::new("stopping…").color(ui.visuals().warn_fg_color));
+            ui.label(egui::RichText::new("stopping…").color(super::theme::warn(ui.visuals())));
         } else if paused {
-            ui.label(egui::RichText::new("paused").color(ui.visuals().warn_fg_color));
+            ui.label(egui::RichText::new("paused").color(super::theme::warn(ui.visuals())));
         }
     });
 
@@ -1386,109 +1922,23 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // across a module boundary. That model does not survive tiling: a render is
     // now passes containing laps, then a resolve per tile, then a write, and
     // the phases are wildly unequal — an A2 poster spends 67s accumulating and
-    // 5.7s saving. A bar per phase either races to 100% and restarts (reading
-    // as finished, or as broken) or gives a five-second write the same width as
-    // a minute of accumulation. Weighting by measured seconds gives one bar
-    // that is monotonic and roughly linear in time.
-    //
-    // `progress_row`'s `ProgressBar` gets an explicit available width, not
-    // `f32::INFINITY`: a `TextEdit` clamps an infinite desired width to what's
-    // there, but `ProgressBar` takes it literally and the auto-sized window it
-    // is in ends up with a degenerate rect that never gets drawn.
+    // 5.7s saving. Weighting by measured seconds gives one bar that is
+    // monotonic and roughly linear in time.
     progress_row(ui, "Progress", BarState::Active(Some(overall)), false);
 
     // Both durations in fixed-width cells, and the whole line in one: this is
     // the readout that ticks every frame for an hour, so every length change
-    // in it is a shuffle you watch. `JobHandle::tick_estimate` handles the
-    // other half — the countdown's *value* jittering rather than its width.
+    // in it is a shuffle you watch.
     let line = match remaining {
         // "about", because it is: the countdown is only shown once progress
         // can support it, and it is filtered, not exact.
-        Some(r) => format!(
-            "{} elapsed · about {} left",
-            format_duration_cell(elapsed),
-            format_duration_cell(r)
-        ),
+        Some(r) => format!("{} elapsed · about {} left", format_duration_cell(elapsed), format_duration_cell(r)),
         None => format!("{} elapsed", format_duration_cell(elapsed)),
     };
     num::small_cell(ui, &line, ELAPSED_CHARS);
 
     ui.separator();
-    egui::ScrollArea::vertical()
-        .id_salt("fracturize_job_log")
-        .max_height(120.0)
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for line in &log {
-                ui.label(egui::RichText::new(line).small().monospace());
-            }
-        });
-
-    ui.separator();
-    ui.horizontal(|ui| {
-        let resp = ui.button(if paused {
-            format!("{} Resume", icons::PLAY)
-        } else {
-            format!("{} Pause", icons::PAUSE)
-        });
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Pause the render without losing progress",
-            "click: pause / resume the job",
-        );
-        if resp.clicked() {
-            if let Some(job) = app.job_mut() {
-                let p = job.paused();
-                job.set_paused(!p);
-            }
-        }
-
-        // Two stages: `Stop` arms it, it counts down disabled, then it comes
-        // back as a red `Stop render`. See `ui::confirm::danger_button`.
-        if cancelling {
-            let resp = ui.add_enabled(
-                false,
-                egui::Button::new(format!("{} Stopping…", icons::TRASH)),
-            );
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Stopping. What has been rendered so far is being saved.",
-                "the render is stopping",
-            );
-        } else {
-            let (arm, fired) = super::confirm::danger_button(
-                ui,
-                &mut app.ui_state,
-                cancel_arm,
-                icons::TRASH,
-                "Stop",
-                "Stop render",
-                "Stop the render early and save what it has so far",
-                "Stop now. What's rendered so far is saved, noisier than a \
-                 finished render. An animation stopped before its first frame \
-                 saves nothing.",
-            );
-            if let Some(job) = app.job_mut() {
-                job.cancel_arm = arm;
-                if fired {
-                    job.cancel_now();
-                }
-            }
-        }
-
-        let resp = ui.button(format!("{} Close", icons::X));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Close this window. The render keeps going, and the status bar shows its progress",
-            "click: close",
-        );
-        if resp.clicked() {
-            app.ui_state.render_job.open = false;
-        }
-    });
+    log_view(ui, &log);
 }
 
 #[cfg(test)]
@@ -1511,28 +1961,83 @@ mod tests {
         // Every frame of an animation has its own camera.
         for mode in [Mode::Animation, Mode::ViewDescriptor] {
             let anim = RenderJobForm { mode, ..RenderJobForm::default() };
-            assert!(
-                matches!(anim.samples(), Samples::Ring { .. }),
-                "{mode:?} must fall back to the ring",
-            );
+            assert!(matches!(anim.samples(), Samples::Ring { .. }), "{mode:?} must fall back to the ring");
         }
 
-        // Falling back must not *lose* the setting. The flag and the target
-        // both survive a trip through a mode that can't use them, which is why
-        // the form keeps them rather than storing a `Samples`.
-        let anim = RenderJobForm { mode: Mode::Animation, use_accumulate: true, splat: true, spp: 700, ..Default::default() };
+        // Falling back must not *lose* the setting.
+        let anim =
+            RenderJobForm { mode: Mode::Animation, use_accumulate: true, splat: true, spp: 700, ..Default::default() };
         assert!(matches!(anim.samples(), Samples::Ring { .. }));
         let back = RenderJobForm { mode: Mode::Still, ..anim };
         assert_eq!(back.samples(), Samples::Accumulate { spp: 700 });
     }
 
-    /// A still render out of this dialog accumulates unless told otherwise —
-    /// the whole point of slice 4. The ring's density falls as the output
-    /// grows, so the old default got worse the bigger you rendered.
+    /// A still render out of this dialog accumulates unless told otherwise.
+    /// The ring's density falls as the output grows, so the old default got
+    /// worse the bigger you rendered.
     #[test]
     fn a_still_defaults_to_accumulating_at_the_medium_tier() {
         let form = RenderJobForm { splat: true, ..Default::default() };
         assert_eq!(form.samples(), Samples::Accumulate { spp: 100 });
+    }
+
+    /// The `preview` preset is the form's own default, so a first render from
+    /// it is the render this dialog has always defaulted to.
+    #[test]
+    fn the_default_preset_is_the_default_form() {
+        let entry = render_preset::find(render_preset::DEFAULT).expect("default preset");
+        let p = render_preset::load(&entry).unwrap();
+        let form = RenderJobForm::default();
+        let mut applied = form.clone();
+        applied.apply(&p);
+        assert_eq!(applied.to_preset(String::new()), form.to_preset(String::new()));
+    }
+
+    /// A preset saved from the form, applied to a form that differs in every
+    /// way, gives back the same settings — and only those settings: the look
+    /// and the machine are the window's and the box's, never a preset's.
+    #[test]
+    fn a_preset_carries_size_and_quality_and_nothing_else() {
+        let mine = RenderJobForm {
+            mode: Mode::Animation,
+            format: crate::video::Format::Mp4,
+            width: 1080,
+            height: 1350,
+            use_accumulate: false,
+            spp: 777,
+            accumulate: 12,
+            points: 33_000_000,
+            supersample: 3,
+            filter: crate::gpu::Filter::Mitchell,
+            filter_radius: 0.8,
+            density_estimation: 0.25,
+            bit_depth: crate::offline::BitDepth::Sixteen,
+            fps: 24,
+            quality: 71,
+            ..Default::default()
+        };
+        let p = mine.to_preset(mine.summary());
+        let other = RenderJobForm { splat: true, exposure: 3.0, gpu_share: 0.4, threads: 7, ..Default::default() };
+        let mut got = other.clone();
+        got.apply(&p);
+        assert_eq!(got.to_preset(String::new()), mine.to_preset(String::new()));
+        assert!(got.splat && got.exposure == 3.0 && got.gpu_share == 0.4 && got.threads == 7);
+    }
+
+    /// The `*` measures only what the preset says. A built-in leaves the point
+    /// count to the dialog, so changing it isn't a change to the preset.
+    #[test]
+    fn a_preset_is_modified_only_by_what_it_says() {
+        let entry = render_preset::find("hd").unwrap();
+        let p = render_preset::load(&entry).unwrap();
+        let mut form = RenderJobForm::default();
+        form.apply(&p);
+        form.preset = Some((entry, p));
+        assert!(!form.preset_modified());
+        form.points = 1_234_567;
+        assert!(!form.preset_modified(), "hd doesn't set points");
+        form.spp = 5;
+        assert!(form.preset_modified());
     }
 
     /// Density estimation reads a density off the accumulation histogram, so
@@ -1540,36 +2045,22 @@ mod tests {
     /// and must not carry one out of range either.
     #[test]
     fn density_estimation_needs_a_histogram_to_read() {
-        let acc = RenderJobForm {
-            use_accumulate: true,
-            splat: true,
-            density_estimation: 0.3,
-            ..Default::default()
-        };
+        let acc = RenderJobForm { use_accumulate: true, splat: true, density_estimation: 0.3, ..Default::default() };
         assert_eq!(acc.density().amount, 0.3);
 
-        // Ring path, points renderer, animation: no histogram, so no DE.
         let ring = RenderJobForm { use_accumulate: false, ..Default::default() };
         assert!(RenderJobForm { density_estimation: 0.3, ..ring }.density().is_off());
         let flat = RenderJobForm { splat: false, density_estimation: 0.3, ..Default::default() };
         assert!(flat.density().is_off());
-        let anim = RenderJobForm {
-            mode: Mode::Animation,
-            splat: true,
-            density_estimation: 0.3,
-            ..Default::default()
-        };
+        let anim = RenderJobForm { mode: Mode::Animation, splat: true, density_estimation: 0.3, ..Default::default() };
         assert!(anim.density().is_off());
 
-        // Clamped, since the field is public even though the slider is not.
         let hot = RenderJobForm { density_estimation: 4.0, ..acc };
         assert_eq!(hot.density().amount, 1.0);
     }
 
     /// A directory is not a file waiting to be overwritten: nothing would be
-    /// clobbered, the render simply cannot be written there. It gets its own
-    /// message and stops the job, rather than being reported as an overwrite
-    /// and then attempted anyway.
+    /// clobbered, the render simply cannot be written there.
     #[test]
     fn a_directory_is_refused_rather_than_overwritten() {
         let dir = std::env::temp_dir();
@@ -1579,8 +2070,6 @@ mod tests {
         let file = dir.join("fracturize-filename-trouble.png");
         std::fs::write(&file, b"x").expect("write a temp file");
         assert_eq!(filename_trouble(&file), Some(FilenameTrouble::WillOverwrite));
-        // Overwriting is a choice, not an error — the warning exists so it is
-        // an informed one, and it must not disable the button.
         assert!(!FilenameTrouble::WillOverwrite.blocks_start());
         let _ = std::fs::remove_file(&file);
 
@@ -1588,8 +2077,32 @@ mod tests {
         assert_eq!(filename_trouble(std::path::Path::new("")), None);
     }
 
+    /// A ratio people say is said that way; one they don't is a decimal, not
+    /// `427:240` or `4961:3508`.
+    #[test]
+    fn an_aspect_ratio_reads_as_people_say_it() {
+        assert_eq!(aspect_label(1920, 1080), "16:9");
+        assert_eq!(aspect_label(640, 480), "4:3");
+        assert_eq!(aspect_label(1080, 1080), "1:1");
+        assert_eq!(aspect_label(1080, 1350), "4:5");
+        assert_eq!(aspect_label(854, 480), "1.78:1");
+        assert_eq!(aspect_label(4961, 3508), "1.41:1");
+    }
+
+    /// The window keeps its vertical view in a render, so wider shows more at
+    /// the sides and narrower cuts some off; matching it is one click.
+    #[test]
+    fn the_shape_is_judged_against_the_window() {
+        assert!(against_window(1920, 1080, 1280, 720).starts_with("Same shape"));
+        assert!(against_window(1920, 1080, 1000, 1000).starts_with("Wider"));
+        assert!(against_window(1080, 1080, 1920, 1080).starts_with("Narrower"));
+        let (w, h) = window_shaped(1920, 1440, 860);
+        assert_eq!((w, h % 2), (1920, 0), "keeps the width, and an even height for video");
+        assert!(against_window(w, h, 1440, 860).starts_with("Same shape"));
+    }
+
     /// Zero samples per pixel is not a render. The slider cannot reach it, but
-    /// the field is public and a view file or a future preset could.
+    /// a preset file could.
     #[test]
     fn a_sample_target_is_at_least_one() {
         let form = RenderJobForm { use_accumulate: true, splat: true, spp: 0, ..Default::default() };

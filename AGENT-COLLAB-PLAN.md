@@ -13,6 +13,17 @@ waiting request when there is one; hold-to-blink is a held button until a key
 is chosen; Re-render of a tweak, the thread picker and delivered/seen states
 are not built. GUI wording is placeholder, as §4 says.*
 
+*Phases 3–5 built 2026-10-27 (`src/bridge.rs`, `src/mcp.rs`, `src/agent.rs`,
+`src/agent_local.rs`, `src/app_agent.rs`, `src/ui/agent.rs`; AGENTS.md "The
+agent connection"). Differences from the plan: the socket carries only what
+needs the window (state, a render, posted/delivered/seen); the bridge does
+every thread operation on files itself and pushes channel events from a file
+watcher, so it works with no window at all. A fourth message kind, `note`, is
+what `reply` and the backends' progress and reports post. Delivered and seen
+are built; working is shown for the window's own backends. The local
+backend's tools mode, a re-render of a tweak, and the thread picker are not
+built. `with-llm` gained `--fits`, its VRAM rule as a query.*
+
 *One collaborative flow for both of the project's users. Either one, human or
 agent, can **request** a change or **propose** one. Proposals come with
 rendered options. The other side can **preview** them, **tweak** one,

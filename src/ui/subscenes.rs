@@ -101,7 +101,7 @@ fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
         }
     });
     if let Some(e) = app.ui_state.import_error.clone() {
-        ui.label(egui::RichText::new(e).small().color(ui.visuals().warn_fg_color));
+        ui.label(egui::RichText::new(e).small().color(super::theme::warn(ui.visuals())));
     }
 }
 

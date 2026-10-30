@@ -17,6 +17,8 @@ use crate::view::View;
 
 #[path = "app_collab.rs"]
 mod collab;
+#[path = "app_agent.rs"]
+pub(crate) mod agent;
 
 /// Seconds since the epoch, for unique output filenames
 pub fn unix_timestamp() -> u64 {
@@ -259,7 +261,10 @@ fn path_fingerprint(path: &CameraPath) -> u64 {
     mix(path.loops.zoom().map_or(0, |z| z.periods.wrapping_add(1)));
     mix(path.loops.zoom().map_or(0, |z| z.scale.to_bits()));
     mix(path.ease.map_or(2, |e| e as u32));
-    mix(path.seconds.unwrap_or(f32::NAN).to_bits());
+    mix(path.period.unwrap_or(f32::NAN).to_bits());
+    for t in path.key_times() {
+        mix(t.to_bits());
+    }
     // Routes are part of the shape: two paths through the same keys but
     // different routes draw different polylines.
     for r in &path.routes {
@@ -850,6 +855,11 @@ pub struct App {
     scene_generation: u64,
     /// Why the tracks aren't playing, when a track won't apply.
     track_error: Option<String>,
+    /// The track whose value the scene can't use at the playhead, while that
+    /// lasts: what makes the error once per stretch rather than per frame.
+    track_invalid: Option<String>,
+    /// `param_catalogue`'s cache, keyed like the live animator.
+    param_cache: Option<((Option<u64>, u64), std::rc::Rc<Vec<crate::params::Param>>)>,
     pub point_size: f32,
 
     /// Persistent user preferences (I toggles pitch inversion)
@@ -986,13 +996,11 @@ pub struct App {
 
     /// The running render job, if any (see `start_job`). One at a time.
     job: Option<JobHandle>,
-    /// The last finished job's outcome, kept so the dialog can report it
-    /// after the handle is gone.
-    /// The last finished job: where it was written and whether it ran to the
-    /// target, or why it failed. Carrying [`crate::render_job::Outcome`]
-    /// rather than a bare path is what stops a render stopped at 40% being
-    /// reported as a finished one — every display site has to say which it was.
-    job_done: Option<Result<(std::path::PathBuf, crate::render_job::Outcome), String>>,
+    /// The last finished job, kept so the dialog can report it after the
+    /// handle is gone. Its result carries [`crate::render_job::Outcome`]
+    /// rather than a bare path, which is what stops a render stopped at 40%
+    /// being reported as a finished one — every display site has to say which.
+    job_done: Option<crate::render_job::FinishedJob>,
     /// Why the last launch was refused (memory limit, bad size) — set instead
     /// of starting, so the dialog can say why rather than doing nothing.
     job_error: Option<String>,
@@ -1195,6 +1203,10 @@ pub struct App {
     /// Threads with the agent: the Collaborate window's state. See
     /// `app_collab`.
     pub(crate) collab: collab::Collab,
+    /// The agent connection: the socket a session's bridge reaches the
+    /// window on, and the backends the window drives itself. See
+    /// `app_agent`.
+    pub(crate) agent: agent::AgentState,
     /// Whether the window has keyboard focus, so a new message for the person
     /// can be announced to the desktop only when they aren't looking.
     pub focused: bool,
@@ -1203,8 +1215,18 @@ pub struct App {
 /// A status-bar message about opening a scene (see `App::set_notice`).
 pub struct Notice {
     pub text: String,
-    /// A failure, drawn in the error colour, rather than a note.
-    pub error: bool,
+    pub tone: Tone,
+}
+
+/// What a notice is saying, which decides its colour (`ui::theme`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Worth knowing: a drop that ignored files, say.
+    Note,
+    /// Something asked for was done: sent, kept, withdrawn.
+    Success,
+    /// A failure.
+    Error,
 }
 
 /// Whether a dropped file is one the window can open, by its extension: a
@@ -1459,6 +1481,8 @@ impl App {
             anim_view: AnimView::default(),
             scene_generation: 0,
             track_error: None,
+            track_invalid: None,
+            param_cache: None,
             camera,
             point_size,
             prefs,
@@ -1587,6 +1611,7 @@ impl App {
             pending_screenshot: false,
             screenshot_to: None,
             collab: Default::default(),
+            agent: Default::default(),
             focused: true,
         };
         app.refresh_zoom();
@@ -1691,7 +1716,7 @@ impl App {
 
     /// The camera path. There is always one.
     ///
-    /// A scene that authors `[[camera.path]]` keypoints flies those; one that
+    /// A scene with a camera track (`target = "camera"`) flies it; one that
     /// doesn't flies a full orbit around its current framing. The default is
     /// not a separate turntable mechanism — it's this system's default value,
     /// synthesized rather than authored but identical in every other respect:
@@ -1891,7 +1916,7 @@ impl App {
     /// the camera back by hand — which is exactly when the route matters,
     /// because that's when you're positioning against it.
     pub fn visible_path(&self) -> Option<&CameraPath> {
-        if self.camera_follows {
+        if self.camera_moving() {
             return None;
         }
         let path = self.camera_path();
@@ -1900,7 +1925,36 @@ impl App {
 
     /// Is the camera flying the path right now?
     pub fn camera_moving(&self) -> bool {
+        self.camera_follows && self.playing
+    }
+
+    /// Whether the camera is attached to the timeline: following its path on
+    /// the clock, whether or not the clock is running. Detached, the camera is
+    /// yours — playing and scrubbing leave it where you put it.
+    pub fn camera_attached(&self) -> bool {
         self.camera_follows
+    }
+
+    /// Attach the camera to the timeline or detach it (the Timeline's camera
+    /// row). Not an edit: how you are watching, like orbiting. Attaching the
+    /// default orbit starts it from where the camera is now, as playing does.
+    pub fn set_camera_attached(&mut self, attached: bool) {
+        if attached == self.camera_follows {
+            return;
+        }
+        if attached {
+            if !self.camera_path().playable() {
+                return;
+            }
+            if self.path_is_default() {
+                self.invalidate_default_path();
+                self.refresh_default_path();
+                self.camera_epoch = self.time;
+            }
+            self.camera_lap = self.camera_local().floor() as i64;
+        }
+        self.camera_follows = attached;
+        log::info!("Camera: {}", if attached { "attached to the timeline" } else { "detached" });
     }
 
     /// Take the camera off the path, because the framing is being set by hand.
@@ -1947,7 +2001,7 @@ impl App {
     /// Start / stop the camera flying the path (O, Z, and the toolbar's
     /// transport button). The one motion control there is.
     pub fn toggle_camera_motion(&mut self) {
-        if self.camera_follows {
+        if self.camera_moving() {
             self.camera_follows = false;
             self.playing = false;
             log::info!("Camera: stopped");
@@ -1979,14 +2033,27 @@ impl App {
         if self.path_is_default() {
             self.camera_epoch = self.time;
         }
-        self.camera_lap = ((self.time - self.camera_epoch) / self.camera_path().duration() as f64).floor() as i64;
+        self.camera_lap = self.camera_local().floor() as i64;
         self.camera_follows = true;
         self.playing = true;
     }
 
-    /// Append the current camera framing as a keypoint of this scene's own path
-    /// (Y). Not an edit to the default orbit — the default is what you get
-    /// *until* the scene has two keypoints, and this is how it gets them.
+    /// Where the camera is in its own laps: the clock, from the camera's
+    /// epoch and its first key, in laps. The whole part counts laps; the
+    /// fraction is what `CameraPath::sample` takes.
+    fn camera_local(&self) -> f64 {
+        let p = self.camera_path();
+        (self.time - self.camera_epoch - p.start() as f64) / p.duration() as f64
+    }
+
+    /// Append the current camera framing as a key of this scene's own camera
+    /// track (Y), [`KEY_SPACING`] after the last one, and put the playhead on
+    /// it. Not an edit to the default orbit — the default is what you get
+    /// *until* the scene has two keys, and this is how it gets them. The
+    /// Timeline's "Key the camera at the playhead" is the other way in, for a
+    /// key at a chosen moment.
+    ///
+    /// [`KEY_SPACING`]: crate::path::KEY_SPACING
     pub fn add_path_key(&mut self) {
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
@@ -1997,10 +2064,10 @@ impl App {
             .get_or_insert_with(|| {
                 crate::path::CameraPath::new(Vec::new(), crate::path::Loop::Once)
             });
-        path.keys.push(key);
-        // A new key means a new segment; give it the short way round until
-        // someone says otherwise.
-        path.fit_routes();
+        let t = path.times_or_spacing_after_last();
+        path.key_at(t, key);
+        self.time = t as f64;
+        let path = self.scene.camera_path.as_ref().expect("just keyed");
         log::info!(
             "Camera path keypoint {} added ({}; Ctrl+S saves it with the scene)",
             path.keys.len(),
@@ -2014,6 +2081,84 @@ impl App {
         self.commit_edit("Add path keypoint", None, before);
     }
 
+    /// Key the camera at the playhead (the Timeline): this framing — or a
+    /// saved view's, with `view` — becomes the camera's view at this moment,
+    /// replacing a key already there. A view at a keyframe point.
+    pub fn key_camera_at_playhead(&mut self, view: Option<&std::path::Path>) {
+        let framing = match view {
+            None => crate::path::PathKey::from_camera(&self.camera),
+            Some(path) => match View::load(path) {
+                Ok(v) => crate::path::PathKey::from_camera(&OrbitCamera::from_legacy(
+                    Vec3::from(v.focus),
+                    Vec3::from(v.offset),
+                    v.distance,
+                    v.rotation,
+                    v.pitch,
+                    v.roll,
+                )),
+                Err(e) => {
+                    self.set_notice(format!("Couldn't key that view: {e}"), Tone::Error);
+                    return;
+                }
+            },
+        };
+        let was_default = self.path_is_default();
+        let before = self.edit_snapshot();
+        let t = self.time as f32;
+        let path = self
+            .scene
+            .camera_path
+            .get_or_insert_with(|| crate::path::CameraPath::new(Vec::new(), crate::path::Loop::Once));
+        let i = path.key_at(t, framing);
+        self.ui_state.timeline_camera_key = Some(i);
+        self.after_path_edit(was_default);
+        self.commit_edit(format!("Key the camera at {t:.2}s"), None, before);
+    }
+
+    /// Move camera key `k` to `t` seconds (dragging its diamond). Coalesced
+    /// like any drag; never reorders the keys.
+    pub fn set_camera_key_time(&mut self, k: usize, t: f64) {
+        let Some(p) = self.scene.camera_path.as_ref() else { return };
+        if k >= p.keys.len() || (p.time(k) as f64 - t).abs() < 1e-4 {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let Some(p) = self.scene.camera_path.as_mut() {
+            p.set_key_time(k, t as f32);
+        }
+        self.commit_edit("Retime camera key", Some(&format!("camera_key_time_{k}")), before);
+    }
+
+    /// Put camera key `k`'s view back to the current framing, at its time.
+    pub fn rekey_camera(&mut self, k: usize) {
+        let Some(p) = self.scene.camera_path.as_ref() else { return };
+        if k >= p.keys.len() {
+            return;
+        }
+        let before = self.edit_snapshot();
+        let framing = crate::path::PathKey::from_camera(&self.camera);
+        if let Some(p) = self.scene.camera_path.as_mut() {
+            p.keys[k] = framing;
+        }
+        self.commit_edit(format!("Re-key camera key {}", k + 1), None, before);
+    }
+
+    /// A looping camera's lap, in seconds (the Timeline): how long after its
+    /// first key it is back there.
+    pub fn set_camera_period(&mut self, seconds: f32) {
+        let Some(p) = self.scene.camera_path.as_ref() else { return };
+        let span = p.time(p.keys.len().saturating_sub(1)) - p.start();
+        let seconds = seconds.max(span + 0.05);
+        if !p.loops.closes() || (p.lap() - seconds).abs() < 1e-4 {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let Some(p) = self.scene.camera_path.as_mut() {
+            p.period = Some(seconds);
+        }
+        self.commit_edit("Camera loop period", Some("camera_period"), before);
+    }
+
     /// Remove the last path keypoint (Shift+Y)
     pub fn remove_path_key(&mut self) {
         if self.scene.camera_path.is_none() {
@@ -2023,7 +2168,7 @@ impl App {
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
         if let Some(path) = &mut self.scene.camera_path {
-            path.keys.pop();
+            path.remove_key(path.keys.len().saturating_sub(1));
         }
         self.after_path_edit(was_default);
         self.commit_edit("Remove path keypoint", None, before);
@@ -2123,7 +2268,7 @@ impl App {
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
         if let Some(path) = &mut self.scene.camera_path {
-            path.keys.remove(idx);
+            path.remove_key(idx);
         }
         log::info!("Camera path keypoint {} removed", idx);
         self.after_path_edit(was_default);
@@ -2134,7 +2279,7 @@ impl App {
     /// [`path_is_default`](Self::path_is_default) from *before* the edit.
     ///
     /// An empty key list isn't a path, so it goes back to `None`: nothing
-    /// writes an empty `[[camera.path]]`, and the default orbit is what the
+    /// writes an empty camera track, and the default orbit is what the
     /// scene flies again. And when the edit changed *which* path flies — the
     /// second key taking over, or a deletion handing back — the playhead means
     /// nothing on the new route, so the camera stops instead of teleporting
@@ -2149,15 +2294,15 @@ impl App {
         }
     }
 
-    /// Set the path's playback duration in seconds; `None` restores the
-    /// default of 3s per segment.
-    pub fn set_path_seconds(&mut self, seconds: Option<f32>) {
-        let seconds = seconds.map(|s| s.max(0.1));
-        if self.camera_path().seconds == seconds {
+    /// Set the path's playback duration in seconds, stretching every key's
+    /// time (and a loop's period) with it.
+    pub fn set_path_seconds(&mut self, seconds: f32) {
+        let seconds = seconds.max(0.1);
+        if (self.camera_path().duration() - seconds).abs() < 1e-4 {
             return;
         }
         let before = self.edit_snapshot();
-        self.author_path().seconds = seconds;
+        self.author_path().retime_to(seconds);
         // The draggy one of the six: coalesced, so a drag across the field is
         // one undo step rather than sixty.
         self.commit_edit("Path duration", Some("path_seconds"), before);
@@ -2500,7 +2645,7 @@ impl App {
             // It would write the option over the scene's file. Keep, in the
             // Collaborate window, is how an option is saved.
             let e = "previewing an option: leave the preview (Esc) to save the scene, or Keep the option";
-            self.set_notice(format!("Not saved: {e}"), true);
+            self.set_notice(format!("Not saved: {e}"), Tone::Error);
             self.last_save_error = Some(e.to_string());
             return;
         }
@@ -2620,7 +2765,7 @@ impl App {
         // file anyway, is a question about nothing. Find out first.
         if self.is_dirty() {
             if let Err(e) = Scene::load(path) {
-                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), true);
+                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), Tone::Error);
                 return;
             }
         }
@@ -4390,7 +4535,7 @@ impl App {
             Err(e) => {
                 log::error!("Failed to load {}: {}", path.display(), e);
                 // The scene on screen is untouched; say why nothing happened.
-                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), true);
+                self.set_notice(format!("Couldn't open {}: {}", path.display(), e), Tone::Error);
                 return;
             }
         };
@@ -4464,12 +4609,12 @@ impl App {
         let files = std::mem::take(&mut self.dropped);
         let first = &files[0];
         if let Err(e) = droppable(first) {
-            self.set_notice(e, true);
+            self.set_notice(e, Tone::Error);
             return;
         }
         self.request_load_scene(first);
         let ignored = files.len() - 1;
-        let failed = self.notice.as_ref().is_some_and(|n| n.error);
+        let failed = self.notice.as_ref().is_some_and(|n| n.tone == Tone::Error);
         if ignored > 0 && !failed {
             let name = first.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // Still asking about unsaved edits, it hasn't opened yet.
@@ -4481,7 +4626,7 @@ impl App {
                     name,
                     if ignored == 1 { "file".to_string() } else { format!("{} files", ignored) },
                 ),
-                false,
+                Tone::Note,
             );
         }
     }
@@ -4489,11 +4634,11 @@ impl App {
     /// Show a message in the status bar until it's clicked away or the next
     /// scene opens. Not on a timer: a message that leaves on its own can leave
     /// before it's been read.
-    pub fn set_notice(&mut self, text: String, error: bool) {
-        if error {
+    pub fn set_notice(&mut self, text: String, tone: Tone) {
+        if tone == Tone::Error {
             log::error!("{}", text);
         }
-        self.notice = Some(Notice { text, error });
+        self.notice = Some(Notice { text, tone });
     }
 
     pub fn notice(&self) -> Option<&Notice> {
@@ -4528,6 +4673,7 @@ impl App {
             return;
         }
         self.job_error = None;
+        self.job_done = None;
         // The camera keeps flying. The job takes a *snapshot* — `current_view`
         // below, and a clone of the scene — and everything after that runs on
         // its own thread and device, so there is no moving target to protect
@@ -4548,7 +4694,13 @@ impl App {
                 Ok((p, _)) => log::info!("View descriptor written: {}", p.display()),
                 Err(e) => log::error!("View descriptor failed: {}", e),
             }
-            self.job_done = Some(result);
+            self.job_done = Some(crate::render_job::FinishedJob {
+                result,
+                params,
+                secs: 0.0,
+                log: Vec::new(),
+                seen: false,
+            });
             return;
         }
 
@@ -4797,8 +4949,15 @@ impl App {
                 Err(e) if e == CANCELLED => log::info!("Render job cancelled, nothing written"),
                 Err(e) => log::error!("Render job failed: {}", e),
             }
-            self.job = None;
-            self.job_done = Some(result);
+            if let Some(job) = self.job.take() {
+                self.job_done = Some(crate::render_job::FinishedJob {
+                    result,
+                    secs: job.working_elapsed(),
+                    params: job.params,
+                    log: job.log,
+                    seen: false,
+                });
+            }
         }
     }
 
@@ -4812,10 +4971,16 @@ impl App {
     }
 
     /// The last finished job's outcome, shown until the next one starts.
-    pub fn job_done(
-        &self,
-    ) -> Option<&Result<(std::path::PathBuf, crate::render_job::Outcome), String>> {
+    pub fn job_done(&self) -> Option<&crate::render_job::FinishedJob> {
         self.job_done.as_ref()
+    }
+
+    /// The dialog has shown the finished job, so the status bar stops
+    /// announcing it.
+    pub fn mark_job_seen(&mut self) {
+        if let Some(done) = self.job_done.as_mut() {
+            done.seen = true;
+        }
     }
 
     /// Why the last launch attempt was refused, if it was.
@@ -5043,7 +5208,7 @@ impl App {
                 );
                 self.adopt_scene(r.scene, &format!("Random flame (seed {seed})"));
             }
-            Err(f) => self.set_notice(format!("Random flame: {}. Kept the scene you had.", f.message()), true),
+            Err(f) => self.set_notice(format!("Random flame: {}. Kept the scene you had.", f.message()), Tone::Error),
         }
     }
 
@@ -5079,7 +5244,7 @@ impl App {
         match crate::dice::profile::load(&entry) {
             Ok(loaded) => {
                 if !loaded.warnings.is_empty() {
-                    self.set_notice(format!("Profile {}: {}", entry.name, loaded.warnings.join("; ")), true);
+                    self.set_notice(format!("Profile {}: {}", entry.name, loaded.warnings.join("; ")), Tone::Error);
                 }
                 self.prefs.random_profile = entry.path.clone();
                 self.prefs.random_profile_builtin = entry.is_builtin().then(|| entry.name.clone());
@@ -5091,7 +5256,7 @@ impl App {
                 self.set_random_settings(loaded.settings);
                 self.prefs_dirty_since = Some(std::time::Instant::now());
             }
-            Err(e) => self.set_notice(format!("Couldn't load the profile: {e}"), true),
+            Err(e) => self.set_notice(format!("Couldn't load the profile: {e}"), Tone::Error),
         }
     }
 
@@ -5230,7 +5395,7 @@ impl App {
         let r = match crate::dice::mutate_seeded(&self.prefs.random, &self.scene, seed) {
             Ok(r) => r,
             Err(f) => {
-                self.set_notice(format!("Mutate: {}. Kept the scene you had.", f.message()), true);
+                self.set_notice(format!("Mutate: {}. Kept the scene you had.", f.message()), Tone::Error);
                 return;
             }
         };
@@ -6752,6 +6917,18 @@ impl App {
         self.prefs_dirty_since = Some(std::time::Instant::now());
     }
 
+    /// The render-job preset last chosen, by name: what the dialog opens on.
+    pub fn render_preset(&self) -> Option<&str> {
+        self.prefs.render_preset.as_deref()
+    }
+
+    pub fn set_render_preset(&mut self, name: Option<String>) {
+        if self.prefs.render_preset != name {
+            self.prefs.render_preset = name;
+            self.prefs_dirty_since = Some(std::time::Instant::now());
+        }
+    }
+
     /// Fraction of the GPU a render job may take. See [`prefs::Prefs::gpu_share`].
     pub fn render_gpu_share(&self) -> f32 {
         self.prefs.gpu_share.unwrap_or(1.0).clamp(0.05, 1.0)
@@ -7310,7 +7487,8 @@ impl App {
             if !playable {
                 self.stop_following();
             } else {
-                let local = (self.time - self.camera_epoch) / duration;
+                let _ = duration;
+                let local = self.camera_local();
                 // Each pass of a zoom loop descends `periods` periods and
                 // arrives on the frame it left — the same picture, one level
                 // down. The lap rolling over is the only record that it
@@ -7354,7 +7532,11 @@ impl App {
                 } else {
                     self.time = end;
                     self.playing = false;
-                    self.camera_follows = false;
+                    // A scene without tracks is the old camera-only transport,
+                    // where finishing the path let go of the camera.
+                    if self.scene.tracks.is_empty() {
+                        self.camera_follows = false;
+                    }
                     log::info!("Timeline: finished");
                 }
             }
@@ -7389,6 +7571,10 @@ impl App {
     /// information that the status bar already carries with more detail and a
     /// sparkline, and which told the window switcher nothing at all about what
     /// you had open. The FPS line still goes to `RUST_LOG` once a second.
+    ///
+    /// A build from any branch but main appends `[branch]`
+    /// (`version::feature_branch`), so a worktree's build open beside main's
+    /// can be told apart from the taskbar.
     ///
     /// Recomputed every frame but only *set* when it changes: `set_title` is a
     /// round trip to the window manager, and the string is stable for minutes
@@ -7425,22 +7611,26 @@ impl App {
     /// where the scene's own path has it at that moment; the default orbit has
     /// no moments to go to, so a free camera stays put.
     pub fn scrub_to(&mut self, t: f64) {
+        // Only the clock moves. An attached camera follows it on the next
+        // update, as it does when playing; a detached one stays put.
         self.time = t.max(0.0);
-        if !self.path_is_default() {
-            let p = self.camera_path();
-            let local = (self.time - self.camera_epoch) / p.duration() as f64;
-            let t = if p.wraps() { local.rem_euclid(1.0) } else { local.clamp(0.0, 1.0) } as f32;
-            self.camera = p.sample(t, self.camera.fov);
-            self.camera_lap = local.floor() as i64;
-            self.zoom_level = 0;
-            self.zoom_turns = self.zoom_turns_base;
-        }
     }
 
-    /// Play or pause the timeline. The same transport as O: playing puts the
-    /// camera back on its path.
+    /// Play or pause the timeline's clock (the Timeline's own button). Unlike
+    /// O, which flies the camera, this leaves the camera as attached or
+    /// detached as it is.
     pub fn toggle_playback(&mut self) {
-        self.toggle_camera_motion();
+        if self.playing {
+            self.playing = false;
+            return;
+        }
+        if self.timeline_end().is_some_and(|end| self.time >= end - 1e-6) {
+            self.time = 0.0;
+            if !self.path_is_default() {
+                self.camera_epoch = 0.0;
+            }
+        }
+        self.playing = true;
     }
 
     /// Mute or unmute one track (the Timeline window). An edit: it changes
@@ -7482,15 +7672,19 @@ impl App {
     /// Start a keyed track on an `-S` path, with one key at the playhead
     /// holding the value the scene has there now — so adding a track changes
     /// nothing on screen until a second key says otherwise. Returns its index.
-    pub fn add_track(&mut self, target: &str) -> Result<usize, String> {
+    pub fn add_track(&mut self, target: &str, start: Option<toml::Value>) -> Result<usize, String> {
         let target = target.trim();
         if let Some(i) = self.scene.tracks.iter().position(|t| t.target == target) {
             return Err(format!("{target} already has a track (row {})", i + 1));
         }
-        let value = crate::track::authored_value(&self.scene_with_live_values(), target)?
-            .ok_or_else(|| {
+        // The caller may know the value already (the parameter picker does,
+        // including for things the file leaves out, like an unused variation).
+        let value = match start {
+            Some(v) => v,
+            None => crate::track::authored_value(&self.scene_with_live_values(), target)?.ok_or_else(|| {
                 format!("this scene doesn't write {target} down yet; set it once, then add the track")
-            })?;
+            })?,
+        };
         let track = crate::track::one_key(target, self.time, value)?;
         let before = self.edit_snapshot();
         self.scene.tracks.push(track);
@@ -7553,6 +7747,48 @@ impl App {
         self.commit_edit("Key value", Some(&format!("timeline:key-value:{i}:{k}")), before);
     }
 
+    /// Set rotation key `k` of track `i` to an Euler triple (degrees, XYZ).
+    /// The route out of it is read from the triples again, so an explicit
+    /// `turns`/`route` on it goes. Coalesced, like any drag.
+    pub fn set_key_rotation(&mut self, i: usize, k: usize, euler: [f64; 3]) {
+        let Some(crate::track::Source::Keys { keys, .. }) = self.scene.tracks.get(i).map(|t| &t.source) else { return };
+        if !matches!(keys.get(k).map(|k| &k.value), Some(crate::track::KeyValue::Rotation(r)) if r.euler != Some(euler)) {
+            return;
+        }
+        let before = self.edit_snapshot();
+        if let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source {
+            keys[k].value = crate::track::KeyValue::Rotation(crate::track::RotKey::from_euler(euler));
+        }
+        self.commit_edit("Key rotation", Some(&format!("timeline:key-value:{i}:{k}")), before);
+    }
+
+    /// Key whole-rotation track `i` at the playhead with the rotation its map
+    /// has in the scene (the inspector's, or a gizmo drag's): pose, then key.
+    /// Replaces a key already at this moment. Returns the key's index.
+    pub fn key_rotation_from_scene(&mut self, i: usize) -> Option<usize> {
+        let target = self.scene.tracks.get(i)?.target.clone();
+        let value = crate::track::authored_value(&self.scene_with_live_values(), &target).ok().flatten();
+        let e: Vec<f64> = value?.as_array()?.iter().filter_map(|v| v.as_float().or(v.as_integer().map(|i| i as f64))).collect();
+        let [x, y, z] = e[..] else { return None };
+        let t = self.time;
+        let before = self.edit_snapshot();
+        let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source else { return None };
+        let key = crate::track::Key { t, value: crate::track::KeyValue::Rotation(crate::track::RotKey::from_euler([x, y, z])) };
+        let at = match keys.iter().position(|k| (k.t - t).abs() < 1e-3) {
+            Some(j) => {
+                keys[j] = key;
+                j
+            }
+            None => {
+                let j = keys.partition_point(|k| k.t < t);
+                keys.insert(j, key);
+                j
+            }
+        };
+        self.commit_edit(format!("Key {target} at {t:.2}s"), None, before);
+        Some(at)
+    }
+
     /// Delete key `k` of track `i`. The last key takes the track with it,
     /// since a track with no keys has nothing to say.
     pub fn delete_key(&mut self, i: usize, k: usize) {
@@ -7584,9 +7820,29 @@ impl App {
         self.commit_edit(format!("Track: {target}"), Some(&format!("timeline:source:{i}")), before);
     }
 
+    /// Every parameter of the scene a person might animate (`params::catalogue`),
+    /// built once per document state: it tries each path on the scene's text,
+    /// which is too much to redo every frame a menu is open.
+    pub fn param_catalogue(&mut self) -> std::rc::Rc<Vec<crate::params::Param>> {
+        let key = (self.history.top_serial(), self.scene_generation);
+        if let Some((k, cat)) = &self.param_cache {
+            if *k == key {
+                return cat.clone();
+            }
+        }
+        let cat = std::rc::Rc::new(crate::params::catalogue(&self.scene_with_live_values()));
+        self.param_cache = Some((key, cat.clone()));
+        cat
+    }
+
     /// Why the scene's tracks aren't playing, when they aren't.
     pub fn track_error(&self) -> Option<&str> {
         self.track_error.as_deref()
+    }
+
+    /// The track that has taken a value the scene can't use at the playhead.
+    pub fn track_invalid(&self) -> Option<&str> {
+        self.track_invalid.as_deref()
     }
 
     /// Put the scene at the playhead on screen.
@@ -7626,14 +7882,14 @@ impl App {
                     // Skipped tracks play no part, and say so in the Timeline.
                     let broken = a.as_ref().and_then(|a| a.broken.first()).map(|(t, why)| format!("{t}: {why}"));
                     if broken.is_some() && broken != self.track_error {
-                        self.set_notice(format!("A track doesn't apply and is skipped — {}", broken.as_deref().unwrap_or("")), true);
+                        self.set_notice(format!("A track doesn't apply and is skipped — {}", broken.as_deref().unwrap_or("")), Tone::Error);
                     }
                     self.track_error = broken;
                     a
                 }
                 Err(e) => {
                     if self.track_error.as_deref() != Some(e.as_str()) {
-                        self.set_notice(format!("Tracks not playing: {e}"), true);
+                        self.set_notice(format!("Tracks not playing: {e}"), Tone::Error);
                     }
                     self.track_error = Some(e);
                     None
@@ -7668,12 +7924,30 @@ impl App {
         let vt = a.view_targets;
         let class = animator.class();
         let frame = match animator.at(self.time) {
-            Ok(f) => f,
-            Err(e) => {
-                if self.track_error.as_deref() != Some(e.as_str()) {
-                    self.set_notice(format!("Tracks: {e}"), true);
+            Ok(f) => {
+                if self.track_invalid.take().is_some() {
+                    log::info!("Tracks: valid again at {:.2}s", self.time);
                 }
-                self.track_error = Some(e);
+                f
+            }
+            Err(e) => {
+                // Said once per stretch of invalid frames, naming the track
+                // rather than the value: the value is new every frame, so a
+                // message carrying it was a new message every frame. The last
+                // frame that worked stays on screen meanwhile.
+                // Named once, at the start of the stretch: finding the culprit
+                // parses the scene once per track, which is not a per-frame cost.
+                if self.track_invalid.is_some() {
+                    return;
+                }
+                let who = animator.culprit(self.time).unwrap_or_else(|| "a track".to_string());
+                if self.track_invalid.as_deref() != Some(who.as_str()) {
+                    self.set_notice(
+                        format!("Track '{who}' has taken a value the scene can't use; holding the last frame that worked ({e})"),
+                        Tone::Error,
+                    );
+                    self.track_invalid = Some(who);
+                }
                 return;
             }
         };
@@ -7747,9 +8021,10 @@ impl App {
             .unwrap_or_else(|| format!("{} (unsaved)", self.scene.name));
         let previewing = self.preview_label().map_or(String::new(), |p| format!("{p} · "));
         let title = format!(
-            "{previewing}{}{} — Fracturize",
+            "{previewing}{}{} — Fracturize{}",
             if self.is_dirty() { "*" } else { "" },
             doc,
+            crate::version::feature_branch().map(|b| format!(" [{b}]")).unwrap_or_default(),
         );
         if self.window_title != title {
             self.window.set_title(&title);

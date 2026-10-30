@@ -47,17 +47,6 @@ distance = 2.0
 yaw = 0.55
 pitch = 0.22
 focus = [0.0, 0.0, 0.0]
-path_seconds = 3.0
-# One period straight down the zoom, closing on itself: the last frame and the
-# first are the same picture if the band is really scale-invariant, so the seam
-# between them is the wrap discontinuity with nothing else mixed in.
-path_zoom_loop = 1
-
-[[camera.path]]
-yaw = 0.55
-pitch = 0.22
-distance = 2.0
-focus = [0.0, 0.0, 0.0]
 
 # The scale symmetry: the plainest one there is. Zero translation puts the
 # fixed point on the origin; a half scale with no rotation makes one period
@@ -110,3 +99,16 @@ octave_falloff = 0.0
 # bigger radius; this scene keeps 3.0 because its whole job is to have the
 # outermost octave *in* the picture where it can be measured.
 edge_guard = 3.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 3.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.55
+pitch = 0.22
+distance = 2.0
+focus = [0.0, 0.0, 0.0]

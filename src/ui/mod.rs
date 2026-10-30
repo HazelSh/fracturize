@@ -20,6 +20,7 @@ use winit::window::Window;
 
 use crate::prefs::PanelPrefs;
 
+pub mod agent;
 pub mod axis_widget;
 pub mod browser;
 pub mod camera_panel;
@@ -34,10 +35,12 @@ pub mod gizmo_ring;
 pub mod labels;
 pub mod mutate;
 pub mod num;
+pub mod param_picker;
 pub mod radio;
 pub mod random_flames;
 pub mod random_settings;
 pub mod table;
+pub mod theme;
 pub mod timeline;
 pub mod render_job;
 pub mod render_panel;
@@ -148,8 +151,12 @@ pub struct UiState {
     /// The ruler's span, held still while a key is dragged.
     pub timeline_span: Option<(f64, f64)>,
     /// The Timeline's new-track field, and why the last add was refused.
-    pub timeline_new_target: String,
     pub timeline_new_error: Option<String>,
+    /// The Timeline's camera row is selected, rather than a track.
+    pub timeline_camera: bool,
+    /// The camera's selected key, and the one a drag is retiming.
+    pub timeline_camera_key: Option<usize>,
+    pub timeline_drag_camera: Option<usize>,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -237,8 +244,10 @@ impl UiState {
             timeline_key: None,
             timeline_drag_key: None,
             timeline_span: None,
-            timeline_new_target: String::new(),
             timeline_new_error: None,
+            timeline_camera: false,
+            timeline_camera_key: None,
+            timeline_drag_camera: None,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),
@@ -294,6 +303,7 @@ pub enum WindowKey {
     Xaos,
     Collab,
     Timeline,
+    RenderJob,
 }
 
 impl WindowKey {
@@ -312,6 +322,7 @@ impl WindowKey {
             Self::Xaos => "xaos",
             Self::Collab => "collab",
             Self::Timeline => "timeline",
+            Self::RenderJob => "render_job",
         }
     }
 
@@ -362,6 +373,8 @@ impl WindowKey {
 
             // The transport row, the ruler and the camera's row.
             Self::Timeline => egui::vec2(560.0, 140.0),
+            // The preset bar above and Start below, with a few rows between.
+            Self::RenderJob => egui::vec2(380.0, 360.0),
             _ => egui::vec2(180.0, 100.0),
         }
     }
@@ -423,6 +436,11 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
             egui::pos2((right_x - 400.0).max(20.0), top + 380.0),
             egui::vec2(380.0, 380.0),
         ),
+        // Tall enough to show the whole form on most screens.
+        WindowKey::RenderJob => (
+            egui::pos2(360.0, top + 30.0),
+            egui::vec2(460.0, (screen.height() - top - 80.0).clamp(360.0, 760.0)),
+        ),
         // Wide and low, docked above the status bar: time runs left to right,
         // and wants all the width there is.
         WindowKey::Timeline => {
@@ -456,6 +474,19 @@ pub fn window(ctx: &egui::Context, app: &crate::app::App, key: WindowKey, title:
         .default_size(size)
         .min_size(min)
         .resizable(true)
+}
+
+/// A titled section of a settings window: a heading that folds what is under
+/// it away. Open to start with, and remembered once folded. `window` keeps two
+/// windows' sections of the same name apart, and the id is salted by the
+/// title's first word, so a title carrying a count keeps its state.
+pub fn section(ui: &mut egui::Ui, window: &str, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let salt = title.split(' ').next().unwrap_or(title).to_string();
+    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+        .id_salt((window.to_string(), salt))
+        .default_open(true)
+        .show(ui, add);
+    ui.add_space(4.0);
 }
 
 /// Read a panel's current rect back out of egui and remember it, so the

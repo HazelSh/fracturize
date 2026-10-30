@@ -1,0 +1,12 @@
+description = "The everyday still: 1280×720 at 100 samples a pixel, supersampled 2×"
+output = "still"
+width = 1280
+height = 720
+samples = "accumulate"
+spp = 100
+rounds = 96
+supersample = 2
+filter = "gaussian"
+filter_radius = 0.5
+density_estimation = 0.0
+bit_depth = 8

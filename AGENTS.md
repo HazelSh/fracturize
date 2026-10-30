@@ -37,6 +37,7 @@ who they cost by those names.
 | `UI-REVIEW-PLAN.md` | The GUI read as a stranger would; a worklist |
 | `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
 | `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
+| `TIMELINE-PLAN.md` | Open questions on the timeline: auto-key, and moving the camera path into `[[track]]` form |
 | `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
 | `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
 | `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
@@ -71,6 +72,7 @@ src/
   derive.rs      # --derive: print a map turned about a world axis / spun about its own
   stats.rs       # --stats: image numbers, empty measured against the recorded background
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
+  render_preset.rs # Render presets: named size+quality files, built-ins in render_presets/
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
     toolbar.rs     # Top strip: File menu, panel toggles, undo/redo, quick controls
@@ -86,22 +88,26 @@ src/
     grid_view.rs   # The mutation grid as the view (Ctrl+U): panes on the background layer
     random_flames.rs   # Random flames: scrolling list of live-thumbnail rolls
     collab.rs      # Collaborate: the thread, option cards, the composer, conflicts
+    agent.rs       # The connection light, and Agent settings
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
     render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
-  render_job.rs  # Batch render dialog: setup, estimates, progress, pause/cancel
+    render_job.rs  # Render job window: presets, sectioned setup, progress, the result
     camera_panel.rs# Framing, saved views, the camera path (incl. how it loops)
     axis_widget.rs # Corner orientation cross; click a ball to look down that axis
     radio.rs       # Segmented one-of-n radio, used by all three such settings
     browser.rs     # Scenes window (Ctrl+O / B): folder tree + places, thumbnail rows
     shortcuts.rs   # Controls window (H / F1): input prefs + the keybind table
     timeline.rs    # Timeline window: transport, ruler, camera row, track rows
+    param_picker.rs# Pick a scene parameter: browsable tree + search (reusable)
     labels.rs      # World-anchored transform name labels
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
   path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
   track.rs       # Tracks: -S paths over time (keys/rate/cycle), the shared
                  # Extrapolate fold, Animator (the scene at time t), classes
+  params.rs      # A scene's settable parameters as a named tree (each an -S
+                 # path checked on the scene), and their valid ranges
   video.rs       # Animation formats: Format (avif/mp4), RGBA->YUV, shared ISOBMFF muxer
   avif.rs        # AV1 backend for .avif (rav1e)
   h264.rs        # H.264 backend for .mp4 (openh264)
@@ -115,6 +121,11 @@ src/
   thread.rs      # Threads with an agent: the message format on disk, reading, posting
   collab.rs      # The CLI side of a thread: --request, --propose, --respond, --wait-reply…
   app_collab.rs  # The GUI side: preview (a sandbox), apply (a merge), send back, keep
+  bridge.rs      # The window's socket: JSON lines, one bridge, the client end
+  mcp.rs         # `fracturize mcp`: stdio MCP server, tools, channel push
+  agent.rs       # [agent] prefs, the headless Claude backend, with-llm
+  agent_local.rs # The local-model backend: author.py's loop, in the window
+  app_agent.rs   # The window's side: socket calls, dispatch, the runs
   scene_browser.rs# The Scenes window's model: places, a folder's scenes, parsed, sorted
   symmetry.rs    # Finite subgroups of SO(3) (C/D/T/O/I) by closure, plus
                  # `repeat` progressions, which are not groups
@@ -556,7 +567,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Enter | enable/disable selected transform |
 | G / Tab | toggle transform gizmos and their name labels |
 | O, Z, or Space | play / stop the timeline: the camera flying its path, and every track (three keys, one action) |
-| Y / Shift+Y | add current framing as a keypoint of this scene's own path / remove the last one |
+| Y / Shift+Y | add the current framing as a camera key after the last one (the playhead goes to it) / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
 | S | save screenshot to screenshots/<scene>-<timestamp>.png (never overwrites) |
@@ -712,7 +723,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
-| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row, a row per track with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selected track — interpolation, extrapolation, key at playhead, the key's time and value, a cycle's or rate's numbers — and adds a track on any `-S` path. See "Tracks and the timeline" |
+| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -1361,7 +1372,8 @@ Phase 2 of `AGENT-COLLAB-PLAN.md`: requests, proposals and responses about one
 scene, kept as files under `renders/collab/<scene-stem>/` (gitignored, so a
 thread never reaches the public repo). Either side can send any kind. An agent
 takes part with nothing but the CLI; the person with the Collaborate window.
-No socket or bridge yet (phase 3), so an agent waits with `--wait-reply`.
+A Claude Code session can also be connected to the window live, and the window
+can drive a backend itself; see "The agent connection" below.
 
 ```sh
 fracturize --list-threads [--waiting]             # every thread, and what's waiting on whom
@@ -1412,20 +1424,96 @@ Things it rests on:
   edits made since the request survive. Where both changed a value, a dialog
   lists yours beside theirs, defaulting to yours (as `--diff --base` does).
   One `commit_edit("Agent: …")`, so one Ctrl+Z, then a response saying
-  "applied". The live values that only reach the scene on a save (point size,
-  falloff, contrast, haze, exposure) stay live unless the option changed them.
-- **What goes out is what the person sees**: a request's or proposal's scene
-  carries the live framing and those live values (`scene_to_send`), and "with
-  a render" is the `S` screenshot of the view, written beside the message
-  (`App::screenshot_to`) before it's posted.
+  "applied". The merge is of the live scene *as a save would write it*
+  (`as_saved`), so the values that only reach the file on a save (point size,
+  falloff, contrast, haze, exposure) conflict like any other: a haze you
+  changed since the request is listed, not overwritten. An option that moves
+  the framing moves the live camera too, or the next Ctrl+S, which writes the
+  live framing, would quietly undo it. A tweak carries those values as well.
+- **What goes out is what the person sees, except where they're standing**: a
+  request's or proposal's scene carries those live values (`scene_to_send`)
+  but keeps its own framing, because orbiting to look at a 3D scene is not a
+  change to propose. "with this view" sends the live framing as the scene's
+  camera, and "with a render" implies it — the `S` screenshot of the view,
+  written beside the message (`App::screenshot_to`) before it's posted, is of
+  a view, and the scene has to say which. The MCP `get_state` gives the scene
+  with its own framing and the live one beside it, labelled as such.
 - **Keep** copies an option (or its tweak) to a new `scenes/<thread>-<n><id>.toml`,
   never over a file: the one way a thread's scene reaches the project.
 
 Not yet: a re-render of a tweak with the proposal's settings (a sent-back
-tweak goes as a scene, without a picture); "delivered" and "seen" states,
-which need the bridge; a thread picker for other scenes' threads (the window
+tweak goes as a scene, without a picture); a thread picker for other scenes' threads (the window
 shows the scene on screen's); the hold-to-blink *key* (a held button for now —
 the key is Hazel's to choose); and tweaks surviving a restart.
+
+## The agent connection: `fracturize mcp`, and the backends
+
+Phases 3–5 of `AGENT-COLLAB-PLAN.md`. The thread (above) is the workflow; this
+is what gets a message to an agent the moment it's sent, and back.
+
+```
+ Claude Code ──stdio MCP──▶ fracturize mcp ──JSON lines──▶ the window
+   (a session)               (src/mcp.rs)    $XDG_RUNTIME_DIR/fracturize/gui.sock (src/bridge.rs)
+ llama-server ◀──HTTP── the window's own loop (src/agent_local.rs)
+```
+
+```sh
+claude mcp add --scope project fracturize -- fracturize mcp      # once
+claude -n fracturize --dangerously-load-development-channels server:fracturize
+```
+
+Who answers is `[agent] backend` in prefs, picked in Agent settings (the
+Collaborate window's header): `claude-channel` (default: a session you
+started; nothing is spawned), `claude-headless` (the window runs `claude -p
+--resume <id>` per message, with the same bridge), `local` (a model on
+llama-server, started through with-llm's preset if nothing answers), or
+`none`. The header's light says who's connected or working, with Stop.
+
+Things it rests on:
+
+- **The socket carries only what needs the live window**: `hello`,
+  `get_state` (the scene as `scene_to_send` makes it), `get_render` (the `S`
+  screenshot path), and three courtesies: `posted` (rescan now), `delivered`
+  and `seen` (message states, kept in memory because a message is written
+  once). Every thread operation the bridge does itself, on files, through
+  `thread.rs`, like the CLI. So the MCP tools work with no window (only
+  `get_state`/`get_render` say they need one), and the bridge `chdir`s to the
+  window's working directory on `hello` so relative paths agree.
+- **One bridge at a time.** A second `hello` is refused naming the first. The
+  socket is taken over only if nobody answers on it (a window that died).
+- **The push is a file watcher**, in the bridge: once a second it reads every
+  thread and sends each new message for it (`for_me`: not from it, and `to`
+  it, `agent`, or nobody) as `notifications/claude/channel`, meta keys being
+  identifiers (`kind`, `thread`, `message`, `from`, `scene`). Messages already
+  there at connect are not replayed, but what's waiting is said once.
+  Channels need the interactive session; `-p` ignores the dev flag, which is
+  why headless is told about the message in its prompt instead.
+- **A new message kind, `note`**: text that wants no answer (progress, a
+  report). It never waits and doesn't count as answering what it replies to,
+  so a progress note leaves a request "waiting".
+- **Dispatch** (`app_agent.rs`): with headless or local chosen and no session
+  connected, each new message from the person (request, own proposal, a
+  send-back) starts the backend, one at a time — only messages since the
+  window opened or the backend was chosen. Options without a render get one
+  from this binary (`mcp::render_option`, a small still in the window's
+  renderer, splat without a window).
+- **The local loop is `tools/llm-author/author.py`'s protocol and welfare
+  rules, unchanged**, reading its prompts from there (plus `sendback.md` and
+  `report.md`): each scene a card at once, `max_turns` replies, then an
+  optional report as a note; DONE/STOP honoured on the spot, STOP never
+  questioned; two repairs a turn; a full-budget reply without a scene ends
+  it; a repeat asked about once. Transcripts in llm-author's format under the
+  thread's `transcripts/`, so `review.sh` reads them. The conversation carries
+  on into the next message in that thread until the window closes.
+- **VRAM**: `with-llm --fits -m <preset>` is with-llm's own rule
+  (weights + projector + 1200 MiB), shown in Agent settings; with-llm refuses
+  to start one that doesn't fit and the window says why. The server is held
+  up by `with-llm … -- cat` on a pipe, so closing the window stops it (if
+  with-llm started it).
+
+Not yet: the local backend's tools mode (the setting exists; whole-scene
+runs), a re-render of a tweak, and a thread picker. The channel flag is a
+research preview's and may change; headless is the way round it.
 
 ## The scene browser
 
@@ -1673,83 +1761,8 @@ roll = 0.0                # optional: rotation about the view axis, radians
                           # pointed straight up.
 # legacy: offset = [x,y,z] (eye displacement) still loads, but is folded
 # into the framing/distance and never written back
-path_loop = "closed"      # how playback gets from the last frame back to the
-                          # first. One of:
-                          #   "once"     play through and stop (the default)
-                          #   "pingpong" out to the last key, then back again
-                          #   "closed"   loop back to key 1 (seamless)
-                          #   "zoom"     close under the [zoom] symmetry, so the
-                          #              animation loops as an endless zoom
-                          # See `path::Loop`. Legacy `path_closed = true` and
-                          # `path_zoom_loop = N` still load and are migrated on
-                          # save; neither is written back.
-path_zoom_periods = 1     # zoom periods descended per loop, with path_loop =
-                          # "zoom" (default 1; see "Infinite Zoom")
-path_seconds = 14.0       # playback/render duration (default 3s per segment
-                          # *travelled* — which a ping-pong does twice over)
-path_ease = false         # smoothstep time; default: once and pingpong ease,
-                          # the two closing loops don't
-
-# Camera path spline keypoints (2+ = a path; see src/path.rs). A uniform
-# Catmull-Rom spline runs through the keys, in *cumulative* form so it splines
-# framings rather than angles: yaw is unbounded (keys spanning 2*TAU author a
-# two-turn corkscrew — nothing wraps), distance interpolates in log space
-# (constant-relative-rate zooms), and focus travels on its own spline so look
-# directions blend smoothly while the eye moves. Omitted fields inherit the
-# base [camera] framing. Closed paths take the shortest yaw route back to key
-# 1. In-app: Y appends the current framing as a keypoint, Shift+Y removes,
-# O or Z flies it; the Camera window's Loop radio picks any of the four. All
-# six path operations are undoable.
-#
-# ROUTES. Which way round a segment goes is data, not something re-derived
-# from its endpoints — that is what used to make a 1° change swing 359° the
-# wrong way. Normally the yaw column says it: keys at 0, 3.14, 6.28 author a
-# full turn, and that is read once at load and kept. A key can also carry
-# `turns = N` to state it outright, which is written only where the yaw
-# column can't (the closing segment of a loop, or a key written as `rotvec`),
-# so a hand-edited yaw can never contradict a `turns` beside it. Whatever the
-# route says, the keys themselves are always hit exactly.
-#
-# A key may instead carry `route = [x, y, z]` — the segment's journey as a
-# rotation vector, winning over `turns` where both are given. This is for the
-# routes an integer cannot name, and only those: between two *equal* framings
-# no axis is implied, so "pitch three full turns and come back" is unsayable
-# as a winding (it collapses to a yaw loop). The catch of storing a
-# displacement is that it can contradict its keys, so it is checked as the
-# scene loads — `exp(route)` must land on the next key within half a degree,
-# or the load fails naming the key and the miss. No UI writes one; it is a
-# file-format door.
-#
-# A key may use `rotvec = [x, y, z]` instead of yaw/pitch/roll, on the same
-# terms as [camera] above: exact, no poles, and what gets written for a
-# keypoint framing the three angles can't name.
-#
-# EVERY SCENE HAS A PATH. Omit these keypoints (or author fewer than two) and
-# the path is a seamless full orbit around the current framing, at 0.18 rad/s
-# — the "turntable". That default is not a second system: it is a real
-# `CameraPath`, it draws, it plays, and `--render x.avif|x.mp4` flies it, all
-# through the same code (`path::resolve`, used by both `App::camera_path` and
-# src/offline.rs). Editing it — a keypoint, the loop flag, the duration — is
-# what turns it into scene data; until then no scene grows a path it never
-# asked for, and Ctrl+S writes no [[camera.path]] block.
-#
-# Paths are drawn in the viewport when gizmos are on (G): the eye's route as a
-# green polyline with a cross at each keypoint — but only while the path ISN'T
-# playing. During playback the camera stands on the line, so drawing it is a
-# smear across the shot that says nothing; it reappears the moment you take the
-# camera back by hand, which is when the route is what you're positioning
-# against.
-[[camera.path]]
-yaw = 0.0
-pitch = 0.9
-distance = 5.5
-
-[[camera.path]]
-yaw = 3.14                # half a turn later...
-pitch = 0.1
-distance = 1.6            # ...swooped in close
-focus = [0.0, -0.5, 0.0]  # looking lower
-roll = 0.4                # ...and tilted
+# The camera's motion is its track: `[[track]] target = "camera"`, below with
+# the others.
 
 [zoom]                    # optional: infinite zoom (see "Infinite Zoom")
 map = "whorl"             # a transform name, or its index as a string
@@ -1796,9 +1809,66 @@ matrix = [
 ]
 
 # Animation: any -S path over time (see "Tracks and the timeline"). Last in
-# the file, because they name what's above. One source per track:
+# the file, because they name what's above.
+#
+# The camera's track comes first. Its keys are VIEWS AT MOMENTS: a framing —
+# yaw/pitch/roll (radians) or `rotvec`, distance, focus, every one optional
+# and inherited from [camera] — at `t` seconds. The camera is on each view at
+# its time, and in between flies a cumulative quaternion Catmull-Rom (see
+# src/path.rs): it splines framings rather than angles, distance in log space
+# (constant-rate zooms), focus on its own spline. Uneven times are fine — the
+# tangents are per second, so speed runs smoothly through a key.
 [[track]]
-target = "transform.whorl.rotation.y"   # an -S path; not camera.* (the path is)
+target = "camera"
+extrapolate = "repeat"    # what happens after the last key:
+                          #   "hold"     stop there (the default)
+                          #   "pingpong" fly back to the first key, and again
+                          #   "repeat"   loop back to key 1 (seamless); needs
+                          #   period = <s>, the lap back round to key 1, so the
+                          #              way home is whatever the last key leaves
+                          #   "offset"   close under the [zoom] symmetry, so it
+                          #              loops as an endless zoom;
+                          #              zoom_periods = N periods a lap
+period = 14.0
+# ease = true             # come to rest at the first and last key; default on
+                          # for hold and pingpong, meaningless on the loops
+
+# ROUTES. Which way round a segment goes is data, not re-derived from its
+# endpoints — that is what used to make a 1° change swing 359° the wrong way,
+# and what lets a path spiral down and back up through whole turns. Normally
+# the yaw column says it: keys at 0, 3.14, 6.28 author a full turn, read once
+# at load and kept, and saving writes the column chained, never wrapped. A key
+# can also carry `turns = N` (extra whole turns on the segment leaving it),
+# written only where the yaw column can't say it (a loop's way home, a key
+# written as `rotvec`), or `route = [x, y, z]`, the journey as a rotation
+# vector, for routes no integer names: between two equal framings no axis is
+# implied, so "pitch three turns and come back" needs it. A route is checked
+# on load — it must land on the next key within half a degree. Whatever the
+# route says, the keys themselves are hit exactly.
+#
+# EVERY SCENE HAS A CAMERA TRACK. Without one the camera flies the default:
+# a seamless orbit of the current framing at 0.18 rad/s, four keys a quarter
+# turn apart on a repeat — the "turntable". It draws, plays and renders
+# through the same code (`path::resolve`, used by `App::camera_path` and
+# src/offline.rs). Editing it is what makes it scene data; until then Ctrl+S
+# writes no camera track. Paths are drawn in the viewport with gizmos on (G),
+# except while playing, when the camera is standing on the line.
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 0.9
+distance = 5.5
+
+[[track.keys]]
+t = 6.0
+yaw = 3.14                # half a turn later...
+pitch = 0.1
+distance = 1.6            # ...swooped in close
+focus = [0.0, -0.5, 0.0]  # looking lower
+roll = 0.4                # ...and tilted
+
+[[track]]
+target = "transform.whorl.rotation.y"   # an -S path; not camera.* (the camera track is)
 keys = [[0.0, 0.0], [4.0, 90.0]]        # [seconds, value]; strings/bools step
 interpolate = "smooth"                  # step | linear | smooth | spline
 extrapolate = "pingpong"                # hold | repeat | pingpong | offset
@@ -1807,6 +1877,24 @@ extrapolate = "pingpong"                # hold | repeat | pingpong | offset
 # period = 8.0     #    period seconds, amplitude either side of the
 # amplitude = 15.0 #    authored value (or `centre`), phase in periods
 # mute = true      # kept, drawn, not applied
+
+# A map's WHOLE rotation keys poses, not one Euler angle, and turns between
+# them as a rotation (the camera's spline and routes): no wrong way round, no
+# gimbal lock, no shear. Change one angle from the key before and it turns by
+# exactly that much about that angle's axis — y 0 → 720 is two whole turns;
+# otherwise the short way, or say `turns = N` / `route = [x, y, z]`. Linear is
+# a constant rate, smooth eases each key, spline flies through all of them;
+# `offset` keeps turning. Applied as `rotvec`, so no Euler branch can flip it.
+[[track]]
+target = "transform.petal.rotation"     # or subscene.<name>.rotation
+interpolate = "linear"
+extrapolate = "offset"                  # a quarter turn every 2 s, forever
+[[track.keys]]
+t = 0.0
+rotation = [0.0, 0.0, 0.0]              # degrees, XYZ; or rotvec = [...] (radians)
+[[track.keys]]
+t = 2.0
+rotation = [0.0, 90.0, 0.0]
 
 # Composition: another attractor beside this one (see "Subscenes"). Each keeps
 # its own walkers, so their maps never mix. Repeatable, up to 15.
@@ -2706,19 +2794,22 @@ expensive thing to go looking for.
 ### Looping zoom animations
 
 An animation can loop as an *endless* zoom, and exactly rather than
-approximately, because the scene has a symmetry. `path_loop = "zoom"` closes
-the path under that symmetry instead of by returning to the first key: one loop
-descends `path_zoom_periods` zoom periods and ends on a frame **identical** to the one it
+approximately, because the scene has a symmetry. A camera track with
+`extrapolate = "offset"` closes under that symmetry instead of by returning to
+the first key: one lap descends `zoom_periods` zoom periods (default 1) and
+ends on a frame **identical** to the one it
 started, since scaling by `sᴺ` about the fixed point and turning by the map's
 rotation leaves the rendered set unchanged. Played on a loop, a fourteen-second
 file falls forever.
 
 ```toml
-[camera]
-path_loop = "zoom"
-path_seconds = 14.0
+[[track]]
+target = "camera"
+extrapolate = "offset"   # the zoom loop
+period = 14.0
 
-[[camera.path]]      # one keypoint is enough — and is better than two
+[[track.keys]]           # one key is enough — and is better than two
+t = 0.0
 yaw = 0.0
 pitch = 1.15
 distance = 3.6
@@ -2731,7 +2822,7 @@ exactly linear — a constant-rate descent with no ease, no wobble and no
 velocity kink at the seam. Author more keys and you get a flight that closes
 one period lower; the last key is still synthesized, never written.
 
-- `path_loop = "zoom"` needs a `[zoom]` map, and says so if there isn't one.
+- The zoom loop needs a `[zoom]` map, and says so if there isn't one.
   It is resolved against the live renormalizing map, so dragging that map
   updates the loop rather than staling it.
 - It is a *different* loop from `"closed"`, not a variant: closing back to the
@@ -2753,15 +2844,17 @@ one period lower; the last key is still synthesized, never written.
 
 ### Zoom animations
 
-A camera path key whose `distance` is many periods below the first authors a
+A camera key whose `distance` is many periods below the first authors a
 descent of exactly that many periods — distance interpolates in log space, so
 that's a constant-rate zoom, and the per-frame wrap folds it back into one
 period however deep it goes. `scenes/wellspiral.toml` descends nine:
 
 ```toml
-[[camera.path]]
+[[track.keys]]
+t = 0.0
 distance = 3.6
-[[camera.path]]
+[[track.keys]]
+t = 14.0
 distance = 0.0363   # 3.6 · 0.6^9
 ```
 
@@ -2800,14 +2893,17 @@ example: Parasol's cut xaos edge opening and closing on a camera loop).
   (`palette.name`, `palette.reverse`) step.
 - **Extrapolation** past the last key: `hold` (default), `repeat`, `pingpong`,
   `offset` (each lap starts where the last ended, Blender's cycles with
-  offset). **The camera's loop is one of these**: `Loop::extrapolate` maps
-  once/closed/pingpong/zoom to hold/repeat/pingpong/offset, the zoom loop being
-  repeat-with-offset whose offset is the zoom symmetry. The camera keeps its
-  own source — framings are rotations, which is what `path.rs`'s routes are
-  for — and its own file format; `CameraPath::sample` folds time by the same
-  rule, spelled in f32 so every flight stays bit-identical
-  (`the_camera_folds_time_as_tracks_do` holds the two together).
-- **One clock, in seconds.** The camera is sampled at `time / its duration`.
+  offset). **The camera is a track** (`target = "camera"`, see "Scene Files"):
+  its keys are views at moments and its loop is one of these, the zoom loop
+  being `offset` whose offset is the zoom symmetry. Only its interpolation is
+  its own — framings are rotations, interpolated by `path.rs`'s cumulative
+  quaternion spline with routes, so a path can spiral through whole turns.
+  `CameraPath::sample` folds time by the same rule
+  (`the_camera_folds_time_as_tracks_do` holds the two together). It is held
+  as `Scene::camera_path`, not in `Scene::tracks`, because it is the one
+  track every scene has (the default orbit) and it drives the view rather
+  than an `-S` path; it is written first among the `[[track]]`s.
+- **One clock, in seconds.** A camera key at `t` is passed at `t`.
   The **timeline's length** (`track::timeline_length`) is the scene's own
   path or its tracks, whichever runs longer; a scene with tracks and no path
   runs as long as its tracks while the default orbit keeps turning through
@@ -2848,7 +2944,13 @@ Things it rests on, each found the hard way:
 - **One Euler angle is only meaningful in its triple.** A track on
   `transform.x.rotation.y` sets one angle of the triple the scene *writes*,
   and a saved scene respells a rotation with |y| > 90° on the other branch;
-  the animator warns when that is in play.
+  the animator warns when that is in play. **Animate a map's turn with its
+  whole rotation instead** (`transform.x.rotation`, the picker's "whole
+  (poses)" leaf): its keys are poses (`KeyValue::Rotation`, `track::RotKey`),
+  interpolated as rotations along routes read from the Euler column
+  (`RotKey::route_to`: one angle changing is that angle's axis, by exactly that
+  much), and each frame sets `rotvec`, which no save respells. A whole-rotation
+  track beside one of its own angles is refused, since the whole would win.
 - **The transport is a clock plus "is the camera following".** `path_t` is
   gone. Grabbing the camera stops it following and, in a scene with tracks,
   leaves the clock running: you can orbit an animation while it plays. Play
@@ -2874,9 +2976,36 @@ Things it rests on, each found the hard way:
 - `.avif`/`.mp4` render the timeline; the summary line says the class and
   whether it loops.
 
-**In the app**: the Timeline window (toolbar, film strip). The O/Z/Space
-transport plays camera and tracks together. Select a row, then edit it in the
-column on the right; drag a diamond to retime its key (the ruler holds still
+**In the app**: the Timeline window (toolbar, film strip).
+
+- **The transport is a clock, and the camera is attached to it or not.** The
+  camera row's link attaches it (it flies its path on the clock, playing and
+  scrubbing) or detaches it (it stays where you put it while the tracks play).
+  Taking the camera in the viewport detaches it. O/Z/Space and the toolbar's
+  Play *fly the camera*: attach and play. The Timeline's own Play runs the
+  clock and leaves the camera as it is. Attaching isn't an edit.
+- **Only the ruler scrubs.** A press on a row selects it and moves nothing
+  else, so picking a track never shifts the camera.
+- **People never type `-S` paths.** "Animate a parameter…" opens
+  `ui::param_picker` over `params::catalogue`: the scene's parameters as a
+  tree (Scene › Haze, Transforms › petal › Rotation › y, Subscenes › smoke ›
+  Share…) to browse with the mouse, or search by any words in any order, each
+  row showing its current value; already-animated ones greyed with the reason.
+  Every listed path is tried on the scene's own text first, so the tree never
+  offers something `-S` would refuse. Rows and the detail header use the same
+  names; the path is only in tooltips. The picker is generic — it returns a
+  `Param` and the caller decides what choosing means — and is there for any
+  other "point at a value in this scene" need.
+- **Values are clamped to what the scene can take** (`params::range_of`): a
+  spline overshoots and a cycle swings past zero, and the loader refuses a
+  negative xaos multiplier, share or subscene scale and draws nonsense from a
+  negative weight or point size. What still can't be used (a step key naming a
+  mode that doesn't exist) **holds the last good frame** and is reported **once
+  per stretch, naming the track** — the value changes every frame, so a message
+  carrying it was a new message, and a new log line, every frame. Offline
+  renders do the same, on stderr.
+
+Select a row, then edit it in the column on the right; drag a diamond to retime its key (the ruler holds still
 while you do — it pages by the playhead and its length follows the last key,
 and the two fed back into the drag); "Key at playhead" adds a key holding the
 curve's value there; a new track on any `-S` path starts with one key at the
@@ -2890,9 +3019,8 @@ its estimate charges a refill per frame when the attractor moves.
 
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
 keying from the inspector (and with it the auto-key question, which is
-Hazel's), zooming the ruler, the curve editor proper, views as camera keys (Hazel's decision),
-moving `[[camera.path]]` into `[[track]]` form (a migration commit for
-Hazel), walkers carried between frames instead of a refill, motion blur, an
+Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper,
+spin/turn rate tracks and post-rotation poses (TIMELINE-PLAN §3 C), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 
 ## Two machines, one repo: how to not make a mess
@@ -2923,6 +3051,51 @@ commit that exists only in the desktop checkout is invisible to the laptop and
 to every other session, and it is the only copy. Pushing is what made today's
 apparent revert a non-event. Cheap, so take it — but it is sync, not release.
 
+### Worktrees, and handing a build to Hazel: `tryout`
+
+Agent work can go in a git worktree (`.claude/worktrees/<name>`, on its own
+branch), and that is now the better default whenever another session is in
+the main checkout. What made worktrees unworkable before was that Hazel had no
+way to *use* the result; `tryout` (`~/code/tryout`, on PATH) is that way.
+
+1. **First thing in a new worktree: `tryout prep`.** It clones main's
+   `target/` copy-on-write (btrfs), so the dependencies cost no disk and no
+   build time; only fracturize itself recompiles (~1m16s release). It also
+   copies main's `Cargo.lock`, which is gitignored — without it a worktree
+   resolves newer versions and rebuilds half the tree. Do it before your first
+   `cargo` command, or it throws that build away to replace it.
+2. **Never share a target dir between checkouts** (`CARGO_TARGET_DIR`, a
+   `target-dir`/`build-dir` setting). Cargo keys this workspace's own crate by
+   its path *relative to the workspace root*, which is the same in every
+   worktree, so one checkout gets another's binary while reporting "Fresh".
+   Measured, not theorised. `tryout prep` refuses to run if it sees one.
+3. **A GUI change isn't done until it's staged:** `tryout stage --notes FILE`
+   (or `-m`, repeatable). The notes are for Hazel, not for you: what changed,
+   what to try and on which scene, what is deliberately not done, anything
+   that will look wrong but isn't. Plain words, per the interface text style.
+   Then name the build (`fracturize/<branch>`) in your final report; she
+   launches it from `tryout` (the picker) whenever she likes.
+   **Always a release build.** `tryout stage` builds `--release` and refuses
+   an unoptimized profile; never hand her a `cargo run` (debug) build either,
+   even for a quick look. She judges smoothness at 120 FPS, and a debug build
+   runs at a fraction of that, so the feature gets judged on the wrong thing.
+4. A staged build runs with **its worktree as cwd** (so `scenes/` and `views/`
+   are the branch's), against **a fresh copy of her prefs** each launch (so a
+   branch can't damage `~/.config/fracturize`), and with `[branch]` in the
+   window title.
+
+5. **Hazel's verdict comes back in `TRYOUT-FEEDBACK.md`** at the worktree root
+   (never committed; it's in `info/exclude`). When she closes a build she
+   picks accept / needs work / drop and writes what she saw. **A fresh agent
+   on a branch reads it first**, with `tryout notes fracturize/<branch>` for
+   what the build was meant to show. `tryout ls --verdict accept` lists
+   builds she has accepted, which means: merge to `main` and push (linear
+   history, per below). tryout itself never merges.
+
+`tryout gc` drops dropped builds and builds of branches that are merged or gone; `tryout du` shows
+what worktree build dirs really cost (plain `du` counts shared blocks once per
+file and wildly overstates it).
+
 If a branch does exist, keep it a *superset* of `main` — merge `main` into it
 whenever `main` moves, so the merge back is a fast-forward and never conflicts.
 `git log --oneline <branch>..main | wc -l` returning zero means exactly that.
@@ -2943,6 +3116,63 @@ with its parameters visible, an estimate, and a way to stop it. The model is
 full framerate while a job goes (measured: 119 FPS with a 240-frame animation
 rendering).
 
+- **Three stages, one window**: setup, running, finished. Finished is the
+  running view with the bar replaced by the result, so the log stays where it
+  was being read; **New render** goes back to the same settings with a fresh
+  filename. It used to drop straight back to the form with a small notice
+  above Start, which put "did it work, and where is it?" among the next job's
+  settings. The app keeps the ended job whole (`render_job::FinishedJob`:
+  result, params, working time, log, `seen`), because the dialog is often
+  closed while a job runs; until the result has been shown, the status bar
+  says "render done" (or stopped early, or failed), and clicking it opens it.
+- **The result opens with one click.** The result panel is a button: it opens
+  the file in the system's own viewer, through the `open` crate (ShellExecute
+  on Windows, `open` on macOS, xdg-open with gio/kde fallbacks and WSL on
+  Linux), detached. Beside it, Open and Show folder (the folder, not the file
+  selected in it: that needs a different call on every desktop).
+- **The setup form is in sections**, each a house table (`ui::table`) under a
+  folding heading (`ui::section`, shared with Random settings), ordered by the
+  questions people ask: Output (kind, filename, 16-bit and transparency, which
+  describe the file), Size (with the aspect ratio, and how it compares with
+  the window: a render keeps the window's *vertical* view, so a wider shape
+  shows more at the sides; "the window's shape" is in the common sizes),
+  Quality (renderer, samples, points, density estimation, then supersampling
+  and its filter), Animation, then the two that aren't chosen here: **Look**
+  (exposure, the inherited grade; read from the window each time the dialog
+  opens) and **This machine** (GPU share, encoder threads; remembered in
+  prefs). The renderer is in Quality, not Look, because it decides what the
+  sample choice under it can be. A preset bar is pinned above and the cost
+  estimate and Start below, so the cost sits beside the button that commits
+  to it however far the form is scrolled.
+
+  **Toggling a control never moves the form.** Nothing appears or vanishes
+  with a choice: the line under Quality is laps and histogram when
+  accumulating and the samples/px a pass comes to when not, Animation is
+  there for a still too (greyed), the grade line doesn't depend on the
+  renderer. **And what switches what is on the page**, not only on hover: a
+  row that depends on the one above is indented under it, and a row that
+  can't be used shows what it needs ("needs Samples: accumulate") in place of
+  its control, naming the row that would free it. Switch rows, whose column
+  is too narrow for that, carry the note beside their name.
+- **Presets** (`src/render_preset.rs`) name a job's size and quality, as
+  Apophysis's `Render presets.av` does: output kind, size, samples (accumulate
+  to `spp`, or one pass with `points`/`rounds`), supersample, filter and
+  radius, density estimation, bit depth, and a clip's fps and quality. Never
+  the look and never the machine: a preset that switched a splat piece to
+  points would change the picture under the name of rendering it bigger.
+  Every key is optional and one left out leaves the form's value. Built-ins
+  are compiled from `src/render_presets/`, cheapest first: `quick-look`,
+  `preview` (the dialog's long-standing defaults, and the first one used),
+  `hd`, `4k`, `4k-fine`, `print-a3`, `print-a2`, `clip-preview`, `clip-hd`;
+  their descriptions give sizes and densities, never durations. The person's
+  own are `~/.config/fracturize/render-presets/<name>.toml`. The picker groups
+  Built in / Yours with descriptions on hover; the name carries a `*` while
+  the settings differ from what the preset says (only the keys it says: a
+  built-in leaves points to the dialog); Save, Save as, Revert, and Delete
+  (armed, `danger_button`). The last preset chosen is remembered in prefs
+  (`render_preset`) and the session's first opening applies it; after that the
+  form keeps its settings between openings. `--render-preset` is the same
+  thing on the command line (see "View Files & Offline Rendering").
 - **Modes**: still (PNG), animation along the camera path in either `.avif`
   (AV1) or `.mp4` (H.264), or view descriptor — write a `.toml` view of this
   framing and render it later. The Output row has a button per file kind, so
@@ -2962,8 +3192,8 @@ rendering).
 - **Pause / cancel.** `JobControl` is checked in three loops in `offline.rs`:
   the `fill_points` accumulation frames, the per-tile loop, and the animation
   frame loop. Pause is a sleep loop — crude but correct, since the work is
-  already chunked and the job's device is its own. Cancel takes two clicks
-  (armed for 4s).
+  already chunked and the job's device is its own. Stop is a
+  `danger_button`, and keeps the work (below).
 - **Cancelling keeps the work.** The chaos game is an *anytime* algorithm: a
   buffer stopped at 60% is the same picture as one stopped at 100%, just
   noisier. So stopping a job renders and saves what it has, and every render
@@ -2987,14 +3217,14 @@ rendering).
   since the sample table cannot describe a clip with fewer.
 - **Threads are a machine setting.** One job-scoped value (`JobParams.threads`),
   defaulting to `render_job::default_threads()` = one less than the machine
-  has, exposed as `--threads N` and as a control in the dialog's animation
-  block. Both encoders read *that* value; they used to call
+  has, exposed as `--threads N` and as This machine's encoder threads in the
+  dialog. Both encoders read *that* value; they used to call
   `available_parallelism()` each and hand the codec every core, which on the
   4-core no-SMT desktop left nothing for the desktop itself. It lives in prefs
   and on the command line and **never** in a scene or view — a sidecar may
   record what was used, as information, but nothing should replay it, because
-  `threads = 16` is wrong advice on the T490. The dialog's control sits in the
-  animation block because encoding is the only thing it steers today; a still's
+  `threads = 16` is wrong advice on the T490. The dialog's control is greyed
+  for a still, because encoding is the only thing it steers today; a still's
   PNG deflate is one short single-threaded pass.
 - The time estimate runs on *working* time, not wall clock: pauses are
   subtracted, or the projected remaining time climbs while progress is frozen,
@@ -3832,6 +4062,22 @@ purpose: a compact attractor centred with a margin is the common framing, not
 the only good one, and a close-up or a form that bursts past every edge is a
 choice the report cannot tell from a mistake.
 
+**Balance is the one framing it does flag**, because filling the frame is a
+choice and crowding one side of an empty frame rarely is — it was the
+commonest slip in small models' scenes, a focus left at the origin with the
+attractor off to one side. `silhouette` is where the material *shows*: the lit
+cells of a 32-column grid reaching half a frame past each edge, lit at a
+hundredth of a dense cell (the log tonemap's view, so a sparse wing counts and
+stray dust doesn't), from a 40k-step walk. `balance` per axis is
+`(before − after) / (before + after)` over its margins: 0 even, ±1 flush to an
+edge, and `fills` when under a quarter of the axis is empty — a close-up has
+no margins to balance, and is never flagged. `to centre it` is the
+`-S camera.focus=` pan (turn and distance kept, solved at the walk's depth
+and refined by reprojecting) and `centred, it shows` where that lands. `notes`
+speaks when an axis has room and one margin is four times the other (|balance|
+≥ 0.6; rule-of-thirds is about 0.5). Infinite zoom says n/a: it renders the
+band, not the bounded walk.
+
 `camera` gives the framing as directions too: `forward`, `right` and `up` in
 world space, then `axes`, which says where each world axis points on screen —
 the app's corner axis cross in words (`+x right +y up +z toward you`). Moving
@@ -3974,6 +4220,28 @@ encode+save | total`) to stdout so you can budget effort. Options:
   Point count is a *render* property, not a scene property: the scene's
   `point_count` is just the interactive default (16 bytes/point of GPU memory).
 - `--width/--height` (default 1920x1080) — per tile when a grid mode is used.
+- `--render-preset NAME|FILE` — a render preset's size and quality (see
+  "Render Jobs"), filling each of `--width --height --spp --points
+  --accumulate --supersample --filter --filter-radius --density-estimation
+  --bit-depth --fps --quality` only where it wasn't typed; it prints the flags
+  it came to, and `(yours kept: …)`. Its `spp` is a density target exactly as
+  an `--effort` tier is, and degrades the same way (accumulates only for a
+  single `--splat` still, otherwise the nearest point buffer, with a note);
+  `--effort` wins over it. Its density estimation is dropped, with a note,
+  where nothing accumulates, and a preset made for the other kind of file
+  (a clip preset on a `.png`) lends its size and quality and says so. It
+  never sets `--splat`, exposure or the grade. `--render-presets` lists every
+  preset with its description and the exact flags it comes to;
+  `--save-render-preset NAME` writes what this command line comes to as one
+  of the person's presets (the dialog lists it under Yours), never over an
+  existing one, and without `--render` saves and exits. So an agent can hand
+  a person a render recipe in the form their dropdown takes:
+
+  ```
+  fracturize --render-presets
+  fracturize -s s.toml --splat --render-preset hd -r renders/s.png
+  fracturize --render-preset print-a3 --density-estimation 0.3 --save-render-preset a3-soft
+  ```
 - `--transparent` — RGBA output for compositing (PNG only; see "Background
   & Transparent Output").
 - `--view <path>` for exact framing (views store yaw + pitch), `--fog`
@@ -4064,6 +4332,27 @@ needs the answer to be present or absent.
   parameter changes the IFS), so prefer `--effort tiny|small`. Unlike mutation
   sheets no variant files are written: a tile is fully described by one flag,
   and that flag is printed per tile, ready to paste.
+- **Each tile is framed from its own variant**: camera, point size, haze band,
+  colour contrast and background (the tile's clear colour and the colour haze
+  fades toward). Until 2026-10-23 a sheet took all of these from the base
+  scene, so `--sweep camera.pitch=0.05,0.6` printed and labelled two tiles
+  that were pixel-identical, which is the silent no-op the rule above exists
+  to prevent, one step later. Framing is read from scene fields, never fitted
+  to the attractor, so tiles that don't sweep one still share it exactly.
+  The sheet's gutters (a partial last row) stay the base scene's colour.
+- `[[symmetry]]` blocks are settable: `symmetry.<index-or-motif>.<field>`
+  (`group`, `axis`, `repeat`, `turn`, `shrink`, …), the block named by its
+  index or by any motif in its `applies_to`, so `-S symmetry.cone.group=Cyc12`
+  and `--sweep 'symmetry.0.group=Cyc12,Cyc18,Cyc30'` work. Inside a subscene,
+  `subscene.<s>.symmetry.<…>`. Until 2026-10-23 this was refused with no
+  stated reason; nothing in the model needed the refusal.
+- **Arrays sweep too.** A list splits at top-level commas only, so
+  `meta.background=[0,0,0],[0.03,0.005,0.03]` is two colours; a range
+  between two arrays walks each component,
+  `meta.background=[0.004,0.004,0.008]:[0.05,0.012,0.04]`, which is the CLI's
+  colour slider. One channel alone is `meta.background.x=0:0.05`.
+- When both axes end in the same field, labels lengthen until they differ:
+  `cone.color_value=0.38 mantle.color_value=0.16`, not `color_value=…` twice.
 
 **Tile labels.** Every sheet — orbit, move, mutation, sweep — draws its
 per-tile parameters into the tile in amber (`src/glyphs.rs`, a 5x7 bitmap font;
@@ -4073,7 +4362,7 @@ too long for its tile is truncated with a trailing `>` rather than running into
 its neighbour. `--no-labels` turns them off.
 
 **Animation** (`--render <out.avif|out.mp4>`): the camera flying
-the scene's path — its `[[camera.path]]` spline, or the default full-turn orbit
+the scene's camera track — its views and the spline through them, or the default full-turn orbit
 of the base framing when it authors fewer than two keypoints. Same rule the app
 previews with (`path::resolve`), so what you watch in the window is what this
 writes. The point cloud is fixed, so
@@ -4103,9 +4392,9 @@ Both go through the same RGBA -> BT.709 limited-range 4:2:0 conversion, so the
 two formats are colour-identical by construction. Cannot combine with
 grid/mutation sheets. Options:
 
-- `--fps N` (default 30), `--seconds S` (default: the path's `path_seconds`,
-  else 3s per spline segment — but the *default* orbit carries its own
-  `path_seconds` of ~35s, one turn at 0.18 rad/s, so a pathless scene animates
+- `--fps N` (default 30), `--seconds S` (default: the timeline's length — the
+  camera track's keys, or its lap — but the *default* orbit's lap is ~35s,
+  one turn at 0.18 rad/s, so a scene without a camera track animates
   a full slow turn unless you pass `--seconds`), `--quality 0-100` (default 60
   — the AV1 quantizer for `.avif`, H.264's QP for `.mp4`).
 - Closed paths omit the final frame so the loop wraps without a stutter.
@@ -4203,7 +4492,7 @@ app = subprocess.Popen(['./target/release/fracturize', '--scene', scene], env=en
 d = display.Display(':79')                      # python-xlib; there is no xdotool
 ```
 
-Five things that will each cost you a run:
+Six things that will each cost you a run, or cost Hazel her desktop:
 
 - **Capture the Xephyr *root*, not the app's window.** `get_image` on the app's
   own window returns blank — it is a GL surface and its contents are not in the
@@ -4219,6 +4508,16 @@ Five things that will each cost you a run:
   the app keyboard focus and XTest key events go nowhere — silently, with no
   log line. Pointer events are fine. Drive an action through its button (Undo
   and Redo are on the toolbar), or `set_input_focus` on the app's window first.
+- **Stop what you started, by the PID you started, and check it's gone.**
+  Xephyr is a real window on Hazel's desktop, and one left running sits there
+  until she asks whose it is (2026-10-30: a cleanup step that found it again
+  by matching its command line didn't kill it, and nothing checked). Keep the
+  handles from launch — `xe.kill()` / `app.kill()` on the `Popen` objects
+  above, or `$!` saved from a shell — rather than searching at the end, and
+  never `pkill -f`, whose pattern matches your own shell. Then confirm:
+  `pgrep -x Xephyr` and `pgrep -x fracturize` should show nothing of yours
+  (Hazel may have her own fracturize open; compare PIDs). A cleanup you didn't
+  verify is a cleanup you didn't do.
 - **To hold the camera still, load a view with `-v`, not a keystroke.** Applying
   a view pauses the orbit as a documented side effect. Toggling camera motion
   with `o` depends on focus having landed where you assumed, and when it

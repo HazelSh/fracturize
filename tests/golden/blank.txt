@@ -3,8 +3,8 @@ scene    untitled                                                      --blank
 
 notes    3
          shape   the attractor is nearly a line: every copy falls along one
-                 direction — turn a map a few degrees, or add one off that
-                 line
+                 direction — turn one map 30-90° about an axis across the
+                 line, and move the maps away from the origin
          render  point_size 0.0120 is over the 0.0045 crisp bound at 1080p
          colour  the gradient is flat (swing 0.02) — renders unshaded
 
@@ -18,6 +18,14 @@ shape    centre     (-0.010, -0.010,  0.000)
          the scene sets      distance 3.000, point_size 0.0120
          on screen           x    30% to    74%    y    10% to    83%
          in frame            100.0% of the walk
+         silhouette          x    28% to    78%    y     6% to    89%
+         balance             x  +0.12 right   y  fills
+         to centre it        -S camera.focus=[0.069, 0.132, -0.041]
+         centred, it shows   x    25% to    75%    y    11% to    94%
+         silhouette is where the material shows, past the edges too: the
+         lit cells of a 32-column grid, lit at a hundredth of a dense cell.
+         Balance is its margins, before less after over both: 0 is even, 1
+         flush to an edge; a form that spills past one is cropped, by choice.
          radius is the 95th percentile of the walk's distance from the centre;
          box and on screen hold the middle 95% of it. On screen, 0% to 100%
          is the 16:9 frame, left to right and top to bottom

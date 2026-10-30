@@ -46,6 +46,11 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 bytemuck = { version = "1.19", features = ["derive"] }
 half = { version = "2.4", features = ["bytemuck"] }
 
+# Opening a finished render in the system's own viewer: ShellExecute on
+# Windows, `open` on macOS, xdg-open (with gio/kde fallbacks, and WSL) on Linux.
+# Each platform's rules for this are fiddly, and the crate is small.
+open = "5"
+
 # Image output
 image = "0.25"
 # Direct, for PNG text chunks: `image`'s convenience wrapper has no passthrough
@@ -65,6 +70,13 @@ rav1e = { version = "0.8.1", default-features = false, features = ["threading"] 
 # from vendored C by the default "source" feature (no system library, and no
 # nasm needed — it falls back to the C kernels).
 openh264 = "0.9"
+
+# Agent collaboration (AGENT-COLLAB-PLAN.md §2): the GUI's socket and the
+# `fracturize mcp` bridge speak JSON lines, and the local-model backend talks
+# to llama-server's OpenAI-compatible API. Blocking HTTP, no TLS (it is only
+# ever 127.0.0.1), and no async runtime.
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
 
 # Clean Ctrl-C for long renders (see src/interrupt.rs): a signal handler that
 # lets an accumulating render finish its lap and save rather than losing it.

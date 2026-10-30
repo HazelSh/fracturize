@@ -48,17 +48,6 @@ yaw = 0.0
 pitch = 1.35
 focus = [0.15, 0.0, 0.1]
 
-# One period of descent, closing on itself under the symmetry (see
-# wellspiral.toml for why a single key is exactly a constant-rate helix).
-path_zoom_loop = 1
-path_seconds = 3.0
-
-[[camera.path]]
-yaw = 0.0
-pitch = 1.35
-distance = 3.2
-focus = [0.15, 0.0, 0.1]
-
 # The symmetry: zero translation so the fixed point is the origin.
 [[transform]]
 name = "turn"
@@ -96,3 +85,16 @@ weight = 0.3
 map = "turn"
 radius = 6.0
 levels = 14
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 3.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 1.35
+distance = 3.2
+focus = [0.15, 0.0, 0.1]

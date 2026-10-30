@@ -341,7 +341,7 @@ fn draw_views(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new(err.clone())
                 .small()
-                .color(ui.visuals().warn_fg_color),
+                .color(super::theme::warn(ui.visuals())),
         );
     }
     if let Some(path) = load {
@@ -492,7 +492,7 @@ fn draw_path(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// The path's transport and shape controls, pinned below the keypoint list.
-fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, authored: bool) {
+pub(super) fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, authored: bool) {
     // One key of your own isn't a path yet, and the list above doesn't show the
     // orbit that's actually flying — so say which is which.
     if authored && flying_default {
@@ -501,13 +501,12 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
                 "Add one more keypoint to fly this path instead of the default orbit.",
             )
             .small()
-            .color(ui.visuals().warn_fg_color),
+            .color(super::theme::warn(ui.visuals())),
         );
     }
 
     let moving = app.camera_moving();
     let seconds = app.camera_path().duration();
-    let explicit_seconds = app.camera_path().seconds.is_some();
     let zoom_loop = app.path_zoom_loop();
     // A zoom loop closes under the scene's scale symmetry, so it only exists
     // when there is one to close under.
@@ -535,16 +534,13 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
         let resp = hinted(
             resp,
             &mut app.ui_state,
-            if explicit_seconds {
-                "How long the whole path takes"
-            } else {
-                "How long the whole path takes. At the moment that's the \
-                 default of 3 seconds between keypoints"
-            },
+            "How long the whole path takes. Every key's time stretches with it, \
+             so they keep their spacing; drag a key on the Timeline to retime \
+             just that one",
             "drag: set the path duration",
         );
         if resp.changed() {
-            app.set_path_seconds(Some(secs));
+            app.set_path_seconds(secs);
         }
     });
 

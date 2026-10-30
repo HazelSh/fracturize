@@ -48,6 +48,8 @@ fn main() {
         None => "unknown".to_string(),
     };
     let date = git(&["log", "-1", "--format=%cs"]).unwrap_or_default();
+    // Empty on a detached HEAD, which is also what a source tarball gets.
+    let branch = git(&["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
     let full = if date.is_empty() {
         format!("{version} ({commit})")
     } else {
@@ -56,5 +58,6 @@ fn main() {
 
     println!("cargo:rustc-env=FRACTURIZE_COMMIT={commit}");
     println!("cargo:rustc-env=FRACTURIZE_COMMIT_DATE={date}");
+    println!("cargo:rustc-env=FRACTURIZE_BRANCH={branch}");
     println!("cargo:rustc-env=FRACTURIZE_BUILD={full}");
 }

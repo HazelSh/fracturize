@@ -245,7 +245,7 @@ fn profile_bar(ui: &mut egui::Ui, app: &mut App, s: &RandomSettings) -> Option<P
         }
     }
     if let Some(e) = &app.ui_state.dice_profile_error {
-        ui.colored_label(ui.visuals().warn_fg_color, e);
+        ui.colored_label(super::theme::warn(ui.visuals()), e);
     }
     action
 }
@@ -283,16 +283,9 @@ fn sections(ui: &mut egui::Ui, st: &mut super::UiState, s: &mut RandomSettings, 
     section(ui, "Mutation step", |ui| mutation(ui, st, s));
 }
 
-/// A section: a heading that folds its table away. Open to start with, and
-/// remembered once folded.
+/// A section: a heading that folds its table away. See [`super::section`].
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    // Salted by the first word, so a title carrying a count keeps its state.
-    let salt = title.split(' ').next().unwrap_or(title).to_string();
-    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-        .id_salt(("fracturize_dice_section", salt))
-        .default_open(true)
-        .show(ui, add);
-    ui.add_space(4.0);
+    super::section(ui, "fracturize_dice_section", title, add);
 }
 
 fn caption(ui: &mut egui::Ui, text: &str) {

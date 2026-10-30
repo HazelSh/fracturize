@@ -15,14 +15,6 @@ focus = [0.0, 0.0, 0.0]
 distance = 2.6999
 yaw = 0.4885
 pitch = 1.15
-path_seconds = 3.0
-path_zoom_loop = 1
-
-[[camera.path]]
-yaw = 0.0
-pitch = 1.15
-distance = 3.6
-focus = [0.0, 0.0, 0.0]
 
 [zoom]
 map = "descent"
@@ -65,3 +57,16 @@ rotation = [154.0, -78.0, 180.0]
 color = [0.35, 0.72, 0.92]
 weight = 0.95
 color_value = 1.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 3.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 1.15
+distance = 3.6
+focus = [0.0, 0.0, 0.0]

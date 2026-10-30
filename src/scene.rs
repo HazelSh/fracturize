@@ -504,16 +504,16 @@ pub fn symmetry_blocks(
                 // Written even at their defaults: a repeat with `repeat = 8`
                 // and nothing else is a file that doesn't say what it does, and
                 // the step is the whole content of the block.
-                step: step.map(|r| r.translate.to_array().map(|v| v as f64)),
-                turn: step.map(|r| r.turn as f64),
-                shrink: step.map(|r| r.scale as f64),
+                // Tidied like a transform's numbers, so a file doesn't fill
+                // with 0.20000000298023224 and a save of a save is the same
+                // text (which is what `scene_diff` compares).
+                step: step.map(|r| r.translate.to_array().map(tidy_sig)),
+                turn: step.map(|r| tidy(r.turn)),
+                shrink: step.map(|r| tidy_sig(r.scale)),
                 // Only where it means something: writing an axis beside
                 // `group = "Icosa"` would say the polyhedral group is aimed,
                 // and it isn't.
-                axis: sym
-                    .kind()
-                    .uses_axis()
-                    .then(|| sym.axis().to_array().map(|v| v as f64)),
+                axis: sym.kind().uses_axis().then(|| tidy_rotvec(sym.axis())),
                 mirror: sym.mirror().then_some(true),
                 applies_to,
                 color: match sym.color() {
@@ -1375,8 +1375,9 @@ fn default_weight() -> f64 {
     1.0
 }
 
-/// Camera configuration from TOML
+/// Camera configuration from TOML. Its motion is the camera's `[[track]]`.
 #[derive(Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CameraDef {
     /// Orbit center / look-at point
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1418,36 +1419,6 @@ pub struct CameraDef {
     /// ordinary scenes stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotvec: Option<[f64; 3]>,
-    /// Camera path: how playback gets from the last frame back to the first —
-    /// `"once"`, `"pingpong"`, `"closed"` or `"zoom"`. Omitted means `once`.
-    /// See `path::Loop`; this is the single key that names it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_loop: Option<String>,
-    /// Camera path: zoom periods descended per loop, with `path_loop =
-    /// "zoom"`. Omitted means one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_zoom_periods: Option<u32>,
-    /// Camera path: playback/render duration in seconds (default 3s per
-    /// segment traversed — which a ping-pong does twice over)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_seconds: Option<f64>,
-    /// Camera path: ease in/out (default: the loop's own — see `path::Loop`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_ease: Option<bool>,
-    /// Legacy: the loop used to be two independent keys, `path_closed = true`
-    /// and `path_zoom_loop = <periods>`, which between them could say
-    /// "returns to the first key *and* descends a zoom period" — two
-    /// different loops at once. Both still load, below `path_loop`; neither is
-    /// ever written back, the same treatment camera `offset` gets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_closed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_zoom_loop: Option<u32>,
-    /// Camera path spline keypoints ([[camera.path]]). Omitted fields
-    /// default to the base camera's values. Must be last: TOML requires
-    /// scalar keys before sub-tables.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<Vec<PathKeyDef>>,
 }
 
 /// How far a `route` may miss the key it runs to before the scene is refused,
@@ -1461,10 +1432,14 @@ pub struct CameraDef {
 /// pixels of a 1080-tall frame.
 const ROUTE_MISS_LIMIT_DEG: f32 = 0.5;
 
-/// One [[camera.path]] spline keypoint. Every field is optional and falls
-/// back to the base [camera] framing, so a key only states what changes.
-#[derive(Deserialize, Serialize, Clone, Copy, Default)]
+/// One key of the camera's track: a view at a moment. Every field but `t` is
+/// optional and falls back to the base [camera] framing, so a key only states
+/// what changes.
+#[derive(Deserialize, Serialize, Clone, Copy, Default, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PathKeyDef {
+    /// Seconds: when the camera passes this view
+    pub t: f64,
     /// The exact framing: a rotation vector in radians. Wins over
     /// yaw/pitch/roll. See [`CameraDef::rotvec`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1740,7 +1715,8 @@ pub struct Scene {
     /// meant every framing in the app had to be one the chart could name. The
     /// conversion happens once, at the file boundary.
     pub camera_orientation: crate::rot::Orientation,
-    /// Optional spline camera path ([[camera.path]] keypoints)
+    /// The camera's track (`[[track]] target = "camera"`); `None` flies the
+    /// default orbit
     pub camera_path: Option<CameraPath>,
     /// Infinite-zoom renormalization ([zoom]), resolved to a transform index
     pub zoom: Option<crate::renorm::ZoomSpec>,
@@ -1954,176 +1930,41 @@ impl Scene {
         }
         let base_chart = folded.chart();
 
-        // Which of the four loops this path is on. `path_loop` names it
-        // outright; without it, fall back to reading the pair of legacy keys
-        // that used to. A zoom loop wins over a closed one there, matching
-        // what the old loader did when a file claimed both.
-        let loop_kind = match &cam.path_loop {
-            Some(s) => crate::path::LoopKind::parse(s).ok_or_else(|| {
-                format!(
-                    "camera.path_loop: unknown loop {:?} — expected \
-                     \"once\", \"pingpong\", \"closed\" or \"zoom\"",
-                    s
-                )
-            })?,
-            None if cam.path_zoom_loop.is_some() => crate::path::LoopKind::Zoom,
-            None if cam.path_closed == Some(true) => crate::path::LoopKind::Closed,
-            None => crate::path::LoopKind::Once,
+        // The camera's track: `[[track]] target = "camera"`. Omitted fields
+        // of a key inherit the base (folded) framing.
+        let camera_tracks: Vec<&crate::track::TrackDef> =
+            scene_file.tracks.iter().filter(|t| t.is_camera()).collect();
+        if camera_tracks.len() > 1 {
+            return Err("two camera tracks; the camera has one".to_string());
+        }
+        let (loop_kind, zoom_periods) = match camera_tracks.first() {
+            Some(t) => t.camera_loop()?,
+            None => (crate::path::LoopKind::Once, 1),
         };
-        let zoom_periods = cam
-            .path_zoom_periods
-            .or(cam.path_zoom_loop)
-            .unwrap_or(1)
-            .clamp(1, 64);
-
-        // Resolve [[camera.path]] keypoints; omitted fields inherit the base
-        // (folded) camera framing
-        let camera_path = match &cam.path {
-            Some(defs) if !defs.is_empty() => {
-                // A zoom loop is the one path that works with a single key:
-                // its closing segment runs to that key's own image under the
-                // symmetry, which is a real segment through real geometry.
-                if defs.len() < 2 && loop_kind != crate::path::LoopKind::Zoom {
-                    return Err("camera.path needs at least 2 keypoints \
-                                (or one, with path_loop = \"zoom\")"
-                        .to_string());
-                }
-                // Each key's chart, with omitted fields inherited from the
-                // base framing. Kept alongside the resolved orientations
-                // because the *route* lives here and nowhere else: a key at
-                // yaw 6.28 is the same framing as one at 0, and only the
-                // number the author wrote says a whole turn happened.
-                let charts: Vec<crate::rot::YawPitchRoll> = defs
-                    .iter()
-                    .map(|k| crate::rot::YawPitchRoll {
-                        yaw: k
-                            .yaw
-                            .map_or(base_chart.yaw, |v| crate::rot::Angle::from_radians(v as f32)),
-                        pitch: k
-                            .pitch
-                            .map_or(base_chart.pitch, |v| crate::rot::Angle::from_radians(v as f32)),
-                        roll: k
-                            .roll
-                            .map_or(base_chart.roll, |v| crate::rot::Angle::from_radians(v as f32)),
-                    })
-                    .collect();
-
-                let keys: Vec<PathKey> = defs
-                    .iter()
-                    .zip(&charts)
-                    .map(|(k, c)| PathKey {
-                        orientation: match k.rotvec {
-                            Some(v) => crate::rot::Turn::from_rotation_vector(Vec3::from(
-                                v.map(|x| x as f32),
-                            ))
-                            .exp(),
-                            None => crate::rot::Orientation::from_yaw_pitch_roll(
-                                c.yaw, c.pitch, c.roll,
-                            ),
-                        },
-                        distance: k.distance.map(|v| v as f32).unwrap_or(folded.distance),
-                        focus: k
-                            .focus
-                            .map(|f| Vec3::from(f.map(|v| v as f32)))
-                            .unwrap_or(camera_focus),
-                    })
-                    .collect();
-
-                let closed = matches!(
-                    loop_kind,
-                    crate::path::LoopKind::Closed | crate::path::LoopKind::Zoom
-                );
-                let n = keys.len();
-                let segments = match (n, closed) {
-                    (0, _) => 0,
-                    (1, _) => 0,
-                    (n, true) => n,
-                    (n, false) => n - 1,
-                };
-                // An explicit `route` is the journey itself and wins over
-                // everything; then an explicit `turns`; otherwise read the
-                // route off the chart the author drew. A key written as an
-                // exact rotvec has no chart to read, so it takes the short way
-                // unless told.
-                let routes: Vec<crate::path::Route> = (0..segments)
-                    .map(|i| {
-                        let j = (i + 1) % n;
-                        if let Some(v) = defs[i].route {
-                            if defs[i].turns.is_some() {
-                                log::warn!(
-                                    "camera.path key {}: both `route` and `turns` given; \
-                                     the route is the exact journey, so `turns` is ignored",
-                                    i + 1
-                                );
-                            }
-                            return crate::path::Route::Exact(
-                                crate::rot::Turn::from_rotation_vector(Vec3::from(
-                                    v.map(|x| x as f32),
-                                )),
-                            );
-                        }
-                        crate::path::Route::Turns(match defs[i].turns {
-                            Some(t) => t,
-                            // A closed path's last segment is the one nobody
-                            // wrote: it runs back to key 0, and the documented
-                            // convention is that it takes the shortest way
-                            // there. Reading the literal jump from the last
-                            // key's yaw to the first would send a corkscrew
-                            // all the way back round the way it came.
-                            None if j < i => 0,
-                            None if defs[i].rotvec.is_some() || defs[j].rotvec.is_some() => 0,
-                            None => crate::rot::winding_from_chart(charts[i], charts[j]),
-                        })
-                    })
-                    .collect();
-
-                // A stored displacement can disagree with the keys it connects
-                // — the one thing a winding integer could never do — so it is
-                // checked here, once, before anything flies it.
-                for (i, r) in routes.iter().enumerate() {
-                    if let crate::path::Route::Exact(t) = r {
-                        let j = (i + 1) % n;
-                        let miss = keys[i]
-                            .orientation
-                            .then_body(*t)
-                            .angle_to(keys[j].orientation)
-                            .to_degrees();
-                        if miss > ROUTE_MISS_LIMIT_DEG {
-                            let v = defs[i].route.unwrap_or_default();
-                            return Err(format!(
-                                "camera.path key {}: route = [{}, {}, {}] does not arrive at \
-                                 key {} — it misses by {:.2}°. A route is the exact journey \
-                                 between two framings, so either the route or the framing it \
-                                 runs to is wrong.",
-                                i + 1,
-                                v[0],
-                                v[1],
-                                v[2],
-                                j + 1,
-                                miss
-                            ));
-                        }
-                    }
-                }
-
+        let camera_path = match camera_tracks.first() {
+            Some(track) => {
+                let defs = track.camera_keys()?;
+                let (keys, routes) =
+                    camera_keys(&defs, loop_kind, base_chart, folded.distance, camera_focus)?;
                 Some(CameraPath {
                     keys,
                     routes,
                     loops: match loop_kind {
-                        crate::path::LoopKind::Once => crate::path::Loop::Once,
                         crate::path::LoopKind::PingPong => crate::path::Loop::PingPong,
                         crate::path::LoopKind::Closed => crate::path::Loop::Closed,
                         // A zoom loop's similarity comes from [zoom], which
-                        // hasn't been resolved yet. Fixed up below, and the
-                        // block that does it errors rather than leaving this
-                        // standing if the scene has no map to close under.
-                        crate::path::LoopKind::Zoom => crate::path::Loop::Once,
+                        // hasn't been resolved yet: fixed up below, which
+                        // refuses the scene if there is no map to close under.
+                        crate::path::LoopKind::Once | crate::path::LoopKind::Zoom => {
+                            crate::path::Loop::Once
+                        }
                     },
-                    ease: cam.path_ease,
-                    seconds: cam.path_seconds.map(|v| v as f32),
+                    ease: track.ease,
+                    times: defs.iter().map(|d| d.t as f32).collect(),
+                    period: track.camera_period()?,
                 })
             }
-            _ => None,
+            None => None,
         };
 
         let mut camera_path = camera_path;
@@ -2153,18 +1994,17 @@ impl Scene {
         // only be resolved once that map is known.
         if loop_kind == crate::path::LoopKind::Zoom {
             let spec = zoom.as_ref().ok_or_else(|| {
-                "camera.path_loop = \"zoom\" needs a [zoom] map: the loop closes under \
-                 the scene's scale symmetry, and without one there is no symmetry \
-                 to close under"
+                "the camera's zoom loop (extrapolate = \"offset\") needs a [zoom] map: \
+                 the loop closes under the scene's scale symmetry, and without one \
+                 there is no symmetry to close under"
                     .to_string()
             })?;
             let renorm = crate::renorm::Renorm::build(spec, &transforms, folded.distance)
-                .map_err(|e| format!("camera.path_loop: {}", e))?;
+                .map_err(|e| format!("the camera's zoom loop: {}", e))?;
             if let Some(path) = camera_path.as_mut() {
                 path.loops = crate::path::Loop::Zoom(renorm.loop_similarity(zoom_periods));
             }
         }
-
         // Subscenes are appended after the scene's own maps, one layer each,
         // so the transform list stays grouped by layer.
         let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -2521,12 +2361,6 @@ impl Scene {
                 visible: (!self.root_visible).then_some(false),
             },
             camera: Some({
-                // A 1-key path is a transient in-app authoring state; the
-                // loader requires 2+ keys, so don't write it out
-                let path = self
-                    .camera_path
-                    .as_ref()
-                    .filter(|p| p.playable());
                 let base_chart = self.camera_orientation.yaw_pitch_roll();
                 let chartable = self.camera_orientation.chart_is_faithful();
                 CameraDef {
@@ -2560,23 +2394,6 @@ impl Scene {
                                 .as_rotation_vector(),
                         )
                     }),
-                    // One key names the loop, and `once` is the default, so
-                    // an ordinary path never mentions it at all.
-                    path_loop: path
-                        .map(|p| p.loops.kind())
-                        .filter(|k| *k != crate::path::LoopKind::Once)
-                        .map(|k| k.as_str().to_string()),
-                    path_zoom_periods: path
-                        .and_then(|p| p.loops.zoom().map(|z| z.periods))
-                        .filter(|n| *n != 1),
-                    // The two keys `path_loop` replaced. Read on load, never
-                    // written — like camera `offset`, leaving them would let a
-                    // stale one contradict the key that now decides.
-                    path_closed: None,
-                    path_zoom_loop: None,
-                    path_seconds: path.and_then(|p| p.seconds.map(tidy)),
-                    path_ease: path.and_then(|p| p.ease),
-                    path: path.map(path_keys_to_defs),
                 }
             }),
             // Written whenever the scene has one, even in `transforms` mode —
@@ -2609,7 +2426,16 @@ impl Scene {
             xaos: matrix_form.then(|| xaos_matrix_def(&root_specs, &root_names)).flatten(),
             transforms,
             subscenes: (1..=self.subscenes.len()).map(|k| self.subscene_def(k)).collect(),
-            tracks: self.tracks.iter().map(crate::track::Track::to_def).collect(),
+            // The camera's track first, then the rest: it is the one every
+            // scene with motion has, and the others are read against it.
+            tracks: self
+                .camera_path
+                .as_ref()
+                .filter(|p| p.playable())
+                .map(camera_track_def)
+                .into_iter()
+                .chain(self.tracks.iter().map(crate::track::Track::to_def))
+                .collect(),
         }
     }
 
@@ -3044,6 +2870,47 @@ fn tidy_rotvec(v: Vec3) -> [f64; 3] {
     v.to_array().map(|x| (x as f64 * 1e6).round() / 1e6 + 0.0)
 }
 
+/// The camera's track as the file writes it: a view at a moment per key, and
+/// how it loops as an extrapolation — the same words every track uses.
+///
+/// A 1-key path is a transient in-app authoring state the loader refuses, so
+/// callers only pass a playable one.
+fn camera_track_def(p: &CameraPath) -> crate::track::TrackDef {
+    use crate::path::LoopKind;
+    use crate::track::Extrapolate;
+    let extrapolate = match p.loops.kind() {
+        LoopKind::Once => None,
+        LoopKind::PingPong => Some(Extrapolate::PingPong),
+        LoopKind::Closed => Some(Extrapolate::Repeat),
+        LoopKind::Zoom => Some(Extrapolate::Offset),
+    };
+    let times = p.key_times();
+    let keys = path_keys_to_defs(p)
+        .into_iter()
+        .zip(times)
+        .map(|(k, t)| crate::track::KeyDef::View(PathKeyDef { t: tidy_time(t), ..k }))
+        .collect();
+    crate::track::TrackDef {
+        target: crate::track::CAMERA.to_string(),
+        extrapolate: extrapolate.map(|e| e.as_str().to_string()),
+        period: p
+            .loops
+            .closes()
+            .then(|| toml::Value::Float(tidy_time(p.lap()))),
+        zoom_periods: p.loops.zoom().map(|z| z.periods).filter(|n| *n != 1),
+        ease: p.ease,
+        keys: Some(keys),
+        ..Default::default()
+    }
+}
+
+/// A time in seconds, for the file: to a tenth of a millisecond. Finer than
+/// any frame, and fine enough that a migrated path's evenly spaced keys (14 s
+/// over six keys is 2.33333…) stay even enough to fly where they did.
+fn tidy_time(t: f32) -> f64 {
+    (t as f64 * 10000.0).round() / 10000.0 + 0.0
+}
+
 /// Write a path's keys in the most readable form that still round-trips.
 ///
 /// Two tiers. Ordinary paths get yaw/pitch/roll, as they always have, with the
@@ -3131,6 +2998,147 @@ fn path_keys_to_defs(p: &CameraPath) -> Vec<PathKeyDef> {
             }
         })
         .collect()
+}
+
+/// A camera track's keys as framings, and the route each segment takes.
+fn camera_keys(
+    defs: &[PathKeyDef],
+    loop_kind: crate::path::LoopKind,
+    base_chart: crate::rot::YawPitchRoll,
+    base_distance: f32,
+    camera_focus: Vec3,
+) -> Result<(Vec<PathKey>, Vec<crate::path::Route>), String> {
+    let who = "the camera track";
+    // A zoom loop is the one path that works with a single key: its closing
+    // segment runs to that key's own image under the symmetry, which is a
+    // real segment through real geometry.
+    if defs.len() < 2 && loop_kind != crate::path::LoopKind::Zoom {
+        return Err(format!(
+            "{who} needs at least 2 keys (or one, looping as a zoom)"
+        ));
+    }
+    // Each key's chart, with omitted fields inherited from the
+    // base framing. Kept alongside the resolved orientations
+    // because the *route* lives here and nowhere else: a key at
+    // yaw 6.28 is the same framing as one at 0, and only the
+    // number the author wrote says a whole turn happened.
+    let charts: Vec<crate::rot::YawPitchRoll> = defs
+        .iter()
+        .map(|k| crate::rot::YawPitchRoll {
+            yaw: k
+                .yaw
+                .map_or(base_chart.yaw, |v| crate::rot::Angle::from_radians(v as f32)),
+            pitch: k
+                .pitch
+                .map_or(base_chart.pitch, |v| crate::rot::Angle::from_radians(v as f32)),
+            roll: k
+                .roll
+                .map_or(base_chart.roll, |v| crate::rot::Angle::from_radians(v as f32)),
+        })
+        .collect();
+
+    let keys: Vec<PathKey> = defs
+        .iter()
+        .zip(&charts)
+        .map(|(k, c)| PathKey {
+            orientation: match k.rotvec {
+                Some(v) => crate::rot::Turn::from_rotation_vector(Vec3::from(
+                    v.map(|x| x as f32),
+                ))
+                .exp(),
+                None => crate::rot::Orientation::from_yaw_pitch_roll(
+                    c.yaw, c.pitch, c.roll,
+                ),
+            },
+            distance: k.distance.map(|v| v as f32).unwrap_or(base_distance),
+            focus: k
+                .focus
+                .map(|f| Vec3::from(f.map(|v| v as f32)))
+                .unwrap_or(camera_focus),
+        })
+        .collect();
+
+    let closed = matches!(
+        loop_kind,
+        crate::path::LoopKind::Closed | crate::path::LoopKind::Zoom
+    );
+    let n = keys.len();
+    let segments = match (n, closed) {
+        (0, _) => 0,
+        (1, _) => 0,
+        (n, true) => n,
+        (n, false) => n - 1,
+    };
+    // An explicit `route` is the journey itself and wins over
+    // everything; then an explicit `turns`; otherwise read the
+    // route off the chart the author drew. A key written as an
+    // exact rotvec has no chart to read, so it takes the short way
+    // unless told.
+    let routes: Vec<crate::path::Route> = (0..segments)
+        .map(|i| {
+            let j = (i + 1) % n;
+            if let Some(v) = defs[i].route {
+                if defs[i].turns.is_some() {
+                    log::warn!(
+                        "{} key {}: both `route` and `turns` given; \
+                         the route is the exact journey, so `turns` is ignored",
+                        who,
+                        i + 1
+                    );
+                }
+                return crate::path::Route::Exact(
+                    crate::rot::Turn::from_rotation_vector(Vec3::from(
+                        v.map(|x| x as f32),
+                    )),
+                );
+            }
+            crate::path::Route::Turns(match defs[i].turns {
+                Some(t) => t,
+                // A closed path's last segment is the one nobody
+                // wrote: it runs back to key 0, and the documented
+                // convention is that it takes the shortest way
+                // there. Reading the literal jump from the last
+                // key's yaw to the first would send a corkscrew
+                // all the way back round the way it came.
+                None if j < i => 0,
+                None if defs[i].rotvec.is_some() || defs[j].rotvec.is_some() => 0,
+                None => crate::rot::winding_from_chart(charts[i], charts[j]),
+            })
+        })
+        .collect();
+
+    // A stored displacement can disagree with the keys it connects
+    // — the one thing a winding integer could never do — so it is
+    // checked here, once, before anything flies it.
+    for (i, r) in routes.iter().enumerate() {
+        if let crate::path::Route::Exact(t) = r {
+            let j = (i + 1) % n;
+            let miss = keys[i]
+                .orientation
+                .then_body(*t)
+                .angle_to(keys[j].orientation)
+                .to_degrees();
+            if miss > ROUTE_MISS_LIMIT_DEG {
+                let v = defs[i].route.unwrap_or_default();
+                return Err(format!(
+                    "{} key {}: route = [{}, {}, {}] does not arrive at \
+                     key {} — it misses by {:.2}°. A route is the exact journey \
+                     between two framings, so either the route or the framing it \
+                     runs to is wrong.",
+                    who,
+                    i + 1,
+                    v[0],
+                    v[1],
+                    v[2],
+                    j + 1,
+                    miss
+                ));
+            }
+        }
+    }
+
+
+    Ok((keys, routes))
 }
 
 // === Comment-preserving merge helpers ===
@@ -3379,103 +3387,6 @@ fn merge_scene_into_document(
         // Folded into yaw/pitch/distance at load; leaving it would
         // double-apply on the next load
         camera.remove("offset");
-
-        // The loop, in the one key that names it. The two legacy keys go the
-        // way `offset` does: removed, so a stale `path_closed = true` can't
-        // sit next to a `path_loop` that says otherwise.
-        //
-        // (`path_zoom_loop` was never written here at all, which meant turning
-        // a zoom loop on and pressing Ctrl+S over an existing file silently
-        // dropped it — the merge path only wrote keys it had a case for.)
-        camera.remove("path_closed");
-        camera.remove("path_zoom_loop");
-        match &cam.path_loop {
-            Some(s) => set_str(camera, "path_loop", s),
-            None => {
-                camera.remove("path_loop");
-            }
-        }
-        match cam.path_zoom_periods {
-            Some(n) => set_i64(camera, "path_zoom_periods", n as i64, None),
-            None => {
-                camera.remove("path_zoom_periods");
-            }
-        }
-        match cam.path_seconds {
-            Some(s) => set_f64(camera, "path_seconds", s, None),
-            None => {
-                camera.remove("path_seconds");
-            }
-        }
-        match cam.path_ease {
-            Some(b) => set_bool(camera, "path_ease", b),
-            None => {
-                camera.remove("path_ease");
-            }
-        }
-        match &cam.path {
-            None => {
-                camera.remove("path");
-            }
-            Some(keys) => {
-                let existing = camera
-                    .get("path")
-                    .and_then(|i| i.as_array_of_tables())
-                    .map(|a| a.len());
-                if existing == Some(keys.len()) {
-                    // Same key count: update values in place (keeps comments)
-                    let arr = camera.get_mut("path")?.as_array_of_tables_mut()?;
-                    for (t, def) in arr.iter_mut().zip(keys) {
-                        if let Some(y) = def.yaw {
-                            set_f64(t, "yaw", y, None);
-                        }
-                        if let Some(p) = def.pitch {
-                            set_f64(t, "pitch", p, None);
-                        }
-                        if let Some(d) = def.distance {
-                            set_f64(t, "distance", d, None);
-                        }
-                        if let Some(f) = def.focus {
-                            set_arr3(t, "focus", f, None);
-                        }
-                        match def.roll {
-                            Some(r) => set_f64(t, "roll", r, Some(0.0)),
-                            None => {
-                                t.remove("roll");
-                            }
-                        }
-                        // The route out of this key. Not a framing like the
-                        // fields above — it says which way the segment
-                        // *travels* — and it has to be written here too, or
-                        // saving over an existing file with the same number of
-                        // keys drops the corkscrew and quietly straightens the
-                        // shot. Both spellings are rewritten from what the
-                        // path actually holds, so the file can never end up
-                        // with a `turns` and a `route` disagreeing.
-                        match def.turns {
-                            Some(n) => set_i64(t, "turns", n as i64, None),
-                            None => {
-                                t.remove("turns");
-                            }
-                        }
-                        match def.route {
-                            Some(r) => set_arr3(t, "route", r, None),
-                            None => {
-                                t.remove("route");
-                            }
-                        }
-                    }
-                } else {
-                    // Key count changed: rebuild from the fresh serialization
-                    let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
-                    camera["path"] = fresh_doc
-                        .get("camera")
-                        .and_then(|c| c.as_table())
-                        .and_then(|c| c.get("path"))?
-                        .clone();
-                }
-            }
-        }
     }
 
     // The band. This used to be missing entirely, which meant editing the zoom
@@ -3541,12 +3452,13 @@ fn merge_scene_into_document(
     // Tracks too: the timeline adds, removes and re-keys them, and a key list
     // is one value. Removed *before* the early return below, so a pure
     // composite doesn't keep tracks that were deleted.
-    doc.remove("track");
+    let old_tracks = doc.remove("track");
+    let keep = old_tracks;
     // A pure composite has no maps of its own; drop the array rather than
     // leave the ones that were edited away.
     if file.transforms.is_empty() {
         doc.remove("transform");
-        append_tracks(&mut doc, file, fresh)?;
+        append_tracks(&mut doc, file, fresh, &keep)?;
         return Some(doc.to_string());
     }
 
@@ -3618,18 +3530,100 @@ fn merge_scene_into_document(
         doc["transform"] = fresh_doc.get("transform")?.clone();
     }
 
-    append_tracks(&mut doc, file, fresh)?;
+    append_tracks(&mut doc, file, fresh, &keep)?;
     Some(doc.to_string())
 }
 
 /// The `[[track]]` tables from the fresh serialization, after everything they
 /// name. `merge_scene_into_document` removed the old ones.
-fn append_tracks(doc: &mut toml_edit::DocumentMut, file: &SceneFile, fresh: &str) -> Option<()> {
-    if !file.tracks.is_empty() {
-        let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
-        doc["track"] = fresh_doc.get("track")?.clone();
+///
+/// Rebuilt wholesale, since the timeline adds, removes and re-keys them, but
+/// the comments come back: each track's own from the old track on the same
+/// target, and each key's from the old key in the same place when the count
+/// is unchanged — winze's "deep in the gold sediment" stays on the key it
+/// describes.
+fn append_tracks(
+    doc: &mut toml_edit::DocumentMut,
+    file: &SceneFile,
+    fresh: &str,
+    old: &Option<toml_edit::Item>,
+) -> Option<()> {
+    if file.tracks.is_empty() {
+        return Some(());
     }
+    let fresh_doc: toml_edit::DocumentMut = fresh.parse().ok()?;
+    let mut tracks = fresh_doc.get("track")?.clone();
+    let old = old.as_ref().and_then(|o| o.as_array_of_tables());
+    if let Some(arr) = tracks.as_array_of_tables_mut() {
+        for t in arr.iter_mut() {
+            let target = t.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let before = old.and_then(|o| {
+                o.iter().find(|ot| ot.get("target").and_then(|v| v.as_str()) == Some(&target))
+            });
+            if let Some(b) = before {
+                *t.decor_mut() = b.decor().clone();
+            }
+            let old_keys: Vec<toml_edit::Decor> = before
+                .and_then(|b| b.get("keys"))
+                .and_then(|k| k.as_array_of_tables())
+                .map(|a| a.iter().map(|k| k.decor().clone()).collect())
+                .unwrap_or_default();
+            if let Some(keys) = t.get_mut("keys").and_then(|k| k.as_array_of_tables_mut()) {
+                if keys.len() == old_keys.len() {
+                    for (k, d) in keys.iter_mut().zip(old_keys) {
+                        *k.decor_mut() = d;
+                    }
+                }
+            }
+        }
+    }
+    doc["track"] = tracks;
+    place_last(doc, "track");
     Some(())
+}
+
+/// Give `doc[key]`'s tables (and theirs, a track's `[[track.keys]]`) document
+/// positions after everything else, in order.
+///
+/// A table toml_edit parsed out of another document keeps that document's
+/// positions, and rendering sorts by position — so tables lifted from a fresh
+/// serialization came out interleaved with the file's own (a camera key among
+/// the `[[transform]]`s). Tracks are last in the file by convention, because
+/// they name what is above them.
+fn place_last(doc: &mut toml_edit::DocumentMut, key: &str) {
+    fn max_position(t: &toml_edit::Table, acc: &mut usize) {
+        if let Some(p) = t.position() {
+            *acc = (*acc).max(p);
+        }
+        for (_, item) in t.iter() {
+            match item {
+                toml_edit::Item::Table(sub) => max_position(sub, acc),
+                toml_edit::Item::ArrayOfTables(a) => a.iter().for_each(|sub| max_position(sub, acc)),
+                _ => {}
+            }
+        }
+    }
+    fn renumber(t: &mut toml_edit::Table, next: &mut usize) {
+        t.set_position(*next);
+        *next += 1;
+        for (_, item) in t.iter_mut() {
+            match item {
+                toml_edit::Item::Table(sub) => renumber(sub, next),
+                toml_edit::Item::ArrayOfTables(a) => a.iter_mut().for_each(|sub| renumber(sub, next)),
+                _ => {}
+            }
+        }
+    }
+    let Some(moved) = doc.remove(key) else { return };
+    let mut last = 0;
+    max_position(doc.as_table(), &mut last);
+    doc[key] = moved;
+    let mut next = last + 1;
+    match &mut doc[key] {
+        toml_edit::Item::ArrayOfTables(a) => a.iter_mut().for_each(|t| renumber(t, &mut next)),
+        toml_edit::Item::Table(t) => renumber(t, &mut next),
+        _ => {}
+    }
 }
 
 /// Rewrite each `[transform.variations]` sub-table as an inline
@@ -4005,6 +3999,31 @@ color = [0.2, 0.5, 1.0]
     /// Saving over an existing file goes through the comment-preserving merge,
     /// which is a different path from a fresh write — and the one that has
     /// historically dropped whole tables (`[zoom]`, `path_zoom_loop`).
+    #[test]
+    fn a_save_of_a_save_is_the_same_text() {
+        // An axis that isn't unit length, and a step an f32 can't hold
+        // exactly: normalizing again on every load moved the axis's last bit
+        // and the step came out as 0.20000000298023224, so a tweak sent back
+        // through the window diffed as "symmetry rewritten" against its option.
+        for (tag, block) in [
+            (
+                "repeat",
+                "\n[[symmetry]]\nrepeat = 12\naxis = [0.0, 1.0, 0.3]\nstep = [-0.2, -0.03, 0.04]\n\
+                 turn = 17.0\nshrink = 0.88\napplies_to = [\"petal\"]\n",
+            ),
+            ("dihedral", "\n[[symmetry]]\ngroup = \"D3\"\naxis = [0.3, 0.9, -0.2]\napplies_to = [\"petal\"]\n"),
+        ] {
+            let once = load_str(&two_motif_scene(block), tag).unwrap().to_toml_string().unwrap();
+            let twice = load_str(&once, tag).unwrap().to_toml_string().unwrap();
+            let thrice = load_str(&twice, tag).unwrap().to_toml_string().unwrap();
+            assert_eq!(once, twice, "{tag}: the second save differs from the first");
+            assert_eq!(twice, thrice, "{tag}");
+            if tag == "repeat" {
+                assert!(once.contains("step = [-0.2, -0.03, 0.04]"), "{tag}: {once}");
+            }
+        }
+    }
+
     #[test]
     fn a_save_over_an_existing_file_keeps_the_symmetry() {
         let tmp = std::env::temp_dir().join("fracturize-sym-merge.toml");
@@ -5029,11 +5048,6 @@ name = "Looper"
 [camera]
 distance = 3.6
 pitch = 1.1
-path_zoom_loop = 2
-path_seconds = 12.0
-
-[[camera.path]]
-yaw = 0.0
 
 {zoom}
 
@@ -5043,6 +5057,16 @@ translation = [0.0, 0.0, 0.0]
 scale = 0.6
 rotation = [0.0, 34.0, 0.0]
 color = [0.3, 0.5, 0.8]
+
+[[track]]
+target = "camera"
+extrapolate = "offset"
+zoom_periods = 2
+period = 12.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
 "#
         );
 
@@ -5178,89 +5202,6 @@ color = [0.9, 0.5, 0.3]
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The loop is one key now (`path_loop`), and it has to survive the merge
-    /// save that writes over an existing file — which is where the pair of
-    /// keys it replaced went wrong. `path_zoom_loop` was never written by the
-    /// merge path at all, so turning a zoom loop on and pressing Ctrl+S on a
-    /// scene loaded from disk silently dropped it.
-    #[test]
-    fn the_loop_survives_a_merge_save() {
-        let src = r#"
-[meta]
-name = "Looper"
-
-[camera]
-distance = 3.6
-pitch = 1.1
-path_zoom_loop = 2      # legacy spelling
-
-[[camera.path]]
-yaw = 0.0
-
-[zoom]
-map = "descent"
-
-[[transform]]
-name = "descent"
-translation = [0.0, 0.0, 0.0]
-scale = 0.6
-rotation = [0.0, 34.0, 0.0]
-color = [0.3, 0.5, 0.8]
-"#;
-        let dir = std::env::temp_dir().join("fracturize_loop_merge_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("looper.toml");
-        std::fs::write(&path, src).unwrap();
-
-        // Legacy key loads...
-        let scene = Scene::load(&path).unwrap();
-        assert_eq!(
-            scene.camera_path.as_ref().unwrap().loops.zoom().unwrap().periods,
-            2
-        );
-
-        // ...and saving over the file migrates it rather than dropping it.
-        scene.save(&path).unwrap();
-        let out = std::fs::read_to_string(&path).unwrap();
-        assert!(out.contains(r#"path_loop = "zoom""#), "{}", out);
-        assert!(out.contains("path_zoom_periods = 2"), "{}", out);
-        assert!(!out.contains("path_zoom_loop"), "{}", out);
-        assert_eq!(
-            Scene::load(&path).unwrap().camera_path.unwrap().loops.zoom().unwrap().periods,
-            2
-        );
-
-        // A ping-pong is the same round trip, through a mode the pair of flags
-        // could not have expressed at all.
-        let pong = dir.join("pong.toml");
-        std::fs::write(
-            &pong,
-            src.replace("path_zoom_loop = 2      # legacy spelling", "path_loop = \"pingpong\"")
-                .replace("[[camera.path]]\nyaw = 0.0", "[[camera.path]]\nyaw = 0.0\n\n[[camera.path]]\nyaw = 1.0"),
-        )
-        .unwrap();
-        let scene = Scene::load(&pong).unwrap();
-        assert_eq!(scene.camera_path.as_ref().unwrap().loops, crate::path::Loop::PingPong);
-        scene.save(&pong).unwrap();
-        assert!(std::fs::read_to_string(&pong).unwrap().contains(r#"path_loop = "pingpong""#));
-        assert_eq!(
-            Scene::load(&pong).unwrap().camera_path.unwrap().loops,
-            crate::path::Loop::PingPong
-        );
-
-        // An unknown loop is a load error, not a silent fall-back to `once`:
-        // a scene that quietly played the wrong way would be worse than one
-        // that refused to load.
-        let bad = dir.join("bad.toml");
-        std::fs::write(&bad, src.replace("path_zoom_loop = 2", "path_loop = \"bounce\"")).unwrap();
-        match Scene::load(&bad) {
-            Err(e) => assert!(e.contains("path_loop"), "{}", e),
-            Ok(_) => panic!("an unknown path_loop should not load"),
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     #[test]
     fn a_route_says_what_a_winding_cannot_and_is_checked_against_its_keys() {
         let src = r#"
@@ -5273,16 +5214,21 @@ distance = 3.0
 yaw = 0.0
 pitch = 0.0
 
-# two full turns of pitch, ending where it began
-[[camera.path]]
-route = [12.566371, 0.0, 0.0]
-
-[[camera.path]]
-
 [[transform]]
 translation = [0.0, 0.0, 0.5]
 scale = 0.5
 color = [1.0, 0.2, 0.2]
+
+[[track]]
+target = "camera"
+
+# two full turns of pitch, ending where it began
+[[track.keys]]
+t = 0.0
+route = [12.566371, 0.0, 0.0]
+
+[[track.keys]]
+t = 3.0
 "#;
         let dir = std::env::temp_dir().join("fracturize_route_test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -5327,95 +5273,93 @@ color = [1.0, 0.2, 0.2]
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The camera's own track: views at moments, its loop an extrapolation.
+    /// Loads, flies through its keys at their times, and comes back the same
+    /// from a save; a misspelled loop or a key from the old form is refused.
     #[test]
-    fn camera_path_roundtrip() {
+    fn the_camera_track_round_trips() {
         let src = r#"
 [meta]
-name = "Pathed"
+name = "Tracked"
 
 [camera]
-focus = [0.0, 0.2, 0.0]
-distance = 3.0
-yaw = 0.5
+distance = 4.0
 pitch = 0.3
-path_closed = true
-path_seconds = 8.0
-
-# approach from afar
-[[camera.path]]
-yaw = 0.0
-distance = 6.0
-
-[[camera.path]]
-yaw = 3.14
-pitch = 0.6
-focus = [0.0, 0.5, 0.0]
-
-[[camera.path]]
-yaw = 6.28
-distance = 1.5
 
 [[transform]]
 translation = [0.0, 0.0, 0.5]
 scale = 0.5
 color = [1.0, 0.2, 0.2]
+
+[[track]]
+target = "camera"
+extrapolate = "repeat"
+period = 12.0
+
+# from above
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 0.9
+
+# low, close, a quarter later than even
+[[track.keys]]
+t = 2.0
+yaw = 2.0
+distance = 2.0
+focus = [0.0, -0.5, 0.0]
+
+[[track.keys]]
+t = 7.0
+yaw = 4.0
+
+[[track]]
+target = "meta.haze"
+keys = [[0.0, 0.0], [6.0, 0.5]]
 "#;
-        let dir = std::env::temp_dir().join("fracturize_path_test");
+        let dir = std::env::temp_dir().join("fracturize_camera_track_test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pathed.toml");
+        let path = dir.join("tracked.toml");
         std::fs::write(&path, src).unwrap();
 
         let scene = Scene::load(&path).unwrap();
-        let p = scene.camera_path.as_ref().expect("path parsed");
-        assert_eq!(p.keys.len(), 3);
+        let p = scene.camera_path.as_ref().expect("the camera's track");
         assert_eq!(p.loops, crate::path::Loop::Closed);
-        assert_eq!(p.seconds, Some(8.0));
-        // Omitted fields inherit the base camera
-        assert!(
-            (p.keys[0].orientation.yaw_pitch_roll().pitch.radians() - 0.3).abs() < 1e-5,
-            "pitch inherits base"
-        );
-        assert!((p.keys[0].focus - Vec3::new(0.0, 0.2, 0.0)).length() < 1e-6);
-        assert!((p.keys[1].distance - 3.0).abs() < 1e-6, "distance inherits base");
-        assert!((p.keys[1].focus - Vec3::new(0.0, 0.5, 0.0)).length() < 1e-6);
+        assert_eq!(p.key_times(), vec![0.0, 2.0, 7.0]);
+        assert_eq!(p.duration(), 12.0);
+        assert!((p.keys[1].distance - 2.0).abs() < 1e-6);
+        assert!((p.keys[2].distance - 4.0).abs() < 1e-6, "omitted fields inherit [camera]");
+        let at2 = p.sample_at(2.0, crate::camera::Fov::default());
+        assert!(at2.orientation.angle_to(p.keys[1].orientation) < 1e-4);
+        assert_eq!(scene.tracks.len(), 1, "the haze track is an ordinary track");
 
-        // Merge-save keeps the path (and its comment); values survive a reload
         scene.save(&path).unwrap();
         let out = std::fs::read_to_string(&path).unwrap();
-        assert!(out.contains("# approach from afar"), "{}", out);
-        assert!(out.contains("[[camera.path]]"), "{}", out);
-        // The legacy `path_closed` is migrated to the one key that names the
-        // loop, and removed — leaving it would let a stale flag contradict the
-        // key that now decides. Same treatment camera `offset` gets.
-        assert!(out.contains(r#"path_loop = "closed""#), "{}", out);
-        assert!(!out.contains("path_closed"), "{}", out);
-        let reloaded = Scene::load(&path).unwrap();
-        let q = reloaded.camera_path.as_ref().unwrap();
-        assert_eq!(q.keys.len(), 3);
-        assert_eq!(q.loops, crate::path::Loop::Closed);
+        assert!(out.contains("# low, close, a quarter later than even"), "{out}");
+        assert!(out.find(r#"target = "camera""#) < out.find(r#"target = "meta.haze""#), "{out}");
+        let again = Scene::load(&path).unwrap();
+        let q = again.camera_path.as_ref().unwrap();
+        assert_eq!(q.key_times(), p.key_times());
+        assert_eq!(q.period, p.period);
         for (a, b) in p.keys.iter().zip(&q.keys) {
             assert!(a.orientation.angle_to(b.orientation) < 1e-3);
-            assert!((a.distance - b.distance).abs() < 1e-3);
-            assert!((a.focus - b.focus).length() < 1e-3);
         }
-        // Routes survive too, or a corkscrew quietly unwinds on save.
-        assert_eq!(p.routes, q.routes, "routes must round-trip");
+        assert_eq!(again.tracks, scene.tracks);
 
-        // Fresh save (new file) round-trips too
-        let fresh_path = dir.join("fresh.toml");
-        scene.save(&fresh_path).unwrap();
-        let fresh = Scene::load(&fresh_path).unwrap();
-        assert_eq!(fresh.camera_path.as_ref().unwrap().keys.len(), 3);
-
-        // A scene without a path stays path-free after save
-        let no_path = {
-            let p2 = dir.join("nopath.toml");
-            std::fs::write(&p2, "[meta]\nname = \"n\"\n\n[[transform]]\ntranslation = [0.0, 0.0, 0.5]\nscale = 0.5\ncolor = [1.0, 1.0, 1.0]\n").unwrap();
-            let s = Scene::load(&p2).unwrap();
-            s.save(&p2).unwrap();
-            Scene::load(&p2).unwrap()
-        };
-        assert!(no_path.camera_path.is_none());
+        // The camera's old keys are gone: a file still carrying one is
+        // refused by name rather than quietly losing its path.
+        let old = dir.join("old.toml");
+        std::fs::write(&old, src.replace("[camera]\n", "[camera]\npath_seconds = 4.0\n")).unwrap();
+        assert!(Scene::load(&old).is_err_and(|e| e.contains("path_seconds")));
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, src.replace("extrapolate = \"repeat\"", "extrapolate = \"bounce\"")).unwrap();
+        assert!(Scene::load(&bad).is_err_and(|e| e.contains("bounce")));
+        let late = dir.join("late.toml");
+        std::fs::write(&late, src.replace("t = 7.0", "t = 1.0")).unwrap();
+        assert!(Scene::load(&late).is_err_and(|e| e.contains("time order")));
+        let short = dir.join("short.toml");
+        std::fs::write(&short, src.replace("period = 12.0", "period = 6.0")).unwrap();
+        assert!(Scene::load(&short).is_err_and(|e| e.contains("period")));
         std::fs::remove_dir_all(&dir).ok();
     }
 

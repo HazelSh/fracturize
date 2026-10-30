@@ -44,28 +44,6 @@ yaw = 0.0
 pitch = 1.15
 focus = [0.0, 0.0, 0.0]
 
-# One period straight down the well, closing on itself.
-#
-# `path_zoom_loop = 1` says the loop closes under the scene's *scale symmetry*
-# rather than by returning to the first key: one loop descends one zoom period
-# and ends on a frame identical to the one it started on, because scaling by
-# 0.6 about the origin and turning 34° is something this scene is invariant
-# under. Played on a loop, that is an endless zoom — not an approximation of
-# one, the thing itself. A fourteen-second file falls forever.
-#
-# One keypoint is enough, and is better than two: the spline's out-of-range
-# keys are that key carried by the symmetry, so log-distance and yaw come out
-# as arithmetic sequences and Catmull-Rom through them is exactly linear. The
-# descent runs at a constant rate with no ease, no wobble and no seam.
-path_zoom_loop = 1
-path_seconds = 14.0
-
-[[camera.path]]
-yaw = 0.0
-pitch = 1.15
-distance = 3.6
-focus = [0.0, 0.0, 0.0]
-
 # The scale symmetry: pure affine, contracting on all three axes, fixed point
 # at the origin. Weighted heavily, so the chaos game spends most of its time
 # in the funnel and the fronds stay ornament.
@@ -106,3 +84,16 @@ map = "descent"
 radius = 3.0
 levels = 14
 octave_falloff = 0.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 14.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 1.15
+distance = 3.6
+focus = [0.0, 0.0, 0.0]

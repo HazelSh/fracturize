@@ -309,7 +309,7 @@ fn list(ui: &mut egui::Ui, app: &mut App, actions: &mut Vec<Action>) -> Option<P
     let folder = match folder {
         None => return None,
         Some(Err(e)) => {
-            ui.colored_label(ui.visuals().error_fg_color, e);
+            ui.colored_label(super::theme::error(ui.visuals()), e);
             return None;
         }
         Some(Ok(f)) => f,

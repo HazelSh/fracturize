@@ -17,50 +17,6 @@ focus = [0.0, 0.2, 0.0]
 distance = 5.5
 yaw = 2.17
 pitch = 0.9
-path_closed = true
-path_seconds = 14.0
-
-# high overview, looking down at the crowns
-[[camera.path]]
-yaw = 2.17
-pitch = 0.9
-distance = 5.5
-focus = [0.0, 0.2, 0.0]
-
-# closing in at crown level
-[[camera.path]]
-yaw = 4.264
-pitch = 0.45
-distance = 3.4
-focus = [0.0, 0.3, 0.0]
-
-# entering the canyon
-[[camera.path]]
-yaw = 6.358
-pitch = 0.18
-distance = 2.0
-focus = [0.0, -0.25, 0.0]
-
-# deep in the gold sediment
-[[camera.path]]
-yaw = 8.452
-pitch = 0.12
-distance = 1.15
-focus = [0.1, -0.95, 0.05]
-
-# pulling back out
-[[camera.path]]
-yaw = 10.55
-pitch = 0.35
-distance = 2.2
-focus = [0.0, -0.5, 0.0]
-
-# rising home (closes forward into key 1)
-[[camera.path]]
-yaw = 12.64
-pitch = 0.7
-distance = 4.2
-focus = [0.0, 0.0, 0.0]
 
 [[transform]]
 name = "vault_a"
@@ -87,3 +43,57 @@ scale = [0.62, 0.55, 0.62]
 rotation = [0.0, 47.0, 0.0]
 color = [0.5, 0.2, 0.75]
 weight = 3.0
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "repeat"
+period = 14.0
+
+# high overview, looking down at the crowns
+[[track.keys]]
+t = 0.0
+yaw = 2.17
+pitch = 0.9
+distance = 5.5
+focus = [0.0, 0.2, 0.0]
+
+# closing in at crown level
+[[track.keys]]
+t = 2.3333
+yaw = 4.264
+pitch = 0.45
+distance = 3.4
+focus = [0.0, 0.3, 0.0]
+
+# entering the canyon
+[[track.keys]]
+t = 4.6667
+yaw = 6.358
+pitch = 0.18
+distance = 2.0
+focus = [0.0, -0.25, 0.0]
+
+# deep in the gold sediment
+[[track.keys]]
+t = 7.0
+yaw = 8.452
+pitch = 0.12
+distance = 1.15
+focus = [0.1, -0.95, 0.05]
+
+# pulling back out
+[[track.keys]]
+t = 9.3333
+yaw = 10.55
+pitch = 0.35
+distance = 2.2
+focus = [0.0, -0.5, 0.0]
+
+# rising home (closes forward into key 1)
+[[track.keys]]
+t = 11.6667
+yaw = 12.64
+pitch = 0.7
+distance = 4.2
+focus = [0.0, 0.0, 0.0]

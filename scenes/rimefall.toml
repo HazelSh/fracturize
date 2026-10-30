@@ -55,18 +55,6 @@ yaw = 0.0
 pitch = 1.12
 focus = [0.0, 0.0, 0.0]
 
-# One period straight down, closing under the scale symmetry rather than by
-# returning to the first key — so the loop is an endless zoom, exactly.
-path_loop = "zoom"
-path_zoom_periods = 1
-path_seconds = 14.0
-
-[[camera.path]]
-yaw = 0.0
-pitch = 1.12
-distance = 3.4
-focus = [0.0, 0.0, 0.0]
-
 # Deep indigo, a teal shoulder, an amber band, one white peak, and back to the
 # dark: luminance rises and falls exactly once, so the cyclic map has no seam
 # at index 0. The renderer has no lights — the palette *is* the shading.
@@ -142,3 +130,16 @@ weight = 0.09
 map = "descent"
 radius = 3.2
 levels = 14
+
+# The camera: a view at each moment, flown through in between.
+[[track]]
+target = "camera"
+extrapolate = "offset"
+period = 14.0
+
+[[track.keys]]
+t = 0.0
+yaw = 0.0
+pitch = 1.12
+distance = 3.4
+focus = [0.0, 0.0, 0.0]

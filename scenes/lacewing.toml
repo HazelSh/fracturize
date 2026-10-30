@@ -51,9 +51,6 @@ yaw = 0.55
 pitch = 0.36
 focus = [0.0, 0.0, 0.0]
 
-path_closed = true
-path_seconds = 16.0
-
 # The body of the walk: a slow contracting turn about the origin. Uniform scale
 # and zero translation, so the fixed point is the origin and the structure is
 # scale-invariant about it.

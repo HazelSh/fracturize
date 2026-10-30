@@ -13,25 +13,25 @@
 //!   run) or [`Source::Cycle`] (an oscillator: sine, triangle, saw, square);
 //! - for keys, what happens past the ends: [`Extrapolate`].
 //!
-//! # The camera is a track too, of a kind that can't be three numbers
+//! # The camera is a track too: views at moments
 //!
-//! Framings are rotations, and rotations don't interpolate as numbers — that
-//! is what `path.rs`'s routes and cumulative spline exist for. So the camera
-//! keeps its own *source* (the `CameraPath` spline, or the default full orbit,
-//! which is a cycle in all but name) and shares everything else: it is sampled
-//! on the same clock, in seconds, and its loop is one of these same
-//! extrapolations — `once` is [`Extrapolate::Hold`], `closed` is `Repeat`,
-//! `pingpong` is `PingPong`, and the zoom loop is **repeat with offset**,
-//! where the offset is the zoom symmetry rather than a number. That last one
-//! is the reason to name them this way: `path_loop = "zoom"` stops being a
-//! special case and becomes `Offset` on a framing.
+//! `[[track]] target = "camera"` is the camera's track. Its keys are *views* —
+//! a framing (yaw/pitch/roll or `rotvec`, distance, focus) at a time `t` — and
+//! its loop is an [`Extrapolate`] like any other track's: `hold`, `pingpong`,
+//! `repeat` (with a `period`, the lap back round to the first key), or
+//! `offset`, where the offset is the scene's zoom symmetry rather than a
+//! number. That last one is the zoom loop, which stops being a special case.
+//!
+//! Framings are rotations, and rotations don't interpolate as numbers, so the
+//! camera keeps its own spline: `path.rs`'s cumulative quaternion Catmull-Rom
+//! with explicit routes, which is what lets a key sequence spiral through
+//! several whole turns (winze) instead of taking the short way. Uneven key
+//! times are honoured with per-second tangents. The track is resolved by the
+//! scene loader, since a key inherits whatever its view leaves out from the
+//! scene's `[camera]`, and is held as `Scene::camera_path` — the one track
+//! every scene has, the default orbit when none is written.
 //! [`Extrapolate::fold`] is the one time-folding function; `CameraPath::sample`
-//! calls it too.
-//!
-//! The camera's file format is unchanged. Moving `[[camera.path]]` into
-//! `[[track]]` form is a format change to every scene with a path, and the plan
-//! makes it one explicit migration commit for Hazel to run, with views-as-keys
-//! a decision still open; nothing here needs it.
+//! folds by the same rule.
 //!
 //! # Evaluating: the scene at time `t` is the scene with `-S` applied
 //!
@@ -114,10 +114,10 @@ impl Extrapolate {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "hold" | "once" => Some(Self::Hold),
-            "repeat" | "loop" | "closed" => Some(Self::Repeat),
-            "pingpong" | "ping-pong" => Some(Self::PingPong),
-            "offset" | "repeat-offset" => Some(Self::Offset),
+            "hold" => Some(Self::Hold),
+            "repeat" => Some(Self::Repeat),
+            "pingpong" => Some(Self::PingPong),
+            "offset" => Some(Self::Offset),
             _ => None,
         }
     }
@@ -241,12 +241,95 @@ impl Wave {
     }
 }
 
-/// A key's value: a number, or anything else TOML can say (a palette name, a
-/// boolean), which only ever steps.
+/// A key's value: a number, a whole rotation, or anything else TOML can say
+/// (a palette name, a boolean), which only ever steps.
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyValue {
     Number(f64),
+    Rotation(RotKey),
     Other(toml::Value),
+}
+
+/// A map's whole rotation at a key: a track on `transform.<map>.rotation`
+/// (or a subscene's placement rotation) keys poses, not one Euler angle.
+///
+/// Poses are interpolated as rotations — the camera's routes and its
+/// cumulative quaternion spline (`path.rs`) — so a turn never takes the wrong
+/// way round and never shears. The *route* from each key to the next is data,
+/// as it is for the camera: written as an Euler triple, a key that changes
+/// one angle from the last turns by exactly that many degrees about that
+/// angle's axis, so `y` from 0 to 720 is two whole turns; otherwise the short
+/// way plus `turns`, or `route`, the journey as a rotation vector.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RotKey {
+    pub orientation: crate::rot::Orientation,
+    /// The Euler triple (degrees, XYZ, as the scene writes `rotation`) when
+    /// the key was written as one; it is what carries the route.
+    pub euler: Option<[f64; 3]>,
+    /// Extra whole turns on the way out of this key, beyond the short way.
+    pub turns: Option<i32>,
+    /// The way out of this key exactly, in its own frame (radians).
+    pub route: Option<glam::Vec3>,
+}
+
+impl RotKey {
+    pub fn from_euler(euler: [f64; 3]) -> Self {
+        let r = euler.map(|d| (d as f32).to_radians());
+        let q = glam::Quat::from_euler(glam::EulerRot::XYZ, r[0], r[1], r[2]);
+        Self {
+            orientation: crate::rot::Orientation::from_mat3(&glam::Mat3::from_quat(q)),
+            euler: Some(euler),
+            turns: None,
+            route: None,
+        }
+    }
+
+    pub fn from_rotvec(v: glam::Vec3) -> Self {
+        Self {
+            orientation: crate::rot::Turn::from_rotation_vector(v).exp(),
+            euler: None,
+            turns: None,
+            route: None,
+        }
+    }
+
+    /// The rotation as `-S …rotvec` takes it.
+    fn rotvec(&self) -> glam::Vec3 {
+        crate::rot::Orientation::IDENTITY.shortest_turn_to(self.orientation).as_rotation_vector()
+    }
+
+    /// The journey from this key to `next`, in this key's frame.
+    pub fn route_to(&self, next: &RotKey) -> crate::rot::Turn {
+        use crate::rot::Turn;
+        if let Some(v) = self.route {
+            return Turn::from_rotation_vector(v);
+        }
+        if let Some(n) = self.turns {
+            return self.orientation.turn_to(next.orientation, n);
+        }
+        if let (Some(a), Some(b)) = (self.euler, next.euler) {
+            let changed: Vec<usize> = (0..3).filter(|&c| (a[c] - b[c]).abs() > 1e-9).collect();
+            if let [c] = changed[..] {
+                // R = Rx·Ry·Rz: x turns about world X, y about Rx·Y, z about
+                // the map's own Z — each a single axis, through the change.
+                let rx = glam::Quat::from_rotation_x((a[0] as f32).to_radians());
+                let world = match c {
+                    0 => glam::Vec3::X,
+                    1 => rx * glam::Vec3::Y,
+                    _ => self.orientation.rotate(glam::Vec3::Z),
+                };
+                let body = self.orientation.inverse().rotate(world);
+                return Turn::about(body, ((b[c] - a[c]) as f32).to_radians());
+            }
+        }
+        self.orientation.shortest_turn_to(next.orientation)
+    }
+}
+
+/// Whether a track on `target` may key whole rotations: a map's or a
+/// subscene's `rotation`, the ones a `rotvec` can stand in for.
+pub fn takes_rotations(target: &str) -> bool {
+    target.ends_with(".rotation") && (target.starts_with("transform.") || target.starts_with("subscene."))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -388,10 +471,25 @@ impl Track {
         }
     }
 
-    /// The value at `t` as the `-S` spec that applies it.
+    /// The value at `t` as the `-S` spec that applies it, brought into the
+    /// target's range (`params::range_of`): a spline overshoots and a cycle
+    /// swings past zero, and a negative xaos multiplier or share is refused
+    /// by the loader, a negative weight or point size drawn as nonsense.
     pub fn spec_at(&self, t: f64, base: Option<f64>) -> String {
         let integral = matches!(self.source, Source::Keys { integral: true, .. });
-        format!("{}={}", self.target, value_text(&self.sample(t, base), integral))
+        let value = match self.sample(t, base) {
+            KeyValue::Number(x) => KeyValue::Number(crate::params::clamp(&self.target, x)),
+            // A pose is written as the exact form, which wins over the Euler
+            // triple: no branch to fall onto, whatever the pose.
+            KeyValue::Rotation(r) => {
+                let v = r.rotvec();
+                let stem = self.target.strip_suffix(".rotation").unwrap_or(&self.target);
+                let r = |x: f32| (x as f64 * 1e6).round() / 1e6 + 0.0;
+                return format!("{stem}.rotvec=[{:?}, {:?}, {:?}]", r(v.x), r(v.y), r(v.z));
+            }
+            other => other,
+        };
+        format!("{}={}", self.target, value_text(&value, integral))
     }
 }
 
@@ -402,6 +500,10 @@ pub fn value_text(v: &KeyValue, integral: bool) -> String {
         KeyValue::Number(x) if integral => format!("{}", x.round() as i64),
         KeyValue::Number(x) if x.is_finite() => format!("{:?}", x),
         KeyValue::Number(_) => "0.0".to_string(),
+        KeyValue::Rotation(r) => {
+            let e = r.euler.unwrap_or_else(|| euler_of(r.orientation, None));
+            format!("[{:?}, {:?}, {:?}]", e[0], e[1], e[2])
+        }
         KeyValue::Other(v) => v.to_string(),
     }
 }
@@ -419,6 +521,9 @@ fn sample_keys(keys: &[Key], interp: Interp, ex: Extrapolate, t: f64) -> KeyValu
     let (a, b) = (&keys[i], &keys[i + 1]);
     let u = ((local - a.t) / (b.t - a.t)).clamp(0.0, 1.0);
 
+    if let (KeyValue::Rotation(ra), KeyValue::Rotation(rb)) = (&a.value, &b.value) {
+        return KeyValue::Rotation(sample_rotation(keys, interp, ex, (local, lap), u, ra, rb));
+    }
     let (KeyValue::Number(pa), KeyValue::Number(pb)) = (&a.value, &b.value) else {
         // Not numbers: a step, and the last key holds from its own time on.
         return if u >= 1.0 { b.value.clone() } else { a.value.clone() };
@@ -437,7 +542,7 @@ fn sample_keys(keys: &[Key], interp: Interp, ex: Extrapolate, t: f64) -> KeyValu
         Interp::Spline => {
             let num = |k: &Key| match k.value {
                 KeyValue::Number(x) => x,
-                KeyValue::Other(_) => 0.0,
+                _ => 0.0,
             };
             // Non-uniform Catmull-Rom as a cubic Hermite: each key's tangent
             // is the slope across its neighbours, one-sided at the ends.
@@ -460,19 +565,141 @@ fn sample_keys(keys: &[Key], interp: Interp, ex: Extrapolate, t: f64) -> KeyValu
     KeyValue::Number(v + offset)
 }
 
+/// The pose between rotation keys `i` and `i + 1`, a fraction `u` of the way.
+///
+/// Step holds, linear turns at a constant rate along the route, smooth eases
+/// in and out of every key, and spline is the camera's cumulative quaternion
+/// Catmull-Rom through all the keys at their times. `offset` carries the
+/// first-to-last turn into each lap, so a map keyed through a quarter turn
+/// keeps turning.
+#[allow(clippy::too_many_arguments)]
+fn sample_rotation(
+    keys: &[Key],
+    interp: Interp,
+    ex: Extrapolate,
+    (local, lap): (f64, i64),
+    u: f64,
+    a: &RotKey,
+    b: &RotKey,
+) -> RotKey {
+    let rot = |k: &Key| match &k.value {
+        KeyValue::Rotation(r) => *r,
+        _ => RotKey::from_rotvec(glam::Vec3::ZERO),
+    };
+    let w = match interp {
+        Interp::Step => if u >= 1.0 { 1.0 } else { 0.0 },
+        Interp::Linear => u,
+        Interp::Smooth => u * u * (3.0 - 2.0 * u),
+        Interp::Spline => -1.0,
+    };
+    let route = a.route_to(b);
+    let orientation = if w >= 0.0 {
+        a.orientation.then_body(route * w as f32)
+    } else {
+        let mut path = crate::path::CameraPath::new(
+            keys.iter()
+                .map(|k| crate::path::PathKey { orientation: rot(k).orientation, distance: 1.0, focus: glam::Vec3::ZERO })
+                .collect(),
+            crate::path::Loop::Once,
+        );
+        path.times = keys.iter().map(|k| k.t as f32).collect();
+        path.routes = keys.windows(2).map(|p| crate::path::Route::Exact(rot(&p[0]).route_to(&rot(&p[1])))).collect();
+        path.ease = Some(false);
+        path.sample_at(local, crate::camera::Fov::default()).orientation
+    };
+    let orientation = match ex {
+        Extrapolate::Offset if lap != 0 => {
+            let (first, last) = (rot(&keys[0]).orientation, rot(&keys[keys.len() - 1]).orientation);
+            let step = first.inverse().then(last).as_quat().normalize();
+            let power = crate::rot::Orientation::IDENTITY.shortest_turn_to(crate::rot::Orientation::from_mat3(&glam::Mat3::from_quat(step)));
+            // Laps compose in the first key's frame: first · Δ^lap · first⁻¹.
+            let world = crate::rot::Turn::from_rotation_vector(first.rotate(power.as_rotation_vector()) * lap as f32);
+            orientation.then_world(world)
+        }
+        _ => orientation,
+    };
+    // A pose sampled on a one-angle segment is that angle, interpolated: the
+    // same rotation, and the triple that keeps the route if it is keyed.
+    let euler = match (a.euler, b.euler, w >= 0.0, ex) {
+        (Some(ea), Some(eb), true, Extrapolate::Hold | Extrapolate::Repeat | Extrapolate::PingPong) => {
+            Some([0, 1, 2].map(|c| ea[c] + (eb[c] - ea[c]) * w))
+        }
+        _ => Some(euler_of(orientation, a.euler)),
+    };
+    RotKey { orientation, euler, turns: None, route: None }
+}
+
+/// An orientation as the scene's Euler triple (degrees, XYZ), each angle
+/// taken as near `near`'s as whole turns allow.
+pub fn euler_of(o: crate::rot::Orientation, near: Option<[f64; 3]>) -> [f64; 3] {
+    let (x, y, z) = o.as_quat().to_euler(glam::EulerRot::XYZ);
+    let e = [x, y, z].map(|r| (r as f64).to_degrees());
+    match near {
+        Some(n) => [0, 1, 2].map(|c| e[c] + 360.0 * ((n[c] - e[c]) / 360.0).round()),
+        None => e.map(|d| (d * 1e4).round() / 1e4),
+    }
+}
+
 // ---------------------------------------------------------------- the file
+
+/// One key as the file writes it: `[seconds, value]` for a number (or a
+/// string or boolean), or a table for the camera — a view at a moment,
+/// `{ t = 2.0, yaw = 1.2, pitch = 0.3, distance = 4.0, focus = [...] }`,
+/// which reads best as its own `[[track.keys]]` section.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum KeyDef {
+    Pair(Vec<toml::Value>),
+    View(crate::scene::PathKeyDef),
+    Turn(RotKeyDef),
+    /// A table as read, before the target says which kind it is.
+    Table(toml::Table),
+}
+
+/// A rotation key as the file writes it: `t`, then `rotation` (Euler degrees,
+/// XYZ, as a map writes it) or `rotvec` (radians), and the route out of it —
+/// `turns` or `route` — where the triples don't already say it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RotKeyDef {
+    pub t: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotvec: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<[f64; 3]>,
+}
+
+impl<'de> Deserialize<'de> for KeyDef {
+    /// By shape, so a mistyped field in a view says which, rather than
+    /// "matched no variant".
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match toml::Value::deserialize(d)? {
+            toml::Value::Array(a) => Ok(Self::Pair(a)),
+            toml::Value::Table(t) => Ok(Self::Table(t)),
+            other => Ok(Self::Pair(vec![other])),
+        }
+    }
+}
+
+/// The camera's track target: not an `-S` path, since a framing isn't one
+/// number.
+pub const CAMERA: &str = "camera";
 
 /// A `[[track]]` table.
 ///
 /// Exactly one of `keys`, `rate` and the cycle fields (`wave`, `period`,
-/// `amplitude`) says which source it is.
+/// `amplitude`) says which source it is. The camera's (`target = "camera"`)
+/// is always keys, each a view, and carries `period`, `ease` and
+/// `zoom_periods` instead; `scene.rs` resolves it, since its keys inherit the
+/// scene's own framing.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TrackDef {
     pub target: String,
-    /// `[[seconds, value], ...]`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keys: Option<Vec<Vec<toml::Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpolate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -493,6 +720,18 @@ pub struct TrackDef {
     pub centre: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mute: bool,
+    /// Camera only: smoothstep each lap (default: on for hold and pingpong,
+    /// off for the loops, whose seam it would stall)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<bool>,
+    /// Camera only, with `extrapolate = "offset"`: zoom periods descended a
+    /// lap (default 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom_periods: Option<u32>,
+    /// `[[seconds, value], ...]`, or the camera's views. Last, because the
+    /// camera's are sections and TOML wants a table's values before them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<KeyDef>>,
 }
 
 /// A TOML number as `f64`, whichever way it was written: `rate = 1` is as good
@@ -503,6 +742,115 @@ fn number(v: &toml::Value) -> Option<f64> {
 }
 
 impl TrackDef {
+    pub fn is_camera(&self) -> bool {
+        self.target.trim() == CAMERA
+    }
+
+    /// The camera track's loop, from `extrapolate`: hold, pingpong, repeat,
+    /// or offset — which for a framing is the zoom loop, its offset being the
+    /// scene's scale symmetry. With the zoom periods a lap.
+    pub fn camera_loop(&self) -> Result<(crate::path::LoopKind, u32), String> {
+        use crate::path::LoopKind;
+        let who = "the camera track";
+        if self.rate.is_some()
+            || self.from.is_some()
+            || self.wave.is_some()
+            || self.amplitude.is_some()
+            || self.phase.is_some()
+            || self.centre.is_some()
+            || self.interpolate.is_some()
+        {
+            return Err(format!(
+                "{who}: its keys are views, interpolated as framings — `rate`, cycles and \
+                 `interpolate` are for number tracks"
+            ));
+        }
+        let kind = match self.extrapolate.as_deref() {
+            None => LoopKind::Once,
+            Some(s) => match Extrapolate::parse(s) {
+                Some(Extrapolate::Hold) => LoopKind::Once,
+                Some(Extrapolate::PingPong) => LoopKind::PingPong,
+                Some(Extrapolate::Repeat) => LoopKind::Closed,
+                Some(Extrapolate::Offset) => LoopKind::Zoom,
+                None => {
+                    return Err(format!(
+                        "{who}: extrapolate '{s}' is not one of hold, pingpong, repeat, \
+                         offset (the zoom loop)"
+                    ));
+                }
+            },
+        };
+        if self.zoom_periods.is_some() && kind != LoopKind::Zoom {
+            return Err(format!("{who}: `zoom_periods` is for extrapolate = \"offset\""));
+        }
+        Ok((kind, self.zoom_periods.unwrap_or(1).clamp(1, 64)))
+    }
+
+    /// The camera track's keys, each a view with its time.
+    pub fn camera_keys(&self) -> Result<Vec<crate::scene::PathKeyDef>, String> {
+        let who = "the camera track";
+        let mut out = Vec::new();
+        for (i, k) in self.keys.iter().flatten().enumerate() {
+            let v = match k {
+                KeyDef::View(v) => *v,
+                KeyDef::Table(t) => toml::Value::Table(t.clone())
+                    .try_into::<crate::scene::PathKeyDef>()
+                    .map_err(|e| format!("{who}: key {}: {}", i + 1, e.to_string().trim()))?,
+                _ => {
+                    return Err(format!(
+                        "{who}: key {} is a [seconds, value] pair; the camera's keys are views \
+                         — `{{ t = 0.0, yaw = ..., pitch = ..., distance = ... }}`",
+                        i + 1
+                    ));
+                }
+            };
+            let t = v.t;
+            if !t.is_finite() {
+                return Err(format!("{who}: key {}'s `t` must be a number of seconds", i + 1));
+            }
+            if let Some(prev) = out.last().map(|p: &crate::scene::PathKeyDef| p.t) {
+                if t <= prev {
+                    return Err(format!(
+                        "{who}: keys must be in time order, each later than the last \
+                         ({t} comes after {prev})"
+                    ));
+                }
+            }
+            out.push(v);
+        }
+        if out.is_empty() {
+            return Err(format!("{who}: no keys"));
+        }
+        Ok(out)
+    }
+
+    /// The camera track's lap, for the loops that close: seconds from its
+    /// first key round to arriving back there.
+    pub fn camera_period(&self) -> Result<Option<f32>, String> {
+        let (kind, _) = self.camera_loop()?;
+        let period = self.num(&self.period, "period")?;
+        let closes = matches!(kind, crate::path::LoopKind::Closed | crate::path::LoopKind::Zoom);
+        match period {
+            Some(_) if !closes => Err(
+                "the camera track: `period` is the lap of a loop that comes back round \
+                 (repeat, offset); a hold or pingpong track's lap is its keys"
+                    .to_string(),
+            ),
+            Some(p) => {
+                let keys = self.camera_keys()?;
+                let span = keys.last().map_or(0.0, |k| k.t) - keys.first().map_or(0.0, |k| k.t);
+                if p <= span {
+                    return Err(format!(
+                        "the camera track: `period` {p} must be longer than its keys' span \
+                         ({span}): the loop still has to come back round from the last key"
+                    ));
+                }
+                Ok(Some(p as f32))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn num(&self, v: &Option<toml::Value>, key: &str) -> Result<Option<f64>, String> {
         match v {
             None => Ok(None),
@@ -520,13 +868,19 @@ impl TrackDef {
     pub fn resolve(&self) -> Result<Track, String> {
         let target = self.target.trim().to_string();
         let who = format!("track '{target}'");
+        if target == CAMERA {
+            return Err(format!("{who}: the camera's track is resolved with the scene"));
+        }
         crate::set::validate_path(&target).map_err(|e| format!("{who}: {e}"))?;
         if target.starts_with("camera.") {
             return Err(format!(
-                "{who}: the camera is animated by its path ([[camera.path]] keys, \
-                 path_loop, path_seconds), not by a track — a track on it would fight \
-                 the path every frame"
+                "{who}: the camera is animated by its own track, `target = \"camera\"`, whose \
+                 keys are whole views — a track on one of its numbers would fight it \
+                 every frame"
             ));
+        }
+        if self.ease.is_some() || self.zoom_periods.is_some() {
+            return Err(format!("{who}: `ease` and `zoom_periods` are the camera track's"));
         }
 
         let is_keys = self.keys.is_some();
@@ -551,9 +905,65 @@ impl TrackDef {
             ));
         }
 
-        let source = if let Some(raw) = &self.keys {
+        let tables = self.keys.iter().flatten().filter(|k| !matches!(k, KeyDef::Pair(_))).count();
+        let source = if let Some(raw) = self.keys.as_ref().filter(|_| tables > 0) {
+            if tables != raw.len() {
+                return Err(format!("{who}: keys mix [seconds, value] pairs with tables"));
+            }
+            if !takes_rotations(&target) {
+                return Err(format!(
+                    "{who}: keys written as tables are views (the camera's) or whole \
+                     rotations (a map's `rotation`); for this one write [seconds, value]"
+                ));
+            }
+            let mut keys: Vec<Key> = Vec::with_capacity(raw.len());
+            for (n, k) in raw.iter().enumerate() {
+                let d: RotKeyDef = match k {
+                    KeyDef::Turn(d) => *d,
+                    KeyDef::Table(t) => toml::Value::Table(t.clone())
+                        .try_into()
+                        .map_err(|e: toml::de::Error| format!("{who}: key {}: {}", n + 1, e.to_string().trim()))?,
+                    _ => unreachable!("counted as a table"),
+                };
+                if !d.t.is_finite() || keys.last().is_some_and(|p| d.t <= p.t) {
+                    return Err(format!("{who}: keys must be in time order, each later than the last"));
+                }
+                let mut r = match (d.rotation, d.rotvec) {
+                    (Some(e), None) => RotKey::from_euler(e),
+                    (None, Some(v)) => RotKey::from_rotvec(glam::Vec3::from(v.map(|x| x as f32))),
+                    _ => {
+                        return Err(format!(
+                            "{who}: key {} needs one of `rotation = [x, y, z]` (degrees) or \
+                             `rotvec = [x, y, z]` (radians)",
+                            n + 1
+                        ));
+                    }
+                };
+                r.turns = d.turns;
+                r.route = d.route.map(|v| glam::Vec3::from(v.map(|x| x as f32)));
+                keys.push(Key { t: d.t, value: KeyValue::Rotation(r) });
+            }
+            let interpolate = match &self.interpolate {
+                None => Interp::default(),
+                Some(s) => Interp::parse(s).ok_or_else(|| {
+                    format!("{who}: interpolate '{s}' is not one of step, linear, smooth, spline")
+                })?,
+            };
+            let extrapolate = match &self.extrapolate {
+                None => Extrapolate::default(),
+                Some(s) => Extrapolate::parse(s).ok_or_else(|| {
+                    format!("{who}: extrapolate '{s}' is not one of hold, repeat, pingpong, offset")
+                })?,
+            };
+            Source::Keys { keys, interpolate, extrapolate, integral: false }
+        } else if let Some(raw) = &self.keys {
             let mut keys = Vec::with_capacity(raw.len());
             for pair in raw {
+                let KeyDef::Pair(pair) = pair else {
+                    return Err(format!(
+                        "{who}: each key is [seconds, value]; a table of fields is a camera key"
+                    ));
+                };
                 let [t, v] = pair.as_slice() else {
                     return Err(format!(
                         "{who}: each key is [seconds, value], not {}",
@@ -619,7 +1029,9 @@ impl TrackDef {
             if !numeric && extrapolate == Extrapolate::Offset {
                 return Err(format!("{who}: offset adds a number each lap; these keys aren't numbers"));
             }
-            let integral = raw.iter().all(|p| p.get(1).is_some_and(|v| v.as_integer().is_some()));
+            let integral = raw.iter().all(|p| {
+                matches!(p, KeyDef::Pair(p) if p.get(1).is_some_and(|v| v.as_integer().is_some()))
+            });
             Source::Keys { keys, interpolate, extrapolate, integral }
         } else if is_rate {
             let rate = self.num(&self.rate, "rate")?.ok_or_else(|| {
@@ -665,16 +1077,27 @@ impl Track {
                 def.keys = Some(
                     keys.iter()
                         .map(|k| {
+                            if let KeyValue::Rotation(r) = &k.value {
+                                let rv = r.rotvec();
+                                return KeyDef::Turn(RotKeyDef {
+                                    t: k.t,
+                                    rotation: r.euler,
+                                    rotvec: r.euler.is_none().then(|| rv.to_array().map(|x| x as f64)),
+                                    turns: r.turns,
+                                    route: r.route.map(|v| v.to_array().map(|x| x as f64)),
+                                });
+                            }
                             let v = match &k.value {
                                 KeyValue::Number(x) if *integral => toml::Value::Integer(x.round() as i64),
                                 KeyValue::Number(x) => toml::Value::Float(*x),
                                 KeyValue::Other(v) => v.clone(),
+                                KeyValue::Rotation(_) => unreachable!("written above"),
                             };
-                            vec![toml::Value::Float(k.t), v]
+                            KeyDef::Pair(vec![toml::Value::Float(k.t), v])
                         })
                         .collect(),
                 );
-                let numeric = keys.iter().all(|k| matches!(k.value, KeyValue::Number(_)));
+                let numeric = keys.iter().all(|k| matches!(k.value, KeyValue::Number(_) | KeyValue::Rotation(_)));
                 let default_interp = if numeric { Interp::default() } else { Interp::Step };
                 if *interpolate != default_interp {
                     def.interpolate = Some(interpolate.as_str().to_string());
@@ -704,9 +1127,20 @@ impl Track {
 }
 
 /// Resolve a scene file's `[[track]]` tables, refusing two on one target.
+///
+/// The camera's track is left out: it is a framing, resolved with the scene's
+/// camera (`Scene::camera_path`).
 pub fn resolve_all(defs: &[TrackDef]) -> Result<Vec<Track>, String> {
-    let tracks: Vec<Track> = defs.iter().map(TrackDef::resolve).collect::<Result<_, _>>()?;
+    let tracks: Vec<Track> =
+        defs.iter().filter(|d| !d.is_camera()).map(TrackDef::resolve).collect::<Result<_, _>>()?;
     for (i, a) in tracks.iter().enumerate() {
+        if let Some(b) = tracks.iter().find(|b| takes_rotations(&a.target) && b.target.starts_with(&format!("{}.", a.target))) {
+            return Err(format!(
+                "'{}' turns the whole rotation and '{}' one angle of it; the whole one wins, \
+                 so the other would do nothing — key the angle into the whole rotation",
+                a.target, b.target
+            ));
+        }
         if tracks[..i].iter().any(|b| b.target == a.target) {
             return Err(format!(
                 "two tracks animate '{}'; the second would silently win — merge their keys",
@@ -757,10 +1191,23 @@ pub fn authored_value(scene: &Scene, target: &str) -> Result<Option<toml::Value>
 /// A new keyed track on `target` with one key, `value` at `t`: what the
 /// Timeline's "add" makes. Numbers interpolate smoothly, anything else steps.
 pub fn one_key(target: &str, t: f64, value: toml::Value) -> Result<Track, String> {
+    if takes_rotations(target) {
+        if let Some(a) = value.as_array().filter(|a| a.len() == 3) {
+            let e: Vec<f64> = a.iter().filter_map(number).collect();
+            if let [x, y, z] = e[..] {
+                return TrackDef {
+                    target: target.to_string(),
+                    keys: Some(vec![KeyDef::Turn(RotKeyDef { t, rotation: Some([x, y, z]), ..Default::default() })]),
+                    ..Default::default()
+                }
+                .resolve();
+            }
+        }
+    }
     let integral = value.as_integer().is_some();
     TrackDef {
         target: target.to_string(),
-        keys: Some(vec![vec![toml::Value::Float(t), value]]),
+        keys: Some(vec![KeyDef::Pair(vec![toml::Value::Float(t), value])]),
         ..Default::default()
     }
     .resolve()
@@ -980,6 +1427,19 @@ impl Animator {
             scene.point_count_defaulted = defaulted;
         }
         Ok(scene)
+    }
+
+    /// Which track makes the scene at `t` one the loader refuses, when
+    /// [`at`](Self::at) fails: each is tried on its own. The name is what an
+    /// error should carry — the value changes every frame, the track doesn't,
+    /// so a message naming the value would be new every frame.
+    pub fn culprit(&self, t: f64) -> Option<String> {
+        self.tracks.iter().find_map(|(track, base)| {
+            let mut doc = self.doc.clone();
+            let bad = crate::set::apply_to_doc(&mut doc, &track.spec_at(t, *base)).is_err()
+                || Scene::from_toml_str(&doc.to_string(), &self.dir).is_err();
+            bad.then(|| track.target.clone())
+        })
     }
 
     /// The highest class of anything that moves.
@@ -1224,6 +1684,123 @@ amplitude = 0.25
         Scene::from_toml_str(SCENE, &std::env::temp_dir()).unwrap()
     }
 
+    // -- whole rotations -------------------------------------------------------
+
+    fn poses(eulers: &[(f64, [f64; 3])], interpolate: Interp, extrapolate: Extrapolate) -> Track {
+        Track {
+            target: "transform.a.rotation".into(),
+            source: Source::Keys {
+                keys: eulers
+                    .iter()
+                    .map(|&(t, e)| Key { t, value: KeyValue::Rotation(RotKey::from_euler(e)) })
+                    .collect(),
+                interpolate,
+                extrapolate,
+                integral: false,
+            },
+            mute: false,
+        }
+    }
+
+    fn pose(v: KeyValue) -> crate::rot::Orientation {
+        match v {
+            KeyValue::Rotation(r) => r.orientation,
+            other => panic!("not a rotation: {other:?}"),
+        }
+    }
+
+    /// How far the map turns about world Y between `t0` and `t1`, summed in
+    /// small steps so whole turns count.
+    fn swept_y(track: &Track, t0: f64, t1: f64) -> f64 {
+        let n = 720;
+        let mut total = 0.0;
+        let mut prev = pose(track.sample(t0, None));
+        for i in 1..=n {
+            let now = pose(track.sample(t0 + (t1 - t0) * i as f64 / n as f64, None));
+            total += prev.shortest_turn_to(now).as_rotation_vector().y as f64;
+            prev = now;
+        }
+        total.to_degrees()
+    }
+
+    /// The route is in the Euler column: y from 0 to 720 is two whole turns,
+    /// 0 to 270 goes the long way as written — never the 90° back the short
+    /// way would take — and the keys are hit.
+    #[test]
+    fn one_angle_changing_turns_that_far_about_its_axis() {
+        let two_turns = poses(&[(0.0, [0.0; 3]), (4.0, [0.0, 720.0, 0.0])], Interp::Linear, Extrapolate::Hold);
+        assert!((swept_y(&two_turns, 0.0, 4.0) - 720.0).abs() < 0.5);
+        let long_way = poses(&[(0.0, [0.0; 3]), (1.0, [0.0, 270.0, 0.0])], Interp::Linear, Extrapolate::Hold);
+        assert!((swept_y(&long_way, 0.0, 1.0) - 270.0).abs() < 0.5);
+        let half = pose(long_way.sample(0.5, None));
+        let want = crate::rot::Orientation::from_axis_angle(glam::Vec3::Y, 135f32.to_radians());
+        assert!(half.angle_to(want) < 1e-4);
+        // Linear is a constant rate: a quarter of the time, a quarter of the way.
+        assert!((swept_y(&two_turns, 0.0, 1.0) - 180.0).abs() < 0.5);
+    }
+
+    /// A y change under a tilted x turns about the tilted axis (R = Rx·Ry·Rz),
+    /// and z about the map's own: every in-between pose is the triple with
+    /// that one angle in between.
+    #[test]
+    fn the_axis_is_the_one_the_triple_turns_about() {
+        for (a, b) in [([30.0, 0.0, 10.0], [30.0, 200.0, 10.0]), ([30.0, 40.0, 0.0], [30.0, 40.0, 300.0])] {
+            let tr = poses(&[(0.0, a), (1.0, b)], Interp::Linear, Extrapolate::Hold);
+            for i in 0..=8 {
+                let u = i as f64 / 8.0;
+                let mid: Vec<f64> = (0..3).map(|c| a[c] + (b[c] - a[c]) * u).collect();
+                let want = RotKey::from_euler([mid[0], mid[1], mid[2]]).orientation;
+                assert!(pose(tr.sample(u, None)).angle_to(want) < 1e-4, "{a:?}->{b:?} at {u}");
+            }
+        }
+    }
+
+    /// Offset keeps turning: keyed through a quarter turn in a second, it is
+    /// half a turn round at two seconds and a whole one at four.
+    #[test]
+    fn offset_keeps_a_rotation_turning() {
+        let tr = poses(&[(0.0, [0.0; 3]), (1.0, [0.0, 90.0, 0.0])], Interp::Linear, Extrapolate::Offset);
+        assert!((swept_y(&tr, 0.0, 4.0) - 360.0).abs() < 0.5);
+        let at = |t| pose(tr.sample(t, None));
+        let y = |deg: f32| crate::rot::Orientation::from_axis_angle(glam::Vec3::Y, deg.to_radians());
+        assert!(at(2.0).angle_to(y(180.0)) < 1e-4);
+        assert!(at(2.5).angle_to(y(225.0)) < 1e-4);
+    }
+
+    /// Spline is the camera's spline: through every key, at its time.
+    #[test]
+    fn a_rotation_spline_passes_its_keys() {
+        let ks = [(0.0, [0.0; 3]), (1.0, [40.0, 10.0, 0.0]), (3.0, [40.0, 190.0, 0.0]), (4.0, [0.0, 200.0, 30.0])];
+        let tr = poses(&ks, Interp::Spline, Extrapolate::Hold);
+        for (t, e) in ks {
+            assert!(pose(tr.sample(t, None)).angle_to(RotKey::from_euler(e).orientation) < 1e-3, "at {t}");
+        }
+    }
+
+    /// In a scene: the file form loads and saves back the same, the frame at
+    /// a time has the map at that pose (through `rotvec`), and a whole
+    /// rotation can't be tracked beside one of its own angles.
+    #[test]
+    fn a_rotation_track_in_a_scene() {
+        let src = SCENE.replace(
+            "[[track]]\ntarget = \"transform.a.rotation.z\"\nkeys = [[0.0, 0.0], [2.0, 90.0]]\ninterpolate = \"linear\"",
+            "[[track]]\ntarget = \"transform.a.rotation\"\ninterpolate = \"linear\"\n\n[[track.keys]]\nt = 0.0\nrotation = [0.0, 0.0, 0.0]\n\n[[track.keys]]\nt = 2.0\nrotation = [0.0, 0.0, 450.0]",
+        );
+        let s = Scene::from_toml_str(&src, &std::env::temp_dir()).unwrap();
+        let text = s.to_toml_string().unwrap();
+        assert!(text.contains("[[track.keys]]") && text.contains("rotation = [0.0, 0.0, 450.0]"), "{text}");
+        let back = Scene::from_toml_str(&text, &std::env::temp_dir()).unwrap();
+        assert_eq!(back.tracks, s.tracks);
+        // Halfway is 225° about z: the map's x axis points along (-1, -1)/√2.
+        let frame = Animator::for_scene(&s).unwrap().unwrap().at(1.0).unwrap();
+        let x = frame.transforms[0].matrix.x_axis.truncate().normalize();
+        assert!((x.x - x.y).abs() < 1e-4 && x.x < -0.5, "{x:?}");
+        assert!((frame.transforms[0].matrix.x_axis.truncate().length() - 0.5).abs() < 1e-5, "scale kept");
+
+        let both = format!("{src}\n[[track]]\ntarget = \"transform.a.rotation.y\"\nrate = 1.0\nfrom = 0.0\n");
+        assert!(Scene::from_toml_str(&both, &std::env::temp_dir()).is_err_and(|e| e.contains("whole rotation")));
+    }
+
     #[test]
     fn a_scene_reads_and_saves_its_tracks() {
         let s = scene();
@@ -1323,6 +1900,31 @@ amplitude = 0.25
         s.point_count = 1234;
         let frame = Animator::for_scene(&s).unwrap().unwrap().at(0.5).unwrap();
         assert_eq!(frame.point_count, 1234);
+    }
+
+    #[test]
+    fn a_track_is_kept_inside_what_the_scene_can_take() {
+        // A cycle about 0 would swing an xaos multiplier negative, which the
+        // loader refuses; the frame comes out at 0 instead.
+        let src = format!(
+            "{SCENE}\n[[track]]\ntarget = \"transform.a.xaos.b\"\nwave = \"sine\"\nperiod = 4.0\namplitude = 1.0\ncentre = 0.0\n"
+        );
+        let s = Scene::from_toml_str(&src, &std::env::temp_dir()).unwrap();
+        let anim = Animator::for_scene(&s).unwrap().unwrap();
+        assert!(anim.at(3.0).is_ok(), "the trough is clamped to 0");
+        assert!(anim.culprit(3.0).is_none());
+    }
+
+    #[test]
+    fn an_invalid_frame_is_blamed_on_its_track() {
+        let src = format!(
+            "{SCENE}\n[[track]]\ntarget = \"meta.color_mode\"\nkeys = [[0.0, \"transforms\"], [2.0, \"bogus\"]]\n"
+        );
+        let s = Scene::from_toml_str(&src, &std::env::temp_dir()).unwrap();
+        let anim = Animator::for_scene(&s).unwrap().unwrap();
+        assert!(anim.at(1.0).is_ok());
+        assert!(anim.at(3.0).is_err());
+        assert_eq!(anim.culprit(3.0).as_deref(), Some("meta.color_mode"));
     }
 
     #[test]
