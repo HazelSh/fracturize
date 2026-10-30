@@ -18,6 +18,7 @@ mod params;
 mod path;
 mod prefs;
 mod trace;
+mod warp;
 mod pick;
 mod scene;
 mod scene_browser;

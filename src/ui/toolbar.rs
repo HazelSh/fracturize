@@ -655,6 +655,28 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     if resp.clicked() {
         app.ui_state.xaos_overlay = !app.ui_state.xaos_overlay;
     }
+    // The warp lattice: the third sibling, for the same reason. It is about
+    // the selected map, and only edit mode has one.
+    let warp = app.ui_state.warp_view;
+    let resp = ui.add_enabled(
+        app.show_gizmos,
+        egui::Button::selectable(warp && app.show_gizmos, icons::GRID_NINE),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if !app.show_gizmos {
+            "Show how the selected transform bends space, as a grid it carries. Only in edit mode"
+        } else if warp {
+            "Showing how the selected transform bends space: a grid through the space its points come from, carried by the transform. The faint grey grid is where it would land with no variations. Click to stop"
+        } else {
+            "Show how the selected transform bends space, as a grid it carries"
+        },
+        if warp { "click: hide the warp grid" } else { "click: show the warp grid" },
+    );
+    if resp.clicked() {
+        app.ui_state.warp_view = !app.ui_state.warp_view;
+    }
 
     let mode_width =
         num::icon_button_width(ui, &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")]);

@@ -986,6 +986,17 @@ pub struct App {
     /// Fingerprint of the path the buffer was last built for, or `None` when
     /// nothing is drawn. See `refresh_path_lines`.
     path_lines_key: Option<u64>,
+    /// Fourth line buffer: the selected map's warp of space, a lattice pushed
+    /// through it (see src/warp.rs). Only with `UiState::warp_view` on.
+    warp_renderer: LineRenderer,
+    /// Fingerprint the warp lines were last built for (`warp::fingerprint`),
+    /// or `None` when nothing is drawn.
+    warp_key: Option<u64>,
+    /// In a composite, the box the selected map's own layer occupies, in that
+    /// layer's space: `attractor` walks every map at once, which is no layer's
+    /// attractor. Keyed like `attractor` and rate-limited the same way.
+    warp_domain: Option<(u64, Option<[glam::Vec3; 2]>)>,
+    warp_measured_at: Instant,
     /// Multisampled target the in-world UI is drawn into and composited from,
     /// so the gizmos and paths are anti-aliased and the point cloud isn't.
     overlay: OverlayTargets,
@@ -1426,6 +1437,7 @@ impl App {
         let line_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
         let indicator_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
         let path_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
+        let warp_renderer = LineRenderer::new(&gpu.device, gpu.format, overlay_samples);
 
         let num_transforms = scene.transforms.len();
 
@@ -1536,6 +1548,10 @@ impl App {
             indicator_renderer,
             indicator_key: (None, None),
             path_renderer,
+            warp_renderer,
+            warp_key: None,
+            warp_domain: None,
+            warp_measured_at: Instant::now(),
             path_lines_key: None,
             overlay,
             attractor: None,
@@ -5291,6 +5307,60 @@ impl App {
         self.path_renderer.set_lines(&self.gpu.device, &verts);
     }
 
+    /// Rebuild the selected map's warp lattice when anything it is drawn from
+    /// changes: the map, its layer's placement, or the box it acts on. Not
+    /// with a whole subscene selected — its gizmo is a placement, not a map.
+    fn refresh_warp(&mut self) {
+        let selected = self
+            .selected_transform
+            .filter(|_| self.show_gizmos && self.ui_state.warp_view && self.selected_subscene().is_none())
+            .filter(|&i| i < self.scene.transforms.len());
+        let drawn = selected.and_then(|i| {
+            let layer = self.scene.transforms[i].layer as usize;
+            let bounds = self.warp_bounds(layer)?;
+            let placement = self.scene.layer_placement(layer);
+            let print = crate::warp::fingerprint(&self.scene.transforms[i], placement, bounds);
+            Some((i, placement, bounds, print))
+        });
+        let key = drawn.map(|d| d.3);
+        if key == self.warp_key {
+            return;
+        }
+        self.warp_key = key;
+        let verts = match drawn {
+            Some((i, placement, bounds, _)) => {
+                crate::warp::build(&self.scene.transforms[i], placement, bounds)
+            }
+            None => Vec::new(),
+        };
+        self.warp_renderer.set_lines(&self.gpu.device, &verts);
+    }
+
+    /// The box layer `k`'s attractor occupies, in its own space: what the
+    /// warp lattice fills. An ordinary scene's is `attractor`'s.
+    fn warp_bounds(&mut self, k: usize) -> Option<[glam::Vec3; 2]> {
+        if !self.scene.is_composite() {
+            return self.attractor.as_ref().map(|a| a.bounds);
+        }
+        let key = self.attractor_fingerprint() ^ ((k as u64) << 40);
+        let fresh = matches!(self.warp_domain, Some((kk, _)) if kk == key);
+        let recent = self.warp_measured_at.elapsed() < Duration::from_millis(200);
+        if !fresh && !(self.warp_domain.is_some() && recent) {
+            let (maps, enabled): (Vec<TransformSpec>, Vec<bool>) = self
+                .scene
+                .transforms
+                .iter()
+                .zip(&self.transform_enabled)
+                .filter(|(t, _)| t.layer as usize == k)
+                .map(|(t, &on)| (t.clone(), on))
+                .unzip();
+            let bounds = crate::trace::measure(&maps, &enabled).map(|a| a.bounds);
+            self.warp_domain = Some((key, bounds));
+            self.warp_measured_at = Instant::now();
+        }
+        self.warp_domain.and_then(|(_, b)| b)
+    }
+
     // === Evolutionary exploration (U / Shift+U) ===
 
     /// The `--random-config` that gets the dice's current settings back from
@@ -7545,6 +7615,7 @@ impl App {
         self.refresh_lacunarity();
         self.refresh_indicators();
         self.refresh_path_lines();
+        self.refresh_warp();
         self.poll_job();
 
         self.advance_camera_glide();
@@ -8638,6 +8709,7 @@ impl App {
         if self.show_gizmos {
             self.indicator_renderer.upload_camera(&self.gpu.queue, &camera);
             self.path_renderer.upload_camera(&self.gpu.queue, &camera);
+            self.warp_renderer.upload_camera(&self.gpu.queue, &camera);
         }
 
         match self.render_mode {
@@ -8757,6 +8829,7 @@ impl App {
                 if self.show_gizmos {
                     self.indicator_renderer.draw(&mut render_pass);
                     self.path_renderer.draw(&mut render_pass);
+                    self.warp_renderer.draw(&mut render_pass);
                     self.gizmo_renderer.draw(&mut render_pass);
                 }
             }

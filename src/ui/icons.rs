@@ -171,3 +171,5 @@ pub const SKIP_BACK: &str = "\u{E5A4}";
 pub const MAGNET: &str = "\u{E682}";
 /// Timeline: show the whole timeline (Phosphor "corners-out")
 pub const CORNERS_OUT: &str = "\u{E1D0}";
+/// The warp lattice toggle (edit mode): grid-nine
+pub const GRID_NINE: &str = "\u{EC8C}";

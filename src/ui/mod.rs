@@ -126,6 +126,9 @@ pub struct UiState {
     pub xaos_paint: Option<(f32, Vec<(usize, usize)>)>,
     /// The viewport's edge overlay (the toggle beside Gizmos).
     pub xaos_overlay: bool,
+    /// The selected map's warp of space, drawn as a lattice (the toggle beside
+    /// Gizmos; see src/warp.rs).
+    pub warp_view: bool,
     /// The overlay edge clicked for editing, `(from, to)` as scene indices:
     /// its popover is open at the edge's midpoint.
     pub xaos_edge: Option<(usize, usize)>,
@@ -242,6 +245,7 @@ impl UiState {
             xaos_show_p: false,
             xaos_paint: None,
             xaos_overlay: false,
+            warp_view: false,
             xaos_edge: None,
             xaos_edge_menu: None,
             toolbar_compact: false,
