@@ -80,7 +80,10 @@ const TAB_HEIGHT: f32 = 30.0;
 /// the rest is the space that keeps two selected-coloured fills apart.
 const TAB_GAP: f32 = 4.0;
 /// Height of the weight-share bar under the list (`draw_weight_share`).
-const SHARE_BAR_HEIGHT: f32 = 12.0;
+const SHARE_BAR_HEIGHT: f32 = 16.0;
+/// Narrowest a Weight share segment can be and still carry its name: room
+/// for two or three letters, which is enough to tell transforms apart.
+const SHARE_NAME_MIN_PX: f32 = 14.0;
 /// Room the weight-share block takes under the list: its caption line, the
 /// bar, and the spacing around them. Reserved before the list is sized, so the
 /// list ends above it rather than pushing it out of the window.
@@ -442,23 +445,39 @@ fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
     painter.rect_filled(bar, 2.0, ui.visuals().extreme_bg_color);
     if total > 0.0 {
         let colour = |i: usize| color32_from_vec3(app.scene.colors.get(i).copied().unwrap_or(Vec3::ONE));
+        let font = egui::TextStyle::Small.resolve(ui.style());
         let mut x = bar.min.x;
-        let segment = |x: &mut f32, frac: f32, fill: egui::Color32| {
+        // Each segment carries its transform's name while there's room for
+        // a few letters of it, cut off at the segment's edge rather than
+        // shortened; a sliver too narrow for that shows colour only.
+        let segment = |x: &mut f32, frac: f32, fill: egui::Color32, name: Option<String>| {
             let w = width * frac;
             let r = egui::Rect::from_min_max(egui::pos2(*x, bar.min.y), egui::pos2(*x + w, bar.max.y));
             painter.rect_filled(r.shrink2(egui::vec2(0.5, 0.0)), 0.0, fill);
+            if let Some(name) = name.filter(|_| w >= SHARE_NAME_MIN_PX) {
+                let [r8, g8, b8, _] = fill.to_array();
+                let light = 0.299 * r8 as f32 + 0.587 * g8 as f32 + 0.114 * b8 as f32 > 140.0;
+                let ink = if light { egui::Color32::BLACK } else { egui::Color32::WHITE };
+                painter.with_clip_rect(r.shrink2(egui::vec2(2.0, 0.0))).text(
+                    egui::pos2(r.min.x + 3.0, r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    font.clone(),
+                    ink,
+                );
+            }
             *x += w;
         };
         if let Some(i) = sel {
-            segment(&mut x, weight(i) / total, colour(i));
+            segment(&mut x, weight(i) / total, colour(i), Some(transform_label(app, i)));
         }
         let dim = if sel.is_some() { 0.35 } else { 0.8 };
         let others: Vec<usize> = in_layer.iter().copied().filter(|&i| Some(i) != sel).collect();
         if others.len() > SHARE_MAX_SEGMENTS {
-            segment(&mut x, rest / total, ui.visuals().weak_text_color().gamma_multiply(dim));
+            segment(&mut x, rest / total, ui.visuals().weak_text_color().gamma_multiply(dim), None);
         } else {
             for i in others {
-                segment(&mut x, weight(i) / total, colour(i).gamma_multiply(dim));
+                segment(&mut x, weight(i) / total, colour(i).gamma_multiply(dim), Some(transform_label(app, i)));
             }
         }
     }
@@ -551,7 +570,6 @@ fn draw_tab(
     } else {
         egui::Sense::click()
     };
-    let pane_fill = ui.visuals().window_fill;
     let accent = color32_from_vec3(row.color);
     let tab_resp = ui
         .scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
@@ -564,7 +582,6 @@ fn draw_tab(
             // Reserved now, sized after layout: `max_rect()` is all remaining
             // space, not this tab.
             let bg_idx = ui.painter().add(egui::Shape::Noop);
-            let accent_idx = ui.painter().add(egui::Shape::Noop);
 
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -595,7 +612,7 @@ fn draw_tab(
                     let text = if !row.enabled {
                         text.color(ui.visuals().weak_text_color()).strikethrough()
                     } else if selected {
-                        text.color(ui.visuals().strong_text_color()).strong()
+                        text.color(ui.visuals().selection.stroke.color).strong()
                     } else {
                         text.color(ui.visuals().text_color())
                     };
@@ -633,22 +650,17 @@ fn draw_tab(
 
             let mut rect = ui.min_rect();
             rect.max.y = rect.min.y + TAB_HEIGHT - TAB_GAP;
-            // Selected tabs run past the rail's right edge so no border or gap
-            // separates them from the detail pane.
+            // The selected tab is filled in the selection colour, as the
+            // chosen segment of a radio is: choosing one transform from the
+            // rail is a choose-one, and it should look like every other one.
+            // It still runs past the rail's right edge into the pane, so it
+            // points at the fields it owns.
             if selected {
                 let mut fill_rect = rect;
                 fill_rect.max.x += 6.0;
                 ui.painter().set(
                     bg_idx,
-                    egui::Shape::rect_filled(fill_rect, 3.0, pane_fill),
-                );
-                ui.painter().set(
-                    accent_idx,
-                    egui::Shape::rect_filled(
-                        egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-                        1.0,
-                        accent,
-                    ),
+                    egui::Shape::rect_filled(fill_rect, 3.0, ui.visuals().selection.bg_fill),
                 );
             } else if ui.response().hovered() {
                 ui.painter().set(

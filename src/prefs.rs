@@ -111,6 +111,11 @@ pub struct Prefs {
     /// monitor" — which on a 4K display is a real complaint and had no answer.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// The highlight colour: selected rows, lit toggles, the chosen option,
+    /// the filled part of a progress bar. sRGB bytes; absent is egui's blue
+    /// (`ui::theme::DEFAULT_SELECTION`).
+    #[serde(default)]
+    pub selection_colour: Option<[u8; 3]>,
     /// What the dice may roll and a mutation may change — the Random
     /// settings window. Follows the person rather than any scene. `--random`
     /// never reads it (a render must be reproducible from flags plus scene);
@@ -200,6 +205,7 @@ impl Default for Prefs {
             panels: PanelPrefs::default(),
             mutate_strength: None,
             ui_scale: default_ui_scale(),
+            selection_colour: None,
             random: Default::default(),
             random_profile: None,
             random_profile_builtin: None,

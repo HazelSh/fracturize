@@ -89,8 +89,8 @@ too: the status bar shows `ui Xms` and p99. Watch p99, not the mean.
 **6. Zero animation in the chrome.** No fades, no easing, no smooth
 scrolling, no tweened panels. Every click shows its full effect on the next
 frame. This is enforced once, in `EguiLayer::new`, and is not to be undone
-per widget. The one exception (the encode bar's pulse) is in AGENTS.md, along
-with the reason it is allowed.
+per widget. There are no exceptions: the one there was, a pulsing encode
+bar, went with egui's `ProgressBar` (§6.10a).
 
 **7. The chrome doesn't move.** Numbers don't change width as they change
 value, buttons don't resize when their caption changes, and toggling a
@@ -140,6 +140,13 @@ that says how to make it available.
 it's implemented. "Makes the far parts fade", not "aerial perspective
 transmittance" (Pip). Numbers stay available one step down (Theo). §7 has the
 details.
+
+**15. Boxes with edges, not pills.** Controls are squares or rounded squares
+with a border you can see, grouped into sections you can see the edges of.
+Information goes in tables with zebra stripes. The current fashion of
+borderless, fully-rounded blocks of flat colour floating wherever there's a
+control (a touch-screen look) is what this interface doesn't do. §3 "Shape
+and surface" has the details.
 
 ---
 
@@ -307,12 +314,44 @@ Post-affine → Xaos (roughly Apophysis's order, not the order the map runs
 in). The most-edited property, a transform's name, is edited in the header
 where it's displayed, not in a section of its own.
 
+### Shape and surface
+
+Hazel's references, in her words: Windows 7's clear squares with highlight
+outlines, and Windows 3.1's large, clear borders, are the good end. Windows
+10's flat glass materials are acceptable. Not XP's big soft skeuomorphism,
+not 95/98's fake-3D grey on grey, and not Vista's glossy shine. Above all,
+not the current style of disconnected, unmarked pills: block colour with no
+gradient and no border, where only the shape says there's a control.
+
+What that means in practice:
+
+- **Corners are slightly rounded, never fully.** Use egui's radii: windows
+  and menus 6, widgets 2–3 (`window_corner_radius`, `widgets.*.corner_radius`).
+  A bar, a box or a cell is a rounded rectangle; nothing is a capsule. This
+  is why the render progress bar is drawn by `ui::progress`, not by egui's
+  `ProgressBar`, which is a borderless pill.
+- **Edges are visible.** A trough, a group, a bar and a selected thing each
+  have a 1px border (`widgets.noninteractive.bg_stroke` for structure, the
+  selection colour for what's selected). If a control would only be
+  recognisable by its fill colour, give it an edge.
+- **Groups are drawn as groups.** A set of options is one connected shape
+  (`ui::radio`); a section has a heading and a rule (`ui::section`); a table
+  has stripes and rules (`ui::table`). Don't scatter separate floating
+  buttons where one grouped control would say what belongs together.
+- **Tables and zebra stripes** for anything that lines up (§3 "Tables versus
+  grids").
+- **Flat, with no gloss or bevels.** No gradients on controls, no drop
+  shadows inside windows, no fake 3D. Depth comes from fills (recessed
+  troughs are darker) and edges, not from lighting effects.
+
 ### Selector and detail
 
 When you choose one of a list and then edit it, use a **tab rail plus a
-detail pane** (the Transforms window): the active tab is filled with the
-pane's colour and runs past the rail's edge, so it visibly belongs to the
-pane. The rail is for choosing, and nothing else on a tab takes a click:
+detail pane** (the Transforms window). The selected tab is **filled with the
+selection colour, like the chosen segment of a radio**, with its text in the
+selection's text colour, because choosing one transform is a choose-one like
+any other. It runs past the rail's edge into the pane, so it points at the
+fields it owns. The rail is for choosing, and nothing else on a tab takes a click:
 swatch, name, eye, nothing more. Rows are a fixed `TAB_HEIGHT` because the
 list is virtualised, and the list takes `ui.available_height()`. Add,
 duplicate and delete go *above* the list, at the end that doesn't move.
@@ -388,40 +427,64 @@ size. A window shouldn't need more than two sizes.
 The UI is egui's dark theme with its defaults: panels and windows at grey 27,
 text at grey 140–240 depending on state, text fields at grey 10, and so on.
 Dark chrome keeps the fractal the brightest thing on screen and doesn't
-fight a flame's colours. **There's no light theme.** (The code doesn't yet
-*force* dark; see §12.)
+fight a flame's colours. **There's no light theme**: `EguiLayer::new` sets
+`egui::Theme::Dark` whatever the desktop's theme is, because every colour
+painted by hand here was chosen against dark panels.
 
 ### The palette, by meaning
 
 | Colour | Value | Means | Used for | Defined in |
 |---|---|---|---|---|
-| **Accent blue, fill** | `#005C80` (0, 92, 128) | *chosen / selected / lit* | the chosen segment of a radio; a lit toggle (open window, Edit Mode, the emphasis bulb, the transport's active buttons); the selected row in the browser, Random flames and Collaborate (at 60%/35% alpha); the selected timeline row and the loop region | egui `visuals.selection.bg_fill` |
-| **Accent blue, stroke** | `#C0DEFF` (192, 222, 255) | *this one, outlined* | the chosen mutation tile's border; the playhead; a selected key's ring on the timeline; text on a filled accent | egui `visuals.selection.stroke` |
+| **Selection, fill** | default `#005C80` (0, 92, 128); **a setting** | *chosen / selected / lit* | the chosen segment of a radio; a lit toggle (open window, Edit Mode, the emphasis bulb, Snap); the selected Transforms tab; the selected timeline track's name; the filled part of a progress bar; the loop region | egui `visuals.selection.bg_fill`, read through `ui::theme` |
+| **Selection, text and edge** | default `#C0DEFF` (192, 222, 255) | *this one* | text on a selection fill; the playhead; a selected key; the chosen mutation tile's border | egui `visuals.selection.stroke` |
+| Selection tint + edge | derived | *this row is selected*, under content that has to stay readable | selected rows in the Scenes browser and Random flames; the previewed Collaborate card; the xaos matrix's selected row and column; the selected gradient stop | `theme::selected_tint`, `selected_edge`, `paint_selected` |
 | Hyperlink blue | `#5AAAFF` (90, 170, 255) | a link | egui's own; we have almost no links | egui |
-| **Success green** | `#5ADC78` (90, 220, 120) | *done, connected, under budget* | the finished-render panel, "sent"/"kept" notices, a connected agent light, a frametime that makes 60 FPS | `theme::SUCCESS` |
+| **Success green** | `#5ADC78` (90, 220, 120) | *done, connected, under budget* | "Render done" and "View saved", "sent"/"kept" notices, a connected agent light, a frametime that makes 60 FPS | `theme::SUCCESS` |
 | **Caution amber** | `#E6AF3C` (230, 175, 60) | *a caveat on a value*, not a problem | a sheared matrix, a frametime over budget | `theme::CAUTION` |
-| **Warn orange** | `#FF8F00` (255, 143, 0) | *wants a look* | waiting on you, partial render, paused, about to overwrite, armed danger buttons | `theme::warn(v)` = egui `warn_fg_color` |
-| **Error red** | `#FF0000` (255, 0, 0) | *failed or impossible* | open/save failures, a render that failed | `theme::error(v)` = egui `error_fg_color` |
+| **Warn orange** | `#FF8F00` (255, 143, 0) | *wants a look* | waiting on you; render stopped early; paused and stopping (text and progress bar); "will be overwritten"; a note-toned notice; xaos and timeline warnings | `theme::warn(v)` = egui `warn_fg_color` |
+| **Error red** | `#FF0000` (255, 0, 0) | *failed or impossible* | open, save and preset failures; render failed; "that's a folder"; a render the GPU can't hold; an armed danger button's fill | `theme::error(v)` = egui `error_fg_color` |
+| Record red | the error red | *recording* | the record button's dot while armed, and nothing else | `theme::recording(v)` |
 | White, black shadow | | *legible over any picture* | world labels, the held roll ring, gradient handles | painted |
 
-**Rules for the accent blue.** Blue means *chosen* and nothing else:
+**The selection colour.** It means *chosen* and nothing else:
 
 - It marks which of several things is current: the chosen option, the open
-  window, the selected row or key, where the playhead is.
+  window, the selected transform, track, row or key, where the playhead is,
+  how far a render has got.
 - It's never decoration, never a heading colour, never "important", never a
   status. A blue word that isn't selected is a link, and we have almost none.
-- One blue. Don't add a second shade with another meaning. The dimension-lock
-  `#64C8FF` in the status bar already does that and is listed as a gap (§12).
-- Use it from `ui.visuals().selection` rather than as a literal, so it stays
-  egui's.
+- **It's a preference** (Settings → "highlight colour", `selection_colour` in
+  prefs.toml; Default puts egui's blue back). So never write it as a
+  literal: read `ui.visuals().selection` or the `ui::theme` helpers, or the
+  person's colour won't reach your widget. `theme::selection_for` derives
+  the text/edge colour from the fill.
+- **Two strengths, by surface.** A *control* that is chosen (a radio
+  segment, a toggle, a tab, a track's name) is **filled** with it, the way
+  egui fills a selectable button. A *row of content* that is selected (a
+  scene in a list, a card, a matrix row) gets `paint_selected`: half-strength
+  tint and a 1px edge, so its thumbnail and text stay readable. A **drawing
+  surface** (timeline lanes, the viewport) is never tinted: mark the thing's
+  label, or the thing itself (a key's ring), not the canvas it sits on.
+- One colour. Don't add a second blue with another meaning. The status bar's
+  dimension lock (`#64C8FF`) still does, and is listed as a gap (§12).
 
-**Rules for the semantic colours.** Use `ui::theme` and nothing else: one
-meaning, one colour. A finished render, a sent message and a connected agent
-are the same green on purpose. Note the difference between *caution* ("this
-value has a caveat") and *warn* ("this needs you"). Text, not colour alone,
-carries the message: every coloured state also says what it is in words,
-because colour alone fails anyone colour-blind and any agent reading a
-screenshot (Mote).
+**The status colours: one meaning, one colour, one place.** Every success,
+caution, warning, error and record colour comes from `ui::theme`. Nothing
+reads `visuals.warn_fg_color` or `error_fg_color` directly, and nothing
+writes its own green or red. A finished render, a sent message and a
+connected agent are the same green on purpose. Choosing one:
+
+| Situation | Colour | Example |
+|---|---|---|
+| It worked, it's done, it's connected | success | "Render done" |
+| A value has a caveat, nothing's wrong yet | caution | "sheared" beside a matrix |
+| It needs you to look, or it's in a state you should know about | warn | "This file exists and will be overwritten", "paused", "Stopped early" |
+| It failed, or can't happen | error | "That's a folder. Add a filename to the end." |
+| Neutral, or it's over and nothing's wrong | weak text | "Stopped before any frames were rendered" |
+
+Text, not colour alone, carries the message: every coloured state also says
+what it is in words, because colour alone fails anyone colour-blind and any
+agent reading a screenshot (Mote).
 
 ### Domain colours (about the scene, not the chrome)
 
@@ -441,7 +504,7 @@ theme. Never reuse them to mean a chrome state.
 ### Picking colours inside a feature
 
 If a feature needs its own colour scale (like the timeline classes), choose
-colours that are distinct from the accent blue and the semantic colours, at
+colours that are distinct from the selection colour and the status colours, at
 about the same lightness as each other, readable on grey 27, and named by
 what they mean in a `const` or function next to the drawing code, with a
 comment saying so.
@@ -503,6 +566,14 @@ icon move.
 | a log slider | a range spanning orders of magnitude | point count (applies live, at most one reallocation per 250 ms) |
 | a custom bar | a *share* of a whole | the Weight share bar under the Transforms list |
 
+**The Weight share bar** (`transforms::draw_weight_share`) is one segment per
+enabled transform, the selected one first in its colour, the rest dimmed.
+Each segment carries the transform's name in small text, black or white by
+the segment's brightness, clipped at the segment's edge rather than
+shortened. A segment narrower than `SHARE_NAME_MIN_PX` (14px, two or three
+letters) shows colour only, and past `SHARE_MAX_SEGMENTS` the others merge
+into one grey segment. Drag along it to set the selected transform's share.
+
 Rules:
 
 - Both kinds of control are **edit and drag in one**: drag to change, click
@@ -517,7 +588,7 @@ Rules:
 
 ### 6.4 Toggles, radios, checkboxes
 
-- **Toggle button** (`ui.toggle_value`, lit in accent blue when on): a mode
+- **Toggle button** (`ui.toggle_value`, lit in the selection colour when on): a mode
   or a window that is on or off and that lives in a strip of buttons — the
   toolbar's window toggles, Edit Mode, emphasis, record.
 - **Checkbox**: an on/off setting in a form or table. In a table it goes in
@@ -527,7 +598,7 @@ Rules:
   double-click turns a checkbox back off.
 - **Segmented radio** (`ui::radio`): choose exactly one of a few options,
   with no off state — renderer, colour source, camera loop. One connected
-  shape, the chosen segment filled in accent blue, a drawn ring and dot on
+  shape, the chosen segment filled in the selection colour, a drawn ring and dot on
   each segment. Each segment has its own `hinted()`. A segment that's not
   available is greyed in place, with the reason in its tooltip. **Never draw
   a choose-one setting as a row of toggle buttons**: that suggests they could
@@ -630,6 +701,28 @@ stands between you and losing work.
 - **The column on the right edits the selection.** The lanes are for timing,
   the column for values.
 - A track's class colour (§5) is shown as a band on its row.
+- **The selected track is marked on its name, not its lane.** Its name cell
+  is filled with the selection colour like a chosen radio segment; the lane
+  stays clear, because the lanes are a drawing surface for keys and curves
+  and a tint over one sits on top of what you're editing. A selected key is
+  drawn in the selection's text colour.
+
+### 6.10a Progress bars: `ui::progress`
+
+`progress::bar(ui, fraction, text, tone)`: a rounded rectangle at the
+window's corner radius, a recessed trough with a 1px border, the done part
+filled and clipped to the same shape, and the caption centred on it in the
+strong text colour. `Tone::Running` fills in the selection colour;
+`Tone::Held` (paused, stopping) fills in the warn colour at 60%. The caption
+comes from a fixed-width source (`num`), two decimals, because a whole
+percent sits still for minutes on a long render and looks hung. The render
+job window uses it, one bar for the whole job.
+
+Don't use egui's `ProgressBar`: it's a borderless pill (§3 "Shape and
+surface"), and its `.animate(true)` pulse bypasses the no-animation rule. A
+bar with no fraction to show says so in its caption ("working…") and
+doesn't move. (The old encode-bar pulse, the one documented exception to the
+rule, went with it: nothing drew it any more.)
 
 ### 6.11 Pickers and lists of things
 
@@ -915,24 +1008,23 @@ an overlay toggled within it.
 Things the code doesn't yet do that these guidelines say it should. Fix them
 when you're nearby, or ask Hazel.
 
-1. **Dark isn't forced.** `EguiLayer::new` passes `window.theme()` to
-   egui-winit and never calls `ctx.set_theme(egui::Theme::Dark)`. egui's
-   default theme preference follows the system, so on a light desktop the
-   chrome may turn light (and the hard-coded painted colours were all chosen
-   for dark). One line fixes it. Not tested on a light desktop.
-2. **A second blue.** The status bar's dimension lock uses its own
-   `#64C8FF`, which reads as accent but means "lock is on". Either use the
-   accent (it *is* a lit toggle) or a non-blue.
-3. **Painted text uses literal sizes** (9–13 in timeline, labels, browser,
+1. **A second blue.** The status bar's dimension lock uses its own
+   `#64C8FF`, which reads as the selection colour but means "lock is on", and
+   doesn't follow the highlight-colour setting. Either use the selection
+   colour (it *is* a lit toggle) or a non-blue.
+2. **Painted text uses literal sizes** (9–13 in timeline, labels, browser,
    mutate, xaos) rather than text styles. They don't follow the UI scale in
    the same way as the rest. Move them to `TextStyle` sizes, or derive them
    from one.
-4. **Error red is pure `#FF0000`**, egui's default: harsh on grey 27. If it's
+3. **Error red is pure `#FF0000`**, egui's default: harsh on grey 27. If it's
    changed, change it in `ui::theme` through the visuals, not at call sites.
-5. **No grade controls in the GUI** (gamma, threshold, vibrancy are CLI and
+4. **No grade controls in the GUI** (gamma, threshold, vibrancy are CLI and
    view-file only).
-6. **The FPS figures above are targets**, not a regression test. Nothing
+5. **The FPS figures above are targets**, not a regression test. Nothing
    measures the T490 automatically.
+6. **Other pill-shaped widgets.** egui's own buttons and value boxes are
+   rounded rectangles already, but check any new egui widget against §3
+   "Shape and surface" before using it as-is.
 
 ---
 
@@ -959,8 +1051,14 @@ Before you hand it over (`tryout stage --notes`, release build):
       it moves.
 - [ ] Choose-one is a `radio`; destructive is a `danger_button`; tables are
       `ui::table`; windows come from `ui::window` with a minimum size.
-- [ ] Accent blue only for chosen/selected; semantic colours only from
-      `ui::theme`; any new domain colours named beside their drawing code.
+- [ ] The selection colour only for chosen/selected, read from the visuals
+      or `ui::theme`, never a literal (it's a setting: try a green one);
+      filled on a control, tint + edge on a content row, never on a drawing
+      surface. Status colours only from `ui::theme`; any new domain colours
+      named beside their drawing code.
+- [ ] Boxes with edges: rounded squares with visible borders, grouped
+      controls drawn as one shape, no borderless pills (§3 "Shape and
+      surface").
 - [ ] Nothing animates. Nothing appears or disappears and shifts the layout.
       Unavailable means greyed with a reason.
 - [ ] Every edit to the artwork is live and goes through `commit_edit`; one

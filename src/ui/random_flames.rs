@@ -245,7 +245,7 @@ fn row(
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
     if is_open {
-        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill.gamma_multiply(0.6));
+        super::theme::paint_selected(&painter, rect, 3.0, &visuals);
     } else if resp.hovered() {
         painter.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
     }

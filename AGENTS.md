@@ -724,7 +724,7 @@ where "start a new document" lives in every program.
 | Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
 | Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
-| Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
+| Controls (H, F1) | Orbit style, invert pitch, panel scale, highlight colour — then the keybind table, scrollable, rows clickable |
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
@@ -846,9 +846,10 @@ Conventions worth keeping:
   frametime, p99 frametime and a 120-sample sparkline, plus live point stats.
   p99 is the number to watch — mean FPS hides the stutters.
 - **The Transforms panel is a tab rail, not a list above fields.** The active
-  tab is filled with the detail pane's own colour and runs past the rail's
-  right edge, with the rail recessed behind it — that continuity is what makes
-  it read as selector-and-detail. Don't reduce it to a highlighted row; a
+  tab is filled with the selection colour, as a chosen radio segment is
+  (Hazel, 2026-10-31: choosing a transform is a choose-one and should look
+  like the others), and runs past the rail's right edge into the pane, with
+  the rail recessed behind it. Don't reduce it to a highlighted row; a
   highlight that never touches the fields can't say which fields it owns.
 
   Two things about the rail are load-bearing and easy to undo by accident.
@@ -1029,17 +1030,11 @@ are low-pass filtered over several frames before egui ever sees them
 input smoothing so one loud notch on a mouse doesn't register as fourteen,
 not a UI animation, and it only touches wheel-scrolled lists (Scenes,
 Keybinds). Anything with its own `.animate(true)` builder flag (`egui::
-ProgressBar` has one) bypasses `animation_time` entirely and has to be
-turned off at the call site. The render-job dialog is the one place in the
-app that still animates, and it does so deliberately, in exactly one spot:
-its **encode** bar pulses while encoding is live. That phase reports no
-progress at all — `rav1e` defers virtually all its work to the flush, so
-`offline.rs` sends the `"encoding"` phase and then nothing until it's done —
-and a pulse is the one case where motion carries information a static bar
-cannot: that work is happening, with unknown extent. The render bar next to
-it always has a real fraction and does *not* animate. If encode progress
-ever gets plumbed through (`src/avif.rs`'s `drain()` already knows its own
-done/total), the pulse should go with it and this exception disappears.
+ProgressBar` has one) bypasses `animation_time` entirely. There are no
+exceptions any more: the render job's progress bar is `ui::progress`, drawn
+in the house shape (a bordered rounded rectangle, not egui's pill), and it
+never moves on its own. The encode-bar pulse that used to be the one
+exception had stopped being drawn once the job became one weighted bar.
 
 ## Random Flames
 

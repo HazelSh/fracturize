@@ -439,7 +439,7 @@ fn draw_window_body(ui: &mut egui::Ui, app: &mut App) {
             let col = app.scene.colors.get(i).copied().unwrap_or(glam::Vec3::ONE);
             painter.rect_filled(rect, 2.0, color32(col));
             if selected == Some(shown[c]) {
-                painter.rect_stroke(rect.expand(1.5), 2.0, egui::Stroke::new(1.5, ui.visuals().strong_text_color()), egui::StrokeKind::Outside);
+                painter.rect_stroke(rect.expand(1.5), 2.0, egui::Stroke::new(2.0, super::theme::selected_edge(ui.visuals())), egui::StrokeKind::Outside);
             }
             let resp = ui.interact(rect, ui.id().with(("xaos_col", i)), egui::Sense::click());
             let resp = hinted(resp, &mut app.ui_state, format!("To {nm}. Click to select it; right-click for column actions."), "click: select this map · right-click: column actions");
@@ -455,6 +455,9 @@ fn draw_window_body(ui: &mut egui::Ui, app: &mut App) {
             let nm = name_of(app, i);
             let rect = egui::Rect::from_min_size(origin + egui::vec2(0.0, HEAD_H + r as f32 * CELL), egui::vec2(LABEL_W - 4.0, CELL - 1.0));
             let col = app.scene.colors.get(i).copied().unwrap_or(glam::Vec3::ONE);
+            if selected == Some(shown[r]) {
+                super::theme::paint_selected(&painter, rect, 2.0, ui.visuals());
+            }
             painter.rect_filled(egui::Rect::from_min_size(rect.min + egui::vec2(2.0, 4.0), egui::vec2(9.0, 9.0)), 2.0, color32(col));
             let text_col = if selected == Some(shown[r]) { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
             let galley = painter.layout(nm.clone(), egui::FontId::proportional(11.0), text_col, LABEL_W - 20.0);

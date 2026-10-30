@@ -595,14 +595,18 @@ fn draw_rows(ui: &mut egui::Ui, app: &mut App, geo: &Geo) {
         } else {
             app.ui_state.timeline_track == Some(row - 1)
         };
+        // The selection marks the row's name, not its lane: the lanes are a
+        // drawing surface for keys and curves, and a tint across one sits
+        // over the very things being edited in it.
         if selected {
-            painter.rect_filled(row_rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.35));
+            let name = egui::Rect::from_min_max(row_rect.min, egui::pos2(lane_row.left() - 2.0, row_rect.max.y));
+            painter.rect_filled(name.shrink2(egui::vec2(0.0, 1.0)), 2.0, visuals.selection.bg_fill);
         }
         if row == 0 {
             draw_camera_row(&painter, app, row_rect, lane_row, &x_of, &visuals);
         } else {
             let key = if selected { app.ui_state.timeline_key } else { None };
-            draw_track_row(&painter, &app.scene.tracks[row - 1], &names[row - 1], row_rect, lane_row, (geo.t0, geo.t1), &x_of, &visuals, key);
+            draw_track_row(&painter, &app.scene.tracks[row - 1], &names[row - 1], row_rect, lane_row, (geo.t0, geo.t1), &x_of, &visuals, selected, key);
         }
     }
 
@@ -953,7 +957,13 @@ fn draw_camera_row(
         egui::Align2::LEFT_CENTER,
         if attached { "camera".to_string() } else { "camera (detached)".to_string() },
         egui::FontId::proportional(13.0),
-        if attached { visuals.text_color() } else { visuals.weak_text_color() },
+        if app.ui_state.timeline_camera {
+            visuals.selection.stroke.color
+        } else if attached {
+            visuals.text_color()
+        } else {
+            visuals.weak_text_color()
+        },
     );
     if app.path_is_default() {
         painter.text(
@@ -1034,9 +1044,16 @@ fn draw_track_row(
     (t0, t1): (f64, f64),
     x_of: &dyn Fn(f64) -> f32,
     visuals: &egui::Visuals,
+    selected: bool,
     selected_key: Option<usize>,
 ) {
-    let text = if track.mute { visuals.weak_text_color() } else { visuals.text_color() };
+    let text = if selected {
+        visuals.selection.stroke.color
+    } else if track.mute {
+        visuals.weak_text_color()
+    } else {
+        visuals.text_color()
+    };
     // Shortened from the left: the end of a name is the part that says what
     // moves.
     let label = shorten_left(name, 30);

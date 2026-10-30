@@ -3799,6 +3799,23 @@ impl App {
         self.prefs_dirty_since = Some(std::time::Instant::now());
     }
 
+    /// The highlight colour for what's selected, if the person has picked
+    /// one; `None` is egui's own blue.
+    pub fn selection_colour(&self) -> Option<[u8; 3]> {
+        self.prefs.selection_colour
+    }
+
+    /// Pick the highlight colour, or `None` for the default. Deferred-write
+    /// like the panel scale: a colour picker changes it every frame it's
+    /// dragged.
+    pub fn set_selection_colour(&mut self, colour: Option<[u8; 3]>) {
+        if self.prefs.selection_colour == colour {
+            return;
+        }
+        self.prefs.selection_colour = colour;
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
     /// Which axis orbit drags yaw about (persisted across sessions)
     pub fn orbit_style(&self) -> OrbitStyle {
         self.prefs.orbit_style

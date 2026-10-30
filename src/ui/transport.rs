@@ -24,7 +24,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     // One group: the gaps inside it are the toolbar's ordinary spacing, and
     // the group sits between separators.
     let armed = app.record_armed;
-    let red = ui.visuals().error_fg_color;
+    let red = super::theme::recording(ui.visuals());
     let resp = ui.add(egui::Button::selectable(
         armed,
         egui::RichText::new(icons::RECORD).color(if armed { red } else { ui.visuals().text_color() }),

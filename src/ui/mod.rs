@@ -39,6 +39,7 @@ pub mod radio;
 pub mod random_flames;
 pub mod random_settings;
 pub mod table;
+pub mod progress;
 pub mod theme;
 pub mod timeline;
 pub mod render_job;
@@ -530,6 +531,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     if (ctx.zoom_factor() - app.ui_scale()).abs() > f32::EPSILON {
         ctx.set_zoom_factor(app.ui_scale());
     }
+    // The highlight colour (Settings), likewise only on change.
+    let fill = app
+        .selection_colour()
+        .map_or(theme::DEFAULT_SELECTION, |[r, g, b]| egui::Color32::from_rgb(r, g, b));
+    if ctx.global_style().visuals.selection.bg_fill != fill {
+        let selection = theme::selection_for(fill);
+        ctx.all_styles_mut(|s| s.visuals.selection = selection);
+    }
 
     // Env lookup once, not per frame.
     static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -777,6 +786,12 @@ impl EguiLayer {
         // it, drag a DragValue to change it). Set once, not per frame:
         // `all_styles_mut` clones the shared `Style` behind an `Arc`.
         ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
+        // Dark, whatever the desktop's theme is. egui follows the system by
+        // default, and every colour painted by hand here (labels, lanes, the
+        // timeline's classes, the xaos heatmap) was chosen against dark
+        // panels; the chrome is dark so the picture stays the brightest
+        // thing on screen (UI-GUIDELINES.md §5).
+        ctx.set_theme(egui::Theme::Dark);
 
         // Zero animation, ever — the house rule (AGENTS.md, "Human
         // Interface"). This is a realtime renderer: the fractal is the thing
