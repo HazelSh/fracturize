@@ -968,6 +968,11 @@ pub struct App {
     /// rather edit against the picture they are going to keep.
     pub show_emphasis: bool,
     emphasis_params: EmphasisParams,
+    /// Mute/solo: which maps' points are drawn (`gpu::points::mask`). A view,
+    /// like orbiting — session state, never in the file or the history — and
+    /// cleared when maps come or go, since it is held by position.
+    pub map_view: crate::gpu::points::mask::MuteSolo,
+    map_view_count: usize,
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
     /// Second line buffer for the selected transform's offset/rotation
@@ -1530,6 +1535,8 @@ impl App {
             splat_renderer,
             emphasis_renderer,
             show_emphasis: true,
+            map_view: Default::default(),
+            map_view_count: 0,
             emphasis_params: EmphasisParams::default(),
             gizmo_renderer,
             line_renderer,
@@ -3355,6 +3362,7 @@ impl App {
             }
         }
         self.scene.subscenes.remove(k - 1);
+        crate::track::follow_subscenes(&mut self.scene.tracks, crate::track::ListChange::Removed(k - 1, Some(&name)));
         self.scene.xaos_matrix_layers.retain(|&l| l as usize != k);
         for l in &mut self.scene.xaos_matrix_layers {
             if *l as usize > k {
@@ -6288,11 +6296,10 @@ impl App {
         let before = self.edit_snapshot();
         // Tracks name maps the way `-S` does: by name, or by index where there
         // is none. Carry them over, or a rename leaves them aimed at nothing.
-        if self.scene.transforms[idx].layer == 0 {
-            let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
-            let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
-            crate::track::rename_map(&mut self.scene.tracks, &old, &new);
-        }
+        let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
+        let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
+        let layer = crate::scene::map_layer(&self.scene.subscenes, self.scene.transforms[idx].layer);
+        crate::track::rename_map(&mut self.scene.tracks, layer, &old, &new);
         self.scene.transform_names[idx] = name;
         self.commit_edit(
             format!("Rename T{}", idx),
@@ -6409,7 +6416,9 @@ impl App {
     /// artwork. Turning `show_emphasis` off is the way to edit against the
     /// picture you are going to keep.
     fn emphasis_target(&self) -> Option<u32> {
-        if !self.show_emphasis || !self.show_gizmos {
+        // Nor while mute/solo is hiding points: the glow measures every point,
+        // hidden ones included, and would light material that isn't drawn.
+        if !self.show_emphasis || !self.show_gizmos || self.map_view.active() {
             return None;
         }
         self.selected_transform.map(|i| i as u32)
@@ -6426,6 +6435,35 @@ impl App {
             &self.point_compute.sensitivity_buffer,
             &self.point_compute.stats_buffer,
         );
+    }
+
+    /// Hand the mute/solo mask to the chaos pass and both renderers.
+    fn sync_map_view(&mut self) {
+        let n = self.scene.transforms.len();
+        if n != self.map_view_count {
+            self.map_view.clear();
+            self.map_view_count = n;
+        }
+        let hidden = self.map_view.hidden(n);
+        self.point_compute.set_hidden(&self.gpu.device, &self.gpu.queue, hidden.as_deref());
+        let binding = self.point_compute.mask_binding();
+        self.point_renderer.bind_mask(&self.gpu.device, &binding);
+        self.splat_renderer.bind_mask(&self.gpu.device, &binding);
+    }
+
+    /// Mute or unmute map `i`'s points (a view; see `map_view`).
+    pub fn toggle_map_mute(&mut self, i: usize) {
+        self.map_view.toggle_mute(i);
+    }
+
+    /// Solo or unsolo map `i`'s points; with `only`, this map alone, or
+    /// nothing soloed if it already was.
+    pub fn toggle_map_solo(&mut self, i: usize, only: bool) {
+        if only {
+            self.map_view.solo_only(i);
+        } else {
+            self.map_view.toggle_solo(i);
+        }
     }
 
     /// Whether the ring still holds points that predate the current emphasis
@@ -8567,7 +8605,8 @@ impl App {
         // The emphasis is settled first, because what the chaos pass measures
         // this frame is part of the params this upload writes.
         self.sync_emphasis();
-        if self.emphasis_filling() || self.anim_churning() {
+        self.sync_map_view();
+        if self.emphasis_filling() || self.point_compute.mask_filling() || self.anim_churning() {
             // The ring still holds points measured against a different
             // transform. Churning at the fill rate replaces them in about a
             // second instead of thirteen, and changes nothing about the

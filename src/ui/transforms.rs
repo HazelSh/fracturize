@@ -59,10 +59,11 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 }
 
 /// Width of the tab rail in points. Narrow on purpose: it carries identity
-/// (colour, name, enabled) and nothing else. A tab is a thing you click to
-/// choose a transform; anything else drawn on it is a place where a click does
-/// something other than what the tab says.
-const RAIL_WIDTH: f32 = 132.0;
+/// (colour, name), its eye, mute and solo, and nothing else. A tab is a thing
+/// you click to choose a transform; anything else drawn on it is a place where
+/// a click does something other than what the tab says, so the only others are
+/// buttons that look like buttons. 132 until mute and solo took about forty.
+const RAIL_WIDTH: f32 = 172.0;
 /// Height of one tab, including the gap below it.
 ///
 /// **This is the row pitch the rail's virtualization is told about**, so a tab
@@ -611,6 +612,10 @@ fn draw_tab(
                     let text = egui::RichText::new(&display_name);
                     let text = if !row.enabled {
                         text.color(ui.visuals().weak_text_color()).strikethrough()
+                    } else if app.map_view.active() && app.map_view.hides(i) {
+                        // Hidden by mute/solo: still in the IFS, so not struck
+                        // through like a disabled map — only not drawn.
+                        text.color(ui.visuals().weak_text_color()).italics()
                     } else if selected {
                         text.color(ui.visuals().selection.stroke.color).strong()
                     } else {
@@ -644,6 +649,40 @@ fn draw_tab(
                         } else {
                             app.toggle_transform_enabled(i);
                         }
+                    }
+
+                    // Mute and solo: a mixing desk's, and a *view*. They hide
+                    // the points a map placed and leave the IFS alone, which
+                    // is the difference from the eye beside them, and why
+                    // both tooltips say so first.
+                    let solo_on = app.map_view.is_soloed(i);
+                    let solo_resp = ui.add(egui::Button::new("S").small().selected(solo_on));
+                    let solo_resp = hinted(
+                        solo_resp,
+                        &mut app.ui_state,
+                        "Solo: draw only the points this map placed, and those of \
+                         any other soloed map\n\nA view, not an edit: the fractal \
+                         stays the same, nothing is saved and there is nothing to \
+                         undo. Alt+click to solo this map alone, and again to \
+                         clear every solo.",
+                        "click: solo this map's points (a view) · alt+click: this one alone",
+                    );
+                    if solo_resp.clicked() {
+                        app.toggle_map_solo(i, ui.input(|inp| inp.modifiers.alt));
+                    }
+                    let mute_on = app.map_view.is_muted(i);
+                    let mute_resp = ui.add(egui::Button::new("M").small().selected(mute_on));
+                    let mute_resp = hinted(
+                        mute_resp,
+                        &mut app.ui_state,
+                        "Mute: stop drawing the points this map placed\n\nA view, \
+                         not an edit: the fractal stays the same, nothing is saved \
+                         and there is nothing to undo. To take the map out of the \
+                         fractal itself, use the eye.",
+                        "click: hide this map's points (a view, not an edit)",
+                    );
+                    if mute_resp.clicked() {
+                        app.toggle_map_mute(i);
                     }
                 });
             });

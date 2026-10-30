@@ -219,6 +219,10 @@ Layout as a preference (like panel geometry) or per scene?
 
 ### 14. Transform mute/solo views
 
+**Built 2026-10-30** (branch `mute-solo`): M/S on the Transforms rail, live,
+through a per-point map record. See AGENTS.md "Mute and solo". Edge mode and
+a render/view key are not done.
+
 **Not the same thing as enable/disable, and the UI has to say so.** The rail's
 eye (and alt+click solo) *enables and disables* a map: the map leaves the IFS
 and the attractor changes. Mute/solo is a *view*: the IFS is untouched and

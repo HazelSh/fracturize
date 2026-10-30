@@ -3804,6 +3804,7 @@ mod tests {
     /// `--isolate`'s drop is one fact in three shaders: chaos.wgsl writes the
     /// sentinel, and both point shaders must clip it in both their entry
     /// points, or an isolated render quietly draws a smear at one position.
+    /// `hidden()` is also where the live mute/solo mask is read.
     #[test]
     fn every_point_shader_clips_what_isolate_drops() {
         let chaos = include_str!("../shaders/points/chaos.wgsl");
@@ -3814,9 +3815,9 @@ mod tests {
         ] {
             assert!(src.contains("return abs(pos.x) > 1.0e36;"), "{name}: threshold moved");
             assert_eq!(
-                src.matches("select(clip.w, -1.0, isolate_dropped(point.position))").count(),
+                src.matches("select(clip.w, -1.0, hidden(point_index, point.position))").count(),
                 2,
-                "{name}: every vertex entry point must clip dropped points"
+                "{name}: every vertex entry point must clip dropped (and muted) points"
             );
         }
     }

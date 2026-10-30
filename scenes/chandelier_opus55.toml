@@ -1,0 +1,78 @@
+# Chandelier -- brass arms, candles, crystal pendants with a bead under each.
+#
+# Every part is a whole copy of the piece, so each arm is a stretched little
+# chandelier and each pendant is one hung upside down. Cyc5 about Y over four
+# motifs, so it hangs rather than mirroring into an hourglass:
+#   arm     -- the whole piece stretched along x and tipped up 15 degrees.
+#              56% of the walk, and almost all of the brass.
+#   candle  -- a thin vertical sliver at each arm tip. It reads as a candle
+#              standing on the pendant, not as the chain it was meant to be.
+#   crystal -- the whole piece turned over (z 180) under each tip: a pendant.
+#   drop    -- a much smaller turned-over copy below that: the bead.
+# stem is the map outside the group (CRAFT 3.6), the rod it hangs from.
+#
+# Built to show off mute and solo in the Transforms window: solo each map in
+# turn and the five parts come apart cleanly (--map-grid shows the same).
+# Mix colour, so brass, ice and rose stay three colours. Render with splat.
+
+[meta]
+name = "Chandelier"
+author = "Claude Opus 5.5"
+point_size = 0.002
+color_mode = "mix"
+color_speed = 0.6
+haze = 0.2
+exposure = 1.6
+background = [0.014, 0.008, 0.009]
+
+[camera]
+focus = [0.0, 0.0, 0.0]
+distance = 2.2
+yaw = 0.3
+pitch = -0.12
+
+[[symmetry]]
+group = "Cyc5"
+axis = [0.0, 1.0, 0.0]
+applies_to = ["arm", "candle", "crystal", "drop"]
+
+[[transform]]
+name = "arm"
+translation = [0.5, 0.05, 0.0]
+scale = [0.5, 0.25, 0.25]
+rotation = [0.0, 0.0, 15.0]
+color = [0.9, 0.55, 0.15]
+weight = 1.0
+variations = { swirl = 0.25, linear = 0.75 }
+
+[[transform]]
+name = "candle"
+translation = [0.88, -0.02, 0.0]
+scale = [0.025, 0.22, 0.025]
+color = [1.0, 0.9, 0.62]
+weight = 0.08
+
+[[transform]]
+name = "crystal"
+translation = [0.88, -0.3, 0.0]
+scale = [0.14, 0.28, 0.14]
+rotation = [0.0, 0.0, 180.0]
+color = [0.4, 0.8, 1.0]
+weight = 0.4
+variations = { absfold = 0.3, linear = 0.7 }
+
+[[transform]]
+name = "drop"
+translation = [0.88, -0.36, 0.0]
+scale = 0.07
+rotation = [0.0, 0.0, 180.0]
+color = [1.0, 0.35, 0.5]
+weight = 0.25
+variations = { bubble = 0.4, linear = 0.6 }
+
+[[transform]]
+name = "stem"
+translation = [0.0, 0.35, 0.0]
+scale = [0.05, 0.5, 0.05]
+color = [0.5, 0.3, 0.1]
+weight = 0.04

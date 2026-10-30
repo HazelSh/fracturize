@@ -352,7 +352,7 @@ selection colour, like the chosen segment of a radio**, with its text in the
 selection's text colour, because choosing one transform is a choose-one like
 any other. It runs past the rail's edge into the pane, so it points at the
 fields it owns. The rail is for choosing, and nothing else on a tab takes a click:
-swatch, name, eye, nothing more. Rows are a fixed `TAB_HEIGHT` because the
+swatch, name, eye, mute and solo, nothing more. Rows are a fixed `TAB_HEIGHT` because the
 list is virtualised, and the list takes `ui.available_height()`. Add,
 duplicate and delete go *above* the list, at the end that doesn't move.
 

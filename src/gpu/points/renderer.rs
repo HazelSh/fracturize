@@ -17,6 +17,11 @@ pub struct PointRenderer {
     pub point_pipeline: RenderPipeline,
     pub bind_group: BindGroup,
     pub camera_buffer: Buffer,
+    // What the bind group is rebuilt from when the mute/solo pair changes.
+    bind_group_layout: wgpu::BindGroupLayout,
+    point_buffer: Buffer,
+    colormap_buffer: Buffer,
+    mask: super::mask::Binding,
 }
 
 impl PointRenderer {
@@ -35,6 +40,7 @@ impl PointRenderer {
         // 0: points (read)
         // 1: camera (uniform)
         // 2: colormap (read)
+        let mask_entries = super::mask::layout_entries(3);
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("point_bind_group_layout"),
             entries: &[
@@ -71,6 +77,9 @@ impl PointRenderer {
                     },
                     count: None,
                 },
+                // Mute/solo: 3, the map record; 4, the mask
+                mask_entries[0],
+                mask_entries[1],
             ],
         });
 
@@ -135,31 +144,57 @@ impl PointRenderer {
 
         let camera_buffer = create_camera_buffer(device);
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: point_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: colormap_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let mask = super::mask::Binding::stand_in(device);
+        let bind_group = Self::make_bind_group(device, &bind_group_layout, point_buffer, &camera_buffer, colormap_buffer, &mask);
 
         Self {
             quad_pipeline,
             point_pipeline,
             bind_group,
             camera_buffer,
+            bind_group_layout,
+            point_buffer: point_buffer.clone(),
+            colormap_buffer: colormap_buffer.clone(),
+            mask,
         }
+    }
+
+    fn make_bind_group(
+        device: &Device,
+        layout: &wgpu::BindGroupLayout,
+        point_buffer: &Buffer,
+        camera_buffer: &Buffer,
+        colormap_buffer: &Buffer,
+        mask: &super::mask::Binding,
+    ) -> BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("point_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: point_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: camera_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: colormap_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: mask.maps.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: mask.mask.as_entire_binding() },
+            ],
+        })
+    }
+
+    /// Clip against this mute/solo pair (`PointCompute::mask_binding`). A
+    /// no-op unless the pair is a different one from last time.
+    pub fn bind_mask(&mut self, device: &Device, mask: &super::mask::Binding) {
+        if mask.generation == self.mask.generation {
+            return;
+        }
+        self.mask = mask.clone();
+        self.bind_group = Self::make_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.point_buffer,
+            &self.camera_buffer,
+            &self.colormap_buffer,
+            &self.mask,
+        );
     }
 
     /// Upload camera uniforms
