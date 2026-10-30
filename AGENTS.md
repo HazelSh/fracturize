@@ -27,11 +27,18 @@ for (Rook, Pip, Jay, Theo, Remy, Atlas, Mote) and the ones it isn't (Abe, Silk,
 Socket), with their goals, failure modes and gaps. Plans say who they serve and
 who they cost by those names.
 
+**Changing the GUI? Read `UI-GUIDELINES.md`.** The principles (live edits,
+grit, zero animation, 120 FPS), the widget library and which module owns each
+widget, type, what every colour means (blue means *chosen*, nothing else),
+when to use a tooltip, a status hint, an inline note or a notice, and a
+checklist to run before handing a build over.
+
 ### The other docs
 
 | File | What it is |
 |------|------------|
 | `USERS.md` | Personas and anti-personas: who to plan for |
+| `UI-GUIDELINES.md` | How the GUI is built: principles, widgets, type, colour, help text |
 | `CRAFT.md` | Authoring scenes as art; the discovery log |
 | `ADDING-A-SCENE-FEATURE.md` | Checklist for every place a scene feature reaches |
 | `UI-REVIEW-PLAN.md` | The GUI read as a stranger would; a worklist |
