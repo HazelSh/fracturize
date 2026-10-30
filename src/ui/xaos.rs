@@ -48,7 +48,7 @@ fn summary(app: &App, idx: usize, sum: &crate::app::XaosSummary) -> String {
     }
 }
 
-/// The Xaos block in the Transforms inspector, under Behaviour.
+/// The Xaos block in the Transforms inspector, the last of its blocks.
 ///
 /// Opt-in by disclosure rather than by a mode: until a row is authored in the
 /// layer it is one closed line; once one is, it opens by default — the state
@@ -60,10 +60,14 @@ pub fn draw_block(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let Some(me) = sum.pos(idx) else { return };
     let n = sum.idx.len();
 
+    // The inspector's own "Xaos" heading sits above this, so the header is
+    // only what the block says.
     let header = if sum.has_xaos {
-        format!("Xaos — {}", summary(app, idx, &sum))
+        let s = summary(app, idx, &sum);
+        let mut c = s.chars();
+        c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or(s)
     } else {
-        "Xaos — any map may follow".to_string()
+        "Any map may follow".to_string()
     };
     let resp = egui::CollapsingHeader::new(egui::RichText::new(header).small())
         .id_salt(("xaos_block", sum.has_xaos))
