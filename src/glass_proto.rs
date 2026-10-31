@@ -44,7 +44,7 @@ fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
 
 /// The chaos-game points, coloured through the scene's colormap.
 fn points(scene: &Scene, n: usize) -> Vec<(Vec3, Vec3)> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(env("GLASS_SEED", 7));
     let enabled = vec![true; scene.transforms.len()];
     let walkers = 64.min(n.max(1));
     let per = n.div_ceil(walkers);
@@ -248,17 +248,24 @@ fn glass_proto() {
         t.elapsed().as_secs_f32()
     );
 
+    let seed: u64 = env("GLASS_SEED", 7);
+    let stem = format!("renders/glass-proto/{name}-{w}x{h}-n{}-s{}{}", s.n, s.sigma, if seed == 7 { String::new() } else { format!("-seed{seed}") });
+    std::fs::create_dir_all(&stem).unwrap();
+    // Each panel unscaled too, for perceptual metrics and close looking.
+    let save = |img: &[Vec3], tag: &str| sheet(&[img.to_vec()], w, h, 1).save(format!("{stem}/{tag}.png")).unwrap();
     let ex: Vec<Vec3> = px.iter().map(|f| exact(f, bg)).collect();
+    save(&ex, "exact");
     let mut row = vec![ex.clone()];
     for &k in &ks {
         let fk: Vec<Vec3> = px.iter().map(|f| front_k(f, bg, k)).collect();
         let tr: Vec<Vec3> = px.iter().map(|f| truncated(f, bg, k)).collect();
         println!("  K={k:3}  front+tail rmse {:.4}   truncated rmse {:.4}", rmse(&fk, &ex), rmse(&tr, &ex));
+        save(&fk, &format!("front-k{k}"));
+        save(&tr, &format!("trunc-k{k}"));
         row.push(fk);
         row.push(tr);
     }
-    std::fs::create_dir_all("renders/glass-proto").unwrap();
-    let out = format!("renders/glass-proto/{name}-{w}x{h}-n{}-s{}.png", s.n, s.sigma);
+    let out = format!("{stem}.png");
     sheet(&row, w, h, zoom).save(&out).unwrap();
     println!("  wrote {out}  (exact, then per K: front+tail, truncated)  {:.2}s", t.elapsed().as_secs_f32());
 }
