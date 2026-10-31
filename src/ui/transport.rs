@@ -27,9 +27,8 @@ const TIME_CHARS: usize = 16;
 /// ...and without its frame count: `999.99 s`.
 const TIME_CHARS_SHORT: usize = 8;
 
-/// Play and Pause: the transport's and the Timeline window's, one list so
-/// both buttons pin to the same width.
-pub const PLAY_STATES: [(&str, &str); 2] = [(icons::PLAY, "Play"), (icons::PAUSE, "Pause")];
+/// Play and Pause, the states the one Play button pins across.
+const PLAY_STATES: [(&str, &str); 2] = [(icons::PLAY, "Play"), (icons::PAUSE, "Pause")];
 
 /// How much narrower the time readout is without its frame count, for the
 /// toolbar's squeeze ladder.
@@ -53,24 +52,23 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, frames: bool) {
 
     let moving = app.is_playing();
     let shown = if moving { PLAY_STATES[1] } else { PLAY_STATES[0] };
-    let resp = ui.add(num::Pinned::new(shown, &PLAY_STATES));
+    // Lit while playing, in the colour that means "on": the transport's one
+    // Play, and the one state of it you most need to read at a glance.
+    let resp = ui.add(num::Pinned::new(shown, &PLAY_STATES).selected(moving));
     let resp = hinted(
         resp,
         &mut app.ui_state,
         if moving {
-            "Pause the timeline (O, Z or Space)"
+            "Pause the scene (O, Z or Space). The camera stays attached, so scrubbing \
+             still moves it."
         } else {
-            "Play the timeline from the playhead, with the camera flying its path (O, Z or \
-             Space)"
+            "Play the scene from the playhead: every track moves, and the camera flies its \
+             path if it is attached (O, Z or Space)"
         },
         if moving { "click: pause" } else { "click: play" },
     );
     if resp.clicked() {
-        if moving {
-            app.toggle_playback();
-        } else {
-            app.toggle_camera_motion();
-        }
+        app.toggle_play();
     }
 
     let armed = app.record_armed;

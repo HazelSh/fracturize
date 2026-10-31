@@ -585,7 +585,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Home | put the camera on the selected transform's fixed point |
 | Enter | enable/disable selected transform |
 | G / Tab | toggle transform gizmos and their name labels |
-| O, Z, or Space | play / stop the timeline: the camera flying its path, and every track (three keys, one action) |
+| O, Z, or Space | play / pause the scene: every track moves, and the camera flies its path if it is attached (three keys, one action, the toolbar's Play) |
 | Left / Right | the playhead a frame back / on, at the Render job's fps (Shift: to the key before / after, on any row) |
 | Y / Shift+Y | add the current framing as a camera key after the last one (the playhead goes to it) / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
@@ -704,7 +704,7 @@ the drawable area, so aspect and picking math are unaffected by which panels
 are open. The toolbar runs
 
 ```
-File  Explore | Transforms | Undo ↷ | Splat · 6.0M ▾ | Edit Mode 💡 ⇢ | ⏺ ⏮ ⟲ ▶ Play  time  Timeline …  *name — author | Collaborate  Help ▾
+File  Explore | Transforms | Undo ↷ | Splat · 6.0M ▾  Look | Edit Mode 💡 ⇢ | ⏮ ▶ Play ⏺ ⟲  time  Timeline …  *name — author | Collaborate  Help ▾
 ```
 
 ordered by task rather than by module: where does a scene come from, what am I
@@ -713,31 +713,38 @@ talking to an agent, and help. `TOPBAR-PLAN.md` is the reasoning.
 
 **Every item has a caption, and things give way one at a time.** When the
 window is too narrow, `toolbar::Forms` drops, in this order: the time's frame
-count, the author after the name, Edit Mode's caption, Timeline's,
-Collaborate's (its count is a badge on the icon, so it stays), then the
-renderer's name on the drawing button. The view-layout radio (`multiview`)
-sits after the edit tools, its own control rather than joined to them. File, Explore, Transforms, Undo, Play and Help never lose theirs; below
+count, the author after the name, Timeline's caption, Collaborate's (its
+count is a badge on the icon, so it stays), then the renderer's name on the
+drawing button. File, Explore, Transforms, Undo, Look, **Edit Mode** (its word
+says which mode you're in and what the two buttons beside it belong to), Play
+and Help never lose theirs; below
 the last step the right-hand block is pushed past the window's edge rather than
 drawn over the left. Both forms of each are pinned to measured widths, so last
 frame's measured width plus or minus each step's saving says exactly which
 step fits (`choose_level`, unit-tested); going back needs an item spacing to
-spare. At 1440 every caption fits. The name is capped at 28 characters of the
+spare. The name is capped at 28 characters of the
 button font and cut with `…`; its `*` is a cell of its own, so a long name
 can't hide it and the bar doesn't shift when it appears. Measure a new item's
-cost before adding it: at 1440 the bar has about 16 points to spare.
+cost before adding it: the bar is close to full at 1440.
 
 **The drawing button** (`Splat · 6.0M ▾`) reads the renderer and point count
-and opens a popup with the renderer, volume's opacity, the point count and a
-`Look…` row: the settings that trade picture for speed. It replaced the
+and opens a popup with the renderer, volume's opacity and the point count: the
+settings that trade picture for speed. **Look** is the button beside it. It replaced the
 renderer radio and the point-count button, which between them took a fifth of
 the bar.
 
 **Windows that left the bar have a door where the work is.** Subscenes: File →
 Subscenes… and File → Import as subscene, and a button beside the Transforms
 rail's layer picker. Xaos: *Whole grid…* in the inspector's Xaos block and on
-an edge's right-click menu, and deliberately no menu row. Look: the drawing
-popup. Views: File → Views…. Settings: File → Settings…. Level: a button above
-the axis cross.
+an edge's right-click menu, and deliberately no menu row. Views: File →
+Views…. Settings: File → Settings….
+
+**The view corner** is the status bar's far right, beside the point count and
+the frame rate: how the viewport is divided (`multiview`'s one, four, or one
+big and three small, as one button opening a menu upward) and level (an
+icon, greyed when the camera is already level). Small view and camera
+controls collect there. It is the status bar's one cluster of controls,
+because they describe the view rather than the scene.
 
 **File, Explore and Help are menus, and the only three** — not the first entries of a
 File/Edit/View/Help bar. The scene is a document, and the value of that
@@ -769,7 +776,7 @@ where "start a new document" lives in every program.
 | Mutate | The dice profile picker, mutation strength (the profile's), 3×3 / 5×5, New, Mutate, Undo, Settings… — then the mutation grid: the scene in the middle, its mutations around it, click one to make it the scene. See "The mutation grid" |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
 | Random settings | The dice profile: picker, save / save as / revert (with a `*` when changed); one list of parts — shape, structure, colour — each switched on or off with its ranges under it; the quality check; how big a mutation's step is; Roll one and Mutate at the foot. See "The dice" |
-| Look (the drawing popup's Look…) | Exposure, point size, colour falloff, the gradient and contrast, background and transparency, the haze button, infinite zoom (incl. the zoom-map picker); then the grade. "Look" is a working name |
+| Look (toolbar, beside the drawing button) | Exposure, point size, colour falloff, the gradient and contrast, background and transparency, the haze button, infinite zoom (incl. the zoom-map picker); then the grade. "Look" is a working name |
 | Views (File → Views…) | This view: distance, roll, level, the yaw · pitch · focus readout; then saved views (click to go there, right-click to rename, Save current) |
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
 | Controls (H, F1, Help → Controls) | The keybind table, scrollable, rows clickable |
@@ -778,7 +785,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
-| Timeline | Wide and low, above the status bar: its own clock-only Play, Snap, Whole; a ruler pinned above the rows (click to scrub, the loop strip along its top), the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it, snapping); eye to mute; right-click a lane or a key for its menu. Ctrl+scroll zooms, Shift+scroll and middle-drag move along. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
+| Timeline | Wide and low, above the status bar: Snap and Whole (no Play of its own; the toolbar's is the one); a ruler pinned above the rows (click to scrub, the loop strip along its top), the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it, snapping); eye to mute; right-click a lane or a key for its menu. Ctrl+scroll zooms, Shift+scroll and middle-drag move along. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -3153,11 +3160,17 @@ Things it rests on, each found the hard way:
   much), and each frame sets `rotvec`, which no save respells. A whole-rotation
   track beside one of its own angles is refused, since the whole would win.
 - **The transport is a clock plus "is the camera following".** `path_t` is
-  gone. Grabbing the camera stops it following and, in a scene with tracks,
-  leaves the clock running: you can orbit an animation while it plays. Play
-  resumes from the playhead; from the end of a one-shot it starts over. The
-  default orbit carries its own epoch, so it always starts from where you are
-  and is carried across a timeline loop rather than snapping back.
+  gone. There is one play, `App::toggle_play`: it runs the clock, and
+  everything animated moves on it, the camera included when it is attached.
+  Pause stops the clock and nothing else. Grabbing the camera stops it
+  following and, in a scene with tracks, leaves the clock running: you can
+  orbit an animation while it plays. In a scene without tracks the camera is
+  all there is to play, so detaching it pauses, and Play on a detached camera
+  attaches it (`play_attaches`). Play resumes from the playhead; from the end
+  of a one-shot it starts over, and reaching that end leaves the camera
+  attached. The default orbit carries its own epoch, so it always starts from
+  where you are and is carried across a timeline loop rather than snapping
+  back.
 - **Ordinary scenes are byte-identical**: stills in both renderers,
   `--path-t`, and animations including zoom and ping-pong loops, against the
   build before tracks.
@@ -3218,9 +3231,13 @@ Things it rests on, each found the hard way:
 - **The transport is a clock, and the camera is attached to it or not.** The
   camera row's link attaches it (it flies its path on the clock, playing and
   scrubbing) or detaches it (it stays where you put it while the tracks play).
-  Taking the camera in the viewport detaches it. O/Z/Space and the toolbar's
-  Play *fly the camera*: attach and play. The Timeline's own Play runs the
-  clock and leaves the camera as it is. Attaching isn't an edit.
+  Taking the camera in the viewport detaches it: a drag, or a zoom (wheel,
+  Up/Down) on an authored path, which would otherwise put the camera straight
+  back; a zoom on the default orbit rebuilds the orbit at the new distance and
+  keeps flying. O/Z/Space and the toolbar's Play are one action: play the
+  scene. They never re-attach a camera you detached, except in a scene with no
+  tracks, where a detached camera would leave nothing to play. Attaching
+  isn't an edit, and it persists across pause and play.
 - **Only the ruler scrubs.** A press on a row selects it and moves nothing
   else, so picking a track never shifts the camera.
 - **People never type `-S` paths.** "Animate a parameter…" opens
@@ -4217,8 +4234,8 @@ Press `V` in-app to dump the current view (yaw, pitch, distance, focus, offset,
 point size, haze, color falloff/contrast — plus `renderer = "splat"` and
 `exposure` when splat mode is active) to `views/<scene>-<timestamp>.toml`.
 View color params override the scene's when present. Load one with `--view <path>`;
-in windowed mode the camera starts stopped so the framing holds (press O to fly the
-path).
+in windowed mode the camera starts detached so the framing holds (attach it on the
+Timeline's camera row, or press O in a scene without tracks, to fly the path).
 
 ### Reading a scene without rendering it
 

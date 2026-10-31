@@ -13,11 +13,6 @@
 //! easier when you can get exactly down an axis. Both features come out of the
 //! one control, which is why it's worth drawing rather than adding six buttons
 //! to a panel.
-//!
-//! **Level** sits just above the perspective view's cross. A tilted horizon
-//! is something you notice by looking at the cross, so that's where your eye
-//! already is when you want it back. It is greyed, not hidden, when the
-//! camera is already level.
 
 use glam::Vec3;
 
@@ -123,10 +118,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         };
         let id = egui::Id::new(("fracturize_axis_widget", i));
         let to_cam = pane.camera.orientation.inverse();
-        // Level is the perspective camera's: an axis view has no horizon of
-        // its own to straighten.
-        let with_level = matches!(pane.slot, crate::multiview::Slot::Perspective);
-        if let Some(world) = cross(ctx, app, id, screen, margin, &windows, to_cam, frame, &hint, status, with_level) {
+        if let Some(world) = cross(ctx, app, id, screen, margin, &windows, to_cam, frame, &hint, status) {
             go = Some((i, world));
         }
     }
@@ -156,7 +148,6 @@ fn cross(
     frame: Orientation,
     hint: &str,
     status: &str,
-    with_level: bool,
 ) -> Option<Vec3> {
     let mut go: Option<Vec3> = None;
     // Out of the way of the windows. The Timeline is wide and low and often
@@ -166,11 +157,7 @@ fn cross(
     // window it would land on (last frame's rectangles), or, when there's no
     // room above, steps to its left.
     let size = egui::Vec2::splat(RADIUS * 2.0 + HIT);
-    // The level button above the cross takes a row of its own, and the
-    // windows are kept clear of both together.
-    let level_h = if with_level { ctx.global_style().spacing.interact_size.y + 4.0 } else { 0.0 };
-    let total = size + egui::vec2(0.0, level_h);
-    let home = egui::Rect::from_min_size(screen.right_bottom() + margin - total, total);
+    let home = egui::Rect::from_min_size(screen.right_bottom() + margin - size, size);
     let mut at = home;
     for _ in 0..8 {
         let Some(w) = windows.iter().find(|w| at.expand(4.0).intersects(**w)) else { break };
@@ -186,122 +173,96 @@ fn cross(
         .order(egui::Order::Foreground)
         .interactable(true)
         .show(ctx, |ui| {
-            ui.set_width(total.x);
-            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                if with_level {
-                    draw_level(ui, app);
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let centre = rect.center();
+            let painter = ui.painter();
+
+            // World → camera. The camera looks down its own −Z, so a ball with
+            // camera-space z > 0 is on the near side and gets drawn last.
+
+            // (screen position, camera-space depth, label, colour, world dir)
+            let mut balls: Vec<(egui::Pos2, f32, &str, egui::Color32, Vec3, bool)> = Vec::new();
+            for (name, axis, color) in AXES {
+                for positive in [true, false] {
+                    // Carried, so that both what is drawn and where a click
+                    // flies to are the same direction. Clicking a ball has
+                    // always meant "look down the way this one points"; under
+                    // a zoom the way it points is the carried axis, and
+                    // sending the camera to the uncarried one would fly it off
+                    // the ball you clicked.
+                    let world = frame.rotate(if positive { axis } else { -axis });
+                    let d = to_cam.rotate(world);
+                    // Screen y grows downward, camera y grows up.
+                    let at = centre + egui::vec2(d.x, -d.y) * RADIUS;
+                    balls.push((at, d.z, name, color, world, positive));
                 }
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                let centre = rect.center();
-                let painter = ui.painter();
+            }
+            // Painter's algorithm: far balls first, so the near ones overlap
+            // them rather than the other way round.
+            balls.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-                // World → camera. The camera looks down its own −Z, so a ball with
-                // camera-space z > 0 is on the near side and gets drawn last.
+            let pointer = ui.input(|i| i.pointer.interact_pos());
+            for (at, depth, name, color, world, positive) in &balls {
+                // Fade with depth so the cross reads as a solid object rather
+                // than six dots in a plane. Never all the way out: a hidden
+                // control you can still click is worse than a dim one.
+                let t = (depth + 1.0) * 0.5;
+                let fade = 0.45 + 0.55 * t;
+                let color = color.gamma_multiply(fade);
 
-                // (screen position, camera-space depth, label, colour, world dir)
-                let mut balls: Vec<(egui::Pos2, f32, &str, egui::Color32, Vec3, bool)> = Vec::new();
-                for (name, axis, color) in AXES {
-                    for positive in [true, false] {
-                        // Carried, so that both what is drawn and where a click
-                        // flies to are the same direction. Clicking a ball has
-                        // always meant "look down the way this one points"; under
-                        // a zoom the way it points is the carried axis, and
-                        // sending the camera to the uncarried one would fly it off
-                        // the ball you clicked.
-                        let world = frame.rotate(if positive { axis } else { -axis });
-                        let d = to_cam.rotate(world);
-                        // Screen y grows downward, camera y grows up.
-                        let at = centre + egui::vec2(d.x, -d.y) * RADIUS;
-                        balls.push((at, d.z, name, color, world, positive));
-                    }
+                let hovered = pointer.is_some_and(|p| p.distance(*at) <= HIT);
+                let r = if hovered { 8.0 } else { 6.5 };
+
+                painter.line_segment(
+                    [centre, *at],
+                    egui::Stroke::new(1.5, color.gamma_multiply(0.6)),
+                );
+                if *positive {
+                    painter.circle_filled(*at, r, color);
+                } else {
+                    // Hollow for the negative end — same axis, other way.
+                    painter.circle_filled(*at, r, ui.visuals().window_fill);
+                    painter.circle_stroke(*at, r, egui::Stroke::new(1.5, color));
                 }
-                // Painter's algorithm: far balls first, so the near ones overlap
-                // them rather than the other way round.
-                balls.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-                let pointer = ui.input(|i| i.pointer.interact_pos());
-                for (at, depth, name, color, world, positive) in &balls {
-                    // Fade with depth so the cross reads as a solid object rather
-                    // than six dots in a plane. Never all the way out: a hidden
-                    // control you can still click is worse than a dim one.
-                    let t = (depth + 1.0) * 0.5;
-                    let fade = 0.45 + 0.55 * t;
-                    let color = color.gamma_multiply(fade);
-
-                    let hovered = pointer.is_some_and(|p| p.distance(*at) <= HIT);
-                    let r = if hovered { 8.0 } else { 6.5 };
-
-                    painter.line_segment(
-                        [centre, *at],
-                        egui::Stroke::new(1.5, color.gamma_multiply(0.6)),
+                if *positive || hovered {
+                    painter.text(
+                        *at,
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        egui::FontId::monospace(9.0),
+                        if *positive {
+                            egui::Color32::from_rgb(20, 20, 24)
+                        } else {
+                            color
+                        },
                     );
-                    if *positive {
-                        painter.circle_filled(*at, r, color);
-                    } else {
-                        // Hollow for the negative end — same axis, other way.
-                        painter.circle_filled(*at, r, ui.visuals().window_fill);
-                        painter.circle_stroke(*at, r, egui::Stroke::new(1.5, color));
-                    }
-                    if *positive || hovered {
-                        painter.text(
-                            *at,
-                            egui::Align2::CENTER_CENTER,
-                            name,
-                            egui::FontId::monospace(9.0),
-                            if *positive {
-                                egui::Color32::from_rgb(20, 20, 24)
-                            } else {
-                                color
-                            },
-                        );
-                    }
-                    if hovered {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    let _ = world;
                 }
+                if hovered {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let _ = world;
+            }
 
-                // One response for the whole cross, hit-tested against the balls —
-                // six separate widgets would each need their own id and would fight
-                // over the overlapping ones.
-                let resp = ui.interact(rect, id.with("hit"), egui::Sense::click());
-                if resp.clicked() {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        // Nearest ball to the click, near side first — the one that
-                        // was drawn on top is the one you meant.
-                        let hit = balls
-                            .iter()
-                            .rev()
-                            .find(|(at, ..)| p.distance(*at) <= HIT);
-                        if let Some((.., world, _)) = hit {
-                            go = Some(*world);
-                        }
+            // One response for the whole cross, hit-tested against the balls —
+            // six separate widgets would each need their own id and would fight
+            // over the overlapping ones.
+            let resp = ui.interact(rect, id.with("hit"), egui::Sense::click());
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    // Nearest ball to the click, near side first — the one that
+                    // was drawn on top is the one you meant.
+                    let hit = balls
+                        .iter()
+                        .rev()
+                        .find(|(at, ..)| p.distance(*at) <= HIT);
+                    if let Some((.., world, _)) = hit {
+                        go = Some(*world);
                     }
                 }
-                super::hints::hinted(resp, &mut app.ui_state, hint, status);
-            });
+            }
+            super::hints::hinted(resp, &mut app.ui_state, hint, status);
         });
     go
-}
-
-/// The level button: put the horizon back.
-fn draw_level(ui: &mut egui::Ui, app: &mut App) {
-    let level = app.camera.is_level();
-    let resp = ui.add_enabled(!level, egui::Button::new((super::icons::TARGET, "level")).small());
-    let resp = super::hints::hinted(
-        resp,
-        &mut app.ui_state,
-        if level {
-            "The horizon is already level"
-        } else {
-            "Make the horizon level again. Dragging in circles tilts it a little at a time"
-        },
-        "click: level the camera",
-    );
-    if resp.clicked() {
-        app.level_camera();
-    }
-    ui.add_space(4.0);
 }
 
 /// Put the camera on `dir`, looking back at the focus — Blender's numpad

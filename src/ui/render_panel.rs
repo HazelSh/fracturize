@@ -63,9 +63,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.look_open = open;
 }
 
-/// The toolbar's drawing popup: the renderer, volume's opacity, the point
-/// count, and a row that opens the Look window. Grouped under the same
-/// persistence-class headings the Look window uses.
+/// The toolbar's drawing popup: the renderer, volume's opacity and the point
+/// count, grouped under the same persistence-class headings the Look window
+/// uses. Look has its own button beside it.
 pub fn draw_popup(ui: &mut egui::Ui, app: &mut App) {
     // Renderer and opacity evaporate at exit: neither is in the scene, a view
     // (a view records the mode, not the opacity) or the preferences.
@@ -87,20 +87,6 @@ pub fn draw_popup(ui: &mut egui::Ui, app: &mut App) {
         "Your own setting. It applies to every scene and is never saved in one.",
     );
     point_count(ui, app);
-
-    ui.separator();
-    let open = app.ui_state.panels.look_open;
-    let resp = ui.add(egui::Button::selectable(open, (super::icons::SLIDERS, "Look…")));
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        "Exposure, point size, colour, background, haze, infinite zoom and the grade",
-        if open { "click: close the Look window" } else { "click: open the Look window" },
-    );
-    if resp.clicked() {
-        app.ui_state.panels.look_open = !open;
-        ui.close();
-    }
 }
 
 /// The points/splat/volume segmented radio, shared by this panel and the

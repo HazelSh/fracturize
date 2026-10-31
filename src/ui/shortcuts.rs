@@ -35,7 +35,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("axis cross", "click a ball (bottom right) to look down that axis", None),
             ("T / Shift+T", "one view, four views, or one big and three small", Some(HelpAction::ViewLayout)),
             ("drag in an axis view", "pan (an axis view looks one way only)", None),
-            ("O / Z / Space", "start / stop the camera flying its path", Some(HelpAction::CameraMotion)),
+            ("O / Z / Space", "play / pause the scene (the camera flies if attached)", Some(HelpAction::Play)),
             ("I", "invert mouse pitch", Some(HelpAction::InvertPitch)),
             ("V", "save the current view", Some(HelpAction::SaveView)),
         ],

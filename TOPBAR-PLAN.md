@@ -325,3 +325,25 @@ Things found that are **not** fixed here, each Hazel's call:
    lit segment already says "chosen". A toolbar-only segmented style would
    halve it. It's the multiview agent's control and the house radio's rule,
    so it's flagged rather than changed.
+
+## 11. Round 3: Hazel's answers (2026-11-01)
+
+- **One Play, and it plays the scene.** Playing runs the scene's clock; an
+  attached camera moves with it, along its track or the default orbit when it
+  has none. Detaching is a separate, lasting choice. The Timeline window's
+  own Play and the camera column's Play/Stop are gone; the toolbar's Play is
+  the only one, lit in the selection colour while playing. (The model was
+  investigated and fixed in `App` by a subagent; see the commit.)
+- **The view layout** (one, four, one big and three small) left the toolbar
+  for the status bar's far right: one button showing the current layout,
+  opening a menu upward. Radios cost too much width for something chosen now
+  and then.
+- **Level** left the axis cross, where it hung in space, for an icon beside
+  the layout button. That corner, next to the point count and frame rate, is
+  where small view and camera controls collect.
+- **Look** is back on the bar, beside the drawing button; the popup's Look…
+  row went.
+- **Edit Mode / View Mode always shows its word.** It situates the two
+  overlay buttons beside it and is one of the key controls, so it came off
+  the ladder, which is now five steps: frame count, author, Timeline's
+  word, Collaborate's word, the renderer's name.

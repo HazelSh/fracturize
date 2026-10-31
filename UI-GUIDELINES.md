@@ -147,17 +147,17 @@ details.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ File Explore │ Transforms │ Undo ↷ │ Splat·6.0M▾ │ Edit Mode │ ⏺⏮⟲▶ time │ │  toolbar
-│   Timeline …                            *name — author │ Collaborate Help▾│
+│ File Explore │ Transforms │ Undo ↷ │ Splat·6.0M▾ Look │ Edit Mode 💡⇢ │    │  toolbar
+│   ⏮ ▶Play ⏺ ⟲ time  Timeline …        *name — author │ Collaborate Help▾│
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │   floating windows over the viewport          world-anchored labels      │
 │   (Transforms right, Look left…)              gizmos, traces, indicators │
 │                                                                          │
-│                                                 level  axis cross  (o)   │
+│                                                        axis cross  (o)   │
 │   Timeline (wide and low, above the status bar)                          │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ hint for whatever is under the pointer     d Λ · pts · FPS ms p99 ~~~~  │  status bar
+│ hint under the pointer   d Λ · FPS ms p99 ~~~~ · pts │ level  ▢▴    │  status bar
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -194,15 +194,14 @@ From left to right, ordered by task:
 | Where a scene comes from | **File**, **Explore** | menu buttons (§6.6) |
 | What I'm working on | **Transforms** | window toggle |
 | | **Undo**, redo (icon only, beside Undo) | command buttons |
-| How it's drawn | the drawing button, `Splat · 6.0M ▾`: renderer, opacity, point count, Look… | a button that opens a popup of the panels' own widgets |
+| How it's drawn | the drawing button, `Splat · 6.0M ▾`: renderer, opacity, point count; then **Look** beside it | a button that opens a popup of the panels' own widgets |
 | Edit tools | **Edit Mode**, then emphasis and the xaos overlay to its right | toggles; the two icons do nothing outside edit mode |
-| How it's viewed | the view layout (one, four, one and three), beside the edit tools but not joined to them | segmented radio (`multiview`) |
 | Time | to start, **Play**, record, loop, the time, **Timeline** | `ui/transport.rs`, then the Timeline toggle |
 | (right) | `*` name — author (click to edit); **Collaborate**, with what's waiting on you as a warn-orange badge on its icon; **Help** | Help is a menu |
 
 The other windows open from where the work is (TOPBAR-PLAN.md §3): Subscenes
 from File and the Transforms rail's layer picker, Xaos from the inspector's
-Xaos block, Look from the drawing popup, Views and Settings from File, About
+Xaos block, Views and Settings from File, About
 from Help.
 
 Rules:
@@ -221,9 +220,10 @@ Rules:
   function, never a copy of it.
 - **Every item has a caption, and when space runs out things give way one
   at a time, always in the same order** (`toolbar::Forms`): the time's frame
-  count, the author, Edit Mode's caption, Timeline's, Collaborate's, then the
-  renderer's name. File, Explore, Transforms, Undo, Play and Help never lose
-  theirs. Each item's two forms are pinned to measured widths (never pixel
+  count, the author, Timeline's caption, Collaborate's, then the renderer's
+  name. File, Explore, Transforms, Undo, Look, **Edit Mode**, Play and Help
+  never lose theirs; Edit Mode's word is what says which mode you're in and
+  what the two buttons beside it belong to. Each item's two forms are pinned to measured widths (never pixel
   constants: they follow the font and the panel scale), so the step is
   computed, not stepped toward, and going back needs a margin so a window
   edge on a boundary doesn't flicker. At 1440 every caption fits with about
@@ -251,7 +251,11 @@ Rules:
   performance cluster: FPS, mean ms, p99 ms, `ui` ms, present wait, and a
   120-sample sparkline. Every readout has a fixed character budget (§6.2).
 - The status bar describes state and the hint. It doesn't hold controls,
-  except for the dimension lock and clickable notices.
+  except for the dimension lock, clickable notices, and **the view corner**
+  at the far right: how the viewport is divided (one button, opening a menu
+  upward) and level (an icon). Small view and camera controls collect there,
+  beside the point count and the frame rate, where they describe the view
+  rather than the scene.
 
 ### Windows
 
@@ -638,9 +642,9 @@ stands between you and losing work.
   playhead a frame per two points of travel, or click and type `12.5`,
   `300f` or `1:02.5`. Play flies the camera (attach and play). O, Z and
   Space all play.
-- **The Timeline window**: its own Play (clock only; it leaves the camera
-  where it is), Snap (the magnet, on by default; Ctrl flips it for one drag),
-  Whole (zoom to fit).
+- **The Timeline window**: Snap (the magnet, on by default; Ctrl flips it for
+  one drag) and Whole (zoom to fit). It has no Play of its own: the
+  toolbar's is the one, lit while playing.
 - **The ruler is fixed; the lanes zoom.** Only the ruler scrubs. Clicking a
   row selects it and moves nothing else. Ctrl+scroll zooms around the
   pointer; Shift+scroll or a middle-drag moves along.

@@ -178,27 +178,13 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.timeline_open = open;
 }
 
-/// The window's own controls. The transport itself — record, return to
-/// start, the time, loop — is in the toolbar (`ui::transport`); this Play
-/// runs the clock and leaves the camera as attached or detached as it is.
+/// The window's own controls: snapping and the zoom. The transport itself
+/// (to start, Play, record, loop, the time) is the toolbar's, and it is the
+/// only Play: there used to be a second one here that ran the clock without
+/// the camera, and two buttons called Play that did different things was one
+/// too many.
 fn draw_header(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        let playing = app.is_playing();
-        use super::transport::PLAY_STATES;
-        let shown = if playing { PLAY_STATES[1] } else { PLAY_STATES[0] };
-        let resp = ui.add(num::Pinned::new(shown, &PLAY_STATES));
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Play or pause the timeline. Every track plays; the camera follows only if it \
-             is attached (the link on the camera row). The toolbar's Play, and O, Z or \
-             Space, fly the camera too: they attach it and play.",
-            if playing { "click: pause" } else { "click: play from the playhead" },
-        );
-        if resp.clicked() {
-            app.toggle_playback();
-        }
-
         let snap = app.ui_state.timeline_snap;
         let resp = ui.add(egui::Button::selectable(snap, (icons::MAGNET, "Snap")));
         let resp = hinted(
@@ -1610,25 +1596,16 @@ fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, au
         );
     }
 
-    let moving = app.camera_moving();
     let seconds = app.camera_path().duration();
     let zoom_loop = app.path_zoom_loop();
     // A zoom loop closes under the scene's scale symmetry, so it only exists
     // when there is one to close under.
     let zoom = app.zoom().map(|z| (z.map, z.log_scale / std::f32::consts::LN_2));
 
+    // No Play here: the toolbar's is the only one, and it plays the camera
+    // along this path whenever the camera is attached.
     ui.horizontal(|ui| {
-        let resp = ui.button(if moving { (icons::PAUSE, "Stop") } else { (icons::PLAY, "Play") });
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Fly the camera along the path (O, Z or Space)",
-            "click: play / stop the camera",
-        );
-        if resp.clicked() {
-            app.toggle_camera_motion();
-        }
-
+        ui.label("length");
         let mut secs = seconds;
         let resp = ui.add(
             num::Drag::new(&mut secs)

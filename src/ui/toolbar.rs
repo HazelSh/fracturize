@@ -22,7 +22,7 @@ use super::num;
 use super::render_panel;
 
 /// How many things give way, one at a time, when the toolbar runs out of room.
-const STEPS: usize = 6;
+const STEPS: usize = 5;
 
 /// The width the document's name may take, in characters of the button font:
 /// about a 20-character name and a short author. A longer one is cut with `…`.
@@ -36,13 +36,11 @@ struct Forms {
     frames: bool,
     /// 2: the author after the scene's name.
     author: bool,
-    /// 3: Edit Mode / View Mode's caption.
-    mode_caption: bool,
-    /// 4: Timeline's caption.
+    /// 3: Timeline's caption.
     timeline_caption: bool,
-    /// 5: Collaborate's caption (its count stays).
+    /// 4: Collaborate's caption (its count stays).
     collab_caption: bool,
-    /// 6: the renderer's name on the drawing button.
+    /// 5: the renderer's name on the drawing button.
     renderer: bool,
 }
 
@@ -51,10 +49,9 @@ impl Forms {
         Self {
             frames: level < 1,
             author: level < 2,
-            mode_caption: level < 3,
-            timeline_caption: level < 4,
-            collab_caption: level < 5,
-            renderer: level < 6,
+            timeline_caption: level < 3,
+            collab_caption: level < 4,
+            renderer: level < 5,
         }
     }
 }
@@ -66,7 +63,6 @@ fn savings(ui: &egui::Ui, app: &App) -> [f32; STEPS] {
     [
         super::transport::frames_width(ui),
         name_width(ui, app, true) - name_width(ui, app, false),
-        mode_width(ui, true) - mode_width(ui, false),
         timeline_width(ui, true) - timeline_width(ui, false),
         collab_width(ui, true) - collab_width(ui, false),
         drawing_button_width(ui, app, true) - drawing_button_width(ui, app, false),
@@ -117,13 +113,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             ui.separator();
 
             draw_drawing_button(ui, app, forms.renderer);
+            draw_look_toggle(ui, app);
             ui.separator();
 
-            draw_edit_tools(ui, app, forms.mode_caption);
-            // How the viewport is divided: beside the edit tools because it is
-            // also about how you look at the scene, but a control of its own,
-            // so ordinary spacing and no join.
-            view_layout(ui, app);
+            draw_edit_tools(ui, app);
             ui.separator();
 
             super::transport::draw(ui, app, forms.frames);
@@ -833,47 +826,6 @@ pub(super) fn point_count_label(capacity: u32) -> String {
     }
 }
 
-/// How the viewport is divided (`multiview`): one of three, so a segmented
-/// radio, and icons because the three pictures say it better than words in a
-/// strip with no room for them.
-fn view_layout(ui: &mut egui::Ui, app: &mut App) {
-    use crate::multiview::Layout;
-    let grid = app.grid_view();
-    let later = if grid { " Takes effect when you leave the mutation grid." } else { "" };
-    let current = app.view_layout();
-    let chosen = super::radio::radio(&mut app.ui_state, "view_layout", current)
-        .option(
-            Layout::Single,
-            icons::SQUARE,
-            format!("One view (T){later}"),
-            "click: one view",
-        )
-        .option(
-            Layout::Quad,
-            icons::SQUARES_FOUR,
-            format!(
-                "Four views: the perspective view top left, with top, front and right \
-                 around it (T). \
-                 Drag in an axis view to pan, and click a ball on its axis cross to \
-                 look down another axis.{later}"
-            ),
-            "click: four views",
-        )
-        .option(
-            Layout::OneAndThree,
-            icons::LAYOUT,
-            format!(
-                "The perspective view large, with top, front and right down the side \
-                 (T).{later}"
-            ),
-            "click: one big view and three small",
-        )
-        .show(ui);
-    if let Some(layout) = chosen {
-        app.set_view_layout(layout);
-    }
-}
-
 /// The renderer's name as the drawing button shows it.
 fn renderer_caption(mode: crate::app::RenderMode) -> &'static str {
     use crate::app::RenderMode;
@@ -943,26 +895,31 @@ fn draw_drawing_button(ui: &mut egui::Ui, app: &mut App, with_renderer: bool) {
         .show(|ui| render_panel::draw_popup(ui, app));
 }
 
-/// Edit Mode / View Mode's two forms: with its caption, and the icon alone.
-fn mode_width(ui: &egui::Ui, caption: bool) -> f32 {
-    num::Pinned::width(ui, &mode_states(caption))
+/// The Look window, beside the drawing button: how the picture is drawn, then
+/// how it looks. A window toggle with its caption; it is short, and never on
+/// the ladder.
+fn draw_look_toggle(ui: &mut egui::Ui, app: &mut App) {
+    let resp = ui.toggle_value(&mut app.ui_state.panels.look_open, (icons::SLIDERS, "Look"));
+    hinted(
+        resp,
+        &mut app.ui_state,
+        "How the picture looks: exposure, point size, colour, background, haze, infinite \
+         zoom and the grade",
+        "toggle the Look window",
+    );
 }
 
-/// Edit Mode's states, edit first.
-fn mode_states(caption: bool) -> [(&'static str, &'static str); 2] {
-    if caption {
-        [(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")]
-    } else {
-        [(icons::CUBE, ""), (icons::EYE, "")]
-    }
-}
+/// Edit Mode / View Mode, edit first. Always captioned: the word is what
+/// says which mode you're in and what the two buttons beside it belong to,
+/// so it is never on the ladder.
+const MODE_STATES: [(&str, &str); 2] = [(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")];
 
 /// Edit Mode / View Mode, then its two companions to its right: the emphasis
 /// glow and the xaos overlay. Both do nothing outside edit mode, so they
 /// belong to that control, and zero spacing between the three is what says
 /// so. Edit Mode comes first because it's the one they depend on (they sat
 /// on its left until 2026-10-31, which read backwards).
-fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App, caption: bool) {
+fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App) {
     let spacing = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 0.0;
 
@@ -970,7 +927,7 @@ fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     // the pressed/unpressed styling already carries the state, so the text is
     // reinforcement rather than the only signal. Pinned to the wider of its
     // two captions, so toggling it doesn't shift what's to its right.
-    let states = mode_states(caption);
+    let states = MODE_STATES;
     let shown = if app.show_gizmos { states[0] } else { states[1] };
     let resp = ui.add(num::Pinned::new(shown, &states).selected(app.show_gizmos));
     let resp = hinted(
@@ -1043,7 +1000,7 @@ fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App, caption: bool) {
 mod tests {
     use super::{STEPS, choose_level};
 
-    const SAVES: [f32; STEPS] = [40.0, 60.0, 70.0, 50.0, 80.0, 45.0];
+    const SAVES: [f32; STEPS] = [40.0, 60.0, 50.0, 80.0, 45.0];
 
     #[test]
     fn the_ladder_takes_the_first_step_that_fits() {

@@ -179,6 +179,8 @@ pub const SQUARES_FOUR: &str = "\u{E464}";
 pub const LAYOUT: &str = "\u{E6D6}";
 /// The drawing popup's button: opens a popup (Phosphor "caret-down")
 pub const CARET_DOWN: &str = "\u{E136}";
+/// The view-layout button on the status bar: opens a menu upward (Phosphor "caret-up")
+pub const CARET_UP: &str = "\u{E13C}";
 /// Settings window (Phosphor "gear")
 pub const GEAR: &str = "\u{E270}";
 /// About Fracturize (Phosphor "info")
