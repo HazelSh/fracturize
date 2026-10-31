@@ -522,6 +522,35 @@ mod tests {
         });
     }
 
+    /// The helpers are only worth anything if they measure what egui draws.
+    /// Lay the real buttons out, unpinned, and check each fits the width the
+    /// helper promised. (The test above only compares the helper with itself.)
+    #[test]
+    fn icon_button_width_covers_the_button_egui_draws() {
+        use super::super::icons;
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            ui.horizontal(|ui| {
+                for pair in [
+                    [(icons::PLAY, "Play"), (icons::PAUSE, "Pause")],
+                    [(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")],
+                    [(icons::FILM_STRIP, "Timeline"), (icons::FILM_STRIP, "Timeline")],
+                ] {
+                    let promised = icon_button_width(ui, &pair);
+                    for (icon, text) in pair {
+                        let drawn = ui.add(egui::Button::new((icon, text))).rect.width();
+                        println!("{text}: drawn {drawn}, promised {promised}");
+                        assert!(
+                            drawn <= promised + 0.01,
+                            "{text}: egui drew {drawn}, the helper promised {promised}"
+                        );
+                    }
+                }
+            });
+        });
+    }
+
     #[test]
     fn point_count_width_covers_every_representative_count() {
         use super::super::toolbar::{POINT_COUNT_K_M_BOUNDARY, point_count_label};
