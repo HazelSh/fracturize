@@ -35,9 +35,9 @@ pub fn draw(ctx: &egui::Context, app: &App) {
                 format!("{}  {}", axis.name(), axis.signed())
             }
         };
-        let galley = painter.layout_no_wrap(text, font.clone(), visuals.text_color());
+        let galley = painter.layout_no_wrap(text, font.clone(), visuals.strong_text_color());
         let plate = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), galley.size()).expand2(egui::vec2(5.0, 2.0));
-        painter.rect_filled(plate, 3.0, egui::Color32::from_black_alpha(150));
-        painter.galley(rect.min + egui::vec2(6.0, 6.0), galley, visuals.text_color());
+        painter.rect_filled(plate, 3.0, egui::Color32::from_black_alpha(210));
+        painter.galley(rect.min + egui::vec2(6.0, 6.0), galley, visuals.strong_text_color());
     }
 }
