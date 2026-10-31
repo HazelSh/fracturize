@@ -142,9 +142,11 @@ pub struct UiState {
     pub xaos_edge: Option<(usize, usize)>,
     /// An overlay edge's right-click menu, pinned where it opened.
     pub xaos_edge_menu: Option<((usize, usize), Option<egui::Pos2>)>,
-    /// The toolbar ran out of room last frame, so its window toggles show
-    /// icons without captions (`toolbar::draw`).
-    pub toolbar_compact: bool,
+    /// How far down the toolbar's squeeze ladder it is (0 = every caption),
+    /// and how wide its right-hand block measured last frame
+    /// (`toolbar::draw`).
+    pub toolbar_level: u8,
+    pub toolbar_right_w: f32,
     /// The Timeline's selection: a track, one of its keys, and the key a drag
     /// is moving (`ui::timeline`).
     pub timeline_track: Option<usize>,
@@ -255,7 +257,8 @@ impl UiState {
             xaos_overlay: false,
             xaos_edge: None,
             xaos_edge_menu: None,
-            toolbar_compact: false,
+            toolbar_level: 0,
+            toolbar_right_w: 0.0,
             timeline_track: None,
             timeline_key: None,
             timeline_drag_key: None,
@@ -446,7 +449,9 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
             egui::vec2(right_col_w.min(400.0), 260.0),
         ),
         WindowKey::Settings => (egui::pos2(320.0, top), egui::vec2(380.0, 200.0)),
-        WindowKey::About => (egui::pos2(320.0, top), egui::vec2(380.0, 170.0)),
+        // Beside Settings rather than on it: both open from the same corner
+        // of the screen, and one shouldn't hide the other.
+        WindowKey::About => (egui::pos2(720.0, top), egui::vec2(380.0, 170.0)),
         // Beside the Transforms window it chooses between.
         WindowKey::Subscenes => (
             egui::pos2((right_x - 340.0).max(20.0), top),

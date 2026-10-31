@@ -1,11 +1,18 @@
-//! Top toolbar: the File and Explore menus, a thin strip of icon toggle
-//! buttons for the panel windows, then the quick controls — the handful of settings you reach for
-//! often enough that opening a panel to get at them is friction.
+//! Top toolbar, ordered by task from left to right: where a scene comes from
+//! (File, Explore), what I'm working on (Transforms), undo, how it's drawn
+//! (the drawing button), the edit tools, and time (the transport and the
+//! Timeline). On the right, the document's name, Collaborate and Help.
+//!
+//! Every item has a caption. When the window is too narrow, a fixed list of
+//! things gives way one at a time, always in the same order (`Forms`, the
+//! squeeze ladder): see TOPBAR-PLAN.md §4. File, Explore, Transforms, Undo,
+//! Play and Help never lose their captions. It used to drop every window
+//! toggle's caption at once, which left seven icons nobody could tell apart.
 //!
 //! Quick controls delegate to the panels' own widgets (`render_panel::
-//! render_mode`, `render_panel::point_count`) rather than reimplementing
-//! them, so the rate limiting, hints and persistence can't drift between the
-//! two places you can change the same value from.
+//! draw_popup`, `render_panel::point_count`) rather than reimplementing them,
+//! so the rate limiting, hints and persistence can't drift between the two
+//! places you can change the same value from.
 
 use crate::app::App;
 
@@ -14,140 +21,230 @@ use super::icons;
 use super::num;
 use super::render_panel;
 
-/// The window toggles' captions, for measuring what dropping them saves.
-const WINDOW_CAPTIONS: [&str; 7] =
-    ["Transforms", "Subscenes", "Xaos", "Collaborate", "Camera", "Timeline", "Render"];
+/// How many things give way, one at a time, when the toolbar runs out of room.
+const STEPS: usize = 6;
 
-/// A window's toolbar toggle: icon and caption, or the icon alone when the
-/// toolbar is too narrow for every caption (`UiState::toolbar_compact`). The
-/// tooltip names the window either way.
-fn window_toggle(ui: &mut egui::Ui, open: &mut bool, icon: &str, caption: impl Into<String>, compact: bool) -> egui::Response {
-    if compact {
-        ui.toggle_value(open, icon)
-    } else {
-        ui.toggle_value(open, (icon, caption.into()))
+/// The width the document's name may take, in characters of the button font:
+/// about a 20-character name and a short author. A longer one is cut with `…`.
+const NAME_CHARS: usize = 28;
+
+/// Which form each item that gives way is drawn in, at one step of the
+/// ladder. Step `n` gives way the first `n` of these, in this order.
+#[derive(Clone, Copy)]
+struct Forms {
+    /// 1: the time readout's frame count.
+    frames: bool,
+    /// 2: the author after the scene's name.
+    author: bool,
+    /// 3: Edit Mode / View Mode's caption.
+    mode_caption: bool,
+    /// 4: Timeline's caption.
+    timeline_caption: bool,
+    /// 5: Collaborate's caption (its count stays).
+    collab_caption: bool,
+    /// 6: the renderer's name on the drawing button.
+    renderer: bool,
+}
+
+impl Forms {
+    fn at(level: u8) -> Self {
+        Self {
+            frames: level < 1,
+            author: level < 2,
+            mode_caption: level < 3,
+            timeline_caption: level < 4,
+            collab_caption: level < 5,
+            renderer: level < 6,
+        }
     }
+}
+
+/// What each step saves, measured this frame. Every item that gives way has
+/// both of its forms pinned to a fixed width, so the saving is exact, and
+/// last frame's measured width plus or minus these says which step fits.
+fn savings(ui: &egui::Ui, app: &App) -> [f32; STEPS] {
+    [
+        super::transport::frames_width(ui),
+        name_width(ui, app, true) - name_width(ui, app, false),
+        mode_width(ui, true) - mode_width(ui, false),
+        timeline_width(ui, true) - timeline_width(ui, false),
+        collab_width(ui, true) - collab_width(ui, false),
+        drawing_button_width(ui, app, true) - drawing_button_width(ui, app, false),
+    ]
+}
+
+/// The step that fits `avail`, given the bar measured `measured` wide at step
+/// `level`. Going back to a roomier step needs `margin` to spare, so a window
+/// edge sitting on a boundary doesn't flicker between the two.
+fn choose_level(level: u8, measured: f32, savings: &[f32; STEPS], avail: f32, margin: f32) -> u8 {
+    let level = level as usize;
+    let width_at = |j: usize| {
+        if j < level {
+            measured + savings[j..level].iter().sum::<f32>()
+        } else {
+            measured - savings[level..j].iter().sum::<f32>()
+        }
+    };
+    (0..=STEPS)
+        .find(|&j| width_at(j) + if j < level { margin } else { 0.0 } <= avail)
+        .unwrap_or(STEPS) as u8
 }
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     egui::Panel::top("fracturize_toolbar").show(ui, |ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
+            let row_left = ui.cursor().min.x;
+            let row_right = ui.max_rect().right();
+            let level = app.ui_state.toolbar_level;
+            let forms = Forms::at(level);
             ui.add_space(4.0);
-            // Decided from last frame's fit: a toolbar that ran into its own
-            // right-hand block drops the window toggles' captions, and gets
-            // them back once there is room for all of them again, with a
-            // margin so a window edge sitting on the boundary doesn't flicker
-            // between the two.
-            let compact = app.ui_state.toolbar_compact;
 
             draw_file_menu(ui, app);
             draw_explore_menu(ui, app);
             ui.separator();
 
-            // Then the windows, ordered by task rather than by module: what am
-            // I working on, then how am I looking at it. Help is pushed to the
-            // right end, where it lives in every toolbar ever made.
-            let resp = window_toggle(ui, &mut app.ui_state.panels.transforms_open, icons::SHAPES, "Transforms", compact);
+            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
             hinted(
                 resp,
                 &mut app.ui_state,
                 "The scene's transforms, and their settings",
                 "toggle the Transforms window",
             );
-
-            let resp = window_toggle(ui, &mut app.ui_state.panels.subscenes_open, icons::UNITE, "Subscenes", compact);
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Other scenes placed inside this one",
-                "toggle the Subscenes window",
-            );
-
-            let resp = window_toggle(ui, &mut app.ui_state.panels.xaos_open, icons::GRAPH, "Xaos", compact);
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Which transform may follow which: the whole graph as a grid",
-                "toggle the Xaos window",
-            );
-
-            // The badge counts what's waiting on the person. A badge and
-            // nothing more: a message never opens a window over the work.
-            let waiting = app.collab_waiting();
-            let caption = if waiting > 0 { format!("Collaborate ({waiting})") } else { "Collaborate".to_string() };
-            let resp = window_toggle(ui, &mut app.ui_state.panels.collab_open, icons::CHATS, caption, compact);
-            hinted(
-                resp,
-                &mut app.ui_state,
-                if waiting > 0 {
-                    "This scene's thread with an agent: something is waiting for your answer"
-                } else {
-                    "This scene's thread with an agent: ask for changes, look at what comes back, \
-                     apply it or send it back"
-                },
-                "toggle the Collaborate window",
-            );
-
             ui.separator();
 
-            let resp = window_toggle(ui, &mut app.ui_state.panels.views_open, icons::VIDEO_CAMERA, "Views", compact);
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "This framing as numbers, and the views this scene has saved",
-                "toggle the Views window",
-            );
-
-            let resp = window_toggle(ui, &mut app.ui_state.panels.timeline_open, icons::FILM_STRIP, "Timeline", compact);
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "The scene over time: the camera's path and every animated value on one \
-                 clock, with a playhead to scrub",
-                "toggle the Timeline window",
-            );
-
-            let resp = window_toggle(ui, &mut app.ui_state.panels.look_open, icons::SLIDERS, "Look", compact);
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "How the picture looks: exposure, point size, colour, haze and infinite zoom",
-                "toggle the Look window",
-            );
-
-            ui.separator();
             draw_undo_redo(ui, app);
-
             ui.separator();
-            draw_quick_controls(ui, app);
+
+            draw_drawing_button(ui, app, forms.renderer);
+            ui.separator();
+
+            draw_edit_tools(ui, app, forms.mode_caption);
+            // How the viewport is divided: beside the edit tools because it is
+            // also about how you look at the scene, but a control of its own,
+            // so ordinary spacing and no join.
+            view_layout(ui, app);
+            ui.separator();
+
+            super::transport::draw(ui, app, forms.frames);
+            draw_timeline_toggle(ui, app, forms.timeline_caption);
             let left_end = ui.cursor().min.x;
 
-            // Right-aligned, and therefore built right-to-left: help at the far
-            // end, then the scene identity beside it.
-            let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(6.0);
-                draw_help_menu(ui, app);
-                ui.separator();
-                draw_scene_identity(ui, app);
-            });
-            let gap = right.response.rect.left() - left_end;
-            let font = egui::TextStyle::Button.resolve(ui.style());
-            let captions: f32 = WINDOW_CAPTIONS
-                .iter()
-                .map(|c| {
-                    ui.ctx().fonts_mut(|f| f.layout_no_wrap(c.to_string(), font.clone(), egui::Color32::WHITE).size().x)
-                        + ui.spacing().icon_spacing
+            // The right-hand block: laid out from the right edge when it fits
+            // beside the left, and pushed past the window's edge when even the
+            // last step doesn't fit, rather than drawn over the left side.
+            let gap = 2.0 * ui.spacing().item_spacing.x;
+            let fits = left_end + gap + app.ui_state.toolbar_right_w <= row_right;
+            let right_w = if fits {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    draw_right_block(ui, app, forms, true)
                 })
-                .sum();
-            if !compact && gap < 4.0 {
-                app.ui_state.toolbar_compact = true;
-            } else if compact && gap > captions + 24.0 {
-                app.ui_state.toolbar_compact = false;
-            }
+                .response
+                .rect
+                .width()
+            } else {
+                ui.add_space(gap);
+                let start = ui.cursor().min.x;
+                draw_right_block(ui, app, forms, false);
+                ui.cursor().min.x - start
+            };
+            app.ui_state.toolbar_right_w = right_w;
+
+            let measured = (left_end - row_left) + gap + right_w;
+            let saved = savings(ui, app);
+            app.ui_state.toolbar_level = choose_level(
+                level,
+                measured,
+                &saved,
+                row_right - row_left,
+                ui.spacing().item_spacing.x,
+            );
         });
         ui.add_space(2.0);
     });
+}
+
+/// The document's name, Collaborate and Help. `rtl` says the layout runs
+/// right to left, so the items are added in reverse.
+fn draw_right_block(ui: &mut egui::Ui, app: &mut App, forms: Forms, rtl: bool) {
+    if rtl {
+        ui.add_space(6.0);
+        draw_help_menu(ui, app);
+        draw_collab_toggle(ui, app, forms.collab_caption);
+        ui.separator();
+        draw_scene_identity(ui, app, forms.author, rtl);
+    } else {
+        draw_scene_identity(ui, app, forms.author, rtl);
+        ui.separator();
+        draw_collab_toggle(ui, app, forms.collab_caption);
+        draw_help_menu(ui, app);
+        ui.add_space(6.0);
+    }
+}
+
+/// Collaborate's two forms: `Collaborate (2)` and its icon with the count.
+fn collab_width(ui: &egui::Ui, caption: bool) -> f32 {
+    num::icon_button_width(ui, &[(icons::CHATS, if caption { "Collaborate (99)" } else { "99" })])
+}
+
+/// Collaborate, with what's waiting on you. A badge and nothing more: a
+/// message never opens a window over the work. Pinned to a two-digit count,
+/// so a message arriving doesn't push Help along.
+fn draw_collab_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
+    let waiting = app.collab_waiting();
+    let text = match (caption, waiting) {
+        (true, 0) => "Collaborate".to_string(),
+        (true, n) => format!("Collaborate ({n})"),
+        (false, 0) => String::new(),
+        (false, n) => n.to_string(),
+    };
+    let open = app.ui_state.panels.collab_open;
+    let resp = ui.add(
+        egui::Button::selectable(open, (icons::CHATS, text, egui::Atom::grow()))
+            .min_size(egui::vec2(collab_width(ui, caption), 0.0)),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        match waiting {
+            0 => "This scene's thread with an agent: ask for changes, look at what comes back, \
+                  apply it or send it back"
+                .to_string(),
+            1 => "This scene's thread with an agent: one thing is waiting for your answer".to_string(),
+            n => format!("This scene's thread with an agent: {n} things are waiting for your answer"),
+        },
+        "toggle the Collaborate window",
+    );
+    if resp.clicked() {
+        app.ui_state.panels.collab_open = !open;
+    }
+}
+
+/// The Timeline toggle's two forms: with its caption, and the icon alone.
+fn timeline_width(ui: &egui::Ui, caption: bool) -> f32 {
+    num::icon_button_width(ui, &[(icons::FILM_STRIP, if caption { "Timeline" } else { "" })])
+}
+
+/// The Timeline window, at the end of the transport: the transport is how you
+/// use it, so that's where you look for it.
+fn draw_timeline_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
+    let open = app.ui_state.panels.timeline_open;
+    let atoms = if caption {
+        egui::Button::selectable(open, (icons::FILM_STRIP, "Timeline", egui::Atom::grow()))
+    } else {
+        egui::Button::selectable(open, (icons::FILM_STRIP, egui::Atom::grow()))
+    };
+    let resp = ui.add(atoms.min_size(egui::vec2(timeline_width(ui, caption), 0.0)));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "The Timeline: the camera's path and every animated value on one clock, with a \
+         playhead to scrub",
+        "toggle the Timeline window",
+    );
+    if resp.clicked() {
+        app.ui_state.panels.timeline_open = !open;
+    }
 }
 
 /// The File menu.
@@ -535,7 +632,9 @@ fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
         app.undo();
     }
 
-    let resp = ui.add_enabled(redo_n > 0, egui::Button::new((icons::REDO, "Redo")));
+    // No caption: it sits beside Undo, which explains it, and the glyph is
+    // the one every program uses.
+    let resp = ui.add_enabled(redo_n > 0, egui::Button::new(icons::REDO));
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -550,17 +649,72 @@ fn draw_undo_redo(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// The name as the toolbar shows it, with or without the author.
+fn name_text(app: &App, with_author: bool) -> String {
+    let author = app.scene.author.trim();
+    // Opened from a render, it says so: there's no .toml behind it yet.
+    let from = if app.scene_png.is_some() { " (from PNG)" } else { "" };
+    if author.is_empty() || !with_author {
+        format!("{}{}", app.scene.name, from)
+    } else {
+        format!("{} — {}{}", app.scene.name, author, from)
+    }
+}
+
+/// The most room the name may take: `NAME_CHARS` of the button font.
+fn name_cap(ui: &egui::Ui) -> f32 {
+    num::text_button_width(ui, &[&"n".repeat(NAME_CHARS)])
+}
+
+/// How wide the name is drawn, with or without the author.
+fn name_width(ui: &egui::Ui, app: &App, with_author: bool) -> f32 {
+    if app.preview_label().is_some() {
+        return name_cap(ui);
+    }
+    num::text_button_width(ui, &[&name_text(app, with_author)]).min(name_cap(ui))
+}
+
 /// The scene's name and author: a readout that opens an editor for itself.
-fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
-    let author = app.scene.author.trim().to_string();
+///
+/// The `*` that says there are unsaved edits is a cell of its own, outside
+/// the name, so a long name cut with `…` can't hide it, and so the bar doesn't
+/// shift when it comes and goes. `rtl` says which way the row is being laid
+/// out, so the `*` lands before the name either way.
+fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App, with_author: bool, rtl: bool) {
+    let h = ui.spacing().interact_size.y;
+    let cap = name_cap(ui);
+    let star_w = num::text_button_width(ui, &["*"]) - 2.0 * ui.spacing().button_padding.x;
     // The same `*` the window title carries, for the same reason: whether
     // there is work on screen that isn't on disk is worth being able to see
     // without opening anything.
-    let dirty = if app.is_dirty() { "*" } else { "" };
+    let dirty = app.is_dirty();
+    let star = |ui: &mut egui::Ui| {
+        ui.add_sized(
+            egui::vec2(star_w, h),
+            egui::Label::new(egui::RichText::new(if dirty { "*" } else { "" }).weak()),
+        );
+    };
+    let layout = if rtl {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    if !rtl {
+        star(ui);
+    }
+
     // While an option is previewed the scene on screen isn't yours, and the
     // readout says so where it would say what it is.
     if let Some(label) = app.preview_label() {
-        let resp = ui.add(egui::Button::new(egui::RichText::new(label).color(super::theme::warn(ui.visuals()))).frame(false).truncate());
+        let resp = ui
+            .allocate_ui_with_layout(egui::vec2(cap, h), layout, |ui| {
+                ui.add(
+                    egui::Button::new(egui::RichText::new(label).color(super::theme::warn(ui.visuals())))
+                        .frame(false)
+                        .truncate(),
+                )
+            })
+            .inner;
         hinted(
             resp,
             &mut app.ui_state,
@@ -568,20 +722,21 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
              untouched. Esc goes back to it.",
             "previewing an option · Esc: back to your scene",
         );
+        if rtl {
+            star(ui);
+        }
         return;
     }
-    // Opened from a render, it says so: there's no .toml behind it yet.
-    let from = if app.scene_png.is_some() { " (from PNG)" } else { "" };
-    let label = if author.is_empty() {
-        format!("{}{}{}", dirty, app.scene.name, from)
-    } else {
-        format!("{}{} — {}{}", dirty, app.scene.name, author, from)
-    };
-    let resp = ui.add(
-        egui::Button::new(egui::RichText::new(label).weak())
-            .frame(false)
-            .truncate(),
-    );
+
+    let label = name_text(app, with_author);
+    let resp = ui
+        .allocate_ui_with_layout(egui::vec2(cap, h), layout, |ui| {
+            ui.add(egui::Button::new(egui::RichText::new(label).weak()).frame(false).truncate())
+        })
+        .inner;
+    if rtl {
+        star(ui);
+    }
     let path = match (&app.scene_path, &app.scene_png) {
         (Some(p), _) => p.clone(),
         (None, Some(png)) => format!(
@@ -590,10 +745,16 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
         ),
         (None, None) => "(unsaved scene)".to_string(),
     };
+    let tip = format!(
+        "{}{}\n{}\n\nClick to change the scene's name or author.",
+        name_text(app, true),
+        if dirty { " (unsaved changes)" } else { "" },
+        path
+    );
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        format!("{}\n\nClick to change the scene's name or author.", path),
+        tip,
         "click: edit the scene's name and author",
     );
 
@@ -651,7 +812,7 @@ pub(super) const POINT_COUNT_K_M_BOUNDARY: u32 = 1_000_000;
 /// The drawing button's point count, e.g. `"420k"` or `"1.5M"`.
 ///
 /// Its own function (rather than inlined at the one call site) so the width
-/// bound in `draw_quick_controls` can ask it for boundary strings — the
+/// bound in `drawing_button_width` can ask it for boundary strings — the
 /// actual widest output this formatter can produce, not a separately
 /// maintained guess that would drift the moment this function changes.
 pub(super) fn point_count_label(capacity: u32) -> String {
@@ -771,28 +932,54 @@ fn draw_drawing_button(ui: &mut egui::Ui, app: &mut App, with_renderer: bool) {
         .show(|ui| render_panel::draw_popup(ui, app));
 }
 
-/// The drawing button, edit/view mode and the transport: the settings that
-/// get changed most often mid-exploration.
-fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
-    draw_drawing_button(ui, app, true);
-    view_layout(ui, app);
-    ui.separator();
+/// Edit Mode / View Mode's two forms: with its caption, and the icon alone.
+fn mode_width(ui: &egui::Ui, caption: bool) -> f32 {
+    if caption {
+        num::icon_button_width(ui, &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")])
+    } else {
+        num::icon_button_width(ui, &[(icons::CUBE, ""), (icons::EYE, "")])
+    }
+}
 
-    // Label names the state you're *in*, not the action a click performs —
-    // the pressed/unpressed `selectable_label` styling already carries the
-    // state, so the text is reinforcement rather than the only signal.
-    //
-    // Fixed to the wider of its two captions (`num::icon_button_width`) so
-    // toggling it — which changes both the icon and the word — doesn't shift
-    // the Play/Pause button beside it.
-    // The emphasis toggle rides *attached* to the mode button rather than
-    // sitting loose in the strip. It does nothing outside edit mode — there is
-    // no selection to be about — so it belongs to that control rather than
-    // beside it, and zero spacing between the two is what says so. Disabled
-    // rather than hidden in view mode: a button that vanishes takes the rest
-    // of the toolbar's layout with it.
+/// Edit Mode / View Mode, then its two companions to its right: the emphasis
+/// glow and the xaos overlay. Both do nothing outside edit mode, so they
+/// belong to that control, and zero spacing between the three is what says
+/// so. Edit Mode comes first because it's the one they depend on (they sat
+/// on its left until 2026-10-31, which read backwards).
+fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     let spacing = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 0.0;
+
+    // Label names the state you're *in*, not the action a click performs:
+    // the pressed/unpressed styling already carries the state, so the text is
+    // reinforcement rather than the only signal. Pinned to the wider of its
+    // two captions, so toggling it doesn't shift what's to its right.
+    let icon = if app.show_gizmos { icons::CUBE } else { icons::EYE };
+    let button = if caption {
+        egui::Button::selectable(
+            app.show_gizmos,
+            (icon, if app.show_gizmos { "Edit Mode" } else { "View Mode" }, egui::Atom::grow()),
+        )
+    } else {
+        egui::Button::selectable(app.show_gizmos, (icon, egui::Atom::grow()))
+    };
+    let resp = ui.add(button.min_size(egui::vec2(mode_width(ui, caption), 0.0)));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if app.show_gizmos {
+            "Edit mode: gizmos and names are showing (G). Click for view mode"
+        } else {
+            "View mode: gizmos and names are hidden (G). Click for edit mode"
+        },
+        if app.show_gizmos { "click: switch to view mode" } else { "click: switch to edit mode" },
+    );
+    if resp.clicked() {
+        app.toggle_gizmos();
+    }
+
+    // Disabled rather than hidden in view mode: a button that vanishes takes
+    // the rest of the toolbar's layout with it.
     let resp = ui.add_enabled(
         app.show_gizmos,
         egui::Button::selectable(app.show_emphasis && app.show_gizmos, icons::LIGHTBULB),
@@ -812,9 +999,9 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     if resp.clicked() {
         app.toggle_emphasis();
     }
-    // The xaos edge overlay: the Gizmos control's other sibling, for the same
-    // reason — it draws between gizmo origins, so it has nothing to show in
-    // view mode.
+
+    // The xaos edge overlay: it draws between gizmo origins, so it has nothing
+    // to show in view mode either.
     let overlay = app.ui_state.xaos_overlay;
     let resp = ui.add_enabled(
         app.show_gizmos,
@@ -826,7 +1013,9 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         if !app.show_gizmos {
             "Draw which transform may follow which, as arrows between gizmos. Only in edit mode"
         } else if overlay {
-            "Drawing xaos edges: the selected transform's exits, or every edge that isn't 1.              Click an edge to edit it, alt+scroll to scale it, ctrl+right-drag to cut several.              Click to stop"
+            "Drawing xaos edges: the selected transform's exits, or every edge that isn't 1. \
+             Click an edge to edit it, alt+scroll to scale it, ctrl+right-drag to cut several. \
+             Click to stop"
         } else {
             "Draw which transform may follow which, as arrows between gizmos"
         },
@@ -836,35 +1025,39 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
         app.ui_state.xaos_overlay = !app.ui_state.xaos_overlay;
     }
 
-    let mode_width =
-        num::icon_button_width(ui, &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")]);
-    let resp = ui.add(
-        egui::Button::selectable(
-            app.show_gizmos,
-            if app.show_gizmos {
-                (icons::CUBE, "Edit Mode", egui::Atom::grow())
-            } else {
-                (icons::EYE, "View Mode", egui::Atom::grow())
-            },
-        )
-        .min_size(egui::vec2(mode_width, 0.0)),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        if app.show_gizmos {
-            "Edit mode: gizmos and names are showing (G). Click for view mode"
-        } else {
-            "View mode: gizmos and names are hidden (G). Click for edit mode"
-        },
-        if app.show_gizmos { "click: switch to view mode" } else { "click: switch to edit mode" },
-    );
-    if resp.clicked() {
-        app.toggle_gizmos();
-    }
     ui.spacing_mut().item_spacing.x = spacing;
+}
 
-    // The transport: record, return to start, play, the time, loop.
-    ui.separator();
-    super::transport::draw(ui, app);
+#[cfg(test)]
+mod tests {
+    use super::{STEPS, choose_level};
+
+    const SAVES: [f32; STEPS] = [40.0, 60.0, 70.0, 50.0, 80.0, 45.0];
+
+    #[test]
+    fn the_ladder_takes_the_first_step_that_fits() {
+        // Measured 1500 with every caption, in 1440: dropping the frame count
+        // (40) isn't enough, dropping the author too (100) is.
+        assert_eq!(choose_level(0, 1500.0, &SAVES, 1440.0, 20.0), 2);
+        // Room for everything: stays at 0.
+        assert_eq!(choose_level(0, 1200.0, &SAVES, 1440.0, 20.0), 0);
+        // From step 2 (measured 1400), the same answer: the arithmetic runs
+        // both ways from wherever the bar is.
+        assert_eq!(choose_level(2, 1400.0, &SAVES, 1440.0, 20.0), 2);
+    }
+
+    #[test]
+    fn going_back_needs_room_to_spare() {
+        // At step 1, measured 1400: step 0 would be 1440, which fits exactly
+        // but leaves no margin, so it stays put rather than flicker.
+        assert_eq!(choose_level(1, 1400.0, &SAVES, 1440.0, 20.0), 1);
+        // With the margin's worth of room, it goes back.
+        assert_eq!(choose_level(1, 1380.0, &SAVES, 1440.0, 20.0), 0);
+    }
+
+    #[test]
+    fn past_the_last_step_it_stays_there() {
+        assert_eq!(choose_level(0, 3000.0, &SAVES, 800.0, 20.0), STEPS as u8);
+        assert_eq!(choose_level(STEPS as u8, 2000.0, &SAVES, 800.0, 20.0), STEPS as u8);
+    }
 }

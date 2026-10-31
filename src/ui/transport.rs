@@ -1,5 +1,5 @@
-//! The transport, in the toolbar: record, return to start, play, the time,
-//! loop. Always in the same place and always visible, whether or not the
+//! The transport, in the toolbar: record, return to start, loop, play, the
+//! time. Loop sits with record because both say how play will behave. Always in the same place and always visible, whether or not the
 //! Timeline window is open, because these are the controls a hand reaches
 //! for without looking (ANIMATION-PLAN.md §2.1).
 //!
@@ -17,10 +17,22 @@ use crate::app::App;
 use super::hints::hinted;
 use super::{icons, num};
 
-/// Characters in the time readout: `9999.99 s 299999 f`.
-const TIME_CHARS: usize = 18;
+/// Characters in the time readout: `999.99 s 99999 f`, which covers a
+/// timeline of 16 minutes and 55 minutes of frames at 30 a second. Every
+/// character here is toolbar width, which is what the squeeze ladder spends.
+const TIME_CHARS: usize = 16;
+/// ...and without its frame count: `999.99 s`.
+const TIME_CHARS_SHORT: usize = 8;
 
-pub fn draw(ui: &mut egui::Ui, app: &mut App) {
+/// How much narrower the time readout is without its frame count, for the
+/// toolbar's squeeze ladder.
+pub fn frames_width(ui: &egui::Ui) -> f32 {
+    num::mono_width(ui, TIME_CHARS) - num::mono_width(ui, TIME_CHARS_SHORT)
+}
+
+/// `frames`: whether the time readout carries the frame count. It's the
+/// first thing the toolbar gives up when it runs out of room.
+pub fn draw(ui: &mut egui::Ui, app: &mut App, frames: bool) {
     // One group: the gaps inside it are the toolbar's ordinary spacing, and
     // the group sits between separators.
     let armed = app.record_armed;
@@ -58,6 +70,30 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         app.return_to_start();
     }
 
+    let looping = app.loop_playback;
+    let resp = ui.add(egui::Button::selectable(looping, icons::REPEAT));
+    let region = app.loop_region;
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        match (looping, region) {
+            (_, Some((a, b))) => format!(
+                "Loop {}: playback goes round the loop region, {a:.2} s to {b:.2} s. Drag in \
+                 the strip along the top of the Timeline's ruler to move it.",
+                if looping { "on" } else { "off" }
+            ),
+            (true, None) => "Loop on: playback goes round to the start at the end of the \
+                             timeline. Drag in the strip along the top of the Timeline's \
+                             ruler to loop a part of it."
+                .to_string(),
+            (false, None) => "Loop off: playback stops at the end of the timeline".to_string(),
+        },
+        if looping { "click: stop looping" } else { "click: loop" },
+    );
+    if resp.clicked() {
+        app.loop_playback = !looping;
+    }
+
     // "Play" and "Pause" aren't the same width, so the button is pinned to
     // the wider or it shifts everything to its right when clicked.
     let moving = app.is_playing();
@@ -89,38 +125,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
-    draw_time(ui, app);
-
-    let looping = app.loop_playback;
-    let resp = ui.add(egui::Button::selectable(looping, icons::REPEAT));
-    let region = app.loop_region;
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        match (looping, region) {
-            (_, Some((a, b))) => format!(
-                "Loop {}: playback goes round the loop region, {a:.2} s to {b:.2} s. Drag in \
-                 the strip along the top of the Timeline's ruler to move it.",
-                if looping { "on" } else { "off" }
-            ),
-            (true, None) => "Loop on: playback goes round to the start at the end of the \
-                             timeline. Drag in the strip along the top of the Timeline's \
-                             ruler to loop a part of it."
-                .to_string(),
-            (false, None) => "Loop off: playback stops at the end of the timeline".to_string(),
-        },
-        if looping { "click: stop looping" } else { "click: loop" },
-    );
-    if resp.clicked() {
-        app.loop_playback = !looping;
-    }
+    draw_time(ui, app, frames);
 }
 
 /// The time: a readout while playing, and a field to type a moment into
 /// while paused.
-fn draw_time(ui: &mut egui::Ui, app: &mut App) {
+fn draw_time(ui: &mut egui::Ui, app: &mut App, frames: bool) {
     let fps = app.frame_rate();
-    let width = num::mono_width(ui, TIME_CHARS) + 2.0 * ui.spacing().button_padding.x;
+    let chars = if frames { TIME_CHARS } else { TIME_CHARS_SHORT };
+    let width = num::mono_width(ui, chars) + 2.0 * ui.spacing().button_padding.x;
     let height = ui.spacing().interact_size.y;
     let playing = app.is_playing();
     if playing {
@@ -172,7 +185,11 @@ fn draw_time(ui: &mut egui::Ui, app: &mut App) {
         None => {
             let t = app.playhead();
             let frame = (t * fps as f64 + 1e-6).floor() as i64;
-            let text = format!("{} s {:>6} f", num::cell(t as f32, 2, 7), frame);
+            let text = if frames {
+                format!("{} s {:>5} f", num::cell(t as f32, 2, 6), frame)
+            } else {
+                format!("{} s", num::cell(t as f32, 2, 6))
+            };
             let resp = ui.add_sized(
                 egui::vec2(width, height),
                 egui::Button::new(egui::RichText::new(text).monospace()).sense(if playing {
