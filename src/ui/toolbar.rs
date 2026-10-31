@@ -585,7 +585,8 @@ fn view_layout(ui: &mut egui::Ui, app: &mut App) {
             Layout::Quad,
             icons::SQUARES_FOUR,
             format!(
-                "Four views: top, front and right beside the perspective view (T). \
+                "Four views: the perspective view top left, with top, front and right \
+                 around it (T). \
                  Drag in an axis view to pan, and click a ball on its axis cross to \
                  look down another axis.{later}"
             ),

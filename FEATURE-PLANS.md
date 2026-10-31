@@ -178,9 +178,9 @@ multiview pane grid.
 
 ### 2. Multiview, and the pane grid it's built on
 
-> **Status, 2026-10-31 (Opus 5.5): built, branch `multiview`.** Three layouts
-> (one view, four views, one big and three small: `T`, or the toolbar's
-> radio), a perspective pane and three axis panes on the one point buffer,
+> **Status, 2026-10-31 (Opus 5.5): built and accepted.** Three layouts
+> (one view, four views with the perspective top-left as Hazel asked, one big
+> and three small: `T`, or the toolbar's radio), a perspective pane and three axis panes on the one point buffer,
 > each with its own axis cross; gizmos pick and drag in any pane. Two of the
 > decisions below went this way: the axis panes are **pickable** (click a ball
 > on a pane's cross; defaults top / front / right, front being +z where the

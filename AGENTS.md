@@ -588,7 +588,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
 | U / Shift+U | random scene mutation / undo it |
 | Ctrl+U | the mutation grid in the view, or back to one view (Esc also leaves it) |
-| T / Shift+T | view layout: one view → four views → one big and three small (see "Multiview") |
+| T / Shift+T | view layout: one view → four views (perspective top-left) → one big and three small (see "Multiview") |
 | Ctrl+Z / Ctrl+Shift+Z | undo / redo *any* edit (see `src/history.rs`) |
 | X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
 | I | invert mouse pitch, flightsim style (persisted to prefs) |
@@ -965,9 +965,9 @@ Conventions worth keeping:
 ### Multiview: the viewport as panes
 
 FEATURE-PLANS item 2 (`src/multiview.rs`, `ui::panes`). `T` / `Shift+T` or the
-toolbar's three-icon radio picks a layout — **one view**, **four views** (top
-above front, right beside front, perspective in the corner left over: the
-drafting layout) or **one big, three small** (perspective left, the three axis
+toolbar's three-icon radio picks a layout — **one view**, **four views**
+(perspective top-left, top above front down the right, right beside front
+along the bottom, so top and front share x and right and front share y) or **one big, three small** (perspective left, the three axis
 views down the right). A preference (`view_layout`, `view_axes` in prefs), not
 scene data. The mutation grid is a layout of its own and wins while it's up.
 

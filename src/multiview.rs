@@ -51,9 +51,10 @@ pub enum Layout {
     /// The one perspective view, as Fracturize has always been.
     #[default]
     Single,
-    /// Two by two: top above front, right beside front, and the perspective
-    /// view in the corner left over — the drafting layout, so the top and
-    /// front views share their x and the front and right views their y.
+    /// Two by two: the perspective view top-left, where the eye lands first
+    /// (Hazel's call, 2026-10-31), top above front down the right, and right
+    /// beside front along the bottom — so the top and front views still share
+    /// their x and the right and front views their y.
     Quad,
     /// The perspective view large on the left, the three axis views stacked
     /// down the right.
@@ -276,10 +277,10 @@ pub fn rects(layout: Layout, area: Rect, gap: u32) -> Vec<(Rect, Slot)> {
             let (left, right) = split(area.x, area.w, half_w);
             let (top, bottom) = split(area.y, area.h, half_h);
             vec![
-                (r(right, top), Slot::Perspective),
-                (r(left, top), Slot::Axis(0)),
-                (r(left, bottom), Slot::Axis(1)),
-                (r(right, bottom), Slot::Axis(2)),
+                (r(left, top), Slot::Perspective),
+                (r(right, top), Slot::Axis(0)),
+                (r(right, bottom), Slot::Axis(1)),
+                (r(left, bottom), Slot::Axis(2)),
             ]
         }
         Layout::OneAndThree => {
@@ -334,15 +335,15 @@ mod tests {
     /// The drafting layout: top above front, right beside front, the
     /// perspective view in the corner left over.
     #[test]
-    fn the_quad_is_laid_out_as_a_drawing_is() {
+    fn the_quad_puts_perspective_top_left_and_keeps_the_views_aligned() {
         let p = rects(Layout::Quad, Rect { x: 0, y: 0, w: 1000, h: 800 }, 2);
         let at = |s: Slot| p.iter().find(|(_, k)| *k == s).unwrap().0;
         let (top, front, right, persp) = (at(Slot::Axis(0)), at(Slot::Axis(1)), at(Slot::Axis(2)), at(Slot::Perspective));
+        assert_eq!((persp.x, persp.y), (0, 0));
         assert_eq!(top.x, front.x);
         assert!(top.y < front.y);
         assert_eq!(right.y, front.y);
-        assert!(right.x > front.x);
-        assert_eq!((persp.x, persp.y), (right.x, top.y));
+        assert_eq!(right.x, persp.x);
     }
 
     #[test]
