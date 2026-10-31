@@ -491,12 +491,22 @@ fn mean_singular_value(m: Mat4) -> f32 {
     (s.x.abs() * s.y.abs() * s.z.abs()).cbrt()
 }
 
+/// Whether `scene` is the blank scene, untouched: the one base with nothing
+/// of its own for a roll to keep.
+pub(super) fn is_blank(scene: &Scene) -> bool {
+    let text = |s: &Scene| s.to_toml_string().ok();
+    text(scene).is_some_and(|t| Some(t) == text(&Scene::blank()))
+}
+
 /// Wrap an accepted candidate up as a full `Scene`, framed for its size.
 ///
 /// Like [`build_candidate`], every draw is made and then a part that's off is
-/// taken from `base`: the colour source and gradient, the background. A roll
+/// taken from `base`: the colour source and gradient, the background. What
+/// the dice have no part for is the base's too — its name and author, its
+/// settings, which way its camera looks, its subscenes, its animation —
+/// unless the base is the blank scene, which has nothing to keep. A roll
 /// with no part of the form on has the base's form, so it keeps the base's
-/// camera and look as well — it's the same flame, recoloured.
+/// framing as well — it's the same flame, recoloured.
 pub(super) fn finish(
     mut c: Candidate,
     center: Vec3,
@@ -524,7 +534,9 @@ pub(super) fn finish(
         xaos_matrix_layers: Vec::new(),
             colours_left_out: Vec::new(),
         name: format!("random-{}", crate::app::unix_timestamp()),
-        author: "fracturize random flame".to_string(),
+        // The base's: dice aren't an author. (The blank scene has none, and
+        // the app fills in the person's.)
+        author: base.author.clone(),
         // Scale the dot size with the attractor: the same point size that
         // looks dusty on a radius-3 form is a solid mass on a radius-0.3 one.
         point_size: (radius * 0.0018).clamp(0.0008, 0.012),
@@ -607,30 +619,33 @@ pub(super) fn finish(
             scene.colors.push(base.colors.get(i).copied().unwrap_or(Vec3::ONE));
         }
     }
+    // A composite's framing, and a kept form's, are the base's outright.
     if p.no_form() || composite {
         scene.camera_focus = base.camera_focus;
         scene.camera_distance = base.camera_distance;
-        scene.camera_orientation = base.camera_orientation;
     }
-    if p.no_form() {
-        // The same flame, recoloured: it keeps its name, its author, and
-        // which colours it left to their positions (re-checked against the
-        // values, so a colour the roll did change is written down).
+    // What a roll doesn't draw stays the base's: its name, every setting the
+    // dice have no part for, and which way the camera looks. Only where it
+    // looks and from how far follow a new form, and the dots keep their size
+    // against that distance. The blank scene has nothing of its own to keep,
+    // so a roll from it (`--random`) takes the roll's defaults, and every
+    // recorded seed still rolls what it did.
+    if p.no_form() || !is_blank(base) {
         scene.name = base.name.clone();
-        scene.author = base.author.clone();
+        // Re-checked against the values, so a colour the roll did change is
+        // written down.
         scene.colours_left_out = base.colours_left_out.clone();
         scene.decay = base.decay;
         scene.points_per_frame = base.points_per_frame;
-        scene.camera_focus = base.camera_focus;
-        scene.camera_distance = base.camera_distance;
         scene.camera_orientation = base.camera_orientation;
         scene.camera_fov = base.camera_fov;
         scene.camera_fov_authored = base.camera_fov_authored;
-        scene.point_size = base.point_size;
+        scene.point_size = base.point_size * scene.camera_distance / base.camera_distance;
         scene.point_count = base.point_count;
         scene.point_count_defaulted = base.point_count_defaulted;
         scene.haze = base.haze;
         scene.exposure = base.exposure;
+        scene.color_contrast = base.color_contrast;
     }
     // Infinite zoom stays wherever its map still qualifies on what was drawn:
     // always, when the form is kept; on a new form, if the same map is still
