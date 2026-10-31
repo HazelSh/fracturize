@@ -184,15 +184,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 fn draw_header(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let playing = app.is_playing();
-        let w = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
-        let resp = ui.add(
-            egui::Button::new(if playing {
-                (icons::PAUSE, "Pause", egui::Atom::grow())
-            } else {
-                (icons::PLAY, "Play", egui::Atom::grow())
-            })
-            .min_size(egui::vec2(w, 0.0)),
-        );
+        use super::transport::PLAY_STATES;
+        let shown = if playing { PLAY_STATES[1] } else { PLAY_STATES[0] };
+        let resp = ui.add(num::Pinned::new(shown, &PLAY_STATES));
         let resp = hinted(
             resp,
             &mut app.ui_state,

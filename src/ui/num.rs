@@ -386,6 +386,74 @@ pub fn text_button_width(ui: &egui::Ui, candidates: &[&str]) -> f32 {
     widest + 2.0 * ui.spacing().button_padding.x
 }
 
+/// A button whose caption changes between states (Play and Pause, Edit Mode
+/// and View Mode, a count), pinned to the widest state it can show so it
+/// never moves what is beside it, with its caption held at the left.
+///
+/// **Build every such button with this**, never with [`icon_button_width`]
+/// and a hand-made `min_size`. The caption is followed by an `Atom::grow()` to
+/// hold it left, and egui puts a gap before that atom as well; a hand-made
+/// width forgets that gap, so the widest state ran one gap past its pin and
+/// shoved its neighbours every time it appeared. That was Play/Pause and Edit
+/// Mode/View Mode on the toolbar, until 2026-11-01. Here the width and the
+/// atoms are made in one place, and a test draws every state and checks the
+/// widths agree.
+use egui::IntoAtoms;
+
+pub struct Pinned<'a> {
+    icon: &'a str,
+    text: &'a str,
+    states: &'a [(&'a str, &'a str)],
+    selected: Option<bool>,
+    icon_after: bool,
+}
+
+impl<'a> Pinned<'a> {
+    /// The state shown now, `(icon, text)`, and every state the button can
+    /// show (including this one). A state with empty text is the icon alone.
+    pub fn new(shown: (&'a str, &'a str), states: &'a [(&'a str, &'a str)]) -> Self {
+        Self { icon: shown.0, text: shown.1, states, selected: None, icon_after: false }
+    }
+
+    /// A toggle: lit while `on`.
+    pub fn selected(mut self, on: bool) -> Self {
+        self.selected = Some(on);
+        self
+    }
+
+    /// The icon after the text, for a button that opens a menu (`Splat · 6.0M ▾`).
+    pub fn icon_after(mut self) -> Self {
+        self.icon_after = true;
+        self
+    }
+
+    /// The width every state is pinned to.
+    pub fn width(ui: &egui::Ui, states: &[(&str, &str)]) -> f32 {
+        let gap = ui.spacing().icon_spacing;
+        states
+            .iter()
+            .map(|s| icon_button_width(ui, &[*s]) + if s.1.is_empty() { 0.0 } else { gap })
+            .fold(0.0_f32, f32::max)
+    }
+}
+
+impl egui::Widget for Pinned<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let width = Pinned::width(ui, self.states);
+        let grow = egui::Atom::grow();
+        let atoms: egui::Atoms<'_> = match (self.text.is_empty(), self.icon_after) {
+            (true, _) => (self.icon, grow).into_atoms(),
+            (false, false) => (self.icon, self.text, grow).into_atoms(),
+            (false, true) => (self.text, grow, self.icon).into_atoms(),
+        };
+        let button = match self.selected {
+            Some(on) => egui::Button::selectable(on, atoms),
+            None => egui::Button::new(atoms),
+        };
+        ui.add(button.min_size(egui::vec2(width, 0.0)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +613,41 @@ mod tests {
                             drawn <= promised + 0.01,
                             "{text}: egui drew {drawn}, the helper promised {promised}"
                         );
+                    }
+                }
+            });
+        });
+    }
+
+    /// Every state of a pinned button is drawn the same width, so flipping it
+    /// moves nothing beside it. This is what Play/Pause and Edit Mode/View
+    /// Mode got wrong by one gap.
+    #[test]
+    fn a_pinned_button_is_the_same_width_in_every_state() {
+        use super::super::icons;
+        use egui::Widget;
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            ui.horizontal(|ui| {
+                let sets: [&[(&str, &str)]; 4] = [
+                    &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")],
+                    &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")],
+                    &[(icons::CUBE, ""), (icons::EYE, "")],
+                    &[(icons::CARET_DOWN, "Points · 950k"), (icons::CARET_DOWN, "Volume · 12.0M")],
+                ];
+                for (k, states) in sets.into_iter().enumerate() {
+                    let widths: Vec<f32> = states
+                        .iter()
+                        .map(|s| {
+                            let p = Pinned::new(*s, states).selected(false);
+                            let p = if k == 3 { p.icon_after() } else { p };
+                            p.ui(ui).rect.width()
+                        })
+                        .collect();
+                    println!("{states:?}: {widths:?}");
+                    for w in &widths {
+                        assert!((w - widths[0]).abs() < 0.01, "{states:?} drew {widths:?}");
                     }
                 }
             });

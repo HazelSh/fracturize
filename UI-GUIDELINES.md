@@ -196,8 +196,9 @@ From left to right, ordered by task:
 | | **Undo**, redo (icon only, beside Undo) | command buttons |
 | How it's drawn | the drawing button, `Splat · 6.0M ▾`: renderer, opacity, point count, Look… | a button that opens a popup of the panels' own widgets |
 | Edit tools | **Edit Mode**, then emphasis and the xaos overlay to its right | toggles; the two icons do nothing outside edit mode |
-| Time | record, to start, loop, **Play**, the time, **Timeline** | `ui/transport.rs`, then the Timeline toggle |
-| (right) | `*` name — author (click to edit); **Collaborate** with its count; **Help** | Help is a menu |
+| How it's viewed | the view layout (one, four, one and three), beside the edit tools but not joined to them | segmented radio (`multiview`) |
+| Time | to start, **Play**, record, loop, the time, **Timeline** | `ui/transport.rs`, then the Timeline toggle |
+| (right) | `*` name — author (click to edit); **Collaborate**, with what's waiting on you as a warn-orange badge on its icon; **Help** | Help is a menu |
 
 The other windows open from where the work is (TOPBAR-PLAN.md §3): Subscenes
 from File and the Transforms rail's layer picker, Xaos from the inspector's
@@ -507,10 +508,14 @@ like it's vibrating. No screenshot shows this, which is why it's a house
 rule.
 
 **Buttons whose caption changes** (Edit Mode / View Mode, Play / Pause, the
-point count): pin the width with `num::icon_button_width` /
-`text_button_width`, then pin the caption to the left with an
-`egui::Atom::grow()` after it, so neither the neighbours nor the button's own
-icon move.
+drawing button): build them with `num::Pinned`, which pins every state to the
+widest and holds the caption at the left. Never pin by hand with
+`icon_button_width` and a `min_size`: the caption is followed by an
+`Atom::grow()`, egui puts a gap before that too, and a hand-made width that
+forgets it lets the widest state push its neighbours by that gap every time
+it appears (Play/Pause did, until 2026-11-01).
+`a_pinned_button_is_the_same_width_in_every_state` draws every state and
+checks.
 
 ### 6.3 Sliders and drag fields
 
@@ -627,9 +632,11 @@ stands between you and losing work.
 
 ### 6.10 Timeline controls (`ui/timeline.rs`, `ui/transport.rs`)
 
-- **Transport** (toolbar): record, to start, play/pause, the time (seconds
-  *and* frames at the Render job's fps; type `12.5`, `300f` or `1:02.5`
-  while paused), loop. Play flies the camera (attach and play). O, Z and
+- **Transport** (toolbar): to start, play/pause, record, loop, in a DAW's
+  order (Logic's, Reaper's), then the time: seconds *and* frames at the
+  Render job's fps, a number box like any other, so drag it to move the
+  playhead a frame per two points of travel, or click and type `12.5`,
+  `300f` or `1:02.5`. Play flies the camera (attach and play). O, Z and
   Space all play.
 - **The Timeline window**: its own Play (clock only; it leaves the camera
   where it is), Snap (the magnet, on by default; Ctrl flips it for one drag),

@@ -184,7 +184,11 @@ fn draw_right_block(ui: &mut egui::Ui, app: &mut App, forms: Forms, rtl: bool) {
 
 /// Collaborate's two forms: `Collaborate (2)` and its icon with the count.
 fn collab_width(ui: &egui::Ui, caption: bool) -> f32 {
-    num::icon_button_width(ui, &[(icons::CHATS, if caption { "Collaborate (99)" } else { "99" })])
+    num::Pinned::width(ui, &[collab_state(caption)])
+}
+
+fn collab_state(caption: bool) -> (&'static str, &'static str) {
+    (icons::CHATS, if caption { "Collaborate" } else { "" })
 }
 
 /// Collaborate, with what's waiting on you. A badge and nothing more: a
@@ -192,17 +196,23 @@ fn collab_width(ui: &egui::Ui, caption: bool) -> f32 {
 /// so a message arriving doesn't push Help along.
 fn draw_collab_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     let waiting = app.collab_waiting();
-    let text = match (caption, waiting) {
-        (true, 0) => "Collaborate".to_string(),
-        (true, n) => format!("Collaborate ({n})"),
-        (false, 0) => String::new(),
-        (false, n) => n.to_string(),
-    };
     let open = app.ui_state.panels.collab_open;
-    let resp = ui.add(
-        egui::Button::selectable(open, (icons::CHATS, text, egui::Atom::grow()))
-            .min_size(egui::vec2(collab_width(ui, caption), 0.0)),
-    );
+    let state = [collab_state(caption)];
+    let resp = ui.add(num::Pinned::new(state[0], &state).selected(open));
+    // The count is a badge on the icon, in the colour for "waiting on you",
+    // so a message arriving changes nothing's width. The tooltip says it in
+    // words, which is what carries it for anyone who can't tell the colour.
+    if waiting > 0 {
+        let pad = ui.spacing().button_padding;
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let icon_w = ui.fonts_mut(|f| f.glyph_width(&font, icons::CHATS.chars().next().unwrap_or(' ')));
+        let r = 0.36 * font.size;
+        let c = egui::pos2(resp.rect.left() + pad.x + icon_w, resp.rect.top() + r + 1.0);
+        let label = if waiting > 9 { "9+".to_string() } else { waiting.to_string() };
+        let painter = ui.painter();
+        painter.circle_filled(c, r, super::theme::warn(ui.visuals()));
+        painter.text(c, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(r * 1.4), egui::Color32::BLACK);
+    }
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -222,19 +232,19 @@ fn draw_collab_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
 
 /// The Timeline toggle's two forms: with its caption, and the icon alone.
 fn timeline_width(ui: &egui::Ui, caption: bool) -> f32 {
-    num::icon_button_width(ui, &[(icons::FILM_STRIP, if caption { "Timeline" } else { "" })])
+    num::Pinned::width(ui, &[timeline_state(caption)])
+}
+
+fn timeline_state(caption: bool) -> (&'static str, &'static str) {
+    (icons::FILM_STRIP, if caption { "Timeline" } else { "" })
 }
 
 /// The Timeline window, at the end of the transport: the transport is how you
 /// use it, so that's where you look for it.
 fn draw_timeline_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     let open = app.ui_state.panels.timeline_open;
-    let atoms = if caption {
-        egui::Button::selectable(open, (icons::FILM_STRIP, "Timeline", egui::Atom::grow()))
-    } else {
-        egui::Button::selectable(open, (icons::FILM_STRIP, egui::Atom::grow()))
-    };
-    let resp = ui.add(atoms.min_size(egui::vec2(timeline_width(ui, caption), 0.0)));
+    let state = [timeline_state(caption)];
+    let resp = ui.add(num::Pinned::new(state[0], &state).selected(open));
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -887,7 +897,7 @@ fn drawing_caption(mode: Option<crate::app::RenderMode>, capacity: u32) -> Strin
 /// show in that form, so changing renderer or dragging the count moves
 /// nothing beside it. Measured at the two counts that print widest (just under
 /// the k/M boundary, and this device's ceiling) across every renderer.
-fn drawing_button_width(ui: &egui::Ui, app: &App, with_renderer: bool) -> f32 {
+fn drawing_captions(app: &App, with_renderer: bool) -> Vec<String> {
     use crate::app::RenderMode;
     let counts = [POINT_COUNT_K_M_BOUNDARY - 1, app.max_point_capacity()];
     let modes: Vec<Option<RenderMode>> = if with_renderer {
@@ -895,10 +905,13 @@ fn drawing_button_width(ui: &egui::Ui, app: &App, with_renderer: bool) -> f32 {
     } else {
         vec![None]
     };
-    let captions: Vec<String> =
-        modes.iter().flat_map(|m| counts.iter().map(move |c| drawing_caption(*m, *c))).collect();
-    let refs: Vec<(&str, &str)> = captions.iter().map(|c| (icons::CARET_DOWN, c.as_str())).collect();
-    num::icon_button_width(ui, &refs)
+    modes.iter().flat_map(|m| counts.iter().map(move |c| drawing_caption(*m, *c))).collect()
+}
+
+fn drawing_button_width(ui: &egui::Ui, app: &App, with_renderer: bool) -> f32 {
+    let captions = drawing_captions(app, with_renderer);
+    let states: Vec<(&str, &str)> = captions.iter().map(|c| (icons::CARET_DOWN, c.as_str())).collect();
+    num::Pinned::width(ui, &states)
 }
 
 /// One button for how the picture is drawn: it reads the renderer and the
@@ -908,11 +921,9 @@ fn drawing_button_width(ui: &egui::Ui, app: &App, with_renderer: bool) -> f32 {
 fn draw_drawing_button(ui: &mut egui::Ui, app: &mut App, with_renderer: bool) {
     let capacity = app.pending_point_capacity().unwrap_or(app.point_capacity());
     let caption = drawing_caption(with_renderer.then_some(app.render_mode), capacity);
-    let width = drawing_button_width(ui, app, with_renderer);
-    let resp = ui.add(
-        egui::Button::new((caption, egui::Atom::grow(), icons::CARET_DOWN))
-            .min_size(egui::vec2(width, 0.0)),
-    );
+    let captions = drawing_captions(app, with_renderer);
+    let states: Vec<(&str, &str)> = captions.iter().map(|c| (icons::CARET_DOWN, c.as_str())).collect();
+    let resp = ui.add(num::Pinned::new((icons::CARET_DOWN, &caption), &states).icon_after());
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -934,10 +945,15 @@ fn draw_drawing_button(ui: &mut egui::Ui, app: &mut App, with_renderer: bool) {
 
 /// Edit Mode / View Mode's two forms: with its caption, and the icon alone.
 fn mode_width(ui: &egui::Ui, caption: bool) -> f32 {
+    num::Pinned::width(ui, &mode_states(caption))
+}
+
+/// Edit Mode's states, edit first.
+fn mode_states(caption: bool) -> [(&'static str, &'static str); 2] {
     if caption {
-        num::icon_button_width(ui, &[(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")])
+        [(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")]
     } else {
-        num::icon_button_width(ui, &[(icons::CUBE, ""), (icons::EYE, "")])
+        [(icons::CUBE, ""), (icons::EYE, "")]
     }
 }
 
@@ -954,16 +970,9 @@ fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     // the pressed/unpressed styling already carries the state, so the text is
     // reinforcement rather than the only signal. Pinned to the wider of its
     // two captions, so toggling it doesn't shift what's to its right.
-    let icon = if app.show_gizmos { icons::CUBE } else { icons::EYE };
-    let button = if caption {
-        egui::Button::selectable(
-            app.show_gizmos,
-            (icon, if app.show_gizmos { "Edit Mode" } else { "View Mode" }, egui::Atom::grow()),
-        )
-    } else {
-        egui::Button::selectable(app.show_gizmos, (icon, egui::Atom::grow()))
-    };
-    let resp = ui.add(button.min_size(egui::vec2(mode_width(ui, caption), 0.0)));
+    let states = mode_states(caption);
+    let shown = if app.show_gizmos { states[0] } else { states[1] };
+    let resp = ui.add(num::Pinned::new(shown, &states).selected(app.show_gizmos));
     let resp = hinted(
         resp,
         &mut app.ui_state,
@@ -1024,6 +1033,8 @@ fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     if resp.clicked() {
         app.ui_state.xaos_overlay = !app.ui_state.xaos_overlay;
     }
+    // The warp grid's toggle (branch `warp-view`) goes here, as the third
+    // companion: it too is about the selected map, so only edit mode has it.
 
     ui.spacing_mut().item_spacing.x = spacing;
 }

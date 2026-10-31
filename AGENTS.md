@@ -714,8 +714,9 @@ talking to an agent, and help. `TOPBAR-PLAN.md` is the reasoning.
 **Every item has a caption, and things give way one at a time.** When the
 window is too narrow, `toolbar::Forms` drops, in this order: the time's frame
 count, the author after the name, Edit Mode's caption, Timeline's,
-Collaborate's (its count stays), then the renderer's name on the drawing
-button. File, Explore, Transforms, Undo, Play and Help never lose theirs; below
+Collaborate's (its count is a badge on the icon, so it stays), then the
+renderer's name on the drawing button. The view-layout radio (`multiview`)
+sits after the edit tools, its own control rather than joined to them. File, Explore, Transforms, Undo, Play and Help never lose theirs; below
 the last step the right-hand block is pushed past the window's edge rather than
 drawn over the left. Both forms of each are pinned to measured widths, so last
 frame's measured width plus or minus each step's saving says exactly which
@@ -836,16 +837,21 @@ Conventions worth keeping:
   `Drag` accumulates exactly, at half the call site's speed
   (`num::DRAG_GAIN`), so every pixel of travel moves the value one even step.
 
-  The same module's `icon_button_width` / `text_button_width` do this for a
-  *button* whose caption changes length between states (Edit Mode/View Mode,
-  Play/Pause, the point-count readout). **Pin the width, then pin the caption
-  to one end of it**: egui centres a button's atoms inside `min_size`, so a
-  widened button holds its neighbours still while its own icon and text slide
-  by half the difference every time the caption changes — the same jitter,
-  moved inside the control. Append an `egui::Atom::grow()` after the text to
-  spend the slack on the right. Left rather than centred because the icon is
-  the part you aim at, and a column of buttons whose icons don't line up reads
-  as a column that is subtly misaligned.
+  The same module's **`num::Pinned`** does this for a *button* whose caption
+  changes between states (Edit Mode/View Mode, Play/Pause, the drawing
+  button). **Pin the width, then pin the caption to one end of it**: egui
+  centres a button's atoms inside `min_size`, so a widened button holds its
+  neighbours still while its own icon and text slide by half the difference
+  every time the caption changes — the same jitter, moved inside the
+  control. `Pinned` puts an `egui::Atom::grow()` after the text to spend the
+  slack on the right, and counts the gap egui adds before that atom, which
+  is the part a hand-made `icon_button_width` + `min_size` gets wrong: the
+  widest state ran one gap past its pin and shoved everything beside it
+  (Play/Pause did, until 2026-11-01). Build such buttons with `Pinned`, never
+  by hand; `a_pinned_button_is_the_same_width_in_every_state` holds it. Left
+  rather than centred because the icon is the part you aim at, and a column
+  of buttons whose icons don't line up reads as a column that is subtly
+  misaligned.
 - **Destructive confirmations use `ui::confirm::danger_button`.** One widget,
   five steps, and every step is visible:
 
@@ -3175,10 +3181,11 @@ Things it rests on, each found the hard way:
 (toolbar, film strip).
 
 - **The transport lives in the toolbar** (`ui::transport`), so it is there
-  with the Timeline closed: record, return to start, play/pause, the time and
-  loop. The time reads in seconds and in frames at the Render job's fps (so a
-  frame is a frame of the file it would write), and takes a typed moment
-  while paused — `12.5`, `300f`, `1:02.5`. Left/Right step a frame,
+  with the Timeline closed: return to start, play/pause, record and loop, in
+  a DAW's order, then the time. The time reads in seconds and in frames at the
+  Render job's fps (so a frame is a frame of the file it would write), and is
+  a number box: drag it to move the playhead (a frame per two points), or
+  click and type a moment — `12.5`, `300f`, `1:02.5`. Left/Right step a frame,
   Shift+Left/Right jump between keys.
 - **Record keys what an edit changes** (`App::autokey`, from `commit_edit`).
   Armed, an edit's changes come out of `scene_diff` as `-S` paths and each is

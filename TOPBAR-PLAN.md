@@ -35,7 +35,7 @@ where you'd be when you want it.
 ## 2. The new bar
 
 ```
- File  Explore │ Transforms │ Undo ↷ │ Splat · 6.0M ▾ │ Edit Mode 💡 ⇢ │ ⏺ ⏮ ⟲ ▶ Play  12.50 s 375 f  Timeline │   *Koru — Hazel │ Collaborate (2)  Help ▾
+ File  Explore │ Transforms │ Undo ↷ │ Splat · 6.0M ▾ │ Edit Mode 💡 ⇢  (•)□ ( )⊞ ( )⊟ │ ⏮ ▶ Play ⏺ ⟲  12.50 s 375 f  Timeline │   *Koru — Hazel │ ¹Collaborate  Help ▾
 ```
 
 | Group | Contents | Change |
@@ -261,3 +261,67 @@ key, so nobody's layout is lost.
 - **A better name than "Look"** for the Look window.
 - **When volume replaces the other renderers**, the popup loses its radio and
   the button reads `6.0M ▾`.
+
+## 10. Round 2: after the first try-out (2026-11-01)
+
+Hazel's verdict on the first build was *needs work*. What she asked, whether
+each ask holds up, and what changed:
+
+- **Transport order: to start, Play, record, loop.** Sound: it is the order
+  of Logic and Reaper (to start, play, record, cycle), so a DAW hand finds
+  Play where it expects. Done. The plan's earlier "loop next to record" still
+  holds.
+- **The time as a click-drag control.** Sound: Blender's current-frame field
+  and Logic's position display both scrub on drag, and finding a moment by
+  eye is a relative act. It is a `num::Drag` now: drag moves the playhead a
+  frame per two points of travel, click types `12.5`, `300f` or `1:02.5` as
+  before. It drags while playing too, which scrubs.
+- **Toggles must not move anything.** Sound, and a house rule that was being
+  broken. The cause: every pinned button puts `Atom::grow()` after its
+  caption, egui adds a gap before that atom, and `icon_button_width` didn't
+  count it, so the widest state (Pause, View Mode) ran 4 points past its pin.
+  The helper she remembered was `num::icon_button_width`; it measured
+  correctly, and the call sites built the button around it wrongly. Fixed
+  once, in `num::Pinned`, which builds the button and its width together;
+  every changing-caption button uses it, and a test draws every state.
+  This also matters to the ladder: with 16 points to spare at 1440, a 4-point
+  wobble on play/pause could tip a step and move the whole bar.
+- **Collaborate far wider than its caption.** Sound. It was pinned to
+  "Collaborate (99)". The count is now a warn-orange badge on its icon (the
+  colour for "waiting on you", with the number in the tooltip in words), so
+  the button fits "Collaborate" and a message arriving moves nothing.
+
+Two buttons from other branches have places: **multiview's layout radio**
+(on `main`) sits after the edit tools with ordinary spacing, its own control
+and not joined to them; **warp-view's grid toggle** (not merged yet) goes
+after the xaos overlay as Edit Mode's third companion, and the code marks the
+spot. With the radio added, 1440 lands on step 2 (no frame count, no author).
+
+### Review against the personas, other tools and Apophysis
+
+Apophysis AV, run for comparison: a full menu bar over one strip of ~24
+icon-only buttons (file, random/mutate, undo/redo, the editor windows, a
+render-density box, play/stop for scripts, pan/rotate/zoom tools); the
+flame's name is in the status bar and the title bar, not the toolbar. Our bar
+keeps what Rook will look for (window doors one click away, density mid-bar)
+and gives Pip the words Apophysis never had.
+
+Things found that are **not** fixed here, each Hazel's call:
+
+1. **Two buttons say "Play" and do different things.** The toolbar's flies
+   the camera (attach and play); the Timeline window's runs the clock and
+   leaves the camera alone. Jay will press one expecting the other. Options:
+   call the Timeline's "Play tracks", or drop it and let the camera row's
+   attach link carry the difference.
+2. **The name duplicates the title bar.** It is what gives way second, and
+   it costs 150–250 points. Apophysis keeps it in the status bar. Moving it
+   there (or to the title only) would give 1440 back every caption with the
+   layout radio in place.
+3. **Help goes off the edge below ~900 wide.** A seventh step that hides the
+   name entirely before Help moves would keep Help on screen to about 750.
+4. **The layout radio is the widest thing per glyph on the bar** (about 125
+   points for three icons) because the house radio draws a ring-and-dot per
+   segment. That rule is right in a panel; on a toolbar of icon segments a
+   lit segment already says "chosen". A toolbar-only segmented style would
+   halve it. It's the multiview agent's control and the house radio's rule,
+   so it's flagged rather than changed.

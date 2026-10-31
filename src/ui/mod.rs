@@ -174,8 +174,6 @@ pub struct UiState {
     /// The right-click menu's target, pinned when it opened: the row, the
     /// moment under the pointer, and the key there if any.
     pub timeline_menu_at: Option<(usize, f64, Option<usize>)>,
-    /// The toolbar's time field while it is being typed into.
-    pub transport_time_edit: Option<String>,
     /// A ctrl+right-drag knife stroke in progress, in physical pixels.
     pub xaos_knife: Option<Vec<(f32, f32)>>,
     /// Which browser row the list has already scrolled into view. Scrolling
@@ -272,7 +270,6 @@ impl UiState {
             timeline_clip: None,
             timeline_loop_drag: None,
             timeline_menu_at: None,
-            transport_time_edit: None,
             xaos_knife: None,
             browser_scrolled_to: None,
             browser_tree: Default::default(),
