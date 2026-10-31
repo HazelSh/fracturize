@@ -48,6 +48,7 @@ checklist to run before handing a build over.
 | `ANIMATION-PLAN.md` | The timeline as a DAW's automation section: what DAW, Blender and VFX users expect, the loop seam, morphs, the agent side |
 | `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
 | `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
+| `GLASS-RENDERER-PLAN.md` | The partly-transparent renderer, restarted from scratch: dots as samples of an absorbing fog |
 | `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
 | `NOTES-infinite-zoom.md` | Why `[zoom]` works the way it does, and the dead ends |
 | `LIKENESS-PLAN.md`, `FIT-OPTIMIZER-PLAN.md`, `IFS-INVERSE-BACKGROUND.md` | Fitting a scene to a picture: plan, solver, background theory |

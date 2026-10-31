@@ -49,6 +49,8 @@ mod rot;
 mod ui;
 mod version;
 mod volume_ref;
+#[cfg(test)]
+mod glass_proto;
 mod video;
 mod view;
 mod xaos;
