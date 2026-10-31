@@ -681,7 +681,7 @@ struct Args {
     /// single still, prefer --effort or --spp, because a buffer caps the
     /// samples in the picture and accumulation doesn't.
     ///
-    /// In windowed mode the Render window's value, saved in prefs, sits
+    /// In windowed mode the toolbar's point count, saved in prefs, sits
     /// between this and the scene's own point_count.
     #[arg(short, long, value_name = "N", help_heading = "Offline render")]
     points: Option<usize>,

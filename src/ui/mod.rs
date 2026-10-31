@@ -312,7 +312,8 @@ impl UiState {
 /// panel means adding a variant here and a case to `default_layout`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WindowKey {
-    Render,
+    /// The Look window. It was the Render window, and keeps its geometry key.
+    Look,
     History,
     Mutate,
     Random,
@@ -333,7 +334,7 @@ pub enum WindowKey {
 impl WindowKey {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Render => "render",
+            Self::Look => "render",
             Self::History => "history",
             Self::Mutate => "mutate",
             Self::Random => "random",
@@ -407,7 +408,7 @@ impl WindowKey {
 /// the right-hand column tracks the window edge instead of sitting at a fixed
 /// x that only works at one size.
 ///
-/// The layout is Hazel's: Render top-left with History and Mutate beneath
+/// The layout is Hazel's: Look (was Render) top-left with History and Mutate beneath
 /// it (where the Explore window was before it became a menu), then Scenes
 /// and Keybinds filling the middle, and Transforms top-right with Views
 /// beneath it against the right edge. Persisted geometry always wins over
@@ -420,7 +421,7 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
     let right_col_w = 450.0;
     let right_x = (screen.right() - right_col_w - 20.0).max(20.0);
     match key {
-        WindowKey::Render => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
+        WindowKey::Look => (egui::pos2(20.0, top), egui::vec2(280.0, 290.0)),
         WindowKey::History => (egui::pos2(20.0, top + 300.0), egui::vec2(280.0, 260.0)),
         // Beside Random settings, so the three dice windows — the list, the
         // profile, the mutation — sit left to right and none hides another.

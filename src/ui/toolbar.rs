@@ -108,12 +108,12 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Timeline window",
             );
 
-            let resp = window_toggle(ui, &mut app.ui_state.panels.look_open, icons::SLIDERS, "Render", compact);
+            let resp = window_toggle(ui, &mut app.ui_state.panels.look_open, icons::SLIDERS, "Look", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
-                "How the fractal is drawn: renderer, points, colour, haze and infinite zoom",
-                "toggle the Render window",
+                "How the picture looks: exposure, point size, colour, haze and infinite zoom",
+                "toggle the Look window",
             );
 
             ui.separator();
@@ -648,7 +648,7 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App) {
 /// could drift from what this function actually prints.
 pub(super) const POINT_COUNT_K_M_BOUNDARY: u32 = 1_000_000;
 
-/// The toolbar's point-count readout, e.g. `"420k pts"` or `"1.5M pts"`.
+/// The drawing button's point count, e.g. `"420k"` or `"1.5M"`.
 ///
 /// Its own function (rather than inlined at the one call site) so the width
 /// bound in `draw_quick_controls` can ask it for boundary strings — the
@@ -656,14 +656,12 @@ pub(super) const POINT_COUNT_K_M_BOUNDARY: u32 = 1_000_000;
 /// maintained guess that would drift the moment this function changes.
 pub(super) fn point_count_label(capacity: u32) -> String {
     if capacity < POINT_COUNT_K_M_BOUNDARY {
-        format!("{:.0}k pts", capacity as f32 / 1e3)
+        format!("{:.0}k", capacity as f32 / 1e3)
     } else {
-        format!("{:.1}M pts", capacity as f32 / 1e6)
+        format!("{:.1}M", capacity as f32 / 1e6)
     }
 }
 
-/// Renderer mode, point count, edit/view mode and the transport — the
-/// settings that get changed most often mid-exploration.
 /// How the viewport is divided (`multiview`): one of three, so a segmented
 /// radio, and icons because the three pictures say it better than words in a
 /// strip with no room for them.
@@ -705,47 +703,80 @@ fn view_layout(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
-    render_panel::render_mode(ui, app);
-    view_layout(ui, app);
+/// The renderer's name as the drawing button shows it.
+fn renderer_caption(mode: crate::app::RenderMode) -> &'static str {
+    use crate::app::RenderMode;
+    match mode {
+        RenderMode::Points => "Points",
+        RenderMode::Splat => "Splat",
+        RenderMode::Volume => "Volume",
+    }
+}
 
-    // A readout, not a slider: the toolbar has no room for a log slider wide
-    // enough to be draggable, and a cramped one would be worse than none. The
-    // popup gets the real widget.
-    //
-    // Its width is pinned too — the label alternates between "NNNk pts" and
-    // "NN.NM pts" as the count changes, and this button sits immediately
-    // left of Edit/View Mode and Play/Pause, so an unpinned width here would
-    // still shift both of them every time the count crosses the k/M
-    // boundary or gains a digit. The bound comes from `point_count_label`
-    // itself, evaluated at the two ends that can actually print the widest
-    // string: just under the k/M boundary, and this device's real capacity
-    // ceiling — never a guessed string.
+/// The drawing button's caption: `Splat · 6.0M`, or just `6.0M` once the
+/// toolbar has run out of room for the renderer's name.
+fn drawing_caption(mode: Option<crate::app::RenderMode>, capacity: u32) -> String {
+    match mode {
+        Some(m) => format!("{} · {}", renderer_caption(m), point_count_label(capacity)),
+        None => point_count_label(capacity),
+    }
+}
+
+/// The drawing button's width for a caption form: the widest caption it can
+/// show in that form, so changing renderer or dragging the count moves
+/// nothing beside it. Measured at the two counts that print widest (just under
+/// the k/M boundary, and this device's ceiling) across every renderer.
+fn drawing_button_width(ui: &egui::Ui, app: &App, with_renderer: bool) -> f32 {
+    use crate::app::RenderMode;
+    let counts = [POINT_COUNT_K_M_BOUNDARY - 1, app.max_point_capacity()];
+    let modes: Vec<Option<RenderMode>> = if with_renderer {
+        [RenderMode::Points, RenderMode::Splat, RenderMode::Volume].into_iter().map(Some).collect()
+    } else {
+        vec![None]
+    };
+    let captions: Vec<String> =
+        modes.iter().flat_map(|m| counts.iter().map(move |c| drawing_caption(*m, *c))).collect();
+    let refs: Vec<(&str, &str)> = captions.iter().map(|c| (icons::CARET_DOWN, c.as_str())).collect();
+    num::icon_button_width(ui, &refs)
+}
+
+/// One button for how the picture is drawn: it reads the renderer and the
+/// point count, and opens a popup holding both, opacity, and the way to the
+/// Look window. It replaced the renderer radio and the point-count button,
+/// which between them took a fifth of the toolbar.
+fn draw_drawing_button(ui: &mut egui::Ui, app: &mut App, with_renderer: bool) {
     let capacity = app.pending_point_capacity().unwrap_or(app.point_capacity());
-    let label = point_count_label(capacity);
-    let point_count_width = num::text_button_width(
-        ui,
-        &[
-            &point_count_label(POINT_COUNT_K_M_BOUNDARY - 1),
-            &point_count_label(app.max_point_capacity()),
-        ],
-    );
+    let caption = drawing_caption(with_renderer.then_some(app.render_mode), capacity);
+    let width = drawing_button_width(ui, app, with_renderer);
     let resp = ui.add(
-        egui::Button::new((label, egui::Atom::grow()))
-            .min_size(egui::vec2(point_count_width, 0.0)),
+        egui::Button::new((caption, egui::Atom::grow(), icons::CARET_DOWN))
+            .min_size(egui::vec2(width, 0.0)),
     );
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "How many points are drawn. Click to change it",
-        "click: open the point count slider",
+        format!(
+            "How the picture is drawn: the {} renderer, {} points. Click to change \
+             either, or to open the Look window (R switches renderer)",
+            app.render_mode.label(),
+            point_count_label(capacity),
+        ),
+        "click: renderer, point count and the Look window",
     );
     egui::Popup::menu(&resp)
         // The default menu behaviour closes on any click inside, which would
         // dismiss the popup the instant you grabbed the slider.
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .width(280.0)
-        .show(|ui| render_panel::point_count(ui, app));
+        .width(300.0)
+        .show(|ui| render_panel::draw_popup(ui, app));
+}
+
+/// The drawing button, edit/view mode and the transport: the settings that
+/// get changed most often mid-exploration.
+fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
+    draw_drawing_button(ui, app, true);
+    view_layout(ui, app);
+    ui.separator();
 
     // Label names the state you're *in*, not the action a click performs —
     // the pressed/unpressed `selectable_label` styling already carries the

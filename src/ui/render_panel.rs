@@ -1,6 +1,11 @@
-//! Render window: everything that decides how the accumulated points get
-//! turned into pixels — renderer mode, exposure, point size, buffer capacity,
-//! haze, and color falloff/contrast.
+//! The Look window, and the toolbar's drawing popup.
+//!
+//! The popup (`draw_popup`, opened from the toolbar's `Splat · 6.0M` button)
+//! holds how the picture is drawn: the renderer, volume's opacity, and the
+//! point count, the settings that trade picture for speed. The Look window
+//! holds how it looks: exposure, point size, colour, background, haze (behind
+//! an icon button for now), infinite zoom and the grade. It was the Render
+//! window, and keeps that window's geometry key. "Look" is a working name.
 //!
 //! Which controls commit history is deliberate (see the matching setters on
 //! `App`): parameters Ctrl+S writes back into the scene TOML are edits and
@@ -23,7 +28,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    super::window(ctx, app, super::WindowKey::Render, "Render")
+    super::window(ctx, app, super::WindowKey::Look, "Look")
         .open(&mut open)
         .show(ctx, |ui| {
             // Grouped by *persistence class*, with headings that say so. This
@@ -39,10 +44,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             // splitting would scatter things that belong together by task, and
             // the task is why you opened this panel.
             class_heading(ui, "Scene", "Saved with the scene (Ctrl+S), and undoable.");
-            draw_renderer(ui, app);
+            draw_exposure(ui, app);
             draw_point_size(ui, app);
             draw_color(ui, app);
-            draw_haze(ui, app);
             draw_zoom_band(ui, app);
             draw_output(ui, app);
 
@@ -53,35 +57,50 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 "Saved in view files and render records, but not in the scene.",
             );
             draw_grade(ui, app);
-
-            // Volume mode's opacity lives under a heading of its own because
-            // it is saved nowhere yet, and the other three headings would each
-            // be a small lie about it. Only drawn when it is the mode in use:
-            // the dial is meaningless to the other two renderers, and this is
-            // the one place it is not worth a greyed row to advertise it (the
-            // radio's own volume segment is where the mode announces itself).
-            if app.render_mode == RenderMode::Volume {
-                ui.add_space(6.0);
-                class_heading(
-                    ui,
-                    "Session",
-                    "Lasts until you quit. Not saved with the scene, a view or your \
-                     preferences.",
-                );
-                draw_opacity(ui, app);
-            }
-
-            ui.add_space(6.0);
-            class_heading(
-                ui,
-                "Preference",
-                "Your own setting. It applies to every scene and is never saved in one.",
-            );
-            point_count(ui, app);
         });
 
-    super::remember(ctx, app, super::WindowKey::Render);
+    super::remember(ctx, app, super::WindowKey::Look);
     app.ui_state.panels.look_open = open;
+}
+
+/// The toolbar's drawing popup: the renderer, volume's opacity, the point
+/// count, and a row that opens the Look window. Grouped under the same
+/// persistence-class headings the Look window uses.
+pub fn draw_popup(ui: &mut egui::Ui, app: &mut App) {
+    // Renderer and opacity evaporate at exit: neither is in the scene, a view
+    // (a view records the mode, not the opacity) or the preferences.
+    class_heading(
+        ui,
+        "Session",
+        "Lasts until you quit. Not saved with the scene or your preferences.",
+    );
+    render_mode(ui, app);
+    // Greyed rather than hidden under the other two renderers: it says the
+    // volume renderer has a dial, and the popup doesn't change height when
+    // you switch.
+    ui.add_enabled_ui(app.render_mode == RenderMode::Volume, |ui| draw_opacity(ui, app));
+
+    ui.add_space(4.0);
+    class_heading(
+        ui,
+        "Preference",
+        "Your own setting. It applies to every scene and is never saved in one.",
+    );
+    point_count(ui, app);
+
+    ui.separator();
+    let open = app.ui_state.panels.look_open;
+    let resp = ui.add(egui::Button::selectable(open, (super::icons::SLIDERS, "Look…")));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Exposure, point size, colour, background, haze, infinite zoom and the grade",
+        if open { "click: close the Look window" } else { "click: open the Look window" },
+    );
+    if resp.clicked() {
+        app.ui_state.panels.look_open = !open;
+        ui.close();
+    }
 }
 
 /// The points/splat/volume segmented radio, shared by this panel and the
@@ -129,12 +148,8 @@ pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal(|ui| {
-        ui.label("Renderer");
-        render_mode(ui, app);
-    });
-
+/// Splat's brightness. Greyed under the points renderer, which has none.
+fn draw_exposure(ui: &mut egui::Ui, app: &mut App) {
     let splat = app.render_mode.is_splat_family();
     ui.add_enabled_ui(splat, |ui| {
         let mut exposure = app.exposure;
@@ -147,9 +162,10 @@ fn draw_renderer(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if splat {
-                "Brightness of the splat renderer (W / Shift+W)"
+                "Brightness of the splat and volume renderers (W / Shift+W)"
             } else {
-                "Only used by the splat renderer"
+                "Only used by the splat and volume renderers. Switch renderer from the \
+                 drawing button in the toolbar, or with R"
             },
             "drag: adjust exposure",
         );
@@ -332,7 +348,7 @@ fn draw_grade(ui: &mut egui::Ui, app: &mut App) {
 
 /// A persistence-class heading: the one line that answers "will this be in my
 /// file tomorrow?", which the UI previously gave no way to ask.
-fn class_heading(ui: &mut egui::Ui, title: &str, tip: &str) {
+pub(super) fn class_heading(ui: &mut egui::Ui, title: &str, tip: &str) {
     ui.separator();
     let resp = ui
         .add(egui::Label::new(egui::RichText::new(title).strong().small()).sense(egui::Sense::hover()));
@@ -503,7 +519,40 @@ fn draw_output(ui: &mut egui::Ui, app: &mut App) {
         if resp.changed() {
             app.transparent_render = transparent;
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            draw_haze_button(ui, app);
+        });
     });
+}
+
+/// Haze, stepped back to an icon button (Hazel, 2026-10-31: it has never
+/// quite done what she wants visually). Lit while haze is on, so a scene with
+/// haze still says so without the popup being opened: a disclosure may hide
+/// the elaboration, never the fact that the feature is on.
+fn draw_haze_button(ui: &mut egui::Ui, app: &mut App) {
+    let on = app.haze_amount > 0.0;
+    let resp = ui.add(egui::Button::selectable(on, super::icons::CLOUD_FOG));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if on {
+            format!(
+                "Haze is on ({:.2}): distant parts fade into the background. Click to \
+                 change it (F / Shift+F)",
+                app.haze_amount
+            )
+        } else {
+            "Haze: distant parts fade into the background, so you can tell what's in \
+             front. Click to set it (F / Shift+F)"
+                .to_string()
+        },
+        "click: the haze settings",
+    );
+    egui::Popup::menu(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(280.0)
+        .show(|ui| draw_haze(ui, app));
 }
 
 /// Colour: the source (stage 2) and the two accumulation knobs around it.

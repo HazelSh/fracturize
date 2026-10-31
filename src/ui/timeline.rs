@@ -1692,7 +1692,7 @@ fn draw_loop(
         None => "Loop by zooming in until the picture repeats itself, so the \
                  animation plays as a zoom that never ends.\n\n\
                  This needs infinite zoom, which this scene doesn't use yet. Turn \
-                 it on under infinite zoom in the Render window."
+                 it on under infinite zoom in the Look window."
             .to_string(),
     };
 
@@ -1734,7 +1734,7 @@ fn draw_loop(
                     // No arrow: the UI font has no U+2192, and a missing glyph
                     // in the one line that tells you where to go is worse than
                     // a comma.
-                    "needs infinite zoom: see the Render window"
+                    "needs infinite zoom: see the Look window"
                 },
             )
             .show(ui);

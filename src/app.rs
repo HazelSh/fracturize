@@ -2288,7 +2288,7 @@ impl App {
                 let Some(zoom) = self.point_compute.zoom else {
                     log::warn!(
                         "A zoom loop closes under the scene's scale symmetry, and this scene \
-                         has none. The Render window's infinite-zoom section lists every \
+                         has none. The Look window's infinite-zoom section lists every \
                          transform and says which of them could carry one."
                     );
                     return;

@@ -70,7 +70,7 @@ fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
             resp,
             &mut app.ui_state,
             if zoomed {
-                "Subscenes don't work with infinite zoom yet. Turn infinite zoom off in the Render window first"
+                "Subscenes don't work with infinite zoom yet. Turn infinite zoom off in the Look window first"
             } else if full {
                 "A scene can hold at most 15 subscenes"
             } else {
