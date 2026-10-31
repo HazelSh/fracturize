@@ -91,12 +91,12 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
 
             ui.separator();
 
-            let resp = window_toggle(ui, &mut app.ui_state.panels.camera_open, icons::VIDEO_CAMERA, "Camera", compact);
+            let resp = window_toggle(ui, &mut app.ui_state.panels.views_open, icons::VIDEO_CAMERA, "Views", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
-                "Camera framing, saved views and the camera path",
-                "toggle the Camera window",
+                "This framing as numbers, and the views this scene has saved",
+                "toggle the Views window",
             );
 
             let resp = window_toggle(ui, &mut app.ui_state.panels.timeline_open, icons::FILM_STRIP, "Timeline", compact);
@@ -108,7 +108,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 "toggle the Timeline window",
             );
 
-            let resp = window_toggle(ui, &mut app.ui_state.panels.render_open, icons::SLIDERS, "Render", compact);
+            let resp = window_toggle(ui, &mut app.ui_state.panels.look_open, icons::SLIDERS, "Render", compact);
             hinted(
                 resp,
                 &mut app.ui_state,
@@ -127,16 +127,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             // end, then the scene identity beside it.
             let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
-                let resp = ui.selectable_label(app.show_help, (icons::KEYBOARD, "Help"));
-                let resp = hinted(
-                    resp,
-                    &mut app.ui_state,
-                    "Keyboard shortcuts, mouse controls and input settings (H or F1)",
-                    "toggle the Controls window",
-                );
-                if resp.clicked() {
-                    app.toggle_help();
-                }
+                draw_help_menu(ui, app);
                 ui.separator();
                 draw_scene_identity(ui, app);
             });
@@ -183,7 +174,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
     let resp = hinted(
         resp,
         &mut app.ui_state,
-        "New, open, save, screenshot, render and quit",
+        "New, open, save, subscenes, views, render, settings and quit",
         "click: the File menu",
     );
 
@@ -214,18 +205,125 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
 
         ui.separator();
 
+        draw_import_menu(ui, app);
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.subscenes_open,
+            &format!("{} Subscenes…", icons::UNITE),
+            "The scenes placed inside this one: show or hide each, its share of the points, where it sits and its colour.",
+        );
+
+        ui.separator();
+
         if menu_item(ui, app, &format!("{} Screenshot", icons::CAMERA), "S", "Save the picture as it is now to the screenshots folder.") {
             app.request_screenshot();
         }
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.views_open,
+            &format!("{} Views…", icons::VIDEO_CAMERA),
+            "This framing as numbers, and the views this scene has saved (V saves one). Click a saved view to go back to it.",
+        );
         if menu_item(ui, app, &format!("{} Render job…", icons::STACK), "P", "Render a high-quality still or animation in the background. Shows how long it'll take before you start, and you can pause or stop it.") {
             super::render_job::open(app);
         }
 
         ui.separator();
 
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.settings_open,
+            &format!("{} Settings…", icons::GEAR),
+            "Your own settings, for every scene: how the mouse orbits, the lens, and how big the panels are.",
+        );
+
+        ui.separator();
+
         if menu_item(ui, app, &format!("{} Quit", icons::QUIT), "Ctrl+Q", "Quit Fracturize. Asks first if there are unsaved changes.") {
             app.request_quit();
         }
+    });
+}
+
+/// "Import as subscene ▸": the scenes folder as a submenu. The same list and
+/// the same refusals as the Subscenes window's Import button, so the two
+/// can't disagree about what can be placed.
+fn draw_import_menu(ui: &mut egui::Ui, app: &mut App) {
+    let zoomed = app.scene.zoom.is_some();
+    let full = app.scene.layer_count() >= crate::subscene::MAX_LAYERS;
+    let mut picked = None;
+    let resp = ui
+        .add_enabled_ui(!zoomed && !full, |ui| {
+            ui.menu_button(format!("{} Import as subscene", icons::PLUS), |ui| {
+                let files = app.importable_scenes();
+                if files.is_empty() {
+                    ui.label(egui::RichText::new("No scenes found in the scenes folder").weak());
+                }
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for f in files {
+                        let label = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                        if ui.button(label).on_hover_text(f.display().to_string()).clicked() {
+                            picked = Some(f);
+                            ui.close();
+                        }
+                    }
+                });
+            })
+            .response
+        })
+        .inner;
+    hinted(
+        resp,
+        &mut app.ui_state,
+        if zoomed {
+            "Subscenes don't work with infinite zoom yet. Turn infinite zoom off first"
+        } else if full {
+            "A scene can hold at most 15 subscenes"
+        } else {
+            "Place another scene inside this one. It keeps its own transforms and colours, and gets an equal share of the points"
+        },
+        "hover: choose a scene to place in this one",
+    );
+    if let Some(f) = picked {
+        app.ui_state.import_error = app.import_subscene(&f).err();
+        // Where the result shows, and where an error is said.
+        app.ui_state.panels.subscenes_open = true;
+    }
+}
+
+/// The Help menu: the keys and the mouse, and what this program is.
+fn draw_help_menu(ui: &mut egui::Ui, app: &mut App) {
+    let resp = ui.button((icons::QUESTION, "Help"));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Keyboard shortcuts and mouse controls, and about Fracturize",
+        "click: the Help menu",
+    );
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(168.0);
+        let open = app.show_help;
+        let resp = ui.add(egui::Button::selectable(open, format!("{} Controls", icons::KEYBOARD)).shortcut_text("H"));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "Every keyboard shortcut and mouse gesture. Click a row there to use it (H or F1)",
+            if open { "click: close this window" } else { "click: open this window" },
+        );
+        if resp.clicked() {
+            app.toggle_help();
+            ui.close();
+        }
+        menu_toggle(
+            ui,
+            app,
+            |p| &mut p.about_open,
+            &format!("{} About Fracturize", icons::INFO),
+            "Which version this is, where the source lives, and what to expect from a pre-release.",
+        );
     });
 }
 

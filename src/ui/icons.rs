@@ -177,3 +177,13 @@ pub const SQUARE: &str = "\u{E45E}";
 pub const SQUARES_FOUR: &str = "\u{E464}";
 /// View layout: one big view and three small (Phosphor "layout")
 pub const LAYOUT: &str = "\u{E6D6}";
+/// The drawing popup's button: opens a popup (Phosphor "caret-down")
+pub const CARET_DOWN: &str = "\u{E136}";
+/// Settings window (Phosphor "gear")
+pub const GEAR: &str = "\u{E270}";
+/// About Fracturize (Phosphor "info")
+pub const INFO: &str = "\u{E2CE}";
+/// Haze, sidelined to an icon button in the Look window (Phosphor "cloud-fog")
+pub const CLOUD_FOG: &str = "\u{E53C}";
+/// The Help menu (Phosphor "question")
+pub const QUESTION: &str = "\u{E3E8}";

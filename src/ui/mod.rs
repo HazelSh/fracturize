@@ -1,6 +1,7 @@
 //! egui UI layer: a top icon toolbar with the File and Explore menus,
-//! floating panel windows (Transforms, Subscenes, Render, Camera, Scenes,
-//! Controls, History, Mutate, Random flames, Random settings), a bottom
+//! floating panel windows (Transforms, Subscenes, Look, Views, Timeline,
+//! Scenes, Controls, Settings, About, History, Mutate, Random flames, Random
+//! settings, and more), a bottom
 //! status bar with
 //! hover hints and an FPS/p99 tracker, and world-anchored gizmo labels —
 //! over vendored Phosphor icons and a best-effort Envy Code R.
@@ -20,10 +21,10 @@ use winit::window::Window;
 
 use crate::prefs::PanelPrefs;
 
+pub mod about;
 pub mod agent;
 pub mod axis_widget;
 pub mod browser;
-pub mod camera_panel;
 pub mod collab;
 pub mod confirm;
 pub mod history;
@@ -46,12 +47,14 @@ pub mod timeline;
 pub mod render_job;
 pub mod render_panel;
 pub mod save_as;
+pub mod settings;
 pub mod shortcuts;
 pub mod status_bar;
 pub mod subscenes;
 pub mod toolbar;
 pub mod transport;
 pub mod transforms;
+pub mod views;
 pub mod xaos;
 
 /// Plain-data UI state living on `App` (not on `AppWrapper`/`EguiLayer` —
@@ -94,7 +97,7 @@ pub struct UiState {
     /// editor left open when the selection moves can be dropped rather than
     /// renaming whatever got selected next.
     pub editing_name: Option<(usize, String)>,
-    /// Camera window's saved-views list: the view being renamed inline (via
+    /// Views window's saved-views list: the view being renamed inline (via
     /// its right-click menu), as `(file it was opened on, buffer)`. The path
     /// rather than an index, because the list re-sorts under the editor the
     /// moment the rename lands.
@@ -317,7 +320,9 @@ pub enum WindowKey {
     Scenes,
     Keybinds,
     Transforms,
-    Camera,
+    Views,
+    Settings,
+    About,
     Subscenes,
     Xaos,
     Collab,
@@ -336,7 +341,9 @@ impl WindowKey {
             Self::Scenes => "scenes",
             Self::Keybinds => "keybinds",
             Self::Transforms => "transforms",
-            Self::Camera => "camera",
+            Self::Views => "views",
+            Self::Settings => "settings",
+            Self::About => "about",
             Self::Subscenes => "subscenes",
             Self::Xaos => "xaos",
             Self::Collab => "collab",
@@ -361,22 +368,19 @@ impl WindowKey {
     /// clicks go to the thing lying over them — a control that looks alive and
     /// isn't, which is a genuinely nasty thing to debug.
     ///
-    /// The Camera window is the one that has to say so: it stacks a framing
+    /// The Camera window was the one that had to say so: it stacked a framing
     /// block, saved views, a scrolling keypoint list, and the transport and
-    /// loop rows, and its own furniture wants most of this before the list gets
-    /// a single pixel.
-    ///
-    /// It used to want ~290px, and needing that much fixed furniture was a bug
-    /// report about information architecture wearing a layout comment's
-    /// clothes — a window that can't fit its own chrome is a window doing too
-    /// much. Two of the five things it was doing have moved out since (the file
-    /// operations to the toolbar's File menu, the input preferences to
-    /// Controls), so the floor comes down with them. The width is the widest
-    /// fixed row, which merely clips rather than colliding — a legibility
+    /// loop rows. Needing that much fixed furniture was a bug report about
+    /// information architecture wearing a layout comment's clothes, and the
+    /// window is gone now: the path went to the Timeline, the lens to
+    /// Settings, and what was left is the Views window. Widths are the widest
+    /// fixed row, which merely clips rather than colliding: a legibility
     /// floor, where the height is a correctness one.
     fn min_size(self) -> egui::Vec2 {
         match self {
-            Self::Camera => egui::vec2(360.0, 240.0),
+            // The distance and roll fields side by side, the readout, and a
+            // few saved views.
+            Self::Views => egui::vec2(360.0, 200.0),
             // Two panes: a folder tree beside rows that each carry a 128px
             // thumbnail. The old one-column list was 280 wide, and saved
             // geometry wins over the default, so this is what widens it.
@@ -405,14 +409,14 @@ impl WindowKey {
 ///
 /// The layout is Hazel's: Render top-left with History and Mutate beneath
 /// it (where the Explore window was before it became a menu), then Scenes
-/// and Keybinds filling the middle, and Transforms top-right with Camera
+/// and Keybinds filling the middle, and Transforms top-right with Views
 /// beneath it against the right edge. Persisted geometry always wins over
 /// this — it's only what you get before you've moved anything.
 fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2) {
     let top = 60.0;
     // The Transforms window is the widest by some way: it holds a tab rail
     // *and* a detail pane side by side. The right column is sized to it so
-    // Camera lines up underneath.
+    // Views lines up underneath.
     let right_col_w = 450.0;
     let right_x = (screen.right() - right_col_w - 20.0).max(20.0);
     match key {
@@ -435,10 +439,13 @@ fn default_layout(key: WindowKey, screen: egui::Rect) -> (egui::Pos2, egui::Vec2
         WindowKey::Scenes => (egui::pos2(320.0, top), egui::vec2(720.0, 520.0)),
         WindowKey::Keybinds => (egui::pos2(620.0, top), egui::vec2(360.0, 420.0)),
         WindowKey::Transforms => (egui::pos2(right_x, top), egui::vec2(right_col_w, 430.0)),
-        WindowKey::Camera => (
+        // Under Transforms, where Camera used to sit.
+        WindowKey::Views => (
             egui::pos2(right_x, top + 460.0),
-            egui::vec2(right_col_w, 320.0),
+            egui::vec2(right_col_w.min(400.0), 260.0),
         ),
+        WindowKey::Settings => (egui::pos2(320.0, top), egui::vec2(380.0, 200.0)),
+        WindowKey::About => (egui::pos2(320.0, top), egui::vec2(380.0, 170.0)),
         // Beside the Transforms window it chooses between.
         WindowKey::Subscenes => (
             egui::pos2((right_x - 340.0).max(20.0), top),
@@ -577,7 +584,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     xaos::draw_window(&ctx, app);
     step("xaos", t, &mut timings);
     let t = std::time::Instant::now();
-    camera_panel::draw(&ctx, app);
+    views::draw(&ctx, app);
     timeline::draw(&ctx, app);
     step("camera", t, &mut timings);
     let t = std::time::Instant::now();
@@ -585,6 +592,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     step("browser", t, &mut timings);
     let t = std::time::Instant::now();
     shortcuts::draw(&ctx, app);
+    settings::draw(&ctx, app);
+    about::draw(&ctx, app);
     step("shortcuts", t, &mut timings);
     let t = std::time::Instant::now();
     save_as::draw(&ctx, app);

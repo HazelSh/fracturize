@@ -18,7 +18,7 @@ use super::num;
 const PX_READOUT_CHARS: usize = 9;
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
-    let mut open = app.ui_state.panels.render_open;
+    let mut open = app.ui_state.panels.look_open;
     if !open {
         return;
     }
@@ -81,7 +81,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         });
 
     super::remember(ctx, app, super::WindowKey::Render);
-    app.ui_state.panels.render_open = open;
+    app.ui_state.panels.look_open = open;
 }
 
 /// The points/splat/volume segmented radio, shared by this panel and the

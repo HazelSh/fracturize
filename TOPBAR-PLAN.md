@@ -83,7 +83,7 @@ are when you want it, and usually from a menu row too.
 ### The drawing popup: `Splat · 6.0M ▾`
 
 One button that shows the current state, and one popup holding how the
-picture is drawn and the two look settings you reach for most:
+picture is drawn:
 
 ```
  ┌ Session ──────────────────────────┐
@@ -91,20 +91,18 @@ picture is drawn and the two look settings you reach for most:
  │ opacity  ━━━━━●━━━━  2.0          │   greyed unless volume
  ├ Preference ───────────────────────┤
  │ points   ━━━━━━━●━━━━━  6.0M       │   render_panel::point_count
- ├ Scene ────────────────────────────┤
- │ point size ━━━━●━━━━━  ≈1.2 px     │   render_panel::draw_point_size
- │ exposure   ━━━━━●━━━━              │   greyed under points
  ├───────────────────────────────────┤
  │ Look…                             │   opens the Look window
  └───────────────────────────────────┘
 ```
 
 - **Renderer and point count trade picture for speed**, and you reach for
-  both when the machine starts to struggle. **Point size and exposure** are
-  the look settings you touch most often (Hazel, 2026-10-31: "I guess that's
-  our look"). One click reaches all four.
-- **Headings are the persistence classes**, the same three words the Look
-  window uses, so the popup says what will be in your file tomorrow.
+  both when the machine starts to struggle.
+- **Point size and exposure stay in the Look window**, which the popup's
+  *Look…* row opens (Hazel, 2026-10-31: they're "our look"). An earlier
+  revision of this plan put them in the popup by misreading her.
+- **Headings are the persistence classes**, the same words the Look window
+  uses, so the popup says what will be in your file tomorrow.
 - **The radio stays a radio inside the popup**: it's one-of-three with no off
   state. The bar shows only the current choice.
 - **The button's width is pinned** to its widest caption, so changing renderer
@@ -116,8 +114,8 @@ picture is drawn and the two look settings you reach for most:
 
 ### What's left in the Look window
 
-Colour (falloff, the gradient and contrast), background and transparency,
-infinite zoom, and the grade. **Haze is sidelined** to an icon button on the
+Point size and exposure first, then colour (falloff, the gradient and
+contrast), background and transparency, infinite zoom, and the grade. **Haze is sidelined** to an icon button on the
 background row that opens the haze slider and band in a popup (Hazel,
 2026-10-31: it has never quite done what she wants visually, and can step
 back for a while). The button is lit while haze is on, so a scene with haze
@@ -206,8 +204,8 @@ cross, it is shown only in edit mode.
 - **Pip**: gains the most. Every item on the bar has a word on it, and Help
   is a menu with *Controls* in it, not a wall of keys, settings and a logo.
 - **Rook**: gains Xaos and Subscenes opening from where the work is, and
-  renderer, points, point size and exposure in one popup. Pays one extra
-  click to reach colour and zoom in the Look window, and two for haze.
+  renderer and points in one popup. Pays one extra click to reach the Look
+  window (point size, exposure, colour, zoom), and two for haze.
 - **Jay**: gains the Timeline next to Play. Pays the Camera window's habit;
   the path was already on the Timeline.
 - **Theo**: keeps the framing numbers, now in Views → This view.
@@ -241,9 +239,8 @@ to go. Each is a working build.
    subscene, Views and Settings. *Whole grid…* in the Xaos block and edge
    menu, the Subscenes button by the layer picker. The old toolbar toggles
    are still there.
-2. **The drawing popup and the Look window.** Renderer, opacity, points, point
-   size and exposure in the popup; Render renamed Look; haze to an icon
-   button.
+2. **The drawing popup and the Look window.** Renderer, opacity and points in
+   the popup; Render renamed Look; haze to an icon button.
 3. **The bar.** The Subscenes, Xaos, Camera and Render toggles come off;
    Timeline joins the transport; Collaborate moves right; redo loses its
    word; Edit Mode before its companions; the name's capped width and `*`

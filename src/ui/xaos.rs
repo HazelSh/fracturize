@@ -285,6 +285,20 @@ fn draw_block_body(ui: &mut egui::Ui, app: &mut App, idx: usize, me: usize, sum:
         {
             app.insert_linked_transform(idx);
         }
+        // The grid's door. It has no toolbar button or menu row: you come to
+        // it from one map's xaos, wanting to see the rest.
+        let open = app.ui_state.panels.xaos_open;
+        let r = ui.add(egui::Button::selectable(open, (icons::GRAPH, "Whole grid…")).small());
+        if hinted(
+            r,
+            &mut app.ui_state,
+            "Every map's xaos at once, as a grid: which may follow which, and how likely",
+            if open { "click: close the xaos grid" } else { "click: open the xaos grid" },
+        )
+        .clicked()
+        {
+            app.ui_state.panels.xaos_open = !open;
+        }
     });
 
     if let Some(e) = app.zoom_error.as_deref().filter(|e| e.contains("xaos")) {
@@ -1007,6 +1021,10 @@ fn draw_edge_menu(ctx: &egui::Context, app: &mut App) {
                 }
                 if ui.button("Edit…").clicked() {
                     app.ui_state.xaos_edge = Some((a, b));
+                    close = true;
+                }
+                if ui.button((icons::GRAPH, "Whole grid…")).clicked() {
+                    app.ui_state.panels.xaos_open = true;
                     close = true;
                 }
             });
