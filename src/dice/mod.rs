@@ -199,9 +199,9 @@ pub fn roll_seeded(settings: &RandomSettings, base: &Scene, seed: u64) -> Result
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut rolled = generate(settings, base, Action::Roll, &mut rng);
-    // Named after its seed, unless it is the base recoloured, which keeps
-    // the base's name.
-    if !settings.parts.no_form() {
+    // A roll keeps its base's name; from the blank scene, which has none of
+    // its own, it is named after its seed.
+    if !settings.parts.no_form() && roll::is_blank(base) {
         let name = format!("random-{seed}");
         match &mut rolled {
             Ok(r) => r.scene.name = name,
@@ -437,6 +437,24 @@ mod tests {
         let rolled = roll_seeded(&builtin("colour-only"), &zoom, 11).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
         assert_eq!(rolled.zoom, zoom.zoom, "a recolour keeps its infinite zoom");
         assert_eq!(animation(&rolled), animation(&zoom), "and its zoom loop");
+    }
+
+    /// A roll of the whole form changes what it draws and nothing else: the
+    /// name, the author and every setting the dice have no part for stay the
+    /// base's. Only a roll from the blank scene is named for its seed.
+    #[test]
+    fn a_roll_keeps_what_it_doesnt_draw() {
+        let base = scene_file("parasol_tide_opus55.toml");
+        let rolled = roll_seeded(&RandomSettings::default(), &base, 3).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!((rolled.name.as_str(), rolled.author.as_str()), (base.name.as_str(), base.author.as_str()));
+        assert_eq!((rolled.haze, rolled.exposure, rolled.decay), (base.haze, base.exposure, base.decay));
+        assert_eq!(rolled.color_contrast, base.color_contrast);
+        assert!(rolled.camera_orientation.angle_to(base.camera_orientation) < 1e-6, "the view keeps its direction");
+        let ratio = rolled.point_size / base.point_size;
+        assert!((ratio - rolled.camera_distance / base.camera_distance).abs() < 1e-4, "dots keep their size against the framing");
+        let fresh = roll_seeded(&RandomSettings::default(), &Scene::blank(), 3).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!(fresh.name, "random-3");
+        assert_eq!(fresh.author, "", "the dice aren't credited");
     }
 
     /// A roll draws the scene's own maps, so a composite's subscenes come

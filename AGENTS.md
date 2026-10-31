@@ -1227,11 +1227,18 @@ draw is made in the order it always was and only then are off parts replaced,
 so every recorded `--random --seed N` still rolls the same flame (checked
 against a build from before the dice: byte-identical `--info`). The one
 exception is the transform count: off, it is the base's, and nothing is drawn
-for it. A roll that keeps the whole form keeps the base's camera, point size
-and look too — it's the same flame, recoloured — and its name, author and
-infinite zoom.
+for it. A roll that keeps the whole form keeps the base's framing too — it's
+the same flame, recoloured.
 
-**The dice change values; they don't throw away what they didn't draw.** A
+**The dice change values; they don't throw away what they didn't draw.**
+What no part covers stays the base's on every roll: its name and author (the
+dice are not an author), haze, exposure, contrast, decay, point count, lens,
+and which way the camera looks; a new form only moves where the camera looks
+and from how far, and the point size scales with that distance. The one
+exception is a base that is the blank scene untouched (`roll::is_blank`),
+which has nothing of its own: a roll from it takes the roll's defaults and is
+named `random-<seed>`, so recorded seeds roll what they did (their author is
+now empty, not "fracturize random flame"). A
 roll draws only the scene's own maps, so a composite's **subscenes** come
 through every roll whole, with the composite's framing. `[zoom]` stays
 wherever its map still qualifies on what was drawn (`Renorm::build`, and

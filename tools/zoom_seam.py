@@ -32,7 +32,7 @@ question — does a wrap move *light* — and mean brightness is still the right
 channel for that. Use both: brightness catches an edge or a density step,
 per-pixel catches a resample, and neither can see the other.
 
-Why not an animation render: `--render out.mp4` on a `path_zoom_loop` covers
+Why not an animation render: `--render out.mp4` on a zoom-loop camera track (`extrapolate = "offset"`) covers
 exactly one period and wraps the camera every frame, so the seam always comes
 out as one ordinary frame step whatever the band is doing. That check reports
 1.04x on a band short enough to make `--info` print BAND TOO SHORT.
