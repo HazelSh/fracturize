@@ -147,14 +147,14 @@ details.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ File Explore │ Transforms Subscenes Xaos Collab │ Camera Timeline Render │ │  toolbar
-│   │ Undo Redo │ quick controls │ transport          scene name* │ Help   │
+│ File Explore │ Transforms │ Undo ↷ │ Splat·6.0M▾ │ Edit Mode │ ⏺⏮⟲▶ time │ │  toolbar
+│   Timeline …                            *name — author │ Collaborate Help▾│
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │   floating windows over the viewport          world-anchored labels      │
-│   (Transforms docked left, Render right…)     gizmos, traces, indicators │
+│   (Transforms right, Look left…)              gizmos, traces, indicators │
 │                                                                          │
-│                                                        axis cross  (o)   │
+│                                                 level  axis cross  (o)   │
 │   Timeline (wide and low, above the status bar)                          │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ hint for whatever is under the pointer     d Λ · pts · FPS ms p99 ~~~~  │  status bar
@@ -192,26 +192,44 @@ From left to right, ordered by task:
 | Group | Contents | Kind of control |
 |---|---|---|
 | Where a scene comes from | **File**, **Explore** | menu buttons (§6.6) |
-| What I'm working on | Transforms, Subscenes, Xaos, Collaborate | window toggles |
-| How I'm looking at it | Camera, Timeline, Render | window toggles |
-| | Undo, Redo | command buttons |
-| Quick controls | renderer radio, point count button (opens a slider popup), Edit/View mode, emphasis | each delegates to its panel's own widget |
-| | transport: record, to start, play/pause, time, loop | `ui/transport.rs` |
-| (right) | scene name and author (click to edit), `*` when unsaved; **Help** | |
+| What I'm working on | **Transforms** | window toggle |
+| | **Undo**, redo (icon only, beside Undo) | command buttons |
+| How it's drawn | the drawing button, `Splat · 6.0M ▾`: renderer, opacity, point count, Look… | a button that opens a popup of the panels' own widgets |
+| Edit tools | **Edit Mode**, then emphasis and the xaos overlay to its right | toggles; the two icons do nothing outside edit mode |
+| Time | record, to start, loop, **Play**, the time, **Timeline** | `ui/transport.rs`, then the Timeline toggle |
+| (right) | `*` name — author (click to edit); **Collaborate** with its count; **Help** | Help is a menu |
+
+The other windows open from where the work is (TOPBAR-PLAN.md §3): Subscenes
+from File and the Transforms rail's layer picker, Xaos from the inspector's
+Xaos block, Look from the drawing popup, Views and Settings from File, About
+from Help.
 
 Rules:
 
-- **File and Explore are the only menus.** There's no Edit/View menu bar,
-  because it would be mostly empty duplicates of the toggles. Don't add a
-  third menu without a group of commands that is conventional, numerous and
-  infrequent (that's the trade-off a menu is right for).
+- **File, Explore and Help are the only menus**; the drawing button opens a
+  popup. There's no Edit/View menu bar, because it would be mostly empty
+  duplicates of the bar. Don't add a fourth menu without a group of commands
+  that is conventional, numerous and infrequent (that's the trade-off a menu
+  is right for).
+- **A window doesn't earn a toolbar toggle by existing.** Transforms, Timeline
+  and Collaborate have one; everything else opens from a menu row and from the
+  place you are when you want it. Before adding a toggle, say what it pushes
+  down the ladder below.
 - **A quick control goes on the toolbar only if it's reached for constantly
   and the panel version is friction.** It must call the panel's own widget
   function, never a copy of it.
-- **When space runs out, window toggles drop their captions and keep their
-  icons** (`toolbar_compact`, with hysteresis so it doesn't flicker). Plan
-  for it: every toggle's icon has to identify it alone, and its tooltip says
-  the name.
+- **Every item has a caption, and when space runs out things give way one
+  at a time, always in the same order** (`toolbar::Forms`): the time's frame
+  count, the author, Edit Mode's caption, Timeline's, Collaborate's, then the
+  renderer's name. File, Explore, Transforms, Undo, Play and Help never lose
+  theirs. Each item's two forms are pinned to measured widths (never pixel
+  constants: they follow the font and the panel scale), so the step is
+  computed, not stepped toward, and going back needs a margin so a window
+  edge on a boundary doesn't flicker. At 1440 every caption fits with about
+  16 points spare; measure what a new item costs before adding it.
+- **The document's name is never what's left over.** It's capped at 28
+  characters of the button font and cut with `…`, with its `*` in a cell of
+  its own.
 - **The transport is always visible**, whether or not the Timeline is open,
   because a hand reaches for play without looking.
 
@@ -357,7 +375,7 @@ monospace text and nowhere else.
 ### Sizes
 
 Sizes are egui 0.35's defaults, which we don't override. All of them scale
-with the **UI scale** preference (Controls window, 0.7–2.0, applied as egui's
+with the **UI scale** preference (Settings window, 0.7–2.0, applied as egui's
 zoom factor):
 
 | Style | Size | Use |
@@ -519,7 +537,7 @@ Rules:
 
 - **Toggle button** (`ui.toggle_value`, lit in accent blue when on): a mode
   or a window that is on or off and that lives in a strip of buttons — the
-  toolbar's window toggles, Edit Mode, emphasis, record.
+  toolbar's Transforms, Timeline and Collaborate, Edit Mode, emphasis, record.
 - **Checkbox**: an on/off setting in a form or table. In a table it goes in
   the **On** column, flush right (`Col::tick`), so ticks line up from one
   table to the next. Checkboxes are also the right way to confirm something
@@ -543,7 +561,7 @@ Rules:
 | **Command** | icon + verb, plain button | Undo, Roll one, Duplicate |
 | **Opens a dialog or asks for more input** | caption ends in **`…`** | `Open…`, `Save as…`, `Render job…`, `Mutate…`, `Animate a parameter…`, `Only to…` |
 | **Opens a window** | a toggle (lit while the window's open) on the toolbar; a `…` row in a menu, also lit while open | Transforms; Explore → History… |
-| **Shows a menu** | caption names the menu, no `…`; the menu opens below | File, Explore; a point-count button that opens a popup |
+| **Shows a menu** | caption names the menu, no `…`; the menu opens below | File, Explore, Help; the drawing button (`Splat · 6.0M ▾`) that opens a popup |
 | **Destructive** | `confirm::danger_button` (§6.9) | Delete preset, Stop render, Discard edits |
 | **Commit / start** | pinned at the bottom of its window, beside its cost | Start (render job), Send request |
 
@@ -654,8 +672,11 @@ stands between you and losing work.
   colour swatch and a name. A variation is a name.
 - An icon leads its caption, consistently, so a column of buttons lines up
   by icon.
-- An icon on its own must still say what it is, because the toolbar can drop
-  captions; its tooltip gives the name.
+- An icon may stand alone only next to something that explains it (redo
+  beside Undo, the emphasis and overlay buttons beside Edit Mode, the
+  Subscenes button beside the layer picker), or with a glyph everyone already
+  knows (record, to start, loop). Where the squeeze ladder drops a caption,
+  the icon left behind still has its tooltip naming it.
 
 ### 6.13 Things painted in the viewport
 

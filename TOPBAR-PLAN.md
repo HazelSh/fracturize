@@ -1,7 +1,7 @@
 # The top bar: a plan
 
-*Status: plan, revised 2026-10-31 with Hazel's answers, and being built on
-branch `topbar`. First written 2026-10-30 by Claude Opus 5.5 against `main`
+*Status: built on branch `topbar` (slices 1-4), 2026-10-31, awaiting Hazel's
+try-out. Revised the same day with her answers. First written 2026-10-30 by Claude Opus 5.5 against `main`
 at 02669a1; revised against f7f3bd9. Where it changes a rule in
 `UI-GUIDELINES.md` or AGENTS.md it says so (§7).*
 

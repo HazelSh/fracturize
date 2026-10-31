@@ -84,7 +84,8 @@ src/
   render_preset.rs # Render presets: named size+quality files, built-ins in render_presets/
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
-    toolbar.rs     # Top strip: File menu, panel toggles, undo/redo, quick controls
+    toolbar.rs     # Top strip: File/Explore/Help menus, undo/redo, the drawing
+                   # button, edit tools, transport, the squeeze ladder
     status_bar.rs  # Bottom bar: context hints, FPS/p99 sparkline, point stats
     hints.rs       # hinted(): tooltip + status-bar hint on one widget response
     num.rs         # Numeric readouts that don't move: the fixed-width house rule
@@ -99,15 +100,19 @@ src/
     collab.rs      # Collaborate: the thread, option cards, the composer, conflicts
     agent.rs       # The connection light, and Agent settings
     random_settings.rs # The dice profile: parts on/off with their ranges; the shared picker
-    render_panel.rs# Renderer mode, exposure, point size, colour, haze, infinite zoom
+    render_panel.rs# The Look window (exposure, point size, colour, haze, zoom,
+                   # grade) and the toolbar's drawing popup (renderer, points)
     save_as.rs     # "Save scene as…" modal (fork the scene under a new name)
     render_job.rs  # Render job window: presets, sectioned setup, progress, the result
-    camera_panel.rs# Framing, saved views, the camera path (incl. how it loops)
+    views.rs       # Views window: this framing as numbers, and saved views
+    settings.rs    # Settings window: orbit style, lens, invert pitch, panel scale
+    about.rs       # About Fracturize: version, repository, pre-release note
     axis_widget.rs # Corner orientation cross; click a ball to look down that axis
     radio.rs       # Segmented one-of-n radio, used by all three such settings
     browser.rs     # Scenes window (Ctrl+O / B): folder tree + places, thumbnail rows
-    shortcuts.rs   # Controls window (H / F1): input prefs + the keybind table
-    timeline.rs    # Timeline window: transport, ruler, camera row, track rows
+    shortcuts.rs   # Controls window (H / F1): the keybind table
+    timeline.rs    # Timeline window: ruler, camera row (and the path's play,
+                   # length, loop and reset), track rows
     param_picker.rs# Pick a scene parameter: browsable tree + search (reusable)
     labels.rs      # World-anchored transform name labels
     panes.rs       # The split viewport's pane edges and captions
@@ -292,8 +297,8 @@ All GPU, three passes per frame:
      * **It needs the fragment stage to write storage**, six buffers' worth. It
        does not need fp32 blending any more (the absorbance is u32 words), so the
        live device no longer requests `FLOAT32_BLENDABLE`.
-     * **Opacity is session state** for now (the Render window's "Session"
-       heading, `--opacity`, default 2): not a scene key, not undoable, not in
+     * **Opacity is session state** for now (the toolbar drawing popup's
+       "Session" heading, `--opacity`, default 2): not a scene key, not undoable, not in
        views or prefs. A view saved in volume mode records the *mode* only.
      * **One-pass stills and the window only.** `--spp`, `--effort` tiers that
        accumulate, `--resume`, animations, grids and sheets refuse `--volume` by
@@ -562,7 +567,7 @@ pitch stopped at ±87.7°, and at the pole roll silently did nothing because the
 axis it rotated world-up about *was* world-up.
 
 Yaw/pitch/roll survive as a **chart**: a human-readable naming of a framing,
-used by scene files, `--yaw/--pitch/--roll`, and the Camera panel readout.
+used by scene files, `--yaw/--pitch/--roll`, and the Views window's readout.
 Charts have poles. Looking straight up or down, yaw and roll become the same
 control and neither means anything on its own — so anything that writes a
 framing checks first and falls back to `rotvec` (an exact rotation vector in
@@ -573,7 +578,7 @@ and `--render` prints whichever form the framing it landed on needs.
 
 | Key | Action |
 |-----|--------|
-| H / ? / F1 | toggle the Controls window (input prefs + every keybind) |
+| H / ? / F1 | toggle the Controls window (every keybind and mouse gesture; also Help → Controls) |
 | Esc | **cancel**: a menu, then a dialog, then the browser, then the selection |
 | Ctrl+Q | quit (asks first if the scene has unsaved edits, as does the window's close button) |
 | Up / Down | zoom in / out (steps the selection when a transform is selected) |
@@ -654,7 +659,7 @@ evicted save point never compares equal again and the scene stays dirty. A
 saving mid-drag and dragging on within the coalescing window would leave the
 file reading clean while the scene moved.
 
-**Orbit style** (Controls window, `orbit_style` in prefs) picks what a
+**Orbit style** (Settings window, `orbit_style` in prefs) picks what a
 horizontal drag yaws about, and is the other preference of this kind.
 `trackball` (the default) yaws about the camera's *own* up: body-frame turns
 compose on the right, so a drag applies the same rotation from every framing
@@ -699,13 +704,41 @@ the drawable area, so aspect and picking math are unaffected by which panels
 are open. The toolbar runs
 
 ```
-File  Explore | Transforms  Subscenes | Camera  Render | Undo Redo | quick controls | transport … scene name | Help
+File  Explore | Transforms | Undo ↷ | Splat · 6.0M ▾ | Edit Mode 💡 ⇢ | ⏺ ⏮ ⟲ ▶ Play  time  Timeline …  *name — author | Collaborate  Help ▾
 ```
 
 ordered by task rather than by module: where does a scene come from, what am I
-working on, then how am I looking at it, then help.
+working on, undo, how it's drawn, the edit tools, time; then the document,
+talking to an agent, and help. `TOPBAR-PLAN.md` is the reasoning.
 
-**File and Explore are menus, and the only two** — not the first entries of a
+**Every item has a caption, and things give way one at a time.** When the
+window is too narrow, `toolbar::Forms` drops, in this order: the time's frame
+count, the author after the name, Edit Mode's caption, Timeline's,
+Collaborate's (its count stays), then the renderer's name on the drawing
+button. File, Explore, Transforms, Undo, Play and Help never lose theirs; below
+the last step the right-hand block is pushed past the window's edge rather than
+drawn over the left. Both forms of each are pinned to measured widths, so last
+frame's measured width plus or minus each step's saving says exactly which
+step fits (`choose_level`, unit-tested); going back needs an item spacing to
+spare. At 1440 every caption fits. The name is capped at 28 characters of the
+button font and cut with `…`; its `*` is a cell of its own, so a long name
+can't hide it and the bar doesn't shift when it appears. Measure a new item's
+cost before adding it: at 1440 the bar has about 16 points to spare.
+
+**The drawing button** (`Splat · 6.0M ▾`) reads the renderer and point count
+and opens a popup with the renderer, volume's opacity, the point count and a
+`Look…` row: the settings that trade picture for speed. It replaced the
+renderer radio and the point-count button, which between them took a fifth of
+the bar.
+
+**Windows that left the bar have a door where the work is.** Subscenes: File →
+Subscenes… and File → Import as subscene, and a button beside the Transforms
+rail's layer picker. Xaos: *Whole grid…* in the inspector's Xaos block and on
+an edge's right-click menu, and deliberately no menu row. Look: the drawing
+popup. Views: File → Views…. Settings: File → Settings…. Level: a button above
+the axis cross.
+
+**File, Explore and Help are menus, and the only three** — not the first entries of a
 File/Edit/View/Help bar. The scene is a document, and the value of that
 abstraction is that people can port intuition from every file-editing program
 they have used; but intuition needs furniture to attach to, and a File menu
@@ -714,7 +747,10 @@ What it deliberately is *not* is a menu bar: Edit and View would be near-empty
 duplicates of the toolbar toggles, and a menu bar that is mostly empty teaches
 people that menus here aren't worth opening. File operations are numerous,
 conventional and infrequent — the trade a menu is right for. Undo and redo are
-the opposite trade, so they get visible buttons as well as menu rows.
+the opposite trade, so they get visible buttons as well as menu rows. Help is
+the one menu every program has: Controls (H) and About Fracturize. Settings
+is in File, not Help, because Help is for finding things out and Settings
+changes things; with no Edit menu, File is where programs put Preferences.
 
 **Explore is the other menu**: the ways of finding a scene by chance, and the
 undo that makes them safe to try. Random flame, the Random flames list, Random
@@ -732,10 +768,12 @@ where "start a new document" lives in every program.
 | Mutate | The dice profile picker, mutation strength (the profile's), 3×3 / 5×5, New, Mutate, Undo, Settings… — then the mutation grid: the scene in the middle, its mutations around it, click one to make it the scene. See "The mutation grid" |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
 | Random settings | The dice profile: picker, save / save as / revert (with a `*` when changed); one list of parts — shape, structure, colour — each switched on or off with its ranges under it; the quality check; how big a mutation's step is; Roll one and Mutate at the foot. See "The dice" |
-| Render | Renderer mode, exposure, point size, colour falloff/contrast, haze, infinite zoom (incl. the zoom-map picker) — then point count, under its own heading |
-| Camera | Framing, saved views, the camera path (keypoints, how it loops, playback) |
+| Look (the drawing popup's Look…) | Exposure, point size, colour falloff, the gradient and contrast, background and transparency, the haze button, infinite zoom (incl. the zoom-map picker); then the grade. "Look" is a working name |
+| Views (File → Views…) | This view: distance, roll, level, the yaw · pitch · focus readout; then saved views (click to go there, right-click to rename, Save current) |
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
-| Controls (H, F1) | Orbit style, invert pitch, panel scale — then the keybind table, scrollable, rows clickable |
+| Controls (H, F1, Help → Controls) | The keybind table, scrollable, rows clickable |
+| Settings (File → Settings…) | The person's preferences: orbit style, field of view, invert pitch, panel scale |
+| About (Help → About) | Version, repository, the pre-release note |
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
@@ -918,8 +956,8 @@ Conventions worth keeping:
 - **Point count is a render property, not scene data.** `App::buffer_capacity`
   owns it and it persists to prefs. Startup precedence is `--points` > prefs >
   the scene file > default. The offline `--render` path never reads prefs, so
-  CLI renders stay reproducible from flags plus scene. The Render window's
-  control is a *logarithmic slider that applies live*, rate-limited to one
+  CLI renders stay reproducible from flags plus scene. The toolbar drawing
+  popup's control is a *logarithmic slider that applies live*, rate-limited to one
   reallocation per 250ms: it's the dial that decides whether the machine stays
   responsive, so you must be able to feel it load up under your hand and drag
   back, not commit blind to a number and find out afterwards.
@@ -931,7 +969,7 @@ Conventions worth keeping:
   later and a bottom panel's contents are registered before the body that
   follows. The buried controls still paint, still highlight on hover and still
   show tooltips, so this reads as "that control is broken" rather than "that
-  window is too short". The Camera window is the one that hits it. Widths are
+  window is too short". The Camera window was the one that hit it. Widths are
   only a legibility floor — a narrow row clips, which is graceful.
 - **Panel geometry persists** to `prefs.window_geometry` (see `ui::WindowKey` /
   `ui::remember`); `ui::default_layout` is only what you get before you've
@@ -1743,7 +1781,7 @@ remembered in prefs and fills itself in on scenes started in-app.
 ## Background & Transparent Output
 
 `background` is scene data (linear RGB, see "Scene Files"), picked in the
-Render window and undoable. It reaches both renderers as the pass clear value
+Look window and undoable. It reaches both renderers as the pass clear value
 and, for splat, as the colour the tonemap composites against.
 
 The splat tonemap **composites** rather than adds: `mix(background,
@@ -1756,7 +1794,7 @@ over the background. On the near-black default the difference from the old
 formula is ~1% RMSE, so existing scenes look the same; `--render` of a *points*
 scene is byte-identical.
 
-`--transparent` (and the Render window's checkbox, which covers `S` screenshots
+`--transparent` (and the Look window's checkbox, which covers `S` screenshots
 and render jobs) writes an alpha channel: the clear alpha goes to 0, the
 points renderer's own alpha marks where points landed, and the splat renderer
 writes straight-alpha coverage so dusty edges stay dusty instead of becoming a
@@ -1794,7 +1832,7 @@ The overlay composite and egui already blend premultiplied, so gizmos and
 panels needed nothing; the panels stay opaque. The emphasis glow writes colour
 only, which over a premultiplied zero reads as added light — glow on glass.
 
-Save-as / fork is `Ctrl+Shift+S` or the Camera window's button — a small modal
+Save-as / fork is `Ctrl+Shift+S` or File → Save as… — a small modal
 (`src/ui/save_as.rs`), not a native dialog: one text field doesn't justify an
 `rfd` dependency when the app already browses `scenes/` with `B`. It refuses to
 overwrite without an explicit tick, because undo only covers the scene you have
@@ -1834,8 +1872,9 @@ How each renderer applies it:
 The shader's four parameters are *not* the user's parameters:
 
 - the near/far band auto-ranges off the camera distance (`haze::auto_band`), so
-  it follows the framing instead of being re-dialled on every zoom. The Render
-  window's "haze band" disclosure can pin it to fixed world units;
+  it follows the framing instead of being re-dialled on every zoom. The haze
+  button in the Look window opens the amount and a "haze band" disclosure that
+  can pin it to fixed world units;
 - transmittance and saturation falloff come from the amount
   (`haze::falloff`), linearly: amount 0.5 leaves half the contribution, and
   **amount 1.0 dissolves the far plane completely** — into the background for
@@ -1881,7 +1920,7 @@ exposure = 1.0            # splat-renderer brightness. Scene data because it is
                           # which --exposure to pass. Ignored by `points`.
 background = [0.02, 0.02, 0.05]   # LINEAR rgb behind the fractal. Linear, not
                           # sRGB: this is the clear value, and 0.02 reads as
-                          # sRGB #282a45. Use the Render window's picker.
+                          # sRGB #282a45. Use the Look window's picker.
 
 [camera]                  # optional
 focus = [0.0, 0.0, 0.0]   # orbit center / look-at
@@ -1895,7 +1934,7 @@ roll = 0.0                # optional: rotation about the view axis, radians
                           # it's the one people quote). Omit it — and almost
                           # every scene should — and the lens is the person's
                           # preference: `fov` in prefs.toml, set by the slider
-                          # in the Controls window, defaulting to 45. State one
+                          # in the Settings window, defaulting to 45. State one
                           # only when a scene is *composed* against a
                           # particular lens; it then wins over that preference,
                           # and only `--fov` beats it. Saving from the app
@@ -2139,7 +2178,7 @@ Scene-design notes learned the hard way:
   (stellate shipped with 0.0025 and needed 0.0012). That bound is written for
   the default 45° lens; a point holds its world size as the FoV changes, so a
   wider one shrinks it on screen and the bound relaxes by
-  `tan(22.5°)/tan(fov/2)` (0.41 at 90°). The Render window's `≈N px` readout
+  `tan(22.5°)/tan(fov/2)` (0.41 at 90°). The Look window's `≈N px` readout
   is always the truth of it.
 - Diffuse volumetric scenes (broad clouds rather than thin filaments) saturate
   small renders into a solid pastel blob: every point is full brightness, so
@@ -2621,7 +2660,7 @@ there.
 
 ### GUI
 
-The gradient strip lives in the Render window (`src/ui/gradient.rs`) and is
+The gradient strip lives in the Look window (`src/ui/gradient.rs`) and is
 drawn in **both** modes — in `transforms` mode it's read-only, and being able
 to see the colormap you're getting is worth having on its own. Ticks along it
 mark each transform's `color_value`.
@@ -2864,7 +2903,7 @@ octave_falloff = 0.0   # point-budget falloff per octave, as a power of `s`
   camera wrap can't reproduce it, so the zoom shows a seam. `Renorm::defect`
   measures this and the CLI/status bar say so rather than pretending.
 
-**In the app, infinite zoom has one home: the Render window → infinite zoom.**
+**In the app, infinite zoom has one home: the Look window → infinite zoom.**
 It opens by default once a scene has a zoom map, and it carries the whole
 control surface:
 
@@ -2924,7 +2963,7 @@ fracturize --scene scenes/astral_lattice.toml --path-t 0.35 --render /tmp/t.png
 
 # ...and the version you can just watch. scenes/octave-edge-visual.toml opens
 # zooming with the guard off; the wrap is a visible blink every 2.5s. Drag
-# "edge guard" up in the Render window and it goes away. Rendering this scene
+# "edge guard" up in the Look window and it goes away. Rendering this scene
 # as an *animation* will not show it — a path_zoom_loop covers exactly one
 # period and wraps every frame, so the seam always measures as one frame step.
 fracturize --scene scenes/octave-edge-visual.toml
@@ -2976,11 +3015,11 @@ one period lower; the last key is still synthesized, never written.
 - It is a *different* loop from `"closed"`, not a variant: closing back to the
   first key would undo the descent. The two were once separate keys that could
   both be set at once, which is a contradiction — now they're two values of
-  one, picked from the Camera window's four-way radio.
+  one, picked from the Timeline camera column's four-way radio.
 - Like any looping path it doesn't ease (a stall at the seam is the one thing a
   zoom must not do) and the final duplicate frame is dropped.
-- **In the app**: `zoom` is the fourth segment of the Camera window's Loop
-  radio, greyed when the scene has no scale symmetry to close under (with the
+- **In the app**: `zoom` is the fourth segment of the Loop radio in the
+  Timeline's camera column, greyed when the scene has no scale symmetry to close under (with the
   reason, and where to get one, on hover) rather than hidden — a mode that
   isn't drawn can't tell you it exists. Choosing it reveals a periods count
   beside it. The similarity is re-derived on every `App::refresh_zoom`, so dragging
@@ -3302,7 +3341,7 @@ cleaning up — but the repo *root* is not, and `-r out.png` from the root leave
 
 ## Render Jobs
 
-`P`, and the Camera window's "Render job…", open the dialog
+`P`, and File → Render job…, open the dialog
 (`src/ui/render_job.rs`). There is no separate one-click "HQ render" — that
 button and its keybind were folded into this dialog, which does the same job
 with its parameters visible, an estimate, and a way to stop it. The model is
