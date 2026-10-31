@@ -677,6 +677,39 @@ fn lerp_camera(a: &OrbitCamera, b: &OrbitCamera, s: f32) -> OrbitCamera {
 /// hand makes while clicking a mouse button.
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
+/// How far a press in the mutation grid may travel, in logical points, and
+/// still be a click. Wider than `DRAG_THRESHOLD_PX` because a click there
+/// *does* something — it makes a tile the scene — and because it costs a drag
+/// nothing: the camera follows the hand from the first pixel either way, and a
+/// press that ends as a click puts back the few pixels it moved.
+const GRID_CLICK_SLOP_PT: f32 = 6.0;
+
+/// How long a press in the mutation grid may be held and still be a click.
+/// A click is quick; a press held longer than this is someone orbiting slowly,
+/// or changing their mind, and releasing it never picks a tile.
+const GRID_CLICK_MAX_HOLD: Duration = Duration::from_millis(500);
+
+/// Was a press in the mutation grid a click? `slipped` is whether it ever
+/// travelled past `GRID_CLICK_SLOP_PT` — latched, so a drag that comes back to
+/// where it started is still a drag. Split out, like `cursor_should_hide`, so
+/// the rule can be checked without a mouse and a stopwatch.
+fn grid_press_is_click(slipped: bool, held: Duration, same_pane: bool) -> bool {
+    !slipped && held < GRID_CLICK_MAX_HOLD && same_pane
+}
+
+/// A press in the mutation grid that hasn't been settled as a click or a drag.
+#[derive(Clone, Copy, Debug)]
+struct GridPress {
+    at: Instant,
+    /// The tile under the press, which is the one a click picks.
+    pane: Option<u32>,
+    /// The camera at the press, put back if the press ends as a click.
+    camera: OrbitCamera,
+    /// Was the camera flying its path? Then it keeps flying until the press
+    /// becomes a drag, and the hand's travel so far is applied at that moment.
+    followed: bool,
+}
+
 /// How long the pointer must sit still over the artwork, in view mode, before
 /// it is hidden (`App::update_cursor_visibility`).
 ///
@@ -900,6 +933,9 @@ pub struct App {
     /// Gizmo drags are the other way round (see `on_cursor_moved`).
     drag_origin: (f32, f32),
     drag_moved: bool,
+    /// A press in the mutation grid, until it ends: what a click there needs
+    /// to know about the moment it began (`GridPress`).
+    grid_press: Option<GridPress>,
     /// Shift-for-fine during a gizmo drag: the virtual-cursor position and the
     /// real cursor position at the moment the modifier last changed, plus the
     /// state currently in force.
@@ -1511,6 +1547,7 @@ impl App {
             cursor: (0.0, 0.0),
             drag: Drag::None,
             drag_origin: (0.0, 0.0),
+            grid_press: None,
             drag_moved: false,
             fine_anchor: (0.0, 0.0),
             fine_from: (0.0, 0.0),
@@ -3890,12 +3927,30 @@ impl App {
 
         // Travel from the press, tracked for every drag — but it *gates*
         // almost nothing. See `drag_moved` for why the camera doesn't wait.
-        if !self.drag_moved && !matches!(self.drag, Drag::None) {
-            let (ox, oy) = (x - self.drag_origin.0, y - self.drag_origin.1);
-            if ox * ox + oy * oy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
-                self.drag_moved = true;
-                self.set_drag_cursor();
+        // In the grid the threshold is the click slop, in logical points, since
+        // passing it is what decides whether a release picks a tile.
+        let threshold = match self.grid_press {
+            Some(_) => GRID_CLICK_SLOP_PT * self.window.scale_factor() as f32,
+            None => DRAG_THRESHOLD_PX,
+        };
+        let (ox, oy) = (x - self.drag_origin.0, y - self.drag_origin.1);
+        if !self.drag_moved && !matches!(self.drag, Drag::None) && ox * ox + oy * oy >= threshold * threshold {
+            self.drag_moved = true;
+            self.set_drag_cursor();
+            // A press in the grid that has become a drag takes the camera. If
+            // it was flying, the path held it still until now, so the hand's
+            // whole travel is applied here and the scene catches up with it.
+            if let Some(press) = self.grid_press.filter(|p| p.followed) {
+                self.stop_following();
+                self.camera = press.camera;
+                self.camera_drag_by(ox, oy);
+                return;
             }
+        }
+        // A press in the grid that is still a click leaves a flying camera to
+        // its path, which sets it every frame anyway.
+        if self.grid_press.is_some_and(|p| p.followed) && !self.drag_moved {
+            return;
         }
 
         match self.drag {
@@ -3915,28 +3970,11 @@ impl App {
             // anything, or "click to select" would become "click to select and
             // then drag whatever I happen to be over".
             Drag::Consumed => {}
-            Drag::Orbit => {
+            Drag::Orbit | Drag::Pan | Drag::Roll => {
                 if self.grid_view {
                     self.stop_following();
                 }
-                let dy = if self.prefs.invert_pitch { -dy } else { dy };
-                self.camera.orbit(dx, dy, self.prefs.orbit_style);
-                self.invalidate_default_path();
-            }
-            Drag::Pan => {
-                if self.grid_view {
-                    self.stop_following();
-                }
-                let (_, h) = self.gpu.size();
-                self.camera.pan(dx, dy, h as f32);
-                self.invalidate_default_path();
-            }
-            Drag::Roll => {
-                if self.grid_view {
-                    self.stop_following();
-                }
-                self.camera.roll_by(dx);
-                self.invalidate_default_path();
+                self.camera_drag_by(dx, dy);
             }
             Drag::Gizmo { transform, subscene, mode, start_matrix } => {
                 // The dead zone applies *here* and nowhere else. A gizmo drag
@@ -3950,6 +3988,24 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Move the camera by `(dx, dy)` pixels of pointer travel, the way the
+    /// drag in flight moves it: orbit, pan or roll.
+    fn camera_drag_by(&mut self, dx: f32, dy: f32) {
+        match self.drag {
+            Drag::Orbit => {
+                let dy = if self.prefs.invert_pitch { -dy } else { dy };
+                self.camera.orbit(dx, dy, self.prefs.orbit_style);
+            }
+            Drag::Pan => {
+                let (_, h) = self.gpu.size();
+                self.camera.pan(dx, dy, h as f32);
+            }
+            Drag::Roll => self.camera.roll_by(dx),
+            _ => return,
+        }
+        self.invalidate_default_path();
     }
 
     /// The cursor position a gizmo drag should be read from: the real one, or
@@ -4087,17 +4143,25 @@ impl App {
         self.fine_anchor = self.cursor;
         self.fine_from = self.cursor;
         self.fine_active = self.shift_held;
+        self.grid_press = None;
         match button {
             // The grid: a drag orbits every pane at once, and a click picks one
             // (see `on_mouse_release`). Nothing to grab. The camera keeps
-            // flying its path until the press moves: a pick isn't taking the
-            // camera, and stopping the flight to choose a tile would lose the
-            // very view it was chosen from.
-            MouseButton::Left if self.grid_view => {
-                self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
-            }
-            MouseButton::Right if self.grid_view => {
-                self.drag = Drag::Roll;
+            // flying its path until the press becomes a drag: a pick isn't
+            // taking the camera, and stopping the flight to choose a tile would
+            // lose the very view it was chosen from.
+            MouseButton::Left | MouseButton::Middle | MouseButton::Right if self.grid_view => {
+                self.drag = match button {
+                    MouseButton::Left if !self.shift_held => Drag::Orbit,
+                    MouseButton::Right => Drag::Roll,
+                    _ => Drag::Pan,
+                };
+                self.grid_press = Some(GridPress {
+                    at: Instant::now(),
+                    pane: self.ui_state.grid_hover,
+                    camera: self.camera,
+                    followed: self.camera_follows,
+                });
             }
             MouseButton::Left => {
                 // The keybinds and scene-browser overlays used to hand-roll
@@ -4186,8 +4250,23 @@ impl App {
             // a deselect. Only the plain orbit grab: a shift-click is a
             // modified gesture and a right-click is the roll/menu button, and
             // neither reads as "select nothing".
-            if matches!(button, MouseButton::Left) && matches!(self.drag, Drag::Orbit) && !self.drag_moved && self.grid_view {
-                self.grid_click();
+            //
+            // In the grid a click picks a tile, so it has to be told from a
+            // drag more surely: a short, quick press that ends on the tile it
+            // began on (`grid_press_is_click`). One that is puts back what its
+            // wobble did to the camera, so the pick is of the view it was
+            // aimed at; one that isn't leaves the camera where the hand took it.
+            if let Some(press) = self.grid_press.take() {
+                let same_pane = self.ui_state.grid_hover == press.pane;
+                if grid_press_is_click(self.drag_moved, press.at.elapsed(), same_pane) {
+                    if !press.followed && self.camera != press.camera {
+                        self.camera = press.camera;
+                        self.invalidate_default_path();
+                    }
+                    if matches!(button, MouseButton::Left) && matches!(self.drag, Drag::Orbit) {
+                        self.grid_click(press.pane);
+                    }
+                }
             } else if matches!(button, MouseButton::Left)
                 && matches!(self.drag, Drag::Orbit)
                 && !self.drag_moved
@@ -5606,6 +5685,8 @@ impl App {
     /// Show the mutation grid in place of the scene (Ctrl+U), or go back.
     pub fn toggle_grid_view(&mut self) {
         self.grid_view = !self.grid_view;
+        // A press made in one view is settled in that view, never the other.
+        self.grid_press = None;
         if self.grid_view {
             // Gizmos and their drags belong to the one scene in the middle;
             // with nine on screen they'd be drawn over all of them.
@@ -5615,10 +5696,10 @@ impl App {
         log::info!("Mutation grid view {}", if self.grid_view { "on" } else { "off" });
     }
 
-    /// A click on the grid that didn't become a drag: the tile under it
-    /// becomes the scene, and the middle one rolls new mutations.
-    fn grid_click(&mut self) {
-        match self.ui_state.grid_hover {
+    /// A click on the grid that didn't become a drag: the tile it was pressed
+    /// on becomes the scene, and the middle one rolls new mutations.
+    fn grid_click(&mut self, pane: Option<u32>) {
+        match pane {
             Some(0) => self.reroll_mutation_grid(),
             Some(k) => self.adopt_mutation(k),
             None => {}
@@ -9054,6 +9135,36 @@ mod tests {
         // Right up to the threshold, and not before it.
         assert!(!cursor_should_hide(true, false, false, CURSOR_IDLE_HIDE - Duration::from_millis(1)));
         assert!(cursor_should_hide(true, false, false, CURSOR_IDLE_HIDE));
+    }
+
+    #[test]
+    fn a_quick_still_press_in_the_grid_is_a_click() {
+        assert!(grid_press_is_click(false, Duration::from_millis(120), true));
+        assert!(grid_press_is_click(false, GRID_CLICK_MAX_HOLD - Duration::from_millis(1), true));
+    }
+
+    #[test]
+    fn a_press_that_travelled_is_a_drag_even_if_it_came_back() {
+        // `slipped` is latched by `on_cursor_moved`, so a drag that returns
+        // to its start still arrives here as slipped.
+        assert!(!grid_press_is_click(true, Duration::from_millis(120), true));
+    }
+
+    #[test]
+    fn a_press_held_too_long_never_picks() {
+        assert!(!grid_press_is_click(false, GRID_CLICK_MAX_HOLD, true));
+        assert!(!grid_press_is_click(false, Duration::from_secs(3), true));
+    }
+
+    #[test]
+    fn a_click_that_ends_on_another_tile_picks_nothing() {
+        assert!(!grid_press_is_click(false, Duration::from_millis(120), false));
+    }
+
+    #[test]
+    fn the_grid_slop_is_wider_than_the_ordinary_threshold() {
+        // At a scale factor of 1, where the two are in the same units.
+        assert!(GRID_CLICK_SLOP_PT > DRAG_THRESHOLD_PX);
     }
 }
 
