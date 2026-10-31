@@ -181,6 +181,8 @@ pub const LAYOUT: &str = "\u{E6D6}";
 pub const CARET_DOWN: &str = "\u{E136}";
 /// The view-layout button on the status bar: opens a menu upward (Phosphor "caret-up")
 pub const CARET_UP: &str = "\u{E13C}";
+/// The toolbar's overflow menu: what didn't fit (Phosphor "dots-three")
+pub const DOTS_THREE: &str = "\u{E1FE}";
 /// Settings window (Phosphor "gear")
 pub const GEAR: &str = "\u{E270}";
 /// About Fracturize (Phosphor "info")

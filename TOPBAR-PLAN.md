@@ -347,3 +347,18 @@ Things found that are **not** fixed here, each Hazel's call:
   overlay buttons beside it and is one of the key controls, so it came off
   the ladder, which is now five steps: frame count, author, Timeline's
   word, Collaborate's word, the renderer's name.
+
+## 12. Overflow (2026-11-01)
+
+Hazel: "in general there needs to be a better way to handle the bar
+overflowing, things moving into a dropdown or something." Pushing the right
+block past the window edge lost Help below about 900 wide.
+
+Now, after the five caption steps, whole items move into an overflow menu
+(`⋯`, just left of Help), each with its caption, in a fixed order: undo and
+redo, Look, Collaborate (its count moves onto `⋯`), Timeline, the name, the
+time, record and loop, Edit Mode's companions, the drawing button (a
+submenu), back to the start, Transforms, Edit Mode. File, Explore, Play and
+Help never move; at 450 wide the bar is File, Explore, Play, `⋯`, Help, and
+everything is still reachable. Each item saves exactly what it last measured
+on the bar, so the ladder stays exact. This answers §10's question 3.

@@ -717,9 +717,14 @@ count, the author after the name, Timeline's caption, Collaborate's (its
 count is a badge on the icon, so it stays), then the renderer's name on the
 drawing button. File, Explore, Transforms, Undo, Look, **Edit Mode** (its word
 says which mode you're in and what the two buttons beside it belong to), Play
-and Help never lose theirs; below
-the last step the right-hand block is pushed past the window's edge rather than
-drawn over the left. Both forms of each are pinned to measured widths, so last
+and Help never lose theirs. Then whole items move into an overflow menu (`⋯`, just left of Help), still
+captioned there, in `toolbar::OVERFLOW_ORDER`: undo and redo, Look,
+Collaborate (its count moves onto `⋯`), Timeline, the name, the time, record
+and loop, Edit Mode's companions, the drawing button (as a submenu), back to
+the start, Transforms, Edit Mode. File, Explore, Play and Help never move, so
+everything stays reachable at any width (checked down to 450). An item's saving is the width it
+measured the last time it was on the bar (`UiState::toolbar_item_w`), so
+these steps are as exact as the caption steps. Both forms of each are pinned to measured widths, so last
 frame's measured width plus or minus each step's saving says exactly which
 step fits (`choose_level`, unit-tested); going back needs an item spacing to
 spare. The name is capped at 28 characters of the

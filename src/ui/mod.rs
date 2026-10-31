@@ -147,6 +147,9 @@ pub struct UiState {
     /// (`toolbar::draw`).
     pub toolbar_level: u8,
     pub toolbar_right_w: f32,
+    /// How wide each overflowable item measured the last time it was on
+    /// the bar, in `toolbar::OVERFLOW_ORDER`: what moving it saves.
+    pub toolbar_item_w: [f32; toolbar::OVERFLOW_ITEMS],
     /// The Timeline's selection: a track, one of its keys, and the key a drag
     /// is moving (`ui::timeline`).
     pub timeline_track: Option<usize>,
@@ -257,6 +260,7 @@ impl UiState {
             xaos_edge_menu: None,
             toolbar_level: 0,
             toolbar_right_w: 0.0,
+            toolbar_item_w: [0.0; toolbar::OVERFLOW_ITEMS],
             timeline_track: None,
             timeline_key: None,
             timeline_drag_key: None,

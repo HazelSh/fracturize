@@ -21,8 +21,63 @@ use super::icons;
 use super::num;
 use super::render_panel;
 
-/// How many things give way, one at a time, when the toolbar runs out of room.
-const STEPS: usize = 5;
+/// How many captions give way, one at a time, before whole items start
+/// moving into the overflow menu.
+const CAPTION_STEPS: usize = 5;
+
+/// What moves into the overflow menu when even the captions are gone, first
+/// out first. Each keeps its caption there. File, Explore, Play and Help
+/// never move, so the bar can always reach everything; the overflow button
+/// sits just left of Help.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Item {
+    /// Undo and redo: Ctrl+Z and the Explore menu have them too.
+    Undo,
+    Look,
+    /// Its count moves onto the overflow button.
+    Collaborate,
+    Timeline,
+    /// The title bar carries it as well.
+    Name,
+    /// The time readout; Left and Right still step it.
+    Time,
+    RecordLoop,
+    /// Emphasis and the xaos overlay: they go before Edit Mode itself.
+    Companions,
+    /// The drawing button, as a submenu holding its popup.
+    Drawing,
+    ToStart,
+    Transforms,
+    /// Last: the key control, still labelled in the menu.
+    EditMode,
+}
+
+const OVERFLOW_ORDER: [Item; 12] = [
+    Item::Undo,
+    Item::Look,
+    Item::Collaborate,
+    Item::Timeline,
+    Item::Name,
+    Item::Time,
+    Item::RecordLoop,
+    Item::Companions,
+    Item::Drawing,
+    Item::ToStart,
+    Item::Transforms,
+    Item::EditMode,
+];
+
+/// How many items can move into the overflow menu (`UiState::toolbar_item_w`).
+pub const OVERFLOW_ITEMS: usize = OVERFLOW_ORDER.len();
+
+/// Every step of the ladder: the captions, then the items.
+const STEPS: usize = CAPTION_STEPS + OVERFLOW_ORDER.len();
+
+impl Item {
+    fn index(self) -> usize {
+        OVERFLOW_ORDER.iter().position(|i| *i == self).unwrap_or(0)
+    }
+}
 
 /// The width the document's name may take, in characters of the button font:
 /// about a 20-character name and a short author. A longer one is cut with `…`.
@@ -42,6 +97,8 @@ struct Forms {
     collab_caption: bool,
     /// 5: the renderer's name on the drawing button.
     renderer: bool,
+    /// 6 onwards: how many of `OVERFLOW_ORDER` are in the overflow menu.
+    overflowed: usize,
 }
 
 impl Forms {
@@ -52,21 +109,44 @@ impl Forms {
             timeline_caption: level < 3,
             collab_caption: level < 4,
             renderer: level < 5,
+            overflowed: (level as usize).saturating_sub(CAPTION_STEPS),
         }
+    }
+
+    /// Whether `item` is on the bar, rather than in the overflow menu.
+    fn shows(self, item: Item) -> bool {
+        item.index() >= self.overflowed
     }
 }
 
 /// What each step saves, measured this frame. Every item that gives way has
 /// both of its forms pinned to a fixed width, so the saving is exact, and
 /// last frame's measured width plus or minus these says which step fits.
+///
+/// An item moving into the overflow menu saves the width it measured the
+/// last time it was on the bar (`UiState::toolbar_item_w`), so the overflow
+/// steps are as exact as the caption steps; the first one also pays for the
+/// overflow button.
 fn savings(ui: &egui::Ui, app: &App) -> [f32; STEPS] {
-    [
-        super::transport::frames_width(ui),
-        name_width(ui, app, true) - name_width(ui, app, false),
-        timeline_width(ui, true) - timeline_width(ui, false),
-        collab_width(ui, true) - collab_width(ui, false),
-        drawing_button_width(ui, app, true) - drawing_button_width(ui, app, false),
-    ]
+    let mut s = [0.0; STEPS];
+    s[0] = super::transport::frames_width(ui);
+    s[1] = name_width(ui, app, true) - name_width(ui, app, false);
+    s[2] = timeline_width(ui, true) - timeline_width(ui, false);
+    s[3] = collab_width(ui, true) - collab_width(ui, false);
+    s[4] = drawing_button_width(ui, app, true) - drawing_button_width(ui, app, false);
+    for k in 0..OVERFLOW_ORDER.len() {
+        s[CAPTION_STEPS + k] = app.ui_state.toolbar_item_w[k];
+    }
+    s[CAPTION_STEPS] -= overflow_button_width(ui);
+    s
+}
+
+/// Draw `add` and remember how wide it came out, item spacing included, so
+/// the ladder knows what moving `item` into the overflow menu saves.
+fn measured(ui: &mut egui::Ui, app: &mut App, item: Item, add: impl FnOnce(&mut egui::Ui, &mut App)) {
+    let spacing = ui.spacing().item_spacing.x;
+    let w = ui.scope(|ui| add(ui, app)).response.rect.width() + spacing;
+    app.ui_state.toolbar_item_w[item.index()] = w;
 }
 
 /// The step that fits `avail`, given the bar measured `measured` wide at step
@@ -100,27 +180,67 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
             draw_explore_menu(ui, app);
             ui.separator();
 
-            let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "The scene's transforms, and their settings",
-                "toggle the Transforms window",
-            );
-            ui.separator();
+            if forms.shows(Item::Transforms) {
+                measured(ui, app, Item::Transforms, |ui, app| {
+                    let resp = ui.toggle_value(&mut app.ui_state.panels.transforms_open, (icons::SHAPES, "Transforms"));
+                    hinted(
+                        resp,
+                        &mut app.ui_state,
+                        "The scene's transforms, and their settings",
+                        "toggle the Transforms window",
+                    );
+                    ui.separator();
+                });
+            }
 
-            draw_undo_redo(ui, app);
-            ui.separator();
+            if forms.shows(Item::Undo) {
+                measured(ui, app, Item::Undo, |ui, app| {
+                    draw_undo_redo(ui, app);
+                    ui.separator();
+                });
+            }
 
-            draw_drawing_button(ui, app, forms.renderer);
-            draw_look_toggle(ui, app);
-            ui.separator();
+            // A group carries its own separator, so whatever moves into the
+            // overflow menu takes its rule with it. Look leaves before the
+            // drawing button, and the companions before Edit Mode, so each
+            // inner item is gone by the time its group is measured alone.
+            if forms.shows(Item::Drawing) {
+                measured(ui, app, Item::Drawing, |ui, app| {
+                    draw_drawing_button(ui, app, forms.renderer);
+                    if forms.shows(Item::Look) {
+                        measured(ui, app, Item::Look, draw_look_toggle);
+                    }
+                    ui.separator();
+                });
+            }
 
-            draw_edit_tools(ui, app);
-            ui.separator();
+            if forms.shows(Item::EditMode) {
+                measured(ui, app, Item::EditMode, |ui, app| {
+                    let spacing = ui.spacing().item_spacing.x;
+                    // Zero spacing: the companions are joined to Edit Mode.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    draw_edit_mode(ui, app);
+                    if forms.shows(Item::Companions) {
+                        measured(ui, app, Item::Companions, draw_companions);
+                    }
+                    ui.spacing_mut().item_spacing.x = spacing;
+                    ui.separator();
+                });
+            }
 
-            super::transport::draw(ui, app, forms.frames);
-            draw_timeline_toggle(ui, app, forms.timeline_caption);
+            if forms.shows(Item::ToStart) {
+                measured(ui, app, Item::ToStart, super::transport::draw_to_start);
+            }
+            super::transport::draw_play(ui, app);
+            if forms.shows(Item::RecordLoop) {
+                measured(ui, app, Item::RecordLoop, super::transport::draw_record_loop);
+            }
+            if forms.shows(Item::Time) {
+                measured(ui, app, Item::Time, |ui, app| super::transport::draw_time(ui, app, forms.frames));
+            }
+            if forms.shows(Item::Timeline) {
+                measured(ui, app, Item::Timeline, |ui, app| draw_timeline_toggle(ui, app, forms.timeline_caption));
+            }
             let left_end = ui.cursor().min.x;
 
             // The right-hand block: laid out from the right edge when it fits
@@ -157,22 +277,200 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// The document's name, Collaborate and Help. `rtl` says the layout runs
-/// right to left, so the items are added in reverse.
+/// The document's name, Collaborate, the overflow menu and Help. `rtl` says
+/// the layout runs right to left, so the items are added in reverse.
 fn draw_right_block(ui: &mut egui::Ui, app: &mut App, forms: Forms, rtl: bool) {
+    let name = |ui: &mut egui::Ui, app: &mut App| {
+        if forms.shows(Item::Name) {
+            measured(ui, app, Item::Name, |ui, app| {
+                if rtl {
+                    ui.separator();
+                    draw_scene_identity(ui, app, forms.author, rtl);
+                } else {
+                    draw_scene_identity(ui, app, forms.author, rtl);
+                    ui.separator();
+                }
+            });
+        }
+    };
+    let collab = |ui: &mut egui::Ui, app: &mut App| {
+        if forms.shows(Item::Collaborate) {
+            measured(ui, app, Item::Collaborate, |ui, app| draw_collab_toggle(ui, app, forms.collab_caption));
+        }
+    };
     if rtl {
         ui.add_space(6.0);
         draw_help_menu(ui, app);
-        draw_collab_toggle(ui, app, forms.collab_caption);
-        ui.separator();
-        draw_scene_identity(ui, app, forms.author, rtl);
+        draw_overflow_menu(ui, app, forms);
+        collab(ui, app);
+        name(ui, app);
     } else {
-        draw_scene_identity(ui, app, forms.author, rtl);
-        ui.separator();
-        draw_collab_toggle(ui, app, forms.collab_caption);
+        name(ui, app);
+        collab(ui, app);
+        draw_overflow_menu(ui, app, forms);
         draw_help_menu(ui, app);
         ui.add_space(6.0);
     }
+}
+
+const OVERFLOW_STATE: [(&str, &str); 1] = [(icons::DOTS_THREE, "")];
+
+/// The overflow button's width on the bar, item spacing included.
+fn overflow_button_width(ui: &egui::Ui) -> f32 {
+    num::Pinned::width(ui, &OVERFLOW_STATE) + ui.spacing().item_spacing.x
+}
+
+/// What didn't fit on the bar, in a menu, each with its caption. Only drawn
+/// once something has moved into it, and it never moves anything else: it
+/// sits just left of Help, which never leaves.
+fn draw_overflow_menu(ui: &mut egui::Ui, app: &mut App, forms: Forms) {
+    if forms.overflowed == 0 {
+        return;
+    }
+    let gone = &OVERFLOW_ORDER[..forms.overflowed];
+    let resp = ui.add(num::Pinned::new(OVERFLOW_STATE[0], &OVERFLOW_STATE));
+    let waiting = app.collab_waiting();
+    if gone.contains(&Item::Collaborate) && waiting > 0 {
+        paint_badge(ui, resp.rect, icons::DOTS_THREE, waiting);
+    }
+    let names: Vec<&str> = gone
+        .iter()
+        .map(|i| match i {
+            Item::Undo => "undo and redo",
+            Item::Look => "Look",
+            Item::Collaborate => "Collaborate",
+            Item::Timeline => "Timeline",
+            Item::Name => "the scene's name",
+            Item::Time => "the time",
+            Item::RecordLoop => "record and loop",
+            Item::Companions => "the edit-mode lights",
+            Item::Drawing => "how it's drawn",
+            Item::ToStart => "back to the start",
+            Item::Transforms => "Transforms",
+            Item::EditMode => "Edit Mode",
+        })
+        .collect();
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        format!(
+            "What didn't fit on the toolbar at this width: {}. Widen the window and they \
+             come back.{}",
+            names.join(", "),
+            if gone.contains(&Item::Collaborate) && waiting > 0 {
+                format!(" Collaborate has {waiting} waiting for you.")
+            } else {
+                String::new()
+            }
+        ),
+        "click: what didn't fit",
+    );
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(200.0);
+        for (k, item) in gone.iter().enumerate() {
+            if k > 0 {
+                ui.separator();
+            }
+            match item {
+                Item::Undo => {
+                    let next_undo = app.history.undo_display().next().map(str::to_string);
+                    let next_redo = app.history.redo_display().last().map(str::to_string);
+                    if menu_item_enabled(ui, app, next_undo.is_some(), &format!("{} Undo", icons::UNDO), "Ctrl+Z", &next_undo.map_or("Nothing to undo".into(), |l| format!("Undo “{l}”"))) {
+                        app.undo();
+                    }
+                    if menu_item_enabled(ui, app, next_redo.is_some(), &format!("{} Redo", icons::REDO), "Ctrl+Shift+Z", &next_redo.map_or("Nothing to redo".into(), |l| format!("Redo “{l}”"))) {
+                        app.redo();
+                    }
+                }
+                Item::Look => menu_toggle(
+                    ui,
+                    app,
+                    |p| &mut p.look_open,
+                    &format!("{} Look", icons::SLIDERS),
+                    "How the picture looks: exposure, point size, colour, background, haze, infinite zoom and the grade",
+                ),
+                Item::Collaborate => menu_toggle(
+                    ui,
+                    app,
+                    |p| &mut p.collab_open,
+                    &if waiting > 0 {
+                        format!("{} Collaborate ({waiting} waiting)", icons::CHATS)
+                    } else {
+                        format!("{} Collaborate", icons::CHATS)
+                    },
+                    "This scene's thread with an agent",
+                ),
+                Item::Timeline => menu_toggle(
+                    ui,
+                    app,
+                    |p| &mut p.timeline_open,
+                    &format!("{} Timeline", icons::FILM_STRIP),
+                    "The camera's path and every animated value on one clock",
+                ),
+                Item::Name => {
+                    let label = format!("{}{}", if app.is_dirty() { "*" } else { "" }, name_text(app, true));
+                    let r = ui.menu_button(label, |ui| identity_fields(ui, app));
+                    hinted(r.response, &mut app.ui_state, "The scene's name and author. Hover to change them.", "hover: edit the name and author");
+                }
+                Item::Time => {
+                    ui.horizontal(|ui| {
+                        ui.label("Time");
+                        super::transport::draw_time(ui, app, true);
+                    });
+                }
+                Item::RecordLoop => {
+                    let armed = app.record_armed;
+                    let r = ui.add(egui::Button::selectable(armed, format!("{} Record", icons::RECORD)));
+                    if hinted(r, &mut app.ui_state, "Arm record: every edit keys what it changes at the playhead", "click: arm or stop recording").clicked() {
+                        app.record_armed = !armed;
+                    }
+                    let looping = app.loop_playback;
+                    let r = ui.add(egui::Button::selectable(looping, format!("{} Loop", icons::REPEAT)));
+                    if hinted(r, &mut app.ui_state, "Loop playback: round the loop region, or the whole timeline", "click: loop or stop looping").clicked() {
+                        app.loop_playback = !looping;
+                    }
+                }
+                Item::Companions => {
+                    ui.add_enabled_ui(app.show_gizmos, |ui| {
+                        let on = app.show_emphasis;
+                        let r = ui.add(egui::Button::selectable(on, format!("{} Light up what moves", icons::LIGHTBULB)));
+                        if hinted(r, &mut app.ui_state, "Light up the points the selected transform moves (M). Only in edit mode", "click: light up what moves").clicked() {
+                            app.toggle_emphasis();
+                        }
+                        let on = app.ui_state.xaos_overlay;
+                        let r = ui.add(egui::Button::selectable(on, format!("{} Xaos edges", icons::FLOW_ARROW)));
+                        if hinted(r, &mut app.ui_state, "Draw which transform may follow which, as arrows between gizmos. Only in edit mode", "click: show or hide the xaos edges").clicked() {
+                            app.ui_state.xaos_overlay = !on;
+                        }
+                    });
+                }
+                Item::Drawing => {
+                    let capacity = app.pending_point_capacity().unwrap_or(app.point_capacity());
+                    let r = ui.menu_button(drawing_caption(Some(app.render_mode), capacity), |ui| render_panel::draw_popup(ui, app));
+                    hinted(r.response, &mut app.ui_state, "How the picture is drawn: the renderer and the point count", "hover: renderer and point count");
+                }
+                Item::ToStart => {
+                    if menu_item(ui, app, &format!("{} Back to the start", icons::SKIP_BACK), "", "Back to the start of the timeline") {
+                        app.return_to_start();
+                    }
+                }
+                Item::Transforms => menu_toggle(
+                    ui,
+                    app,
+                    |p| &mut p.transforms_open,
+                    &format!("{} Transforms", icons::SHAPES),
+                    "The scene's transforms, and their settings",
+                ),
+                Item::EditMode => {
+                    let on = app.show_gizmos;
+                    let r = ui.add(egui::Button::selectable(on, format!("{} Edit Mode", icons::CUBE)).shortcut_text("G"));
+                    if hinted(r, &mut app.ui_state, "Edit mode: gizmos and names showing. Off is view mode (G)", "click: switch mode").clicked() {
+                        app.toggle_gizmos();
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Collaborate's two forms: `Collaborate (2)` and its icon with the count.
@@ -196,15 +494,7 @@ fn draw_collab_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     // so a message arriving changes nothing's width. The tooltip says it in
     // words, which is what carries it for anyone who can't tell the colour.
     if waiting > 0 {
-        let pad = ui.spacing().button_padding;
-        let font = egui::TextStyle::Button.resolve(ui.style());
-        let icon_w = ui.fonts_mut(|f| f.glyph_width(&font, icons::CHATS.chars().next().unwrap_or(' ')));
-        let r = 0.36 * font.size;
-        let c = egui::pos2(resp.rect.left() + pad.x + icon_w, resp.rect.top() + r + 1.0);
-        let label = if waiting > 9 { "9+".to_string() } else { waiting.to_string() };
-        let painter = ui.painter();
-        painter.circle_filled(c, r, super::theme::warn(ui.visuals()));
-        painter.text(c, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(r * 1.4), egui::Color32::BLACK);
+        paint_badge(ui, resp.rect, icons::CHATS, waiting);
     }
     let resp = hinted(
         resp,
@@ -221,6 +511,21 @@ fn draw_collab_toggle(ui: &mut egui::Ui, app: &mut App, caption: bool) {
     if resp.clicked() {
         app.ui_state.panels.collab_open = !open;
     }
+}
+
+/// A count on a button's icon, in the colour for "waiting on you": painted,
+/// so it changes nothing's width. Whoever calls it says the number in words
+/// in the tooltip too.
+fn paint_badge(ui: &egui::Ui, rect: egui::Rect, icon: &str, n: usize) {
+    let pad = ui.spacing().button_padding;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let icon_w = ui.fonts_mut(|f| f.glyph_width(&font, icon.chars().next().unwrap_or(' ')));
+    let r = 0.36 * font.size;
+    let c = egui::pos2(rect.left() + pad.x + icon_w, rect.top() + r + 1.0);
+    let label = if n > 9 { "9+".to_string() } else { n.to_string() };
+    let painter = ui.painter();
+    painter.circle_filled(c, r, super::theme::warn(ui.visuals()));
+    painter.text(c, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(r * 1.4), egui::Color32::BLACK);
 }
 
 /// The Timeline toggle's two forms: with its caption, and the icon alone.
@@ -766,40 +1071,43 @@ fn draw_scene_identity(ui: &mut egui::Ui, app: &mut App, with_author: bool, rtl:
         // the moment you put the caret in a field.
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(260.0)
-        .show(|ui| {
-            let mut name = app.scene.name.clone();
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY),
-                );
-                hinted(
-                    resp,
-                    &mut app.ui_state,
-                    "Shown here, and used to name screenshots, renders and views",
-                    "type: rename the scene",
-                );
-            });
-            app.set_scene_name(&name);
+        .show(|ui| identity_fields(ui, app));
+}
 
-            let mut author = app.scene.author.clone();
-            ui.horizontal(|ui| {
-                ui.label("By");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut author).desired_width(f32::INFINITY),
-                );
-                hinted(
-                    resp,
-                    &mut app.ui_state,
-                    "Saved in the scene file, and filled in for you on new scenes you \
-                     start here.",
-                    "type: set the author",
-                );
-            });
-            app.set_scene_author(&author);
-            // No "Ctrl+S writes these to the file" footnote: this is a file
-            // editing program, so that is the paradigm and not news.
-        });
+/// The name and author fields: the toolbar name's popup, and the overflow
+/// menu's name row. No "Ctrl+S writes these" footnote: this is a file editing
+/// program, so that is the paradigm and not news.
+fn identity_fields(ui: &mut egui::Ui, app: &mut App) {
+    let mut name = app.scene.name.clone();
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY),
+        );
+        hinted(
+            resp,
+            &mut app.ui_state,
+            "Shown here, and used to name screenshots, renders and views",
+            "type: rename the scene",
+        );
+    });
+    app.set_scene_name(&name);
+
+    let mut author = app.scene.author.clone();
+    ui.horizontal(|ui| {
+        ui.label("By");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut author).desired_width(f32::INFINITY),
+        );
+        hinted(
+            resp,
+            &mut app.ui_state,
+            "Saved in the scene file, and filled in for you on new scenes you \
+             start here.",
+            "type: set the author",
+        );
+    });
+    app.set_scene_author(&author);
 }
 
 /// Below this many points the toolbar readout prints "k", at or above it
@@ -914,15 +1222,11 @@ fn draw_look_toggle(ui: &mut egui::Ui, app: &mut App) {
 /// so it is never on the ladder.
 const MODE_STATES: [(&str, &str); 2] = [(icons::CUBE, "Edit Mode"), (icons::EYE, "View Mode")];
 
-/// Edit Mode / View Mode, then its two companions to its right: the emphasis
-/// glow and the xaos overlay. Both do nothing outside edit mode, so they
-/// belong to that control, and zero spacing between the three is what says
-/// so. Edit Mode comes first because it's the one they depend on (they sat
-/// on its left until 2026-10-31, which read backwards).
-fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App) {
-    let spacing = ui.spacing().item_spacing.x;
-    ui.spacing_mut().item_spacing.x = 0.0;
-
+/// Edit Mode / View Mode. Its two companions sit to its right, joined to it
+/// (`draw_companions`): both do nothing outside edit mode, so they belong to
+/// this control, and zero spacing between the three is what says so. Edit
+/// Mode comes first because it's the one they depend on.
+fn draw_edit_mode(ui: &mut egui::Ui, app: &mut App) {
     // Label names the state you're *in*, not the action a click performs:
     // the pressed/unpressed styling already carries the state, so the text is
     // reinforcement rather than the only signal. Pinned to the wider of its
@@ -943,7 +1247,10 @@ fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App) {
     if resp.clicked() {
         app.toggle_gizmos();
     }
+}
 
+/// Edit Mode's two companions: the emphasis glow and the xaos overlay.
+fn draw_companions(ui: &mut egui::Ui, app: &mut App) {
     // Disabled rather than hidden in view mode: a button that vanishes takes
     // the rest of the toolbar's layout with it.
     let resp = ui.add_enabled(
@@ -992,15 +1299,14 @@ fn draw_edit_tools(ui: &mut egui::Ui, app: &mut App) {
     }
     // The warp grid's toggle (branch `warp-view`) goes here, as the third
     // companion: it too is about the selected map, so only edit mode has it.
-
-    ui.spacing_mut().item_spacing.x = spacing;
+    // It wants a row in the overflow menu's Companions arm too.
 }
 
 #[cfg(test)]
 mod tests {
     use super::{STEPS, choose_level};
 
-    const SAVES: [f32; STEPS] = [40.0, 60.0, 50.0, 80.0, 45.0];
+    const SAVES: [f32; STEPS] = [40.0, 60.0, 50.0, 80.0, 45.0, 70.0, 60.0, 110.0, 75.0, 160.0, 90.0, 80.0, 50.0, 120.0, 30.0, 100.0, 110.0];
 
     #[test]
     fn the_ladder_takes_the_first_step_that_fits() {
@@ -1021,6 +1327,22 @@ mod tests {
         assert_eq!(choose_level(1, 1400.0, &SAVES, 1440.0, 20.0), 1);
         // With the margin's worth of room, it goes back.
         assert_eq!(choose_level(1, 1380.0, &SAVES, 1440.0, 20.0), 0);
+    }
+
+    #[test]
+    fn items_move_into_the_overflow_menu_in_order_after_the_captions() {
+        use super::{CAPTION_STEPS, Forms, Item};
+        let all = [Item::Undo, Item::Look, Item::Collaborate, Item::Timeline, Item::Name];
+        // Every caption gone, and still everything on the bar.
+        let f = Forms::at(CAPTION_STEPS as u8);
+        assert!(all.iter().all(|i| f.shows(*i)));
+        // Two steps more: undo/redo and Look have gone, the rest stay.
+        let f = Forms::at(CAPTION_STEPS as u8 + 2);
+        assert!(!f.shows(Item::Undo) && !f.shows(Item::Look));
+        assert!(f.shows(Item::Collaborate) && f.shows(Item::Timeline) && f.shows(Item::Name));
+        // The last step: everything that can go has gone.
+        let f = Forms::at(STEPS as u8);
+        assert!(all.iter().all(|i| !f.shows(*i)));
     }
 
     #[test]

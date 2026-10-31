@@ -223,11 +223,18 @@ Rules:
   count, the author, Timeline's caption, Collaborate's, then the renderer's
   name. File, Explore, Transforms, Undo, Look, **Edit Mode**, Play and Help
   never lose theirs; Edit Mode's word is what says which mode you're in and
-  what the two buttons beside it belong to. Each item's two forms are pinned to measured widths (never pixel
-  constants: they follow the font and the panel scale), so the step is
-  computed, not stepped toward, and going back needs a margin so a window
-  edge on a boundary doesn't flicker. At 1440 every caption fits with about
-  16 points spare; measure what a new item costs before adding it.
+  what the two buttons beside it belong to.
+- **Then whole items move into the overflow menu** (`⋯`, just left of Help),
+  captioned there, one at a time in `toolbar::OVERFLOW_ORDER`. File, Explore,
+  Play and Help never move, so nothing is ever unreachable and nothing is
+  pushed off the edge. A new toolbar item must say where it goes in that
+  order and what its row in the menu is.
+- Each item's forms are pinned to measured widths (never pixel constants:
+  they follow the font and the panel scale), and an overflowed item saves
+  what it last measured on the bar, so the step is computed, not stepped
+  toward. Going back needs a margin so a window edge on a boundary doesn't
+  flicker. The bar is close to full at 1440; measure what a new item costs
+  before adding it.
 - **The document's name is never what's left over.** It's capped at 28
   characters of the button font and cut with `…`, with its `*` in a cell of
   its own.

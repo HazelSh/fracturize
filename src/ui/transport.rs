@@ -36,9 +36,8 @@ pub fn frames_width(ui: &egui::Ui) -> f32 {
     num::mono_width(ui, TIME_CHARS) - num::mono_width(ui, TIME_CHARS_SHORT)
 }
 
-/// `frames`: whether the time readout carries the frame count. It's the
-/// first thing the toolbar gives up when it runs out of room.
-pub fn draw(ui: &mut egui::Ui, app: &mut App, frames: bool) {
+/// Return to start.
+pub fn draw_to_start(ui: &mut egui::Ui, app: &mut App) {
     let resp = ui.button(icons::SKIP_BACK);
     let resp = hinted(
         resp,
@@ -49,7 +48,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, frames: bool) {
     if resp.clicked() {
         app.return_to_start();
     }
+}
 
+/// The one Play: plays the scene, lit while playing.
+pub fn draw_play(ui: &mut egui::Ui, app: &mut App) {
     let moving = app.is_playing();
     let shown = if moving { PLAY_STATES[1] } else { PLAY_STATES[0] };
     // Lit while playing, in the colour that means "on": the transport's one
@@ -70,7 +72,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, frames: bool) {
     if resp.clicked() {
         app.toggle_play();
     }
+}
 
+/// Record and loop: how play behaves.
+pub fn draw_record_loop(ui: &mut egui::Ui, app: &mut App) {
     let armed = app.record_armed;
     let red = ui.visuals().error_fg_color;
     let resp = ui.add(egui::Button::selectable(
@@ -118,15 +123,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, frames: bool) {
     if resp.clicked() {
         app.loop_playback = !looping;
     }
-
-    draw_time(ui, app, frames);
 }
 
 /// The time, as a number box: drag to move the playhead by a little, click
 /// to type a moment. A drag moves it a frame for every two points of travel
 /// (the house drag gain), so a short drag is a few frames, which is what
 /// finding a moment by eye wants; typing is for jumping somewhere exact.
-fn draw_time(ui: &mut egui::Ui, app: &mut App, frames: bool) {
+/// `frames`: whether the readout carries the frame count, the first thing
+/// the toolbar gives up when it runs out of room.
+pub fn draw_time(ui: &mut egui::Ui, app: &mut App, frames: bool) {
     let fps = app.frame_rate().max(1);
     let chars = if frames { TIME_CHARS } else { TIME_CHARS_SHORT };
     let width = num::mono_width(ui, chars) + 2.0 * ui.spacing().button_padding.x + 4.0;
