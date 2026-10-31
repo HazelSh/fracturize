@@ -656,7 +656,7 @@ fn draw_tab(
                     // is the difference from the eye beside them, and why
                     // both tooltips say so first.
                     let solo_on = app.map_view.is_soloed(i);
-                    let solo_resp = ui.add(egui::Button::new("S").small().selected(solo_on));
+                    let solo_resp = tab_toggle(ui, "S", solo_on, selected);
                     let solo_resp = hinted(
                         solo_resp,
                         &mut app.ui_state,
@@ -671,7 +671,7 @@ fn draw_tab(
                         app.toggle_map_solo(i, ui.input(|inp| inp.modifiers.alt));
                     }
                     let mute_on = app.map_view.is_muted(i);
-                    let mute_resp = ui.add(egui::Button::new("M").small().selected(mute_on));
+                    let mute_resp = tab_toggle(ui, "M", mute_on, selected);
                     let mute_resp = hinted(
                         mute_resp,
                         &mut app.ui_state,
@@ -834,6 +834,23 @@ pub fn transform_label(app: &App, i: usize) -> String {
         .and_then(|n| n.clone())
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| format!("T{}", i))
+}
+
+/// A tab's M or S button. On, it's lit in the selection colour like any
+/// toggle; but the selected tab is already filled with that colour, so there
+/// an "on" button inverts instead (pale fill, dark letter), or it would show
+/// only as an outline and read as off.
+fn tab_toggle(ui: &mut egui::Ui, label: &str, on: bool, on_selected_tab: bool) -> egui::Response {
+    if on && on_selected_tab {
+        let sel = ui.visuals().selection;
+        ui.add(
+            egui::Button::new(egui::RichText::new(label).color(sel.bg_fill).strong())
+                .small()
+                .fill(sel.stroke.color),
+        )
+    } else {
+        ui.add(egui::Button::new(label).small().selected(on))
+    }
 }
 
 /// The button's label. Constant, because "this is the one" is carried by

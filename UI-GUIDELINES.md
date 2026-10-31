@@ -356,6 +356,13 @@ swatch, name, eye, mute and solo, nothing more. Rows are a fixed `TAB_HEIGHT` be
 list is virtualised, and the list takes `ui.available_height()`. Add,
 duplicate and delete go *above* the list, at the end that doesn't move.
 
+**A toggle inside something already selected inverts.** An "on" M or S is
+normally filled with the selection colour, but on the selected tab that's the
+tab's own fill, so it would show as a bare outline and read as off. There it
+takes the selection's pale text colour as its fill, with the letter in the
+selection colour (`transforms::tab_toggle`). Any toggle placed on a selected
+surface needs the same treatment.
+
 ### Tables versus grids
 
 - **A table** (`ui::table`) is for values that line up: the same kind of
