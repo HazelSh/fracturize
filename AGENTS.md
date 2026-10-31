@@ -109,8 +109,10 @@ src/
     timeline.rs    # Timeline window: transport, ruler, camera row, track rows
     param_picker.rs# Pick a scene parameter: browsable tree + search (reusable)
     labels.rs      # World-anchored transform name labels
+    panes.rs       # The split viewport's pane edges and captions
     icons.rs       # Phosphor codepoints (vendored font, see assets/fonts/)
   camera.rs      # OrbitCamera (yaw/pitch/distance/focus), ray + projection helpers
+  multiview.rs   # View layouts, pane rectangles, the axis panes' long-lens cameras
   path.rs        # CameraPath: Catmull-Rom splines over orbit keypoints
   track.rs       # Tracks: -S paths over time (keys/rate/cycle), the shared
                  # Extrapolate fold, Animator (the scene at time t), classes
@@ -419,7 +421,8 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | right-click an xaos edge | its menu: cut, restore, only exit, linked map |
 | ctrl+right-drag (overlay on) | knife: cut every edge the stroke crosses, as one edit |
 | right-click a Transforms row | duplicate / enable-disable / delete / rename |
-| click the corner axis cross | look down that axis (the six balls, bottom right) |
+| click the corner axis cross | look down that axis (the six balls, bottom right). In an axis pane: that pane looks down it instead |
+| drag in an axis pane | pan (left, middle or right): an axis pane has no orbit or roll. Scroll zooms every pane together |
 | drag any panel DragValue | change the value; click it to type an exact one |
 
 A button-down becomes a drag past a **4px threshold**, which is what lets a
@@ -585,6 +588,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Ctrl+S | **save the scene** (with all edits) back to its TOML file |
 | U / Shift+U | random scene mutation / undo it |
 | Ctrl+U | the mutation grid in the view, or back to one view (Esc also leaves it) |
+| T / Shift+T | view layout: one view → four views → one big and three small (see "Multiview") |
 | Ctrl+Z / Ctrl+Shift+Z | undo / redo *any* edit (see `src/history.rs`) |
 | X / Shift+X | chaos-game traces: show (re-rolls each press) / hide |
 | I | invert mouse pitch, flightsim style (persisted to prefs) |
@@ -957,6 +961,52 @@ Conventions worth keeping:
   control in this UI was at one point saying nothing at all.
 - When testing anything that touches prefs, set an isolated `XDG_CONFIG_HOME`
   rather than writing the developer's real `~/.config/fracturize/prefs.toml`.
+
+### Multiview: the viewport as panes
+
+FEATURE-PLANS item 2 (`src/multiview.rs`, `ui::panes`). `T` / `Shift+T` or the
+toolbar's three-icon radio picks a layout — **one view**, **four views** (top
+above front, right beside front, perspective in the corner left over: the
+drafting layout) or **one big, three small** (perspective left, the three axis
+views down the right). A preference (`view_layout`, `view_axes` in prefs), not
+scene data. The mutation grid is a layout of its own and wins while it's up.
+
+- **Every pane draws the one point buffer.** `App::panes()` gives the
+  rectangles and cameras; `render_frame` draws them in turn, each with its
+  camera uploaded and a `gpu::Viewport` (viewport + scissor) on every pass.
+  The renderers hold one camera uniform each and `queue.write_buffer` lands
+  before the *next submit*, so **each pane after the first is its own
+  submit**. The splat/volume/tonemap/emphasis fullscreen passes already
+  address pixels by `clip_position.xy`, which is framebuffer pixels whatever
+  the viewport, so no shader knows panes exist; the splat tonemap *loads* in a
+  pane instead of clearing. Points mode costs one draw of every point per
+  pane, so four views is about four times the vertex work.
+- **The one-view layout is one pane** (whole window, the camera, its own near
+  and far), through the same loop with identical values, so it renders as it
+  always did.
+- **Axis panes share the main camera's focus and scale**: scroll in any pane
+  zooms them all, a drag in an axis pane pans the shared focus. An axis pane
+  has no orbit or roll, so every drag there pans; a plain click on empty space
+  still deselects. Its direction comes from the cross in its own corner (click
+  a ball). The perspective pane's cross looks down an axis as before, now with
+  the same basis (`multiview::axis_orientation`: +x right in the top view, so
+  top and front line up) — which turned the old top view, +z up, half a turn.
+- **An axis pane is a long lens, not orthographic** (`AXIS_LENS_DEGREES` = 1,
+  `Fov::axis_lens`, the one lens under `Fov::MIN_DEGREES`): about 0.9% size
+  change front to back across a framed attractor. Orthographic would have
+  broken point size, haze, the splat footprint and volume absorbance, which
+  all divide by `clip.w`. Its own near/far planes sit at half its distance
+  either side of the focus, for depth precision. Haze is shifted by the extra
+  distance so it still spans the attractor, along the pane's axis; the zoom
+  edge guard is measured from the perspective eye in every pane.
+- **Picking is per pane.** A press fixes `App::active_pane` for the whole
+  gesture; `try_grab_gizmo` / `update_gizmo_drag` / `update_hover` use that
+  pane's camera, its size and the cursor from its corner. So dragging an
+  origin dot in an axis pane moves it in that plane exactly. Labels and the
+  roll ring are drawn in every pane, clipped to it. The xaos edge overlay and
+  its picking stay in the perspective pane.
+- Not yet: the mutation grid in these panes; a per-pane renderer; screenshots
+  and render jobs of anything but the perspective camera.
 
 ### Mute and solo: a view of which map placed what
 

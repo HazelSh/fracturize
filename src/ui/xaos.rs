@@ -701,18 +701,22 @@ pub fn overlay_edges(app: &mut App) -> (Vec<OverlayEdge>, usize) {
     let layer = selected.and_then(|i| app.scene.transforms.get(i)).map_or(app.current_layer(), |t| t.layer as usize);
     let Some(sum) = app.xaos_summary(layer) else { return (Vec::new(), 0) };
     let n = sum.idx.len();
-    let (w, h) = app.surface_size();
+    // The perspective pane: the whole window, unless it is split
+    // (`multiview`), where the edges are drawn in that pane alone.
+    let pane = app.panes()[0];
+    let (w, h) = (pane.rect.w, pane.rect.h);
     if w == 0 || h == 0 {
         return (Vec::new(), 0);
     }
-    let view_proj = app.current_view_proj();
+    let view_proj = pane.view_proj();
+    let (ox, oy) = (pane.rect.x as f32, pane.rect.y as f32);
     let placement = app.scene.layer_placement(layer);
     let screen: Vec<Option<egui::Pos2>> = sum
         .idx
         .iter()
         .map(|&i| {
             let o = placement.transform_point3(app.scene.transforms[i].matrix.w_axis.truncate());
-            crate::camera::world_to_screen(o, view_proj, w as f32, h as f32).map(|(x, y)| egui::pos2(x, y))
+            crate::camera::world_to_screen(o, view_proj, w as f32, h as f32).map(|(x, y)| egui::pos2(x + ox, y + oy))
         })
         .collect();
 
@@ -833,7 +837,14 @@ pub fn knife_cuts(edges: &[OverlayEdge], stroke: &[(f32, f32)]) -> Vec<(usize, u
 pub fn draw_overlay(ctx: &egui::Context, app: &mut App) {
     let (edges, skipped) = overlay_edges(app);
     let ppp = ctx.pixels_per_point();
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("fracturize_xaos_overlay")));
+    // Kept inside the perspective pane, where `overlay_edges` projects them.
+    let main = app.panes()[0].rect;
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("fracturize_xaos_overlay")))
+        .with_clip_rect(egui::Rect::from_min_size(
+            egui::pos2(main.x as f32 / ppp, main.y as f32 / ppp),
+            egui::vec2(main.w as f32 / ppp, main.h as f32 / ppp),
+        ));
     let pointer = ctx.pointer_hover_pos().map(|p| (p.x * ppp, p.y * ppp));
     let over_panel = ctx.is_pointer_over_egui();
     let hovered = pointer.filter(|_| !over_panel && app.hovered_transform().is_none()).and_then(|q| pick_edge(&edges, q));

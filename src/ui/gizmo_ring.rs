@@ -62,30 +62,41 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     let Some(idx) = app.gizmo_selection() else { return };
     let Some(matrix) = app.gizmo_specs().get(idx).map(|s| s.matrix) else { return };
 
-    let (w, h) = app.surface_size();
-    if w == 0 || h == 0 {
-        return;
-    }
-    let Some((centre, radius)) =
-        crate::pick::roll_ring(matrix, app.current_view_proj(), w as f32, h as f32)
-    else {
-        return;
-    };
-
     // Projection is in physical pixels; egui works in logical points.
     let ppp = ctx.pixels_per_point();
-    let c = egui::pos2(centre.0 / ppp, centre.1 / ppp);
-    let r = radius / ppp;
-
     let held = app.rolling();
     let hovered = app.hovering_roll();
     let color = if held || hovered { ACTIVE } else { IDLE };
     let width = if held { 2.0 } else { 1.0 };
-
-    let painter = ctx.layer_painter(egui::LayerId::new(
+    let layer = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::new("fracturize_roll_ring"),
     ));
+
+    // A ring in every pane, through that pane's camera: picking finds one in
+    // whichever pane the pointer is in, so each must be drawn where it can
+    // be grabbed (`multiview`).
+    for pane in app.panes() {
+        let rect = pane.rect;
+        if rect.w == 0 || rect.h == 0 {
+            continue;
+        }
+        let Some((centre, radius)) =
+            crate::pick::roll_ring(matrix, pane.view_proj(), rect.w as f32, rect.h as f32)
+        else {
+            continue;
+        };
+        let painter = layer.with_clip_rect(egui::Rect::from_min_size(
+            egui::pos2(rect.x as f32 / ppp, rect.y as f32 / ppp),
+            egui::vec2(rect.w as f32 / ppp, rect.h as f32 / ppp),
+        ));
+        let c = egui::pos2((centre.0 + rect.x as f32) / ppp, (centre.1 + rect.y as f32) / ppp);
+        let r = radius / ppp;
+        ring(&painter, c, r, color, width, held);
+    }
+}
+
+fn ring(painter: &egui::Painter, c: egui::Pos2, r: f32, color: egui::Color32, width: f32, held: bool) {
     let stroke = egui::Stroke::new(width, color);
 
     let at = |t: f32| egui::pos2(c.x + r * t.cos(), c.y + r * t.sin());

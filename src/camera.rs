@@ -77,6 +77,16 @@ impl Fov {
         Self(degrees.clamp(Self::MIN_DEGREES, Self::MAX_DEGREES).to_radians())
     }
 
+    /// The long lens multiview's axis panes look through
+    /// ([`crate::multiview::axis_camera`]), narrower than
+    /// [`Self::MIN_DEGREES`] allows anywhere else, because there it stands in
+    /// for an orthographic camera. Never written to a file and never offered
+    /// on a slider. The minimum is about depth precision, and an axis pane sets
+    /// its own near and far planes tight around the focus, which answers it.
+    pub fn axis_lens(degrees: f32) -> Self {
+        Self(degrees.to_radians())
+    }
+
     pub fn radians(self) -> f32 {
         self.0
     }

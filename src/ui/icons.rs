@@ -171,3 +171,9 @@ pub const SKIP_BACK: &str = "\u{E5A4}";
 pub const MAGNET: &str = "\u{E682}";
 /// Timeline: show the whole timeline (Phosphor "corners-out")
 pub const CORNERS_OUT: &str = "\u{E1D0}";
+/// View layout: one view (Phosphor "square")
+pub const SQUARE: &str = "\u{E45E}";
+/// View layout: four views (Phosphor "squares-four")
+pub const SQUARES_FOUR: &str = "\u{E464}";
+/// View layout: one big view and three small (Phosphor "layout")
+pub const LAYOUT: &str = "\u{E6D6}";

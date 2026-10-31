@@ -26,11 +26,10 @@ pub fn draw(ctx: &egui::Context, app: &App) {
     if w == 0 || h == 0 {
         return;
     }
-    let view_proj = app.current_view_proj();
     // Projection is in physical pixels; egui works in logical points.
     let ppp = ctx.pixels_per_point();
 
-    let painter = ctx.layer_painter(egui::LayerId::new(
+    let layer = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::new("fracturize_gizmo_labels"),
     ));
@@ -45,11 +44,22 @@ pub fn draw(ctx: &egui::Context, app: &App) {
 
     // In scene space: a map in a placed subscene is labelled where it is
     // drawn, and a subscene selected as a whole is labelled by its name.
-    for (i, (matrix, label, enabled)) in app.gizmo_labels().into_iter().enumerate() {
+    let labels = app.gizmo_labels();
+    // In every pane, through that pane's camera, and kept inside it
+    // (`multiview`): one pane, the whole window, in the one-view layout.
+    for pane in app.panes() {
+        let r = pane.rect;
+        let painter = layer.with_clip_rect(egui::Rect::from_min_size(
+            egui::pos2(r.x as f32 / ppp, r.y as f32 / ppp),
+            egui::vec2(r.w as f32 / ppp, r.h as f32 / ppp),
+        ));
+        let view_proj = pane.view_proj();
+    for (i, (matrix, label, enabled)) in labels.iter().cloned().enumerate() {
         let origin = matrix.w_axis.truncate();
-        let Some((sx, sy)) = world_to_screen(origin, view_proj, w as f32, h as f32) else {
+        let Some((sx, sy)) = world_to_screen(origin, view_proj, r.w as f32, r.h as f32) else {
             continue;
         };
+        let (sx, sy) = (sx + r.x as f32, sy + r.y as f32);
 
         let pos = egui::pos2(sx / ppp + 8.0, sy / ppp - 7.0);
 
@@ -90,5 +100,6 @@ pub fn draw(ctx: &egui::Context, app: &App) {
             );
             painter.galley(pos, galley, egui::Color32::from_white_alpha(alpha));
         }
+    }
     }
 }

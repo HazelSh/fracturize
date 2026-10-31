@@ -444,6 +444,7 @@ impl EmphasisRenderer {
         width: u32,
         height: u32,
         instances: u32,
+        viewport: Option<crate::gpu::Viewport>,
     ) {
         if instances == 0 {
             return;
@@ -468,6 +469,9 @@ impl EmphasisRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(v) = viewport {
+                v.apply(&mut pass);
+            }
             pass.set_pipeline(&self.accum_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..4, 0..instances);
@@ -489,6 +493,9 @@ impl EmphasisRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(v) = viewport {
+            v.apply(&mut pass);
+        }
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &accum.bind_group, &[]);
         pass.set_pipeline(&self.dim_pipeline);

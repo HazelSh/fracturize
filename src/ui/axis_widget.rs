@@ -42,6 +42,11 @@ const AXES: [(&str, Vec3, egui::Color32); 3] = [
     ("Z", Vec3::Z, crate::palette::axes::axis_color32(2)),
 ];
 
+/// Distance from a pane's bottom-right corner when the viewport is split. The
+/// whole-window cross keeps clear of the status bar; a pane's corner already
+/// is clear of it.
+const PANE_MARGIN: egui::Vec2 = egui::vec2(-8.0, -8.0);
+
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     // It is a gizmo — a handle drawn over the picture that you grab to move
     // the camera — so it goes away with the rest of them. Somewhere to look
@@ -51,21 +56,10 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    let mut go: Option<Vec3> = None;
     // The zoom carries the world with it; see `App::zoom_frame`. Identity
     // unless this scene has an infinite zoom and the camera has folded.
     let frame = app.zoom_frame();
     let carried = frame != crate::rot::Orientation::IDENTITY;
-
-    // Out of the way of the windows. The Timeline is wide and low and often
-    // dragged right across the bottom of the screen, and the Transforms
-    // window often sits down the right edge; a cross drawn over either hides
-    // what is under it and takes its clicks. So the cross climbs above any
-    // window it would land on (last frame's rectangles), or, when there's no
-    // room above, steps to its left.
-    let size = egui::Vec2::splat(RADIUS * 2.0 + HIT);
-    let screen = ctx.content_rect();
-    let home = egui::Rect::from_min_size(screen.right_bottom() + MARGIN - size, size);
     let windows: Vec<egui::Rect> = ctx.memory(|m| {
         m.areas().visible_layer_ids()
             .into_iter()
@@ -73,6 +67,97 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             .filter_map(|l| m.area_rect(l.id))
             .collect()
     });
+
+    // One cross per pane, each drawn from that pane's camera, so every view
+    // says which way it is looking (`multiview`). In the perspective pane a
+    // click turns the camera to look down the axis; in an axis pane it makes
+    // that pane look down it instead.
+    let panes = app.panes();
+    let ppp = ctx.pixels_per_point();
+    let mut go: Option<(usize, Vec3)> = None;
+    for (i, pane) in panes.iter().enumerate() {
+        let (screen, margin) = if panes.len() == 1 {
+            (ctx.content_rect(), MARGIN)
+        } else {
+            let r = pane.rect;
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(r.x as f32 / ppp, r.y as f32 / ppp),
+                egui::vec2(r.w as f32 / ppp, r.h as f32 / ppp),
+            );
+            (rect, PANE_MARGIN)
+        };
+        let twist = if carried {
+            "\n\nUnder infinite zoom the cross keeps turning as you zoom, following \
+             the zoom's own twist."
+        } else {
+            ""
+        };
+        let (hint, status) = match pane.slot {
+            crate::multiview::Slot::Perspective => (
+                format!(
+                    "Which way the world's axes point. Click a ball to look along \
+                     that axis. Solid balls are the positive ends, hollow ones the \
+                     negative.{twist}"
+                ),
+                "click an axis: look down it",
+            ),
+            crate::multiview::Slot::Axis(k) => {
+                let axis = app.view_axis(k);
+                (
+                    format!(
+                        "This view looks down {} at the scene ({}), from far enough \
+                         away that depth doesn't change sizes. Click another ball to \
+                         look down that axis here instead. Solid balls are the \
+                         positive ends, hollow ones the negative.{twist}",
+                        axis.signed(),
+                        axis.name().to_lowercase(),
+                    ),
+                    "click an axis: this view looks down it",
+                )
+            }
+        };
+        let id = egui::Id::new(("fracturize_axis_widget", i));
+        let to_cam = pane.camera.orientation.inverse();
+        if let Some(world) = cross(ctx, app, id, screen, margin, &windows, to_cam, frame, &hint, status) {
+            go = Some((i, world));
+        }
+    }
+
+    match go.map(|(i, world)| (panes[i].slot, world)) {
+        Some((crate::multiview::Slot::Perspective, world)) => look_down(app, world),
+        Some((crate::multiview::Slot::Axis(k), world)) => {
+            // Back out of the zoom's carried frame to the world axis it shows.
+            app.set_view_axis(k, crate::multiview::Axis::nearest(frame.inverse().rotate(world)));
+        }
+        None => {}
+    }
+}
+
+/// Draw one cross in the bottom-right corner of `screen`, as seen through a
+/// camera whose world-to-camera rotation is `to_cam`, and return the world
+/// direction of a ball that was clicked.
+#[allow(clippy::too_many_arguments)]
+fn cross(
+    ctx: &egui::Context,
+    app: &mut App,
+    id: egui::Id,
+    screen: egui::Rect,
+    margin: egui::Vec2,
+    windows: &[egui::Rect],
+    to_cam: Orientation,
+    frame: Orientation,
+    hint: &str,
+    status: &str,
+) -> Option<Vec3> {
+    let mut go: Option<Vec3> = None;
+    // Out of the way of the windows. The Timeline is wide and low and often
+    // dragged right across the bottom of the screen, and the Transforms
+    // window often sits down the right edge; a cross drawn over either hides
+    // what is under it and takes its clicks. So the cross climbs above any
+    // window it would land on (last frame's rectangles), or, when there's no
+    // room above, steps to its left.
+    let size = egui::Vec2::splat(RADIUS * 2.0 + HIT);
+    let home = egui::Rect::from_min_size(screen.right_bottom() + margin - size, size);
     let mut at = home;
     for _ in 0..8 {
         let Some(w) = windows.iter().find(|w| at.expand(4.0).intersects(**w)) else { break };
@@ -83,10 +168,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             at.translate(egui::vec2(w.left() - 8.0 - at.right(), 0.0))
         };
     }
-    let offset = MARGIN + (at.min - home.min);
-
-    egui::Area::new(egui::Id::new("fracturize_axis_widget"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, offset)
+    egui::Area::new(id)
+        .fixed_pos(at.min)
         .order(egui::Order::Foreground)
         .interactable(true)
         .show(ctx, |ui| {
@@ -96,7 +179,6 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 
             // World → camera. The camera looks down its own −Z, so a ball with
             // camera-space z > 0 is on the near side and gets drawn last.
-            let to_cam = app.camera.orientation.inverse();
 
             // (screen position, camera-space depth, label, colour, world dir)
             let mut balls: Vec<(egui::Pos2, f32, &str, egui::Color32, Vec3, bool)> = Vec::new();
@@ -164,11 +246,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             // One response for the whole cross, hit-tested against the balls —
             // six separate widgets would each need their own id and would fight
             // over the overlapping ones.
-            let resp = ui.interact(
-                rect,
-                egui::Id::new("fracturize_axis_widget_hit"),
-                egui::Sense::click(),
-            );
+            let resp = ui.interact(rect, id.with("hit"), egui::Sense::click());
             if resp.clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
                     // Nearest ball to the click, near side first — the one that
@@ -182,27 +260,9 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                     }
                 }
             }
-            let hint = if carried {
-                "Which way the world's axes point. Click a ball to look along \
-                 that axis. Solid balls are the positive ends, hollow ones the \
-                 negative.\n\nUnder infinite zoom the cross keeps turning as you \
-                 zoom, following the zoom's own twist."
-            } else {
-                "Which way the world's axes point. Click a ball to look along \
-                 that axis. Solid balls are the positive ends, hollow ones the \
-                 negative."
-            };
-            super::hints::hinted(
-                resp,
-                &mut app.ui_state,
-                hint,
-                "click an axis: look down it",
-            );
+            super::hints::hinted(resp, &mut app.ui_state, hint, status);
         });
-
-    if let Some(dir) = go {
-        look_down(app, dir);
-    }
+    go
 }
 
 /// Put the camera on `dir`, looking back at the focus — Blender's numpad
@@ -212,14 +272,12 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 /// the eye as well would lose the thing you were looking at. Glides rather than
 /// cuts, like every other discrete framing change.
 fn look_down(app: &mut App, dir: Vec3) {
-    let z = dir.normalize();
-    // World up, except when looking straight along it — there "up" has to be
-    // something else, and +Z is what every tool picks for the top view.
-    let up = if z.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let x = up.cross(z).normalize();
-    let y = z.cross(x);
+    // The framing an axis pane looking down `dir` has, so the perspective view
+    // turned to an axis and that axis's own pane show the same picture. World
+    // up is screen up except looking along y, where +x stays on the right, as
+    // a drawing's top view sits above its front view.
     let target = OrbitCamera {
-        orientation: Orientation::from_basis(x, y, z),
+        orientation: crate::multiview::axis_orientation(dir),
         ..app.camera
     };
     app.glide_camera_to(target);

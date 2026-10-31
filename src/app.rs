@@ -570,6 +570,8 @@ pub enum HelpAction {
     HazeIntensity,
     Mutate,
     MutationGrid,
+    /// T / Shift+T: the next / previous way of dividing the viewport.
+    ViewLayout,
     Undo,
     Browse,
     Traces,
@@ -900,6 +902,14 @@ pub struct App {
     /// Gizmo drags are the other way round (see `on_cursor_moved`).
     drag_origin: (f32, f32),
     drag_moved: bool,
+    /// Which pane of the split viewport the pointer is in, or was in when the
+    /// drag in flight began: the pane every pick and drag is measured in
+    /// (`multiview`). 0, the perspective pane, in the one-view layout.
+    active_pane: usize,
+    /// The press in flight is a plain left press in an axis pane: a drag pans,
+    /// since an axis pane has nothing to orbit, but a click still deselects
+    /// as a click on empty space does everywhere else.
+    axis_press: bool,
     /// Shift-for-fine during a gizmo drag: the virtual-cursor position and the
     /// real cursor position at the moment the modifier last changed, plus the
     /// state currently in force.
@@ -1512,6 +1522,8 @@ impl App {
             drag: Drag::None,
             drag_origin: (0.0, 0.0),
             drag_moved: false,
+            active_pane: 0,
+            axis_press: false,
             fine_anchor: (0.0, 0.0),
             fine_from: (0.0, 0.0),
             fine_active: false,
@@ -3927,8 +3939,13 @@ impl App {
                 if self.grid_view {
                     self.stop_following();
                 }
-                let (_, h) = self.gpu.size();
-                self.camera.pan(dx, dy, h as f32);
+                // Measured in the pane the drag began in, so the scene stays
+                // under the hand there. Every pane shares the one focus, so
+                // panning in an axis pane pans them all.
+                let pane = self.active_pane();
+                let mut camera = pane.camera;
+                camera.pan(dx, dy, pane.rect.h as f32);
+                self.camera.focus = camera.focus;
                 self.invalidate_default_path();
             }
             Drag::Roll => {
@@ -4017,16 +4034,21 @@ impl App {
     fn update_hover(&mut self) {
         use winit::window::CursorIcon;
 
+        // Hover is measured in whichever pane the pointer is over; a drag
+        // keeps the pane it began in, and this doesn't run during one.
+        if matches!(self.drag, Drag::None) {
+            self.active_pane = self.pane_at(self.cursor);
+        }
         let hit = if self.show_gizmos && !self.grid_view {
-            let (w, h) = self.gpu.size();
+            let pane = self.active_pane();
             let matrices = self.gizmo_matrices();
             crate::pick::pick_gizmo(
                 &matrices,
                 self.gizmo_selection(),
-                self.current_view_proj(),
-                self.cursor,
-                w as f32,
-                h as f32,
+                pane.view_proj(),
+                pane.rect.local(self.cursor),
+                pane.rect.w as f32,
+                pane.rect.h as f32,
             )
         } else {
             None
@@ -4060,12 +4082,6 @@ impl App {
         }
     }
 
-    /// Current view-projection matrix for the window surface
-    pub fn current_view_proj(&self) -> Mat4 {
-        let (w, h) = self.gpu.size();
-        self.camera.view_proj(w as f32 / h as f32)
-    }
-
     /// Surface size in physical pixels — `ui::labels` needs it to project
     /// transform origins to screen space.
     pub fn surface_size(&self) -> (u32, u32) {
@@ -4077,6 +4093,11 @@ impl App {
         use winit::event::MouseButton;
         self.drag_origin = self.cursor;
         self.drag_moved = false;
+        // The pane this gesture belongs to, for as long as it lasts: a drag
+        // that wanders over a neighbouring pane is still the drag it began as.
+        self.active_pane = self.pane_at(self.cursor);
+        let in_axis_pane = self.active_pane().is_axis();
+        self.axis_press = false;
         // Taking the camera by hand beats any glide still in flight, and ends
         // the zoom gesture the magnifier was showing.
         self.cancel_camera_glide();
@@ -4125,7 +4146,11 @@ impl App {
                 // *nothing*" and drops the selection — the universal editor
                 // convention, and the only exit from a selection this app used
                 // to have no way out of.
-                self.drag = if self.shift_held { Drag::Pan } else { Drag::Orbit };
+                //
+                // An axis pane looks down its axis and nowhere else, so there
+                // is nothing to orbit there: the drag pans.
+                self.axis_press = in_axis_pane && !self.shift_held;
+                self.drag = if self.shift_held || in_axis_pane { Drag::Pan } else { Drag::Orbit };
                 // Taking the camera by hand stops it flying the path — they'd
                 // fight over the same framing otherwise.
                 self.stop_following();
@@ -4160,7 +4185,8 @@ impl App {
                         return;
                     }
                 }
-                self.drag = Drag::Roll;
+                // Nor is there anything to roll an axis pane to.
+                self.drag = if in_axis_pane { Drag::Pan } else { Drag::Roll };
                 self.stop_following();
             }
             _ => {}
@@ -4189,7 +4215,7 @@ impl App {
             if matches!(button, MouseButton::Left) && matches!(self.drag, Drag::Orbit) && !self.drag_moved && self.grid_view {
                 self.grid_click();
             } else if matches!(button, MouseButton::Left)
-                && matches!(self.drag, Drag::Orbit)
+                && (matches!(self.drag, Drag::Orbit) || (self.axis_press && matches!(self.drag, Drag::Pan)))
                 && !self.drag_moved
                 && self.gizmo_selection().is_some()
             {
@@ -4273,14 +4299,19 @@ impl App {
         if !self.show_gizmos {
             return None;
         }
-        let (w, h) = self.gpu.size();
-        let (w, h) = (w as f32, h as f32);
-        let view_proj = self.current_view_proj();
+        // Everything below is measured in the pane the press landed in: its
+        // camera, its size, and the cursor from its corner. In the one-view
+        // layout that is the window and the camera, as it always was.
+        let pane = self.active_pane();
+        let (w, h) = (pane.rect.w as f32, pane.rect.h as f32);
+        let view_proj = pane.view_proj();
+        let cursor = pane.rect.local(self.cursor);
+        let camera = pane.camera;
 
         let matrices = self.gizmo_matrices();
         let was_selected = self.gizmo_selection();
         let subscene = self.selected_subscene();
-        let hit = pick_gizmo(&matrices, was_selected, view_proj, self.cursor, w, h)?;
+        let hit = pick_gizmo(&matrices, was_selected, view_proj, cursor, w, h)?;
 
         // Grabbing an *unselected* transform selects it and stops there. The
         // gesture is spent on choosing; it starts no drag, and deliberately not
@@ -4304,7 +4335,7 @@ impl App {
         let m = matrices[hit.transform];
         let origin = m.w_axis.truncate();
         let inv_vp = view_proj.inverse();
-        let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, self.cursor.0, self.cursor.1, w, h);
+        let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, cursor.0, cursor.1, w, h);
 
         // Ctrl turns any grab into a uniform scale — except on the two rotation
         // controls, where it is the snap modifier instead.
@@ -4329,11 +4360,11 @@ impl App {
         // tip handles resize the whole thing rather than one axis of it.
         let uniform_tip = subscene.is_some() && matches!(hit.part, GizmoPart::Tip(_));
         let mode = if (self.ctrl_held && !snappable) || uniform_tip {
-            GizmoDragMode::Scale { start_y: self.cursor.1 }
+            GizmoDragMode::Scale { start_y: cursor.1 }
         } else {
             match hit.part {
                 GizmoPart::Origin => {
-                    let normal = self.camera.forward();
+                    let normal = camera.forward();
                     let grab = crate::pick::ray_plane(ray_o, ray_d, origin, normal)?;
                     GizmoDragMode::TranslateView { normal, grab_offset: origin - grab }
                 }
@@ -4373,26 +4404,26 @@ impl App {
                     let mut axis = m.col(k).truncate().normalize_or(Vec3::Y);
                     // Screen-CCW should mean world-CCW around the axis as
                     // seen by the camera; flip when the axis points away
-                    if axis.dot(self.camera.eye() - origin) < 0.0 {
+                    if axis.dot(camera.eye() - origin) < 0.0 {
                         axis = -axis;
                     }
                     let center = crate::camera::world_to_screen(origin, view_proj, w, h)?;
                     GizmoDragMode::Rotate {
                         axis,
                         center,
-                        start_angle: crate::pick::screen_angle(center, self.cursor),
+                        start_angle: crate::pick::screen_angle(center, cursor),
                     }
                 }
                 GizmoPart::Roll => {
                     // The view axis, pointing back at the eye, so a clockwise
                     // drag rolls the map clockwise on screen. Captured once:
                     // the camera can't move mid-gizmo-drag.
-                    let axis = -self.camera.forward();
+                    let axis = -camera.forward();
                     let center = crate::camera::world_to_screen(origin, view_proj, w, h)?;
                     GizmoDragMode::Roll {
                         axis,
                         center,
-                        start_angle: crate::pick::screen_angle(center, self.cursor),
+                        start_angle: crate::pick::screen_angle(center, cursor),
                     }
                 }
             }
@@ -4415,14 +4446,15 @@ impl App {
         mode: GizmoDragMode,
         start: Mat4,
     ) {
-        let (w, h) = self.gpu.size();
-        let (w, h) = (w as f32, h as f32);
-        let view_proj = self.current_view_proj();
+        // The pane the drag began in, as `try_grab_gizmo` measured it.
+        let pane = self.active_pane();
+        let (w, h) = (pane.rect.w as f32, pane.rect.h as f32);
+        let view_proj = pane.view_proj();
         let inv_vp = view_proj.inverse();
         // Every drag mode below is a pure function of *a* cursor position, so
         // Shift-for-fine is one substitution here rather than four separate
         // gain factors.
-        let cursor = self.fine_cursor();
+        let cursor = pane.rect.local(self.fine_cursor());
         let (ray_o, ray_d) = crate::camera::cursor_ray(inv_vp, cursor.0, cursor.1, w, h);
         let start_origin = start.w_axis.truncate();
 
@@ -5599,6 +5631,96 @@ impl App {
 
     // === The mutation grid as the view ===
 
+    // === Multiview: the viewport as panes ===================================
+
+    pub fn view_layout(&self) -> crate::multiview::Layout {
+        self.prefs.view_layout
+    }
+
+    /// Divide the viewport differently. A preference, so it is remembered and
+    /// isn't an edit; nothing about the scene changes.
+    pub fn set_view_layout(&mut self, layout: crate::multiview::Layout) {
+        if layout == self.prefs.view_layout {
+            return;
+        }
+        self.prefs.view_layout = layout;
+        self.prefs.save();
+        self.active_pane = 0;
+        log::info!("View layout: {}", layout.label());
+    }
+
+    /// T / Shift+T.
+    pub fn cycle_view_layout(&mut self, back: bool) {
+        let l = self.prefs.view_layout;
+        self.set_view_layout(if back { l.prev() } else { l.next() });
+    }
+
+    /// Which axis axis pane `slot` looks down: its axis cross sets it.
+    pub fn view_axis(&self, slot: usize) -> crate::multiview::Axis {
+        self.prefs.view_axes.get(slot).copied().unwrap_or(crate::multiview::DEFAULT_AXES[0])
+    }
+
+    pub fn set_view_axis(&mut self, slot: usize, axis: crate::multiview::Axis) {
+        if let Some(a) = self.prefs.view_axes.get_mut(slot) {
+            if *a != axis {
+                *a = axis;
+                self.prefs.save();
+            }
+        }
+    }
+
+    /// The panes the viewport is divided into this frame, the perspective pane
+    /// first. One pane covering the whole window, through the camera exactly
+    /// as it always was, in the one-view layout, in the mutation grid (which
+    /// is a layout of its own), and when the window is too small to split.
+    pub fn panes(&self) -> Vec<crate::multiview::Pane> {
+        use crate::multiview::{self, Layout, Pane, Rect, Slot};
+        let (w, h) = self.gpu.size();
+        let whole = Rect { x: 0, y: 0, w, h };
+        let single = vec![Pane { rect: whole, slot: Slot::Perspective, camera: self.camera, planes: None }];
+        if self.grid_view || self.prefs.view_layout == Layout::Single {
+            return single;
+        }
+        // Between the toolbar and the status bar, so no pane's corner or
+        // caption is under either.
+        let ppp = self.window.scale_factor() as f32;
+        let area = self.ui_state.grid_area.map_or(whole, |r| {
+            let x0 = ((r.min.x * ppp).round().max(0.0) as u32).min(w);
+            let y0 = ((r.min.y * ppp).round().max(0.0) as u32).min(h);
+            let x1 = ((r.max.x * ppp).round().max(0.0) as u32).clamp(x0, w);
+            let y1 = ((r.max.y * ppp).round().max(0.0) as u32).clamp(y0, h);
+            Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        });
+        let gap = (2.0 * ppp).round().max(1.0) as u32;
+        let frame = self.zoom_frame();
+        let panes: Vec<Pane> = multiview::rects(self.prefs.view_layout, area, gap)
+            .into_iter()
+            .map(|(rect, slot)| match slot {
+                Slot::Perspective => Pane { rect, slot, camera: self.camera, planes: None },
+                Slot::Axis(k) => {
+                    let (camera, planes) = multiview::axis_camera(&self.camera, self.view_axis(k), frame);
+                    Pane { rect, slot, camera, planes: Some(planes) }
+                }
+            })
+            .collect();
+        if panes.iter().any(|p| p.rect.w < 32 || p.rect.h < 32) {
+            return single;
+        }
+        panes
+    }
+
+    /// The pane under `p` (physical pixels), or the perspective pane when it
+    /// is over none of them — a gap, or the toolbar.
+    fn pane_at(&self, p: (f32, f32)) -> usize {
+        self.panes().iter().position(|pane| pane.rect.contains(p)).unwrap_or(0)
+    }
+
+    /// The pane picks and drags are measured in (`active_pane`).
+    pub fn active_pane(&self) -> crate::multiview::Pane {
+        let panes = self.panes();
+        panes.get(self.active_pane).copied().unwrap_or(panes[0])
+    }
+
     pub fn grid_view(&self) -> bool {
         self.grid_view
     }
@@ -6184,6 +6306,10 @@ impl App {
     /// The overlay edge under the pointer, if the overlay is showing.
     fn xaos_edge_under_cursor(&mut self) -> Option<(usize, usize)> {
         if !crate::ui::xaos::overlay_active(self) {
+            return None;
+        }
+        // The edges are drawn in the perspective pane only.
+        if self.pane_at(self.cursor) != 0 {
             return None;
         }
         let (edges, _) = crate::ui::xaos::overlay_edges(self);
@@ -6773,11 +6899,13 @@ impl App {
     /// drawn: on in volume mode with opacity above zero, off otherwise. `samples`
     /// and `height` are exactly what exposure is normalised by at that call
     /// site, so absorbance scales the way brightness does.
-    fn sync_volume(&mut self, samples: f64, height: f32) {
+    fn sync_volume(&mut self, samples: f64, height: f32, fov: crate::camera::Fov) {
         use crate::gpu::points::volume::VolumeParams;
         let params = if self.render_mode == RenderMode::Volume {
             let framing = self.volume_framing();
-            VolumeParams::new(self.opacity, samples, height, self.camera.fov, framing)
+            // The pane's own lens: a pixel's world footprint at depth z is
+            // set by it, and an axis pane's is far narrower.
+            VolumeParams::new(self.opacity, samples, height, fov, framing)
         } else {
             VolumeParams::OFF
         };
@@ -7300,7 +7428,12 @@ impl App {
     /// Use native 1px point primitives (~3x faster) when the projected point
     /// size at the orbit distance would be subpixel anyway
     fn use_point_primitives(&self, screen_height: f32) -> bool {
-        self.projected_point_pixels(screen_height) <= 1.5
+        self.use_point_primitives_for(&self.camera, screen_height)
+    }
+
+    /// The same, for a pane's camera (`multiview`).
+    fn use_point_primitives_for(&self, camera: &OrbitCamera, screen_height: f32) -> bool {
+        OrbitCamera::point_pixels(self.rendered_point_size(), camera.distance, screen_height, camera.fov) <= 1.5
     }
 
     /// What the shaders will make of the current point size at the focus, in
@@ -8448,7 +8581,7 @@ impl App {
                     // different picture from the one on screen.
                     self.grade,
                 );
-                self.sync_volume(self.buffer_capacity as f64, SCREENSHOT_HEIGHT as f32);
+                self.sync_volume(self.buffer_capacity as f64, SCREENSHOT_HEIGHT as f32, self.camera.fov);
                 self.splat_renderer.render(
                     &self.gpu.device,
                     &mut encoder,
@@ -8598,6 +8731,7 @@ impl App {
                 }
             }
             HelpAction::MutationGrid => self.toggle_grid_view(),
+            HelpAction::ViewLayout => self.cycle_view_layout(shift),
             HelpAction::Undo => {
                 if shift {
                     self.redo()
@@ -8658,8 +8792,6 @@ impl App {
         }
 
         let (width, height) = self.gpu.size();
-        let aspect = width as f32 / height as f32;
-        let view_proj = self.camera.view_proj(aspect);
 
         // Advance circular buffer and get valid point count. What we *draw*
         // can be less — see `drawn_points` for the collapsed-attractor case.
@@ -8726,180 +8858,233 @@ impl App {
         // points that dispatch just wrote included.
         self.point_compute.dispatch_emphasis_stats(&mut encoder);
 
-        // === STEP 2: RENDER POINTS ===
-        let haze = self.haze_uniforms();
-        let camera = CameraUniforms::new(
-            view_proj,
-            self.camera.fov,
-            height as f32,
-            self.rendered_point_size(),
-            aspect,
-            1.0,
-            haze.0,
-            haze.1,
-            haze.2,
-            haze.3,
-            self.color_contrast,
-            self.scene.background.to_array(),
-            // Overridden below when the window is transparent.
-            false,
-            self.scene.packs_rgb(),
-        )
-        .with_alpha(self.window_alpha())
-        // Every frame, from this frame's eye: that is what makes the zoom's
-        // edge guard track the camera instead of the world.
-        .with_zoom_guard(self.zoom(), self.camera.eye());
-        self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
-        if self.show_traces {
-            self.line_renderer.upload_camera(&self.gpu.queue, &camera);
-        }
-        if self.show_gizmos {
-            self.indicator_renderer.upload_camera(&self.gpu.queue, &camera);
-            self.path_renderer.upload_camera(&self.gpu.queue, &camera);
-        }
-
+        // === STEP 2: RENDER POINTS, ONCE PER PANE ===
+        //
+        // In the one-view layout there is one pane, the whole window through
+        // the camera, and everything below is exactly what it always was.
+        // Split (`multiview`), each pane is drawn in turn through its own
+        // camera, with a viewport and scissor on every pass. The renderers
+        // each hold a single camera uniform, set by `queue.write_buffer`,
+        // which lands before the *next submit*: so every pane after the first
+        // is a submit of its own, and each sees its own camera.
+        let panes = self.panes();
+        let split = panes.len() > 1;
         // The grid fills the view with panes egui draws; the scene itself
-        // isn't drawn under them, only its ground.
+        // isn't drawn under them, only its ground. It is never split.
         let mode = if self.grid_view { None } else { Some(self.render_mode) };
-        match mode {
-            None => {
-                let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("grid_clear_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &color_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(self.window_clear()),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-            }
-            Some(RenderMode::Points) => {
-                self.point_renderer.upload_camera(&self.gpu.queue, &camera);
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("point_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &color_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(self.window_clear()),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
+        if split || mode.is_none() {
+            // Split: the gaps between panes, and the ground each pane's own
+            // passes load rather than clear, so no pane wipes another.
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(if split { "pane_clear_pass" } else { "grid_clear_pass" }),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.window_clear()),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        let haze = self.haze_uniforms();
+        // The edge guard is measured from the perspective eye in every pane,
+        // so all of them fade the zoom band's rim where it does.
+        let guard_eye = self.camera.eye();
+        let draw_overlay = (self.show_traces || self.show_gizmos) && !self.grid_view;
+        for (i, pane) in panes.iter().enumerate() {
+            if i > 0 {
+                let done = std::mem::replace(
+                    &mut encoder,
+                    self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("pane_encoder"),
                     }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+                );
+                self.gpu.queue.submit(std::iter::once(done.finish()));
+            }
+            let viewport = split.then(|| pane.rect.viewport());
+            let pane_height = pane.rect.h as f32;
+            // The haze band follows the eye's distance from the focus. An axis
+            // pane's eye stands far further back, so its band moves back by
+            // the difference and still spans the attractor — now as depth
+            // along that pane's own axis.
+            let shift = pane.camera.distance - self.camera.distance;
+            let camera = CameraUniforms::new(
+                pane.view_proj(),
+                pane.camera.fov,
+                pane_height,
+                self.rendered_point_size(),
+                pane.rect.aspect(),
+                1.0,
+                haze.0 + shift,
+                haze.1 + shift,
+                haze.2,
+                haze.3,
+                self.color_contrast,
+                self.scene.background.to_array(),
+                // Overridden below when the window is transparent.
+                false,
+                self.scene.packs_rgb(),
+            )
+            .with_alpha(self.window_alpha())
+            // Every frame, from this frame's eye: that is what makes the zoom's
+            // edge guard track the camera instead of the world.
+            .with_zoom_guard(self.zoom(), guard_eye);
+            let primitives = self.use_point_primitives_for(&pane.camera, pane_height);
+            self.gizmo_renderer.upload_camera(&self.gpu.queue, &camera);
+            if self.show_traces {
+                self.line_renderer.upload_camera(&self.gpu.queue, &camera);
+            }
+            if self.show_gizmos {
+                self.indicator_renderer.upload_camera(&self.gpu.queue, &camera);
+                self.path_renderer.upload_camera(&self.gpu.queue, &camera);
+            }
 
-                if point_count > 0 {
-                    self.point_renderer.draw(
-                        &mut render_pass,
+            match mode {
+                None => {}
+                Some(RenderMode::Points) => {
+                    self.point_renderer.upload_camera(&self.gpu.queue, &camera);
+                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("point_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &color_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: if split {
+                                    wgpu::LoadOp::Load
+                                } else {
+                                    wgpu::LoadOp::Clear(self.window_clear())
+                                },
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        // Cleared whole, every pane: the panes before this one
+                        // are finished with it, gizmos included.
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    if let Some(v) = viewport {
+                        v.apply(&mut render_pass);
+                    }
+
+                    if point_count > 0 {
+                        self.point_renderer.draw(&mut render_pass, point_count, primitives);
+                    }
+                }
+                Some(RenderMode::Splat | RenderMode::Volume) => {
+                    self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
+                    self.splat_renderer.upload_params(
+                        &self.gpu.queue,
+                        self.exposure,
+                        // The *drawn* count, not the buffer's: exposure is
+                        // normalized by it, so capping the draw (see
+                        // `drawn_points`) doesn't change how bright the result is.
+                        // During warmup this is below capacity too, which is the
+                        // brightness ramp that has always been there.
+                        self.buffer_capacity.min(point_count.max(1)) as f64,
+                        // The pane's height, which exposure is normalised by,
+                        // so a pane is as bright as the whole window would be.
+                        pane_height,
+                        self.window_clear(),
+                        self.window_alpha(),
+                        // The window's own grade — the whole point of it being a
+                        // live control rather than a render setting.
+                        self.grade,
+                    );
+                    // Absorbance is normalised by the same two numbers exposure is.
+                    self.sync_volume(
+                        self.buffer_capacity.min(point_count.max(1)) as f64,
+                        pane_height,
+                        pane.camera.fov,
+                    );
+                    self.splat_renderer.set_viewport(viewport);
+                    self.splat_renderer.render(
+                        &self.gpu.device,
+                        &mut encoder,
+                        &color_view,
+                        &depth_view,
+                        width,
+                        height,
                         point_count,
-                        self.use_point_primitives(height as f32),
+                        primitives,
                     );
                 }
             }
-            Some(RenderMode::Splat | RenderMode::Volume) => {
-                self.splat_renderer.upload_camera(&self.gpu.queue, &camera);
-                self.splat_renderer.upload_params(
+
+            // === STEP 2.4: LIGHT UP WHAT THE SELECTED TRANSFORM MOVES ===
+            //
+            // After the cloud and before the gizmos: it is light added to the
+            // finished picture, and it belongs under the handles you are about to
+            // grab rather than over them.
+            let (run_start, run_len) = self.point_compute.emphasis_window();
+            if run_len > 0 && !self.grid_view {
+                self.emphasis_renderer.upload_camera(&self.gpu.queue, &camera);
+                self.emphasis_renderer.upload_params(
                     &self.gpu.queue,
-                    self.exposure,
-                    // The *drawn* count, not the buffer's: exposure is
-                    // normalized by it, so capping the draw (see
-                    // `drawn_points`) doesn't change how bright the result is.
-                    // During warmup this is below capacity too, which is the
-                    // brightness ramp that has always been there.
-                    self.buffer_capacity.min(point_count.max(1)) as f64,
-                    height as f32,
-                    self.window_clear(),
-                    self.window_alpha(),
-                    // The window's own grade — the whole point of it being a
-                    // live control rather than a render setting.
-                    self.grade,
+                    &EmphasisParams {
+                        run_start,
+                        run_len,
+                        capacity: self.point_compute.buffer_capacity,
+                        // Gather the glow the way the picture under it was drawn.
+                        splat_mode: u32::from(self.render_mode.is_splat_family()),
+                        background: self.scene.background.to_array(),
+                        ..self.emphasis_params
+                    },
                 );
-                // Absorbance is normalised by the same two numbers exposure is.
-                self.sync_volume(self.buffer_capacity.min(point_count.max(1)) as f64, height as f32);
-                self.splat_renderer.render(
+                self.emphasis_renderer.render(
                     &self.gpu.device,
                     &mut encoder,
                     &color_view,
-                    &depth_view,
                     width,
                     height,
-                    point_count,
-                    self.use_point_primitives(height as f32),
+                    run_len,
+                    viewport,
                 );
             }
-        }
 
-        // === STEP 2.4: LIGHT UP WHAT THE SELECTED TRANSFORM MOVES ===
-        //
-        // After the cloud and before the gizmos: it is light added to the
-        // finished picture, and it belongs under the handles you are about to
-        // grab rather than over them.
-        let (run_start, run_len) = self.point_compute.emphasis_window();
-        if run_len > 0 && !self.grid_view {
-            self.emphasis_renderer.upload_camera(&self.gpu.queue, &camera);
-            self.emphasis_renderer.upload_params(
-                &self.gpu.queue,
-                &EmphasisParams {
-                    run_start,
-                    run_len,
-                    capacity: self.point_compute.buffer_capacity,
-                    // Gather the glow the way the picture under it was drawn.
-                    splat_mode: u32::from(self.render_mode.is_splat_family()),
-                    background: self.scene.background.to_array(),
-                    ..self.emphasis_params
-                },
-            );
-            self.emphasis_renderer.render(
-                &self.gpu.device,
-                &mut encoder,
-                &color_view,
-                width,
-                height,
-                run_len,
-            );
-        }
-
-        // === STEP 2.5/2.6/3: THE IN-WORLD UI, MULTISAMPLED ===
-        //
-        // Traces, the selected transform's indicators, the camera path and the
-        // gizmos all go into one multisampled target and come back as a single
-        // composite (see src/gpu/overlay.rs). They used to be three passes
-        // straight onto the swapchain, sharing the main depth buffer and its
-        // aliasing; the pass gets its own copy of that depth so the point
-        // cloud still occludes them, and its own sample count so they are the
-        // only thing anti-aliased.
-        let draw_overlay = (self.show_traces || self.show_gizmos) && !self.grid_view;
-        if draw_overlay {
-            {
-                let mut render_pass = self.overlay.begin(&mut encoder);
-                if self.show_traces {
-                    self.line_renderer.draw(&mut render_pass);
+            // === STEP 2.5/2.6/3: THE IN-WORLD UI, MULTISAMPLED ===
+            //
+            // Traces, the selected transform's indicators, the camera path and the
+            // gizmos all go into one multisampled target and come back as a single
+            // composite (see src/gpu/overlay.rs). They used to be three passes
+            // straight onto the swapchain, sharing the main depth buffer and its
+            // aliasing; the pass gets its own copy of that depth so the point
+            // cloud still occludes them, and its own sample count so they are the
+            // only thing anti-aliased. In a pane the overlay target is clear
+            // everywhere outside it, so compositing all of it touches only the
+            // pane.
+            if draw_overlay {
+                {
+                    let mut render_pass = self.overlay.begin(&mut encoder);
+                    if let Some(v) = viewport {
+                        v.apply(&mut render_pass);
+                    }
+                    if self.show_traces {
+                        self.line_renderer.draw(&mut render_pass);
+                    }
+                    if self.show_gizmos {
+                        self.indicator_renderer.draw(&mut render_pass);
+                        self.path_renderer.draw(&mut render_pass);
+                        self.gizmo_renderer.draw(&mut render_pass);
+                    }
                 }
-                if self.show_gizmos {
-                    self.indicator_renderer.draw(&mut render_pass);
-                    self.path_renderer.draw(&mut render_pass);
-                    self.gizmo_renderer.draw(&mut render_pass);
-                }
+                self.overlay.composite(&mut encoder, &color_view);
             }
-            self.overlay.composite(&mut encoder, &color_view);
         }
 
         // === STEP 4: RENDER EGUI OVERLAY (replaces the old text-overlay pass) ===

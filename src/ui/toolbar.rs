@@ -566,8 +566,49 @@ pub(super) fn point_count_label(capacity: u32) -> String {
 
 /// Renderer mode, point count, edit/view mode and the transport — the
 /// settings that get changed most often mid-exploration.
+/// How the viewport is divided (`multiview`): one of three, so a segmented
+/// radio, and icons because the three pictures say it better than words in a
+/// strip with no room for them.
+fn view_layout(ui: &mut egui::Ui, app: &mut App) {
+    use crate::multiview::Layout;
+    let grid = app.grid_view();
+    let later = if grid { " Takes effect when you leave the mutation grid." } else { "" };
+    let current = app.view_layout();
+    let chosen = super::radio::radio(&mut app.ui_state, "view_layout", current)
+        .option(
+            Layout::Single,
+            icons::SQUARE,
+            format!("One view (T){later}"),
+            "click: one view",
+        )
+        .option(
+            Layout::Quad,
+            icons::SQUARES_FOUR,
+            format!(
+                "Four views: top, front and right beside the perspective view (T). \
+                 Drag in an axis view to pan, and click a ball on its axis cross to \
+                 look down another axis.{later}"
+            ),
+            "click: four views",
+        )
+        .option(
+            Layout::OneAndThree,
+            icons::LAYOUT,
+            format!(
+                "The perspective view large, with top, front and right down the side \
+                 (T).{later}"
+            ),
+            "click: one big view and three small",
+        )
+        .show(ui);
+    if let Some(layout) = chosen {
+        app.set_view_layout(layout);
+    }
+}
+
 fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     render_panel::render_mode(ui, app);
+    view_layout(ui, app);
 
     // A readout, not a slider: the toolbar has no room for a log slider wide
     // enough to be draggable, and a cramped one would be worse than none. The

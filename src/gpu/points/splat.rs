@@ -146,6 +146,9 @@ pub struct SplatRenderer {
     /// and the device able to. At zero, nothing about the volume exists in the
     /// frame and the output is plain splat, byte for byte.
     volume_active: bool,
+    /// The pane `render` draws into, when the window is split (`multiview`);
+    /// `None` is the whole target, and every pass exactly as it always was.
+    viewport: Option<crate::gpu::Viewport>,
     /// The exact reference's pipelines, built the first time they are asked for.
     dump_pipelines: Option<DumpPipelines>,
     /// What the tonemap reads as `volume_n`: the supersample factor, or 0 when
@@ -746,6 +749,7 @@ impl SplatRenderer {
             volume_params_buffer,
             volume_pipelines,
             volume_active: false,
+            viewport: None,
             volume_n: 0.0,
             dump_pipelines: None,
             moments: None,
@@ -847,6 +851,14 @@ impl SplatRenderer {
 
     /// The factor in force, 1 when off. Callers need it to size the
     /// accumulation and to scale anything measured in target pixels.
+    /// Draw the next `render` into one pane of the target rather than all of
+    /// it: every pass gets the viewport and scissor, and the tonemap keeps
+    /// what is already outside the pane instead of overwriting the window.
+    /// Live only, so never with supersampling.
+    pub fn set_viewport(&mut self, viewport: Option<crate::gpu::Viewport>) {
+        self.viewport = viewport;
+    }
+
     pub fn supersample(&self) -> u32 {
         self.supersample.as_ref().map_or(1, |s| s.factor)
     }
@@ -980,6 +992,7 @@ impl SplatRenderer {
         use_point_primitives: bool,
     ) {
         let n = self.supersample();
+        debug_assert!(n == 1 || self.viewport.is_none(), "a pane is a live view, and the live view is never supersampled");
         self.ensure_accum(device, width * n, height * n);
         if n > 1 {
             Self::ensure_resolved(
@@ -1036,9 +1049,9 @@ impl SplatRenderer {
                     wgpu::BindGroupEntry { binding: 2, resource: m.slices.as_entire_binding() },
                 ],
             });
-            Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
+            Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group, self.viewport);
         } else {
-            Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group);
+            Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, tonemap_bind_group, self.viewport);
         }
     }
 
@@ -1122,6 +1135,9 @@ impl SplatRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(v) = self.viewport {
+            v.apply(&mut pass);
+        }
         if !points.is_empty() {
             pass.set_bind_group(0, &self.accum_bind_group, &[]);
             let vp = if volume { self.volume_pipelines.as_ref() } else { None };
@@ -1168,7 +1184,7 @@ impl SplatRenderer {
                 wgpu::BindGroupEntry { binding: 2, resource: slices.as_entire_binding() },
             ],
         });
-        Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group);
+        Self::encode_tonemap(&vp.tonemap, encoder, target, depth, &bind_group, None);
     }
 
     /// Size of the moment targets (the accumulation's), once they exist.
@@ -1462,6 +1478,9 @@ impl SplatRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(v) = self.viewport {
+            v.apply(&mut pass);
+        }
         pass.set_bind_group(0, &self.accum_bind_group, &[]);
         pass.set_bind_group(1, &m.bind_group, &[]);
         let pipeline = match (spans, use_point_primitives) {
@@ -1500,6 +1519,9 @@ impl SplatRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(v) = self.viewport {
+            v.apply(&mut pass);
+        }
         pass.set_bind_group(0, &self.accum_bind_group, &[]);
         pass.set_bind_group(1, &m.bind_group, &[]);
         pass.set_pipeline(if range { &vp.range_pipe } else { &vp.prefix_pipe });
@@ -1598,7 +1620,7 @@ impl SplatRenderer {
         depth: &wgpu::TextureView,
         bind_group: &BindGroup,
     ) {
-        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, bind_group);
+        Self::encode_tonemap(&self.tonemap_pipeline, encoder, target, depth, bind_group, None);
     }
 
     fn encode_tonemap(
@@ -1607,6 +1629,7 @@ impl SplatRenderer {
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         bind_group: &BindGroup,
+        viewport: Option<crate::gpu::Viewport>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("splat_tonemap_pass"),
@@ -1614,8 +1637,9 @@ impl SplatRenderer {
                 view: target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // Fullscreen overwrite; the clear value is irrelevant
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    // Fullscreen overwrite; the clear value is irrelevant.
+                    // In a pane, the rest of the window is other panes.
+                    load: if viewport.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::BLACK) },
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -1632,6 +1656,9 @@ impl SplatRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(v) = viewport {
+            v.apply(&mut pass);
+        }
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..3, 0..1);

@@ -98,6 +98,8 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("Up / Down", "zoom in / out (or step through transforms, if one is selected)", Some(HelpAction::Zoom)),
             ("Home", "centre the camera on the selected transform", Some(HelpAction::FrameSelected)),
             ("axis cross", "click a ball (bottom right) to look down that axis", None),
+            ("T / Shift+T", "one view, four views, or one big and three small", Some(HelpAction::ViewLayout)),
+            ("drag in an axis view", "pan (an axis view looks one way only)", None),
             ("O / Z / Space", "start / stop the camera flying its path", Some(HelpAction::CameraMotion)),
             ("I", "invert mouse pitch", Some(HelpAction::InvertPitch)),
             ("V", "save the current view", Some(HelpAction::SaveView)),

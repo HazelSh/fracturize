@@ -178,6 +178,18 @@ multiview pane grid.
 
 ### 2. Multiview, and the pane grid it's built on
 
+> **Status, 2026-10-31 (Opus 5.5): built, branch `multiview`.** Three layouts
+> (one view, four views, one big and three small: `T`, or the toolbar's
+> radio), a perspective pane and three axis panes on the one point buffer,
+> each with its own axis cross; gizmos pick and drag in any pane. Two of the
+> decisions below went this way: the axis panes are **pickable** (click a ball
+> on a pane's cross; defaults top / front / right, front being +z where the
+> default camera stands, not −z), and the layout is a **preference**. Point 1
+> went another way: the axis panes are a 1° long lens, not an orthographic
+> projection, because every shader reads `clip.w` as eye distance (AGENTS.md
+> "Multiview"). Not done: the mutation grid in these panes (it stays its own
+> layout), per-pane renderer, a pane per scene.
+
 Two jobs for one piece of machinery:
 - **better 3D perspectives while tweaking**: perspective + +x / +y / −z, as a
   2×2 or one big view with three stacked on the right;

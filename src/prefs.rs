@@ -189,6 +189,18 @@ pub struct Prefs {
     /// (`[agent]`, AGENT-COLLAB-PLAN.md §4.6).
     #[serde(default)]
     pub agent: crate::agent::AgentPrefs,
+    /// How the viewport is divided: one view, or the perspective view beside
+    /// axis views (`multiview`). How the person looks, not scene data.
+    #[serde(default)]
+    pub view_layout: crate::multiview::Layout,
+    /// Which axis each of the three axis panes looks down, as each pane's
+    /// axis cross last set it.
+    #[serde(default = "default_view_axes")]
+    pub view_axes: [crate::multiview::Axis; 3],
+}
+
+fn default_view_axes() -> [crate::multiview::Axis; 3] {
+    crate::multiview::DEFAULT_AXES
 }
 
 impl Default for Prefs {
@@ -214,6 +226,8 @@ impl Default for Prefs {
             browser_sort: Default::default(),
             window_geometry: BTreeMap::new(),
             agent: Default::default(),
+            view_layout: Default::default(),
+            view_axes: default_view_axes(),
         }
     }
 }

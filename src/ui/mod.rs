@@ -35,6 +35,7 @@ pub mod gizmo_ring;
 pub mod labels;
 pub mod mutate;
 pub mod num;
+pub mod panes;
 pub mod param_picker;
 pub mod radio;
 pub mod random_flames;
@@ -603,6 +604,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut crate::app::App) {
     // Under the labels: a name should never be obscured by the ring
     // encircling it.
     if !app.grid_view() {
+        panes::draw(&ctx, app);
         gizmo_ring::draw(&ctx, app);
         labels::draw(&ctx, app);
         xaos::draw_overlay(&ctx, app);

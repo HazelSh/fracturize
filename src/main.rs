@@ -39,6 +39,7 @@ mod track;
 mod glyphs;
 mod dice;
 mod mutation_grid;
+mod multiview;
 mod random_list;
 mod record;
 mod renorm;
@@ -2825,6 +2826,9 @@ impl ApplicationHandler for AppWrapper {
                             }
                             "b" | "B" => {
                                 app.toggle_browser();
+                            }
+                            "t" | "T" => {
+                                app.cycle_view_layout(app.shift_held);
                             }
                             "p" | "P" => {
                                 ui::render_job::open(app);
