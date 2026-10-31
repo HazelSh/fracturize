@@ -99,6 +99,27 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                         );
                     }
 
+                    // Mute/solo hides points without changing the fractal, so
+                    // a picture with parts missing has to say why, here, with
+                    // the way back on the same click.
+                    let n = app.scene.transforms.len();
+                    if let Some(hidden) = app.map_view.hidden(n) {
+                        let shown = hidden.iter().filter(|&&h| !h).count();
+                        ui.add_space(10.0);
+                        let label = format!("{} {shown} of {n} maps drawn", super::icons::X);
+                        let resp = ui.add(egui::Button::new(label).small());
+                        let resp = super::hints::hinted(
+                            resp,
+                            &mut app.ui_state,
+                            "Mute or solo is hiding some maps' points. The fractal \
+                             itself is unchanged.\n\nClick to draw every map again.",
+                            "click: clear every mute and solo",
+                        );
+                        if resp.clicked() {
+                            app.map_view.clear();
+                        }
+                    }
+
                     // Under infinite zoom the picture is the same at every
                     // depth, so the level counter is the only thing that says
                     // how far in you are — and if the scene asked for zoom and

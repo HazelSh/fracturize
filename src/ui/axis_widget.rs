@@ -57,12 +57,39 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     let frame = app.zoom_frame();
     let carried = frame != crate::rot::Orientation::IDENTITY;
 
+    // Out of the way of the windows. The Timeline is wide and low and often
+    // dragged right across the bottom of the screen, and the Transforms
+    // window often sits down the right edge; a cross drawn over either hides
+    // what is under it and takes its clicks. So the cross climbs above any
+    // window it would land on (last frame's rectangles), or, when there's no
+    // room above, steps to its left.
+    let size = egui::Vec2::splat(RADIUS * 2.0 + HIT);
+    let screen = ctx.content_rect();
+    let home = egui::Rect::from_min_size(screen.right_bottom() + MARGIN - size, size);
+    let windows: Vec<egui::Rect> = ctx.memory(|m| {
+        m.areas().visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Middle)
+            .filter_map(|l| m.area_rect(l.id))
+            .collect()
+    });
+    let mut at = home;
+    for _ in 0..8 {
+        let Some(w) = windows.iter().find(|w| at.expand(4.0).intersects(**w)) else { break };
+        let above = at.translate(egui::vec2(0.0, w.top() - 8.0 - at.bottom()));
+        at = if above.top() > screen.top() + 40.0 {
+            above
+        } else {
+            at.translate(egui::vec2(w.left() - 8.0 - at.right(), 0.0))
+        };
+    }
+    let offset = MARGIN + (at.min - home.min);
+
     egui::Area::new(egui::Id::new("fracturize_axis_widget"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, MARGIN)
+        .anchor(egui::Align2::RIGHT_BOTTOM, offset)
         .order(egui::Order::Foreground)
         .interactable(true)
         .show(ctx, |ui| {
-            let size = egui::Vec2::splat(RADIUS * 2.0 + HIT);
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             let centre = rect.center();
             let painter = ui.painter();

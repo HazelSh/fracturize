@@ -189,7 +189,7 @@ pub fn catalogue(scene: &Scene) -> Vec<Param> {
     let shown: Vec<String> = names
         .iter()
         .enumerate()
-        .map(|(i, n)| n.clone().unwrap_or_else(|| format!("map {i}")))
+        .map(|(i, n)| n.clone().unwrap_or_else(|| format!("T{i}")))
         .collect();
     for (pos, r) in refs.iter().enumerate().take(MAX_MAPS) {
         map_params(&mut offer, &["Transforms", &shown[pos]], &format!("transform.{r}"), &refs, &shown, &maps[pos]);
@@ -216,7 +216,7 @@ pub fn catalogue(scene: &Scene) -> Vec<Param> {
             let shown: Vec<String> = names
                 .iter()
                 .enumerate()
-                .map(|(i, n)| n.clone().unwrap_or_else(|| format!("map {i}")))
+                .map(|(i, n)| n.clone().unwrap_or_else(|| format!("T{i}")))
                 .collect();
             for (pos, r) in refs.iter().enumerate().take(MAX_MAPS) {
                 map_params(

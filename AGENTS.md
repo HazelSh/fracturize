@@ -27,17 +27,25 @@ for (Rook, Pip, Jay, Theo, Remy, Atlas, Mote) and the ones it isn't (Abe, Silk,
 Socket), with their goals, failure modes and gaps. Plans say who they serve and
 who they cost by those names.
 
+**Changing the GUI? Read `UI-GUIDELINES.md`.** The principles (live edits,
+grit, zero animation, 120 FPS), the widget library and which module owns each
+widget, type, what every colour means (blue means *chosen*, nothing else),
+when to use a tooltip, a status hint, an inline note or a notice, and a
+checklist to run before handing a build over.
+
 ### The other docs
 
 | File | What it is |
 |------|------------|
 | `USERS.md` | Personas and anti-personas: who to plan for |
+| `UI-GUIDELINES.md` | How the GUI is built: principles, widgets, type, colour, help text |
 | `CRAFT.md` | Authoring scenes as art; the discovery log |
 | `ADDING-A-SCENE-FEATURE.md` | Checklist for every place a scene feature reaches |
 | `UI-REVIEW-PLAN.md` | The GUI read as a stranger would; a worklist |
 | `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
 | `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
 | `TIMELINE-PLAN.md` | Open questions on the timeline: auto-key, and moving the camera path into `[[track]]` form |
+| `ANIMATION-PLAN.md` | The timeline as a DAW's automation section: what DAW, Blender and VFX users expect, the loop seam, morphs, the agent side |
 | `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
 | `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
 | `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
@@ -138,6 +146,7 @@ src/
       splat.rs     # Splat mode: additive log-density accumulation + tonemap;
                    # also volume mode's passes (spans, slices, weighted emission)
       volume.rs    # Volume mode's uniform, reference length, slice constants
+      mask.rs      # Mute/solo: the per-point map record, the mask, the mixer rules
       moments.rs   # The retired moment reconstruction, kept for the reference
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
@@ -402,8 +411,9 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | drag a whole subscene's gizmo | move / turn / resize the entire subscene (select its row in the Subscenes window first); its tips resize uniformly, and alt+scroll over it sets its share of the points |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
-| drag a row's weight bar | change that transform's chaos weight |
+| drag along the Weight share bar (under the Transforms list) | set the selected transform's share of the weight, the rest held |
 | alt+click a row's eye | solo it; alt+click again brings everything back |
+| click a row's M / S | mute / solo the points that map placed — a view, not an edit (alt+click S: this map alone, again to clear) |
 | click an xaos edge (overlay on) | open its popover: multiplier, probability, cut/restore, only exit |
 | alt+scroll over an xaos edge | scale its multiplier — the weight lever, one level down |
 | right-click an xaos edge | its menu: cut, restore, only exit, linked map |
@@ -567,6 +577,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | Enter | enable/disable selected transform |
 | G / Tab | toggle transform gizmos and their name labels |
 | O, Z, or Space | play / stop the timeline: the camera flying its path, and every track (three keys, one action) |
+| Left / Right | the playhead a frame back / on, at the Render job's fps (Shift: to the key before / after, on any row) |
 | Y / Shift+Y | add the current framing as a camera key after the last one (the playhead goes to it) / remove the last one |
 | Ctrl+Y | redo (the Windows binding, so an Apophysis refugee's reflex lands somewhere safe) |
 | V | save current view to views/<scene>-<timestamp>.toml |
@@ -683,7 +694,7 @@ the drawable area, so aspect and picking math are unaffected by which panels
 are open. The toolbar runs
 
 ```
-File  Explore | Transforms  Subscenes | Camera  Render | Undo Redo | quick controls … scene name | Help
+File  Explore | Transforms  Subscenes | Camera  Render | Undo Redo | quick controls | transport … scene name | Help
 ```
 
 ordered by task rather than by module: where does a scene come from, what am I
@@ -711,7 +722,7 @@ where "start a new document" lives in every program.
 
 | Window | What lives there |
 |--------|------------------|
-| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, eye toggle, draggable weight bar, filter box past a dozen) plus a detail pane grouped Shape / Post-affine / Symmetry / Behaviour / Appearance, under a header whose name is click-to-edit |
+| Transforms | Add/duplicate/delete over a vertical tab rail (colour swatch, name, mute, solo, eye toggle, filter box past a dozen) with a Weight share bar under it, plus a detail pane grouped Weight / Appearance / Shape / Variations / Symmetry / Post-affine / Xaos, under a header whose name is click-to-edit |
 | History | Every edit, newest first, redo rows above the current marker; click a row to jump N steps in one rebuild |
 | Mutate | The dice profile picker, mutation strength (the profile's), 3×3 / 5×5, New, Mutate, Undo, Settings… — then the mutation grid: the scene in the middle, its mutations around it, click one to make it the scene. See "The mutation grid" |
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
@@ -723,7 +734,7 @@ where "start a new document" lives in every program.
 | Subscenes | The layers of a composite: eye (alt+click solos), share of the points, map count; Import a scene file, Remove; the selected subscene's placement, colour source and provenance. See "Subscenes" |
 | Collaborate | This scene's thread with an agent: requests, proposals as option cards (Preview, Apply, Send back, Reject, Keep), responses; a composer (Send request, Propose my edit). The toolbar button counts what's waiting on you. See "Threads" |
 | Xaos | The current layer's transition matrix as a heatmap (a cut is an ×, not a shade): click, drag, alt+scroll, shift+drag paint; header menus; a walk-share strip; presets. See "Xaos" |
-| Timeline | Wide and low, above the status bar: play/pause, the playhead against the timeline's length, loop; a ruler to scrub, the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it); eye to mute, right-click to delete. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
+| Timeline | Wide and low, above the status bar: its own clock-only Play, Snap, Whole; a ruler pinned above the rows (click to scrub, the loop strip along its top), the camera's row (link: attach/detach), a row per track named for people, with its keys and a faint value curve (drag a key to retime it, snapping); eye to mute; right-click a lane or a key for its menu. Ctrl+scroll zooms, Shift+scroll and middle-drag move along. A column on the right edits the selection — a track's interpolation, extrapolation, keys and numbers; the camera's attachment, duration, loop and keypoints — and "Animate a parameter…" browses the scene's parameters. See "Tracks and the timeline" |
 
 All of them persist their open state to prefs, and all behave alike.
 
@@ -870,14 +881,22 @@ Conventions worth keeping:
   action row's Rename button stays, because click-to-edit is invisible until
   you hover the right four words and the button is what says the gesture is
   there.
-- **A control stacked on top of another says where it is.** The weight bar
-  along a tab's bottom edge is registered after the tab and so takes the
-  pointer inside its own strip — which means every pixel it covers is a place
-  where clicking does not do what the tab under it advertises. So the strip is
-  small (`BAR_GRAB`, centred on the drawn bar) and it *shows* itself on hover,
-  growing into a full-width track with the value filled in. It was 40% of the
-  tab, silently, with only the cursor to say so — and the cursor changes at the
-  top of the screen, nowhere near the thing it is talking about.
+- **The rail is for choosing, and nothing else lives on a tab.** A tab is
+  swatch, name, eye, mute and solo, and the last three are buttons that look
+  like buttons. Each tab used to carry a draggable weight bar along its
+  bottom edge, registered after the tab, so a strip of every tab was a place
+  where a click adjusted a weight instead of selecting — however small the
+  strip was made and however it showed itself on hover, it was a hazard in a
+  list whose job is to be clicked and scrolled. It came out. The weight lives
+  in the inspector's first block, and how it is spread is the **Weight share**
+  bar under the list (`draw_weight_share`): one fixed-size bar of the layer's
+  enabled maps, the selected one first in its colour, the rest dimmed; drag
+  along it to set the selected map's share with the others' weight held, so
+  the scale doesn't move under the pointer. Under xaos a tick marks its walk
+  share.
+- **The inspector's blocks are in the order you wander into them**, roughly
+  Apophysis's: Weight, Appearance, Shape, Variations, Symmetry, Post-affine,
+  Xaos. Not the order a map runs in (Shape, Variations, Post-affine, group).
 - **Gizmo indicators** (`src/indicators.rs`) draw the selected transform's
   relationship to the grey identity cell: an offset vector from the world
   origin with an arrowhead and a length label, and the rotation as an axis
@@ -938,6 +957,47 @@ Conventions worth keeping:
   control in this UI was at one point saying nothing at all.
 - When testing anything that touches prefs, set an isolated `XDG_CONFIG_HOME`
   rather than writing the developer's real `~/.config/fracturize/prefs.toml`.
+
+### Mute and solo: a view of which map placed what
+
+FEATURE-PLANS item 14 (`src/gpu/points/mask.rs`). Each tab on the Transforms
+rail has **M** and **S** beside its eye, with mixing-desk rules: if anything is
+soloed only the soloed maps' points are drawn, otherwise all but the muted
+ones. **It is not the eye.** The eye takes a map out of the IFS and the
+attractor changes; mute and solo leave the walk exactly as it is and stop
+drawing the points a map placed last — `--isolate`'s partition, for any set of
+maps, live. So it is session state like orbiting: not in the file, not in the
+history, and cleared when maps are added or removed (it is held by position).
+The status bar says "k of n maps drawn" while it is on, and clicking that
+clears it.
+
+- **A change shows on the next frame.** `--isolate` drops points as they are
+  written, which would take the ring's thirteen seconds. Instead the chaos
+  pass records each point's GPU slot (one up, so 0 is "not yet") in
+  `point_maps`, binding 10, and the vertex stages clip against the mask
+  (`hidden()` in render.wgsl and splat.wgsl, which replaced
+  `isolate_dropped` at the four call sites). Word 0 of the mask is "on", then
+  a bit per GPU slot.
+- **The record costs four bytes a point** and is allocated the first time
+  anything is muted or soloed, then kept, as emphasis keeps its sensitivity.
+  The chaos pass writes it only when `arrayLength(&point_maps)` reaches the
+  ring's capacity, which is the whole on-switch: no parameter word was free.
+  While the first lap fills it the ring churns at the fill rate, and
+  unrecorded points count as hidden, so a first solo densifies in.
+- **Every other renderer binds 16-byte stand-ins** with the mask off, so
+  offline renders, thumbnails and render jobs never see it (checked
+  byte-identical against `main` in both renderers). The live renderers rebind
+  when `PointCompute::mask_binding`'s generation changes.
+- **Exposure stays normalised by every point**, so a soloed part is at the
+  brightness it has in the whole picture, as with `--isolate`.
+- **The emphasis glow stands down while it is on**: the glow measures every
+  point, hidden ones included, and would light material that isn't drawn.
+- **Under infinite zoom the zoom map's part looks like the whole picture.** Its
+  points, renormalised by the zoom map's inverse, are the same set an octave
+  over, so muting it thins the density and leaves the shape alone. Not a bug.
+- Not yet: edge mode (`from>to`, which `--isolate` has), a view-file key or
+  CLI flag for rendering a part (one map is `--isolate`), and carrying it
+  across adding or deleting a map.
 
 ### Deferred on purpose
 
@@ -1175,8 +1235,36 @@ draw is made in the order it always was and only then are off parts replaced,
 so every recorded `--random --seed N` still rolls the same flame (checked
 against a build from before the dice: byte-identical `--info`). The one
 exception is the transform count: off, it is the base's, and nothing is drawn
-for it. A roll that keeps the whole form keeps the base's camera, point size
-and look too — it's the same flame, recoloured.
+for it. A roll that keeps the whole form keeps the base's framing too — it's
+the same flame, recoloured.
+
+**The dice change values; they don't throw away what they didn't draw.**
+What no part covers stays the base's on every roll: its name and author (the
+dice are not an author), haze, exposure, contrast, decay, point count, lens,
+and which way the camera looks; a new form only moves where the camera looks
+and from how far, and the point size scales with that distance. The one
+exception is a base that is the blank scene untouched (`roll::is_blank`),
+which has nothing of its own: a roll from it takes the roll's defaults and is
+named `random-<seed>`, so recorded seeds roll what they did (their author is
+now empty, not "fracturize random flame"). A
+roll draws only the scene's own maps, so a composite's **subscenes** come
+through every roll whole, with the composite's framing. `[zoom]` stays
+wherever its map still qualifies on what was drawn (`Renorm::build`, and
+`xaos::zoom_conflict`). And **animation is carried, as offsets**
+(`track::rebase`): an animated value the dice change takes its keys with it
+— a number's keys move by the change, a pose's turn by the rotation that
+changed it, each keeping its route to the next key, and a stepped key that
+held the old value holds the new one — so a mutation of a keyed value shows
+instead of being overridden at every moment. A mutation rebases after each
+operator; one that adds or removes a map has already moved the paths
+(`follow_maps`). A roll carries tracks **by position**
+(`track::carry_onto_roll`) — the base's third map's animation onto the
+roll's third map, under whatever name it has now — and drops only those on a
+map the roll doesn't have, as deleting a map does. The camera's flight moves
+with the framing (focus shifted, distance scaled), and a zoom loop that has
+lost its zoom loops back to its first key. With every part on and the blank
+scene as base (`--random`) there is nothing to carry, so recorded seeds roll
+what they always did.
 
 **Profiles are files and have names.** Built in, compiled from
 `src/dice/profiles/` so they exist wherever the app is started from:
@@ -2226,7 +2314,7 @@ Four facts drive every view of it, and are worth teaching anyone who uses it:
    cut can make a class absorbing and drain everything else (cut `spine`'s two
    other exits in `parasol` and the whole picture collapses onto the spine).
    So walk share sits beside weight share in `--info`, the inspector, the
-   rail's weight bars (a tick) and the matrix window.
+   Weight share bar under the rail (a tick) and the matrix window.
 3. **Dimension changes formula** to Mauldin–Williams — the `d` where the
    spectral radius of `[i→j allowed]·Σ(sⱼe)ᵈ` is 1 — over the maps the walk
    actually visits. `--info` prints it beside the dimension without the cuts.
@@ -2935,12 +3023,20 @@ Things it rests on, each found the hard way:
   around the frame's drawing (`App::render`). Keyed off the history position,
   so a paused timeline costs nothing.
 - **A track that doesn't resolve is reported, never refused**, like an xaos
-  dead end: delete the map a track moves and it points at nothing, and a scene
-  the app saved must open again. `Animator` skips it and says why — `--info`
-  notes, stderr from a render, the Timeline. Renaming a map renames it in its
-  tracks (`track::rename_map`). Refused at load are only malformed tracks:
+  dead end: a hand-edited file can aim one at nothing, and a scene the app
+  saved must open again. `Animator` skips it and says why — `--info` notes,
+  stderr from a render, the Timeline. Refused at load are only malformed tracks:
   camera targets (the path is the camera's track), two tracks on one target,
   interpolated strings, mixed sources.
+- **Tracks stay on their maps when maps come and go.** An unnamed map is
+  reached by position (`transform.3…`, `subscene.smoke.transform.1…`), so
+  `Scene::insert_transform` / `remove_transform` rewrite every position-named
+  path (`track::follow_maps`), xaos targets included, and removing a subscene
+  does the same one level up (`follow_subscenes`). A deleted map's tracks go
+  with it, as do other maps' xaos tracks toward it; one Ctrl+Z brings both
+  back. Renaming a map renames it in its tracks, in any layer
+  (`track::rename_map`). Without this, deleting map 1 handed map 2's
+  animation to what had been map 3, silently.
 - **One Euler angle is only meaningful in its triple.** A track on
   `transform.x.rotation.y` sets one angle of the triple the scene *writes*,
   and a saved scene respells a rotation with |y| > 90° on the other branch;
@@ -2976,8 +3072,43 @@ Things it rests on, each found the hard way:
 - `.avif`/`.mp4` render the timeline; the summary line says the class and
   whether it loops.
 
-**In the app**: the Timeline window (toolbar, film strip).
+**In the app**: the transport in the toolbar, and the Timeline window
+(toolbar, film strip).
 
+- **The transport lives in the toolbar** (`ui::transport`), so it is there
+  with the Timeline closed: record, return to start, play/pause, the time and
+  loop. The time reads in seconds and in frames at the Render job's fps (so a
+  frame is a frame of the file it would write), and takes a typed moment
+  while paused — `12.5`, `300f`, `1:02.5`. Left/Right step a frame,
+  Shift+Left/Right jump between keys.
+- **Record keys what an edit changes** (`App::autokey`, from `commit_edit`).
+  Armed, an edit's changes come out of `scene_diff` as `-S` paths and each is
+  keyed at the playhead, its track made if there isn't one, in the edit's own
+  undo step. A vector keys all three of its parts whichever moved (a map
+  picked up and moved is pinned on every axis) and any rotation keys the whole
+  pose; a value a rate or cycle moves is left to it. **While armed and paused,
+  the authored scene is synced to the frame at the playhead** for keyed tracks
+  (`sync_record_base`), so the inspector and the gizmos edit what's on screen
+  and the key is the value you set rather than a jump from the authored one.
+  That sync isn't an edit and never changes the picture (keys override the
+  authored value), but Ctrl+S writes it. Disarmed, nothing has changed: an
+  inspector edit edits the authored value.
+- **The ruler is pinned; the lanes zoom.** Ctrl+scroll over the lanes zooms
+  about the pointer, Shift+scroll or a middle-drag moves along, Whole goes
+  back; zoomed in, playback that runs off the end turns the page (a jump).
+- **The loop region** (`App::loop_region`, session state like
+  `loop_playback`) is drawn in the strip along the ruler's top: drag to make
+  one, its ends or middle to move it, or right-click the ruler. With loop on,
+  playback goes round inside it, the default orbit carried across the seam as
+  at the timeline's end, and play from outside it starts at its beginning.
+- **Snapping** is the magnet (on by default; Ctrl flips it for one drag):
+  keys, loop ends and the playhead land on any row's keys (the camera's
+  included), the playhead, the loop's ends, the timeline's ends and the
+  ruler's finer ticks within `SNAP_PX` points.
+- **Right-click** a lane to key there or paste; a key to copy, paste over,
+  duplicate at the playhead or delete; the camera's row to key the framing
+  there or work on a view. A copied value pastes only onto a track keyed
+  with the same kind of value.
 - **The transport is a clock, and the camera is attached to it or not.** The
   camera row's link attaches it (it flies its path on the clock, playing and
   scrubbing) or detaches it (it stays where you put it while the tracks play).
@@ -3011,15 +3142,18 @@ and the two fed back into the drag); "Key at playhead" adds a key holding the
 curve's value there; a new track on any `-S` path starts with one key at the
 playhead holding the scene's value, so it changes nothing until keyed again.
 All of those, and mute and delete, are undoable edits; scrubbing is view
-state, like orbiting. **No auto-key**: editing a tracked value in the
+state, like orbiting. Without record, editing a tracked value in the
 inspector edits the scene's own value, which a rate or cycle moves about and
-keys override — key values are edited in the Timeline. A Render job still renders the
+keys override. A Render job still renders the
 frame at the playhead; an animation's length defaults to the timeline's, and
 its estimate charges a refill per frame when the attractor moves.
 
 **Not yet, on purpose** (the model first, FEATURE-PLANS order 9 → 8 → 10):
-keying from the inspector (and with it the auto-key question, which is
-Hazel's; see `TIMELINE-PLAN.md`), zooming the ruler, the curve editor proper,
+vector tracks (a position keyed as one `[x, y, z]`; record keys three
+number tracks instead), the curve editor proper (dragging a key's value as
+well as its time), box selection and moving many keys at once, per-key
+interpolation, markers and a tempo grid (`ANIMATION-PLAN.md`), the loop
+region as scene data,
 spin/turn rate tracks and post-rotation poses (TIMELINE-PLAN §3 C), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 

@@ -1151,23 +1151,122 @@ pub fn resolve_all(defs: &[TrackDef]) -> Result<Vec<Track>, String> {
     Ok(tracks)
 }
 
-/// Point every track that names map `old` at `new` instead — what renaming a
-/// map has to do, or its tracks are left pointing at a name that is gone.
-/// Covers the map's own fields (`transform.old.weight`) and other maps' xaos
-/// toward it (`transform.x.xaos.old`).
-pub fn rename_map(tracks: &mut [Track], old: &str, new: &str) {
+/// Which list of maps a track path reaches into: the scene's own
+/// (`transform.<map>…`) or a subscene's (`subscene.<sub>.transform.<map>…`,
+/// the subscene by its name or its index among the subscenes).
+#[derive(Clone, Copy, Debug)]
+pub enum MapLayer<'a> {
+    Own,
+    Subscene { name: &'a str, index: usize },
+}
+
+impl MapLayer<'_> {
+    /// Where in `segs` this layer's map selectors sit: the map's own, and an
+    /// xaos target's (`….xaos.<map>`, `….xaos_p.<map>`) when there is one.
+    /// Empty when the path is not about this layer's maps.
+    fn map_slots(&self, segs: &[String]) -> Vec<usize> {
+        let at = match self {
+            Self::Own => 1,
+            Self::Subscene { name, index } => {
+                let Some(sub) = segs.get(1) else { return Vec::new() };
+                // A number is a position, as `-S` reads it.
+                let ours = match sub.parse::<usize>() {
+                    Ok(i) => i == *index,
+                    Err(_) => sub == name,
+                };
+                if segs[0] != "subscene" || !ours || segs.get(2).map(String::as_str) != Some("transform") {
+                    return Vec::new();
+                }
+                3
+            }
+        };
+        if matches!(self, Self::Own) && segs.first().map(String::as_str) != Some("transform") {
+            return Vec::new();
+        }
+        if segs.len() <= at {
+            return Vec::new();
+        }
+        let mut slots = vec![at];
+        if matches!(segs.get(at + 1).map(String::as_str), Some("xaos" | "xaos_p")) && segs.len() > at + 2 {
+            slots.push(at + 2);
+        }
+        slots
+    }
+}
+
+/// A list of things that tracks name by position (a layer's maps, the
+/// subscenes) changed: what a position-named path has to do to keep pointing
+/// at the same thing.
+#[derive(Clone, Copy, Debug)]
+pub enum ListChange<'a> {
+    /// Something went in at this position; it and everything after it move
+    /// up one.
+    Inserted(usize),
+    /// The thing at this position went, called `name` if it had one.
+    Removed(usize, Option<&'a str>),
+}
+
+/// Rewrite the selectors at `slots` for `change`; false when the path was
+/// about the thing removed, and so goes with it.
+fn follow(segs: &mut [String], slots: &[usize], change: ListChange) -> bool {
+    let mut keep = true;
+    for &i in slots {
+        match (change, segs[i].parse::<usize>()) {
+            (ListChange::Inserted(p), Ok(n)) if n >= p => segs[i] = (n + 1).to_string(),
+            (ListChange::Removed(p, _), Ok(n)) if n == p => keep = false,
+            (ListChange::Removed(p, _), Ok(n)) if n > p => segs[i] = (n - 1).to_string(),
+            (ListChange::Removed(_, Some(name)), Err(_)) if segs[i] == name => keep = false,
+            _ => {}
+        }
+    }
+    keep
+}
+
+/// Keep every track on the map it animates when maps go in or out of a
+/// layer (`Scene::insert_transform` / `remove_transform`). A map without a
+/// name is reached by its position, so without this, deleting map 1 would
+/// quietly hand map 2's animation to what was map 3. A deleted map's tracks
+/// go with it, as do other maps' xaos tracks toward it — its xaos column
+/// goes too. Returns how many tracks went.
+pub fn follow_maps(tracks: &mut Vec<Track>, layer: MapLayer, change: ListChange) -> usize {
+    let before = tracks.len();
+    tracks.retain_mut(|t| {
+        let mut segs: Vec<String> = t.target.split('.').map(str::to_string).collect();
+        let slots = layer.map_slots(&segs);
+        let keep = follow(&mut segs, &slots, change);
+        t.target = segs.join(".");
+        keep
+    });
+    before - tracks.len()
+}
+
+/// The same for the subscenes themselves (`subscene.<sub>…`): a removed
+/// subscene's tracks go with it, and later ones named by index move down.
+pub fn follow_subscenes(tracks: &mut Vec<Track>, change: ListChange) -> usize {
+    let before = tracks.len();
+    tracks.retain_mut(|t| {
+        let mut segs: Vec<String> = t.target.split('.').map(str::to_string).collect();
+        if segs.first().map(String::as_str) != Some("subscene") || segs.len() < 2 {
+            return true;
+        }
+        let keep = follow(&mut segs, &[1], change);
+        t.target = segs.join(".");
+        keep
+    });
+    before - tracks.len()
+}
+
+/// Point every track that names map `old` of `layer` at `new` instead — what
+/// renaming a map has to do, or its tracks are left pointing at a name that
+/// is gone. Covers the map's own fields (`transform.old.weight`) and other
+/// maps' xaos toward it (`transform.x.xaos.old`).
+pub fn rename_map(tracks: &mut [Track], layer: MapLayer, old: &str, new: &str) {
     for t in tracks {
         let mut segs: Vec<String> = t.target.split('.').map(str::to_string).collect();
-        if segs.first().map(String::as_str) != Some("transform") {
-            continue;
-        }
-        if segs.get(1).map(String::as_str) == Some(old) {
-            segs[1] = new.to_string();
-        }
-        if matches!(segs.get(2).map(String::as_str), Some("xaos" | "xaos_p"))
-            && segs.get(3).map(String::as_str) == Some(old)
-        {
-            segs[3] = new.to_string();
+        for i in layer.map_slots(&segs) {
+            if segs[i] == old {
+                segs[i] = new.to_string();
+            }
         }
         t.target = segs.join(".");
     }
@@ -1186,6 +1285,211 @@ pub fn authored_value(scene: &Scene, target: &str) -> Result<Option<toml::Value>
         .from
         .and_then(|f| toml::from_str::<toml::Table>(&format!("v = {f}")).ok())
         .and_then(|t| t.get("v").cloned()))
+}
+
+// ---------------------------------------------------------------- re-basing
+
+/// Move tracks with an edit made underneath them: the dice changing a value
+/// that is animated.
+///
+/// Keys are absolute, so without this a mutation of a keyed value would be
+/// overridden at every moment and never seen, and a roll would have to throw
+/// the animation away. Instead the motion is kept and moved to the new value,
+/// as offsets from the authored one: a number's keys move by the change; a
+/// pose's keys turn by the rotation that took the old pose to the new one,
+/// each keeping its route to the next; a stepped value's keys that held the
+/// old value hold the new one. Rates and cycles already move about the
+/// authored value, and one with its own `from` or `centre` moves by the
+/// change. Only a track whose value differs between the two is touched, and
+/// one that either scene can't resolve is left as it was.
+pub fn rebase(tracks: &mut [Track], before: &Scene, after: &Scene) {
+    if tracks.is_empty() {
+        return;
+    }
+    let doc = |s: &Scene| s.to_toml_string().ok()?.parse::<toml_edit::DocumentMut>().ok();
+    let (Some(before), Some(after)) = (doc(before), doc(after)) else { return };
+    for track in tracks {
+        rebase_one(track, &before, &after);
+    }
+}
+
+/// What a saved scene writes at `target`: `Ok(None)` where it writes
+/// nothing, `Err` where the path doesn't resolve.
+fn written_at(doc: &toml_edit::DocumentMut, target: &str) -> Result<Option<toml::Value>, String> {
+    let mut doc = doc.clone();
+    let applied = crate::set::apply_to_doc(&mut doc, &format!("{target}=0.0"))?;
+    Ok(applied
+        .from
+        .and_then(|f| toml::from_str::<toml::Table>(&format!("v = {f}")).ok())
+        .and_then(|t| t.get("v").cloned()))
+}
+
+/// A map's or subscene's pose, from its `rotvec` or `rotation`; unwritten is
+/// no rotation.
+fn pose_at(doc: &toml_edit::DocumentMut, target: &str) -> Option<crate::rot::Orientation> {
+    let triple = |v: &toml::Value| -> Option<[f32; 3]> {
+        let a: Vec<f32> = v.as_array()?.iter().filter_map(number).map(|x| x as f32).collect();
+        <[f32; 3]>::try_from(a).ok()
+    };
+    let prefix = target.strip_suffix(".rotation")?;
+    if let Ok(Some(v)) = written_at(doc, &format!("{prefix}.rotvec")) {
+        return Some(crate::rot::Turn::from_rotation_vector(glam::Vec3::from(triple(&v)?)).exp());
+    }
+    let euler = match written_at(doc, target).ok()? {
+        Some(v) => triple(&v)?,
+        None => [0.0; 3],
+    };
+    Some(crate::rot::Orientation::from_xyz_degrees(euler))
+}
+
+fn rebase_one(track: &mut Track, before: &toml_edit::DocumentMut, after: &toml_edit::DocumentMut) {
+    if takes_rotations(&track.target) {
+        let (Some(b), Some(a)) = (pose_at(before, &track.target), pose_at(after, &track.target)) else { return };
+        if b.angle_to(a) < 1e-6 {
+            return;
+        }
+        if let Source::Keys { keys, .. } = &mut track.source {
+            // a·b⁻¹: what turned the authored pose into the new one, in world terms.
+            turn_poses(keys, b.inverse().then(a));
+        }
+        return;
+    }
+    // A variation a map doesn't carry has weight 0, not no weight.
+    let variation = track.target.contains(".variations.");
+    let read = |doc| match written_at(doc, &track.target) {
+        Ok(None) if variation => Some(toml::Value::Float(0.0)),
+        Ok(v) => v,
+        Err(_) => None,
+    };
+    let (Some(b), Some(a)) = (read(before), read(after)) else { return };
+    if b == a {
+        return;
+    }
+    match (number(&b), number(&a)) {
+        (Some(x), Some(y)) => shift(&mut track.source, y - x),
+        _ => {
+            if let Source::Keys { keys, .. } = &mut track.source {
+                for k in keys {
+                    if matches!(&k.value, KeyValue::Other(v) if *v == b) {
+                        k.value = KeyValue::Other(a.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every number a track holds about its value, moved by `by`.
+fn shift(source: &mut Source, by: f64) {
+    // To the precision a scene is written at, so 1.1193 − 0.8193 is 0.3 and
+    // not 0.30000000000000004.
+    let tidy = |v: f64| (v * 1e6).round() / 1e6;
+    match source {
+        Source::Keys { keys, integral, .. } => {
+            for k in keys {
+                if let KeyValue::Number(v) = &mut k.value {
+                    *v = if *integral { (*v + by).round() } else { tidy(*v + by) };
+                }
+            }
+        }
+        Source::Rate { from, .. } => {
+            if let Some(f) = from {
+                *f = tidy(*f + by);
+            }
+        }
+        Source::Cycle { centre, .. } => {
+            if let Some(c) = centre {
+                *c = tidy(*c + by);
+            }
+        }
+    }
+}
+
+/// Turn every pose by `delta` (world terms), keeping each key's route to the
+/// next: `(D·Kᵢ)⁻¹·D·Kᵢ₊₁ = Kᵢ⁻¹·Kᵢ₊₁`, so the journey between keys is the
+/// same turn. Keys stay written as Euler triples where the triples still say
+/// that route, and get an explicit `route` where they don't.
+fn turn_poses(keys: &mut [Key], delta: crate::rot::Orientation) {
+    let old: Vec<RotKey> = keys
+        .iter()
+        .filter_map(|k| match k.value {
+            KeyValue::Rotation(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    if old.len() != keys.len() {
+        return;
+    }
+    let routes: Vec<glam::Vec3> = old.windows(2).map(|w| w[0].route_to(&w[1]).as_rotation_vector()).collect();
+    let mut new: Vec<RotKey> = old.iter().map(|r| readable_pose(r.orientation.then(delta))).collect();
+    for (i, route) in routes.iter().enumerate() {
+        if (new[i].route_to(&new[i + 1]).as_rotation_vector() - *route).length() > 1e-4 {
+            new[i].route = Some(*route);
+        }
+    }
+    for (k, r) in keys.iter_mut().zip(new) {
+        k.value = KeyValue::Rotation(r);
+    }
+}
+
+/// A pose as an Euler triple, rounded as a scene writes it, unless the
+/// triple can't say it (near a quarter turn about y): then a rotation vector.
+fn readable_pose(o: crate::rot::Orientation) -> RotKey {
+    let euler = o.to_xyz_degrees().map(|d| (d as f64 * 1e4).round() / 1e4);
+    let key = RotKey::from_euler(euler);
+    if key.orientation.angle_to(o) < 1e-3_f32.to_radians() {
+        key
+    } else {
+        RotKey { orientation: o, euler: None, turns: None, route: None }
+    }
+}
+
+/// Carry `base`'s tracks onto a scene the dice rolled from it.
+///
+/// The roll keeps the base's map list or draws a new one, and its maps may
+/// be named differently (`t0`, `t1`…), so each track follows its map *by
+/// position*: what animated the base's third map animates the roll's third.
+/// A track on a map the roll doesn't have goes, as a deleted map's does. A
+/// subscene's tracks come through as they are, as the subscene does (a roll
+/// draws only the scene's own maps). Then the values are rebased onto what
+/// the roll drew.
+pub fn carry_onto_roll(base: &Scene, rolled: &Scene) -> Vec<Track> {
+    let own = |s: &Scene| -> Vec<Option<String>> {
+        (0..s.transforms.len()).filter(|&i| s.transforms[i].layer == 0).map(|i| s.transform_names[i].clone()).collect()
+    };
+    let (from, to) = (own(base), own(rolled));
+    let position = |sel: &str| match sel.parse::<usize>() {
+        Ok(i) => Some(i),
+        Err(_) => from.iter().position(|n| n.as_deref() == Some(sel)),
+    };
+    let readdress = |sel: &str| -> Option<String> {
+        let i = position(sel).filter(|&i| i < to.len())?;
+        Some(to[i].clone().unwrap_or_else(|| i.to_string()))
+    };
+    let mut tracks = Vec::new();
+    'tracks: for t in &base.tracks {
+        let mut segs: Vec<String> = t.target.split('.').map(str::to_string).collect();
+        if segs[0] == "subscene" {
+            tracks.push(t.clone());
+            continue;
+        }
+        for i in MapLayer::Own.map_slots(&segs) {
+            match readdress(&segs[i]) {
+                Some(sel) => segs[i] = sel,
+                None => continue 'tracks,
+            }
+        }
+        tracks.push(Track { target: segs.join("."), ..t.clone() });
+    }
+    // Rebased against the base as the roll addresses it, so each value is
+    // compared with the one at the same position.
+    let mut readdressed = base.clone();
+    readdressed.tracks = Vec::new();
+    for (i, k) in (0..base.transforms.len()).filter(|&i| base.transforms[i].layer == 0).enumerate() {
+        readdressed.transform_names[k] = to.get(i).cloned().flatten();
+    }
+    rebase(&mut tracks, &readdressed, rolled);
+    tracks
 }
 
 /// A new keyed track on `target` with one key, `value` at `t`: what the
@@ -1866,9 +2170,237 @@ amplitude = 0.25
             Track { target: "transform.b.xaos.a".into(), source: Source::Rate { rate: 1.0, from: None }, mute: false },
             Track { target: "transform.ab.weight".into(), source: Source::Rate { rate: 1.0, from: None }, mute: false },
         ];
-        rename_map(&mut tracks, "a", "arm");
+        rename_map(&mut tracks, MapLayer::Own, "a", "arm");
         let t: Vec<&str> = tracks.iter().map(|t| t.target.as_str()).collect();
         assert_eq!(t, ["transform.arm.weight", "transform.b.xaos.arm", "transform.ab.weight"]);
+    }
+
+    fn rate_tracks(targets: &[&str]) -> Vec<Track> {
+        targets
+            .iter()
+            .map(|t| Track { target: t.to_string(), source: Source::Rate { rate: 1.0, from: None }, mute: false })
+            .collect()
+    }
+
+    fn targets(tracks: &[Track]) -> Vec<&str> {
+        tracks.iter().map(|t| t.target.as_str()).collect()
+    }
+
+    #[test]
+    fn deleting_a_map_keeps_the_others_animation_on_them() {
+        let mut tracks = rate_tracks(&[
+            "transform.0.weight",
+            "transform.1.weight",           // the one deleted: goes
+            "transform.3.variations.julia", // moves down to 2
+            "transform.0.xaos.1",           // toward the deleted map: goes
+            "transform.0.xaos.2",           // toward map 2, now 1
+            "transform.b.weight",           // by name, not the deleted map's
+            "subscene.smoke.transform.1.weight", // another layer: untouched
+            "meta.haze",
+        ]);
+        let gone = follow_maps(&mut tracks, MapLayer::Own, ListChange::Removed(1, None));
+        assert_eq!(gone, 2);
+        assert_eq!(
+            targets(&tracks),
+            [
+                "transform.0.weight",
+                "transform.2.variations.julia",
+                "transform.0.xaos.1",
+                "transform.b.weight",
+                "subscene.smoke.transform.1.weight",
+                "meta.haze",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_deleted_maps_named_tracks_go_with_it() {
+        let mut tracks = rate_tracks(&["transform.a.weight", "transform.b.xaos.a", "transform.b.weight"]);
+        follow_maps(&mut tracks, MapLayer::Own, ListChange::Removed(0, Some("a")));
+        assert_eq!(targets(&tracks), ["transform.b.weight"]);
+    }
+
+    #[test]
+    fn inserting_a_map_moves_later_positions_up() {
+        let mut tracks = rate_tracks(&["transform.0.weight", "transform.1.weight", "transform.0.xaos_p.2"]);
+        follow_maps(&mut tracks, MapLayer::Own, ListChange::Inserted(1));
+        assert_eq!(targets(&tracks), ["transform.0.weight", "transform.2.weight", "transform.0.xaos_p.3"]);
+    }
+
+    #[test]
+    fn a_subscenes_maps_follow_by_its_name_or_index() {
+        let layer = MapLayer::Subscene { name: "smoke", index: 0 };
+        let mut tracks = rate_tracks(&[
+            "subscene.smoke.transform.2.weight",
+            "subscene.0.transform.2.scale",
+            "subscene.other.transform.2.weight",
+            "transform.2.weight",
+            "subscene.smoke.share",
+        ]);
+        follow_maps(&mut tracks, layer, ListChange::Removed(1, None));
+        assert_eq!(
+            targets(&tracks),
+            [
+                "subscene.smoke.transform.1.weight",
+                "subscene.0.transform.1.scale",
+                "subscene.other.transform.2.weight",
+                "transform.2.weight",
+                "subscene.smoke.share",
+            ]
+        );
+        let mut named = rate_tracks(&["subscene.smoke.transform.old.weight"]);
+        rename_map(&mut named, layer, "old", "new");
+        assert_eq!(targets(&named), ["subscene.smoke.transform.new.weight"]);
+    }
+
+    #[test]
+    fn removing_a_subscene_takes_its_tracks_and_moves_later_indices() {
+        let mut tracks = rate_tracks(&[
+            "subscene.smoke.share",
+            "subscene.0.transform.1.weight",
+            "subscene.2.share",
+            "subscene.fire.share",
+            "transform.0.weight",
+        ]);
+        let gone = follow_subscenes(&mut tracks, ListChange::Removed(0, Some("smoke")));
+        assert_eq!(gone, 2);
+        assert_eq!(targets(&tracks), ["subscene.1.share", "subscene.fire.share", "transform.0.weight"]);
+    }
+
+    fn keyed_numbers(t: &Track) -> Vec<(f64, f64)> {
+        match &t.source {
+            Source::Keys { keys, .. } => keys
+                .iter()
+                .map(|k| match k.value {
+                    KeyValue::Number(v) => (k.t, v),
+                    _ => panic!("not a number key"),
+                })
+                .collect(),
+            _ => panic!("not keys"),
+        }
+    }
+
+    const TWO_MAPS: &str = r#"
+[meta]
+name = "two"
+
+[[transform]]
+name = "a"
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+weight = 1.0
+
+[[transform]]
+name = "b"
+translation = [-0.5, 0.0, 0.0]
+scale = 0.5
+"#;
+
+    #[test]
+    fn a_changed_value_moves_its_keys_by_the_change() {
+        let before = Scene::from_toml_str(TWO_MAPS, &std::env::temp_dir()).unwrap();
+        let mut after = before.clone();
+        after.transforms[0].weight = 1.5;
+        after.transforms[1].variations[10] = 0.25; // julia, unwritten before
+        let mut tracks = vec![
+            one_key("transform.a.weight", 0.0, toml::Value::Float(1.0)).unwrap(),
+            one_key("transform.b.variations.julia", 0.0, toml::Value::Float(0.5)).unwrap(),
+            one_key("transform.b.weight", 0.0, toml::Value::Float(3.0)).unwrap(),
+        ];
+        rebase(&mut tracks, &before, &after);
+        assert_eq!(keyed_numbers(&tracks[0]), [(0.0, 1.5)]);
+        assert_eq!(keyed_numbers(&tracks[1]), [(0.0, 0.75)], "an unwritten variation is 0");
+        assert_eq!(keyed_numbers(&tracks[2]), [(0.0, 3.0)], "untouched value, untouched keys");
+    }
+
+    #[test]
+    fn a_turned_map_turns_its_poses_and_keeps_their_route() {
+        let before = Scene::from_toml_str(TWO_MAPS, &std::env::temp_dir()).unwrap();
+        let mut after = before.clone();
+        let turn = glam::Mat4::from_rotation_x(30f32.to_radians());
+        after.transforms[0].matrix = turn * after.transforms[0].matrix;
+        // Two whole turns about y: a route only the Euler column says.
+        let mut tracks = vec![poses(&[(0.0, [0.0, 0.0, 0.0]), (2.0, [0.0, 720.0, 0.0])], Interp::Linear, Extrapolate::Hold)];
+        let rot = |t: &Track| match &t.source {
+            Source::Keys { keys, .. } => keys
+                .iter()
+                .map(|k| match k.value {
+                    KeyValue::Rotation(r) => r,
+                    _ => panic!(),
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!(),
+        };
+        let old = rot(&tracks[0]);
+        rebase(&mut tracks, &before, &after);
+        let new = rot(&tracks[0]);
+        let delta = crate::rot::Orientation::from_xyz_degrees([30.0, 0.0, 0.0]);
+        assert!(new[0].orientation.angle_to(old[0].orientation.then(delta)) < 1e-4);
+        let (a, b) = (old[0].route_to(&old[1]).as_rotation_vector(), new[0].route_to(&new[1]).as_rotation_vector());
+        assert!((a - b).length() < 1e-3, "route {a} became {b}");
+        assert!(a.length() > 12.0, "still two whole turns: {a}");
+    }
+
+    #[test]
+    fn a_roll_carries_tracks_by_position_onto_renamed_maps() {
+        let base_src = format!("{TWO_MAPS}\n[[transform]]\nname = \"c\"\ntranslation = [0.0, 0.5, 0.0]\nscale = 0.4\n");
+        let mut base = Scene::from_toml_str(&base_src, &std::env::temp_dir()).unwrap();
+        base.tracks = vec![
+            one_key("transform.b.weight", 0.0, toml::Value::Float(2.0)).unwrap(),
+            one_key("transform.c.weight", 0.0, toml::Value::Float(2.0)).unwrap(),
+            one_key("transform.a.xaos.b", 0.0, toml::Value::Float(0.5)).unwrap(),
+        ];
+        // What a roll with the count on looks like: two maps, named t0 and t1.
+        let mut rolled = Scene::from_toml_str(TWO_MAPS, &std::env::temp_dir()).unwrap();
+        rolled.transform_names = vec![Some("t0".into()), Some("t1".into())];
+        rolled.transforms[1].weight = 1.25;
+        let tracks = carry_onto_roll(&base, &rolled);
+        assert_eq!(targets(&tracks), ["transform.t1.weight", "transform.t0.xaos.t1"], "map c is gone, and its track");
+        assert_eq!(keyed_numbers(&tracks[0]), [(0.0, 2.25)]);
+    }
+
+    /// Through the scene itself: an animated weight on an unnamed map stays on
+    /// that map when one before it is deleted, and when one is added before it.
+    #[test]
+    fn the_scene_keeps_tracks_on_their_maps() {
+        let src = r#"
+[meta]
+name = "unnamed"
+
+[[transform]]
+translation = [0.5, 0.0, 0.0]
+scale = 0.5
+
+[[transform]]
+translation = [-0.5, 0.0, 0.0]
+scale = 0.5
+
+[[transform]]
+translation = [0.0, 0.5, 0.0]
+scale = 0.5
+
+[[track]]
+target = "transform.2.weight"
+keys = [[0.0, 3.0], [1.0, 3.0]]
+
+[[track]]
+target = "transform.1.weight"
+keys = [[0.0, 7.0], [1.0, 7.0]]
+"#;
+        let mut s = Scene::from_toml_str(src, &std::env::temp_dir()).unwrap();
+        let at_half = |s: &Scene| {
+            let anim = Animator::for_scene(s).unwrap().unwrap();
+            let frame = anim.at(0.5).unwrap();
+            frame.transforms.iter().map(|t| t.weight).collect::<Vec<f32>>()
+        };
+        s.remove_transform(1);
+        assert_eq!(targets(&s.tracks), ["transform.1.weight"], "map 1's track goes with it");
+        // The map that was 2 is 1 now, and still carries its weight of 3.
+        assert_eq!(at_half(&s)[1], 3.0);
+        let spec = s.transforms[0].clone();
+        s.insert_transform(0, spec, None, None, None);
+        assert_eq!(targets(&s.tracks), ["transform.2.weight"]);
+        assert_eq!(at_half(&s)[2], 3.0);
     }
 
     #[test]

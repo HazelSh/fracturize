@@ -59,9 +59,12 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
 }
 
 /// Width of the tab rail in points. Narrow on purpose: it carries identity
-/// (colour, name, enabled) and relative weight, and nothing else.
-const RAIL_WIDTH: f32 = 132.0;
-/// Height of one tab, including its weight bar and the gap below it.
+/// (colour, name), its eye, mute and solo, and nothing else. A tab is a thing
+/// you click to choose a transform; anything else drawn on it is a place where
+/// a click does something other than what the tab says, so the only others are
+/// buttons that look like buttons. 132 until mute and solo took about forty.
+const RAIL_WIDTH: f32 = 172.0;
+/// Height of one tab, including the gap below it.
 ///
 /// **This is the row pitch the rail's virtualization is told about**, so a tab
 /// has to actually occupy it — see `draw_tab`'s `set_min_height`. It didn't,
@@ -77,18 +80,15 @@ const TAB_HEIGHT: f32 = 30.0;
 /// The gap between painted tabs: a tab's body is `TAB_HEIGHT - TAB_GAP`, and
 /// the rest is the space that keeps two selected-coloured fills apart.
 const TAB_GAP: f32 = 4.0;
-/// Thickness of the weight bar drawn along a tab's bottom edge.
-const BAR_THICKNESS: f32 = 2.0;
-/// How far the weight bar is inset from each end of its tab.
-const BAR_INSET: f32 = 8.0;
-/// Height of the weight bar's *grab* strip, centred on the drawn bar.
-///
-/// Deliberately much smaller than the tab: this strip is registered after the
-/// tab and so takes the pointer from it, and it used to be 8pt of a 21pt row —
-/// 40% of every tab, including the whole lower half of the name, was silently
-/// not the click target it looked like. Centred on the 2pt bar it is now 20%
-/// of a 30pt row, sitting under the thing it adjusts and nothing else.
-const BAR_GRAB: f32 = 6.0;
+/// Height of the weight-share bar under the list (`draw_weight_share`).
+const SHARE_BAR_HEIGHT: f32 = 12.0;
+/// Room the weight-share block takes under the list: its caption line, the
+/// bar, and the spacing around them. Reserved before the list is sized, so the
+/// list ends above it rather than pushing it out of the window.
+const SHARE_BLOCK_HEIGHT: f32 = 44.0;
+/// Past this many other maps, the rest of the bar is drawn as one block: forty
+/// thousand one-pixel segments say nothing a single block doesn't.
+const SHARE_MAX_SEGMENTS: usize = 64;
 /// Shortest the rail's list is allowed to get when the window is dragged small.
 /// Below about three rows a list stops being one.
 const MIN_LIST_HEIGHT: f32 = TAB_HEIGHT * 3.0;
@@ -112,7 +112,6 @@ fn rail_fill(ui: &egui::Ui) -> egui::Color32 {
 struct RowData {
     name: String,
     color: Vec3,
-    weight: f32,
     enabled: bool,
     /// Hover summary (position/scale/variations) — the info the retired HUD
     /// transform list used to show per row.
@@ -130,10 +129,10 @@ fn row_data(app: &App, i: usize) -> RowData {
             .and_then(|n| n.clone())
             .unwrap_or_default(),
         color: app.scene.colors.get(i).copied().unwrap_or(Vec3::ONE),
-        weight: spec.weight,
         enabled: app.is_transform_enabled(i),
         summary: format!(
-            "Position ({:.2}, {:.2}, {:.2}) · scale {:.2}\nVariations: {}",
+            "Weight {:.2} · position ({:.2}, {:.2}, {:.2}) · scale {:.2}\nVariations: {}",
+            spec.weight,
             p.x,
             p.y,
             p.z,
@@ -262,15 +261,6 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
     // scroll. One line of filter is that way.
     let visible = filtered_indices(app);
     let n = visible.len();
-    // Weights are shown as bars relative to the largest, so "which transform
-    // dominates the chaos game" stays readable at a glance even though the
-    // editable field lives over in the detail pane.
-    let max_weight = app
-        .scene
-        .transforms
-        .iter()
-        .map(|t| t.weight)
-        .fold(0.01f32, f32::max);
 
     ui.vertical(|ui| {
         ui.set_width(RAIL_WIDTH);
@@ -289,7 +279,7 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
                 // The list takes the rest of the window. It used to take 320pt
                 // whatever the window was, so growing the window grew a band of
                 // empty rail instead of showing more transforms.
-                let height = ui.available_height().max(MIN_LIST_HEIGHT);
+                let height = (ui.available_height() - SHARE_BLOCK_HEIGHT).max(MIN_LIST_HEIGHT);
                 // Virtualized: L-system scenes reach tens of thousands of
                 // transforms, and laying every tab out per frame would cost
                 // more than the whole rest of the UI.
@@ -314,9 +304,10 @@ fn draw_rail(ui: &mut egui::Ui, app: &mut App) {
                         for slot in range {
                             let i = visible[slot];
                             let row = row_data(app, i);
-                            draw_tab(ui, app, i, row, selected == Some(i), max_weight);
+                            draw_tab(ui, app, i, row, selected == Some(i));
                         }
                     });
+                draw_weight_share(ui, app, selected);
             });
     });
 }
@@ -385,6 +376,155 @@ fn draw_list_actions(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
     });
 }
 
+/// The selected transform's share of its layer's weight, under the list.
+///
+/// It used to be a 2pt bar along the bottom of every tab, and a drag control
+/// at that: a strip inside the selection list where a click adjusted a weight
+/// instead of choosing the tab it sat on. The rail is for choosing, so the
+/// weight came out of it. What the bars said — how the weight is spread across
+/// the maps — is said here once, as one fixed-size bar of the whole: the
+/// selected map's share first, in its colour, then everyone else's, dimmed.
+///
+/// Dragging (or clicking) along it sets the selected map's share, with the
+/// rest of the layer's weight held where it is: share `p` against a rest `r`
+/// is weight `p·r / (1 − p)`. Held, the rest doesn't move during the drag, so
+/// the bar under the pointer means the same thing from the first pixel to the
+/// last — unlike scaling a bar drawn against the largest weight, where dragging
+/// the largest moves the scale it is measured on.
+///
+/// Counted over the layer's enabled maps, because those are the ones the walk
+/// draws from. Under xaos a tick marks where the walk actually puts this map,
+/// which the weight no longer says by itself.
+fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) {
+    let layer = app.current_layer();
+    let composite = app.scene.is_composite();
+    let in_layer: Vec<usize> = (0..app.scene.transforms.len())
+        .filter(|&i| !composite || app.scene.transforms[i].layer as usize == layer)
+        .filter(|&i| app.is_transform_enabled(i))
+        .collect();
+    let sel = selected.filter(|i| in_layer.contains(i));
+    let walk = sel.and_then(|i| {
+        let s = app.xaos_summary(layer).filter(|s| s.has_xaos)?;
+        Some(s.shares[s.pos(i)?] as f32)
+    });
+    let weights: Vec<f32> = app.scene.transforms.iter().map(|t| t.weight.max(0.0)).collect();
+    let weight = |i: usize| weights[i];
+    let total: f32 = in_layer.iter().map(|&i| weight(i)).sum();
+    let rest = total - sel.map_or(0.0, weight);
+    let share = sel.map(|i| if total > 0.0 { weight(i) / total } else { 0.0 });
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Weight share").small());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(6.0);
+            let text = match share {
+                Some(p) => format!("{}%", super::num::fixed(p * 100.0, 1)),
+                None => "—".to_string(),
+            };
+            super::num::small_cell(ui, &text, 6);
+        });
+    });
+
+    let width = RAIL_WIDTH - 12.0;
+    let (outer, _) = ui.allocate_exact_size(egui::vec2(RAIL_WIDTH, SHARE_BAR_HEIGHT), egui::Sense::hover());
+    let bar = egui::Rect::from_min_size(outer.min + egui::vec2(6.0, 0.0), egui::vec2(width, SHARE_BAR_HEIGHT));
+    let editable = sel.is_some() && rest > 0.0;
+    let resp = ui.interact(
+        bar,
+        ui.id().with("weight_share"),
+        if editable { egui::Sense::click_and_drag() } else { egui::Sense::hover() },
+    );
+
+    // The segments: the selected map first, then the others in layer order,
+    // or every map in layer order when nothing is selected.
+    let painter = ui.painter();
+    painter.rect_filled(bar, 2.0, ui.visuals().extreme_bg_color);
+    if total > 0.0 {
+        let colour = |i: usize| color32_from_vec3(app.scene.colors.get(i).copied().unwrap_or(Vec3::ONE));
+        let mut x = bar.min.x;
+        let segment = |x: &mut f32, frac: f32, fill: egui::Color32| {
+            let w = width * frac;
+            let r = egui::Rect::from_min_max(egui::pos2(*x, bar.min.y), egui::pos2(*x + w, bar.max.y));
+            painter.rect_filled(r.shrink2(egui::vec2(0.5, 0.0)), 0.0, fill);
+            *x += w;
+        };
+        if let Some(i) = sel {
+            segment(&mut x, weight(i) / total, colour(i));
+        }
+        let dim = if sel.is_some() { 0.35 } else { 0.8 };
+        let others: Vec<usize> = in_layer.iter().copied().filter(|&i| Some(i) != sel).collect();
+        if others.len() > SHARE_MAX_SEGMENTS {
+            segment(&mut x, rest / total, ui.visuals().weak_text_color().gamma_multiply(dim));
+        } else {
+            for i in others {
+                segment(&mut x, weight(i) / total, colour(i).gamma_multiply(dim));
+            }
+        }
+    }
+    if let Some(p) = share {
+        // The boundary between this map and the rest: the thing a drag moves.
+        let bx = bar.min.x + width * p;
+        let stroke_colour = if resp.hovered() || resp.dragged() {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().text_color()
+        };
+        painter.line_segment(
+            [egui::pos2(bx, bar.min.y - 2.0), egui::pos2(bx, bar.max.y + 2.0)],
+            egui::Stroke::new(2.0, stroke_colour),
+        );
+    }
+    if let Some(w) = walk {
+        let wx = bar.min.x + width * w.clamp(0.0, 1.0);
+        let tick = egui::Rect::from_min_max(egui::pos2(wx - 1.0, bar.max.y), egui::pos2(wx + 1.0, bar.max.y + 4.0));
+        painter.rect_filled(tick, 0.0, ui.visuals().strong_text_color());
+    }
+    if editable && (resp.hovered() || resp.dragged()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+
+    let tooltip = match (sel, share) {
+        (Some(_), Some(p)) if rest > 0.0 => {
+            let mut t = format!(
+                "This transform has {}% of the weight, against everything else. \
+                 Drag along the bar to set its share; the others keep theirs.",
+                super::num::fixed(p * 100.0, 1)
+            );
+            if let Some(w) = walk {
+                t.push_str(&format!(
+                    "\n\nThe tick under the bar is where xaos actually puts it: {}% of the points.",
+                    super::num::fixed(w * 100.0, 1)
+                ));
+            }
+            t
+        }
+        (Some(_), _) => "This is the only transform drawn here, so it has all the weight. \
+                         Add another to share it."
+            .to_string(),
+        (None, _) if selected.is_some() => {
+            "The selected transform is disabled, so it gets no share. Enable it to give it one.".to_string()
+        }
+        (None, _) => "How the weight is shared between the transforms. Select one to set its share.".to_string(),
+    };
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        tooltip,
+        if editable { "drag: set this transform's share of the weight" } else { "how the weight is shared" },
+    );
+    if editable && (resp.dragged() || resp.clicked()) {
+        if let (Some(i), Some(pos)) = (sel, resp.interact_pointer_pos()) {
+            let p = ((pos.x - bar.min.x) / width).clamp(0.005, 0.995);
+            let next = p * rest / (1.0 - p);
+            if (next - weight(i)).abs() > 1e-6 {
+                app.set_transform_weight(i, next);
+            }
+        }
+    }
+}
+
 /// One tab. The selected tab is filled with the *detail pane's* colour and
 /// extends past the rail's right edge, so it reads as continuous with the
 /// pane rather than as a highlighted row in a separate list.
@@ -394,7 +534,6 @@ fn draw_tab(
     i: usize,
     row: RowData,
     selected: bool,
-    max_weight: f32,
 ) {
     let is_renaming = app
         .ui_state
@@ -415,22 +554,6 @@ fn draw_tab(
     };
     let pane_fill = ui.visuals().window_fill;
     let accent = color32_from_vec3(row.color);
-    // Under xaos, where the walk actually puts this map, as the weight that
-    // would put it there with no xaos: weight × walk share / weight share. A
-    // tick on the same track as the weight bar, so the two read as one axis
-    // and the gap between them is the "why is this map invisible" signal.
-    let walk = app
-        .scene
-        .transforms
-        .get(i)
-        .map(|t| t.layer as usize)
-        .and_then(|k| app.xaos_summary(k))
-        .filter(|s| s.has_xaos)
-        .and_then(|s| {
-            let p = s.pos(i)?;
-            (s.chain.start[p] > 0.0).then(|| (s.shares[p], row.weight * (s.shares[p] / s.chain.start[p]) as f32))
-        });
-
     let tab_resp = ui
         .scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
             ui.set_width(ui.available_width());
@@ -443,7 +566,6 @@ fn draw_tab(
             // space, not this tab.
             let bg_idx = ui.painter().add(egui::Shape::Noop);
             let accent_idx = ui.painter().add(egui::Shape::Noop);
-            let bar_idx = ui.painter().add(egui::Shape::Noop);
 
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -473,6 +595,10 @@ fn draw_tab(
                     let text = egui::RichText::new(&display_name);
                     let text = if !row.enabled {
                         text.color(ui.visuals().weak_text_color()).strikethrough()
+                    } else if app.map_view.active() && app.map_view.hides(i) {
+                        // Hidden by mute/solo: still in the IFS, so not struck
+                        // through like a disabled map — only not drawn.
+                        text.color(ui.visuals().weak_text_color()).italics()
                     } else if selected {
                         text.color(ui.visuals().strong_text_color()).strong()
                     } else {
@@ -507,6 +633,40 @@ fn draw_tab(
                             app.toggle_transform_enabled(i);
                         }
                     }
+
+                    // Mute and solo: a mixing desk's, and a *view*. They hide
+                    // the points a map placed and leave the IFS alone, which
+                    // is the difference from the eye beside them, and why
+                    // both tooltips say so first.
+                    let solo_on = app.map_view.is_soloed(i);
+                    let solo_resp = ui.add(egui::Button::new("S").small().selected(solo_on));
+                    let solo_resp = hinted(
+                        solo_resp,
+                        &mut app.ui_state,
+                        "Solo: draw only the points this map placed, and those of \
+                         any other soloed map\n\nA view, not an edit: the fractal \
+                         stays the same, nothing is saved and there is nothing to \
+                         undo. Alt+click to solo this map alone, and again to \
+                         clear every solo.",
+                        "click: solo this map's points (a view) · alt+click: this one alone",
+                    );
+                    if solo_resp.clicked() {
+                        app.toggle_map_solo(i, ui.input(|inp| inp.modifiers.alt));
+                    }
+                    let mute_on = app.map_view.is_muted(i);
+                    let mute_resp = ui.add(egui::Button::new("M").small().selected(mute_on));
+                    let mute_resp = hinted(
+                        mute_resp,
+                        &mut app.ui_state,
+                        "Mute: stop drawing the points this map placed\n\nA view, \
+                         not an edit: the fractal stays the same, nothing is saved \
+                         and there is nothing to undo. To take the map out of the \
+                         fractal itself, use the eye.",
+                        "click: hide this map's points (a view, not an edit)",
+                    );
+                    if mute_resp.clicked() {
+                        app.toggle_map_mute(i);
+                    }
                 });
             });
 
@@ -535,27 +695,6 @@ fn draw_tab(
                     egui::Shape::rect_filled(rect, 3.0, ui.visuals().widgets.hovered.bg_fill),
                 );
             }
-
-            // Relative chaos weight, as a bar along the tab's bottom edge.
-            let track = weight_bar_track(rect);
-            let bar_w = track.width() * (row.weight / max_weight).clamp(0.0, 1.0);
-            if bar_w > 0.5 {
-                let bar = egui::Rect::from_min_size(track.min, egui::vec2(bar_w, BAR_THICKNESS));
-                let color = if row.enabled {
-                    accent.gamma_multiply(0.8)
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                ui.painter().set(bar_idx, egui::Shape::rect_filled(bar, 1.0, color));
-            }
-            if let Some((_, eq)) = walk {
-                let x = track.min.x + track.width() * (eq / max_weight).clamp(0.0, 1.0);
-                let tick = egui::Rect::from_center_size(
-                    egui::pos2(x, track.center().y),
-                    egui::vec2(2.0, BAR_THICKNESS * 3.0),
-                );
-                ui.painter().rect_filled(tick, 0.0, ui.visuals().strong_text_color());
-            }
         })
         .response;
 
@@ -573,83 +712,6 @@ fn draw_tab(
         app.select_transform(Some(i));
     }
 
-    // The weight bar, as a control rather than a readout.
-    //
-    // Registered *after* the tab, so egui hands it the pointer inside its own
-    // strip — later registration wins. That puts the most-adjusted
-    // per-transform value under the pointer that is already there to select the
-    // row, which is the whole argument for it. It is also why the strip has to
-    // be small and has to *say* where it is: everything it covers is a place
-    // where clicking does not do the thing the tab under it advertises.
-    //
-    // Multiplicative, like the scroll gesture and the , / . keys, rather than
-    // an absolute position-to-weight mapping. An absolute mapping would be a
-    // feedback loop for whichever transform is currently the largest: the bar
-    // is drawn relative to the maximum, so dragging the maximum wider changes
-    // the scale it is measured against and the bar never moves.
-    let mut body = tab_resp.rect;
-    body.max.y -= TAB_GAP;
-    let track = weight_bar_track(body);
-    let bar_rect = egui::Rect::from_center_size(
-        track.center(),
-        egui::vec2(track.width(), BAR_GRAB),
-    );
-    let bar_resp = ui.interact(
-        bar_rect,
-        ui.id().with(("weight_bar", i)),
-        egui::Sense::drag(),
-    );
-    let bar_active = bar_resp.hovered() || bar_resp.dragged();
-    if bar_active {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        // Say which of the two controls stacked here the pointer is on. The
-        // cursor alone can't: it changes at the top of the app's window
-        // furniture and is nowhere near the thing it's talking about, and a
-        // tab that looks identical whether a click will select it or drag its
-        // weight is a tab that surprises you every time it does the second.
-        //
-        // Drawn from the parent painter, after the tab's own shapes, so it
-        // lands on top of the bar rather than needing last frame's hover
-        // state to paint inside it.
-        let painter = ui.painter();
-        let grown = egui::Rect::from_center_size(
-            track.center(),
-            egui::vec2(track.width(), BAR_THICKNESS * 2.0),
-        );
-        // The full track first: hovering says how much room the value has to
-        // move in, which is the one thing a bar drawn relative to the maximum
-        // can't show while it's short.
-        painter.rect_filled(grown, 1.0, ui.visuals().widgets.inactive.bg_fill);
-        let frac = (row.weight / max_weight).clamp(0.0, 1.0);
-        let mut fill = grown;
-        fill.max.x = fill.min.x + grown.width() * frac;
-        painter.rect_filled(fill, 1.0, color32_from_vec3(row.color));
-    }
-    let bar_resp = hinted(
-        bar_resp,
-        &mut app.ui_state,
-        match walk {
-            None => format!(
-                "Weight {}: how often this transform is picked. Drag sideways to change it.",
-                super::num::fixed(row.weight, 2)
-            ),
-            Some((share, _)) => format!(
-                "Weight {}: how often this transform is picked, before xaos. The tick is where                  the walk actually puts it: {}% of the points. Drag sideways to change the weight.",
-                super::num::fixed(row.weight, 2),
-                super::num::fixed(share as f32 * 100.0, 1)
-            ),
-        },
-        "drag: adjust this transform's weight",
-    );
-    if bar_resp.dragged() {
-        let dx = bar_resp.drag_delta().x;
-        if dx != 0.0 {
-            // ~5x across the width of the rail — enough range to be useful in
-            // one gesture, gentle enough to land on a value.
-            let next = row.weight * 1.015f32.powf(dx);
-            app.set_transform_weight(i, next);
-        }
-    }
     // Double-click to rename: Blender's outliner, every file manager, every
     // editor's tab bar. Free here, since the name is drawn on this very row —
     // which is the whole reason the gesture is universal.
@@ -662,18 +724,6 @@ fn draw_tab(
             ui.close();
         }
     });
-}
-
-/// Where a tab's weight bar is drawn, given the tab's painted body rect: a
-/// `BAR_THICKNESS` strip along the bottom edge, inset from both ends.
-///
-/// One function so the painted bar and the strip you grab it by cannot drift
-/// apart — the grab strip is this rect grown to `BAR_GRAB` about its centre.
-fn weight_bar_track(body: egui::Rect) -> egui::Rect {
-    egui::Rect::from_min_size(
-        egui::pos2(body.min.x + BAR_INSET, body.max.y - 1.0 - BAR_THICKNESS),
-        egui::vec2((body.width() - 2.0 * BAR_INSET).max(0.0), BAR_THICKNESS),
-    )
 }
 
 /// One transform's context menu. Shared by its row in this window and by
@@ -1020,7 +1070,7 @@ impl TrsCache {
     }
 }
 
-/// One of the inspector's four block headings.
+/// One of the inspector's block headings.
 fn block_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
     ui.separator();
@@ -1115,13 +1165,21 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     let mut editing = false;
 
     // Blocks with headings, rather than fifteen-odd controls in a flat stack
-    // with two anonymous rules doing all the grouping work.
+    // with two anonymous rules doing all the grouping work. In the order you
+    // reach for them while exploring, which is roughly Apophysis's:
     //
-    //   Shape       position, rotation, scale — already together
-    //   Behaviour   weight *and* variations: what this map does in the chaos
-    //               game. The two controls that most define the transform, and
-    //               they used to sit at opposite ends with colour in between.
-    //   Appearance  colour, colour value, colour speed
+    //   Weight       how often the chaos game picks this map — the lever you
+    //                pull most, so it is first and on its own
+    //   Appearance   colour, colour value, colour speed
+    //   Shape        position, rotation, scale
+    //   Variations   what the map does to a point between its two affines
+    //   Symmetry     the group it is a motif of
+    //   Post-affine  the affine after the variations
+    //   Xaos         which maps may follow this one
+    //
+    // Not the order the map runs in (Shape, Variations, Post-affine, then the
+    // group): that order is in the headings' tooltips and in the docs, and it
+    // is not the order anyone wanders into them.
     //
     // There was an `Identity` block too, holding one Name field. It's gone:
     // the name is edited in the header that already displays it (see
@@ -1130,6 +1188,12 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
     // Headings rather than disclosure sections: `todo.txt` is explicit that
     // hidden bits are the problem and not the solution, and that instinct is
     // right. Separate with rules and headings; don't close things.
+    block_heading(ui, "Weight");
+    draw_weight(ui, app, idx);
+
+    block_heading(ui, "Appearance");
+    draw_appearance(ui, app, idx);
+
     block_heading(ui, "Shape");
     if cache.faithful {
         draw_trs_fields(ui, app, idx, &mut cache, &mut editing);
@@ -1137,29 +1201,22 @@ fn draw_inspector(ui: &mut egui::Ui, app: &mut App) {
         draw_matrix_grid(ui, app, idx, &mut cache, &mut editing);
     }
 
-    // After Shape, because that is the order the map runs in: Shape, then the
-    // variations under Behaviour, then this.
+    block_heading(ui, "Variations");
+    draw_variations(ui, app, idx);
+
+    block_heading(ui, "Symmetry");
+    draw_symmetry(ui, app, idx);
+
     block_heading(ui, "Post-affine");
     draw_post_affine(ui, app, idx, &mut cache, &mut editing);
 
     cache.editing = editing;
     app.ui_state.trs_cache = Some(cache);
 
-    // And after Post-affine, by the same rule: the group composes on the
-    // outside of the whole map, so it is the last thing that happens to a
-    // point and the last block that describes one.
-    block_heading(ui, "Symmetry");
-    draw_symmetry(ui, app, idx);
-
-    block_heading(ui, "Behaviour");
-    draw_weight(ui, app, idx);
-    draw_variations(ui, app, idx);
     // Which maps may follow this one: the other half of "how often", since
     // under xaos the weight alone no longer says it.
+    block_heading(ui, "Xaos");
     super::xaos::draw_block(ui, app, idx);
-
-    block_heading(ui, "Appearance");
-    draw_appearance(ui, app, idx);
 }
 
 fn drag_row(
@@ -1985,12 +2042,9 @@ fn draw_matrix_grid(ui: &mut egui::Ui, app: &mut App, idx: usize, cache: &mut Tr
     }
 }
 
-/// Weight — how often the chaos game picks this map.
-///
-/// Sits with the variations, under **Behaviour**, because those two are the
-/// pair that most define what a transform *does*: one says how often it's
-/// chosen, the other says what it does when it is. They used to sit at opposite
-/// ends of the pane with the entire colour block between them.
+/// Weight — how often the chaos game picks this map. The first block of the
+/// pane, on its own: it is the lever pulled most while exploring. Its share of
+/// the whole is under the rail's list (`draw_weight_share`).
 fn draw_weight(ui: &mut egui::Ui, app: &mut App, idx: usize) {
     let mut weight = app.scene.transforms[idx].weight;
     ui.horizontal(|ui| {
@@ -2223,8 +2277,6 @@ fn draw_header_name(ui: &mut egui::Ui, app: &mut App, idx: usize, name: &str) {
 }
 
 fn draw_variations(ui: &mut egui::Ui, app: &mut App, idx: usize) {
-    ui.label(egui::RichText::new("Variations").strong());
-
     let weights = app.scene.transforms[idx].variations;
     let selected_slot = app.selected_variation();
 

@@ -2679,6 +2679,17 @@ impl ApplicationHandler for AppWrapper {
                             app.delete_selected_transform();
                             return;
                         }
+                        PhysicalKey::Code(c @ (KeyCode::ArrowLeft | KeyCode::ArrowRight)) => {
+                            // The playhead: a frame at a time, or with Shift to
+                            // the key before or after (on any row).
+                            let forward = c == KeyCode::ArrowRight;
+                            if app.shift_held {
+                                app.jump_to_key(forward);
+                            } else {
+                                app.step_frames(if forward { 1 } else { -1 });
+                            }
+                            return;
+                        }
                         PhysicalKey::Code(KeyCode::Home) => {
                             // "Frame selected", on the key everyone binds it to.
                             app.frame_selected_transform();
@@ -3798,6 +3809,7 @@ mod tests {
     /// `--isolate`'s drop is one fact in three shaders: chaos.wgsl writes the
     /// sentinel, and both point shaders must clip it in both their entry
     /// points, or an isolated render quietly draws a smear at one position.
+    /// `hidden()` is also where the live mute/solo mask is read.
     #[test]
     fn every_point_shader_clips_what_isolate_drops() {
         let chaos = include_str!("../shaders/points/chaos.wgsl");
@@ -3808,9 +3820,9 @@ mod tests {
         ] {
             assert!(src.contains("return abs(pos.x) > 1.0e36;"), "{name}: threshold moved");
             assert_eq!(
-                src.matches("select(clip.w, -1.0, isolate_dropped(point.position))").count(),
+                src.matches("select(clip.w, -1.0, hidden(point_index, point.position))").count(),
                 2,
-                "{name}: every vertex entry point must clip dropped points"
+                "{name}: every vertex entry point must clip dropped (and muted) points"
             );
         }
     }

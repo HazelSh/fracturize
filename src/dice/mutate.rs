@@ -39,8 +39,17 @@ pub fn mutate(scene: &mut Scene, settings: &RandomSettings, strength: f32, rng: 
     // and throw that operator away. New maps are appended, and count.
     let mut touched = vec![false; scene.transforms.len()];
     for _ in 0..n_ops {
+        let before = (!scene.tracks.is_empty()).then(|| scene.clone());
         apply_one(scene, settings, strength, rng, &mut touched, &mut log);
         touched.resize(scene.transforms.len(), true);
+        // An animated value the operator changed takes its animation with it,
+        // or the keys would override the change at every moment. One that
+        // added or removed a map has already moved the tracks' paths.
+        if let Some(before) = before.filter(|b| b.transforms.len() == scene.transforms.len()) {
+            let mut tracks = std::mem::take(&mut scene.tracks);
+            crate::track::rebase(&mut tracks, &before, scene);
+            scene.tracks = tracks;
+        }
     }
     if log.is_empty() {
         log.push("nothing changed: no part the profile has on can change on this scene".to_string());

@@ -579,6 +579,8 @@ pub enum HelpAction {
     /// Start / stop the camera flying its path (O, Z) — one action, because
     /// there's one motion.
     CameraMotion,
+    /// Left / Right: a frame back or on; with shift, to the key before or after
+    StepFrame,
     PathKey,
     NewScene,
     Quit,
@@ -844,6 +846,17 @@ pub struct App {
     /// Whether playback runs back to 0 at the end of the timeline (a session
     /// setting, toggled in the Timeline window).
     pub loop_playback: bool,
+    /// The loop region, in seconds, start before end: with looping on,
+    /// playback goes round inside it instead of over the whole timeline. Set
+    /// on the Timeline's ruler. Session state, like `loop_playback`.
+    pub loop_region: Option<(f64, f64)>,
+    /// Record is armed: an edit to a value keys it at the playhead
+    /// (`autokey`), in the same undo step, instead of editing the value the
+    /// scene authors. Session state; it never arms itself.
+    pub record_armed: bool,
+    /// The playhead, history position and scene `sync_record_base` last put
+    /// the authored scene at.
+    record_synced: Option<(u64, Option<u64>, u64)>,
     /// The scene's tracks, ready to evaluate, and what they last showed.
     live_anim: Option<LiveAnimation>,
     /// View-class values a track holds at the playhead, swapped in around the
@@ -956,6 +969,11 @@ pub struct App {
     /// rather edit against the picture they are going to keep.
     pub show_emphasis: bool,
     emphasis_params: EmphasisParams,
+    /// Mute/solo: which maps' points are drawn (`gpu::points::mask`). A view,
+    /// like orbiting — session state, never in the file or the history — and
+    /// cleared when maps come or go, since it is held by position.
+    pub map_view: crate::gpu::points::mask::MuteSolo,
+    map_view_count: usize,
     gizmo_renderer: GizmoRenderer,
     line_renderer: LineRenderer,
     /// Second line buffer for the selected transform's offset/rotation
@@ -1477,6 +1495,9 @@ impl App {
             camera_epoch: 0.0,
             camera_lap: 0,
             loop_playback: true,
+            loop_region: None,
+            record_armed: false,
+            record_synced: None,
             live_anim: None,
             anim_view: AnimView::default(),
             scene_generation: 0,
@@ -1523,6 +1544,8 @@ impl App {
             splat_renderer,
             emphasis_renderer,
             show_emphasis: true,
+            map_view: Default::default(),
+            map_view_count: 0,
             emphasis_params: EmphasisParams::default(),
             gizmo_renderer,
             line_renderer,
@@ -2030,6 +2053,7 @@ impl App {
             self.time = 0.0;
             self.camera_epoch = 0.0;
         }
+        self.enter_loop_region();
         if self.path_is_default() {
             self.camera_epoch = self.time;
         }
@@ -2085,6 +2109,12 @@ impl App {
     /// saved view's, with `view` — becomes the camera's view at this moment,
     /// replacing a key already there. A view at a keyframe point.
     pub fn key_camera_at_playhead(&mut self, view: Option<&std::path::Path>) {
+        self.key_camera_at(self.time, view);
+    }
+
+    /// Key the camera at `t` seconds: the framing on screen, or a saved
+    /// view's. The Timeline's right-click on the camera row.
+    pub fn key_camera_at(&mut self, t: f64, view: Option<&std::path::Path>) {
         let framing = match view {
             None => crate::path::PathKey::from_camera(&self.camera),
             Some(path) => match View::load(path) {
@@ -2104,7 +2134,7 @@ impl App {
         };
         let was_default = self.path_is_default();
         let before = self.edit_snapshot();
-        let t = self.time as f32;
+        let t = t.max(0.0) as f32;
         let path = self
             .scene
             .camera_path
@@ -2723,9 +2753,138 @@ impl App {
     /// lets rapid same-key commits (held weight/color keys, drag-scroll
     /// bursts) merge into one entry instead of flooding the stack.
     pub fn commit_edit(&mut self, label: impl Into<String>, coalesce_key: Option<&str>, before: EditSnapshot) {
+        // Record keys what the edit changed, before it is committed, so the
+        // edit and its keys are one undo step.
+        if self.record_armed {
+            self.autokey(&before);
+        }
         // No dirty flag to raise: committing moves the history to a state the
         // save point doesn't name, which is what `is_dirty` asks about.
         self.history.commit(label, coalesce_key, before, Instant::now());
+    }
+
+    /// Record: key every value an edit changed at the playhead, making the
+    /// track where there isn't one (Blender's auto-key, a DAW's armed
+    /// automation lane). An edit to the timeline itself keys nothing.
+    ///
+    /// The changes are `scene_diff`'s, so they are `-S` paths, which is what
+    /// a track names. A vector (a position, a scale, a colour) keys all three
+    /// of its parts whichever moved, so a map picked up and moved is pinned
+    /// there on every axis; a rotation keys the whole pose. A value moved by a
+    /// rate or a cycle is left to move: its authored value is what was edited.
+    fn autokey(&mut self, before: &EditSnapshot) {
+        use crate::track::{KeyValue, Source};
+        let mut was = before.scene.clone();
+        was.point_size = before.point_size;
+        was.haze = before.haze_amount;
+        was.exposure = before.exposure;
+        was.color_contrast = before.color_contrast;
+        was.color_falloff = before.color_falloff;
+        let now = self.scene_with_live_values();
+        if was.tracks != now.tracks {
+            return;
+        }
+        let Some(keys) = autokey_targets(&was, &now, &self.scene.tracks) else { return };
+        let t = self.time;
+        for (target, value) in keys {
+            match self.scene.tracks.iter().position(|tr| tr.target == target) {
+                Some(i) => {
+                    let Source::Keys { keys, integral, .. } = &mut self.scene.tracks[i].source else { continue };
+                    let value = match value {
+                        KeyValue::Number(x) if *integral => KeyValue::Number(x.round()),
+                        v => v,
+                    };
+                    if keys.iter().any(|k| std::mem::discriminant(&k.value) != std::mem::discriminant(&value)) {
+                        continue;
+                    }
+                    let key = crate::track::Key { t, value };
+                    match keys.iter().position(|k| (k.t - t).abs() < 1e-3) {
+                        Some(j) => keys[j] = key,
+                        None => {
+                            let j = keys.partition_point(|k| k.t < t);
+                            keys.insert(j, key);
+                        }
+                    }
+                }
+                None => {
+                    let start = match &value {
+                        KeyValue::Number(x) => toml::Value::Float(*x),
+                        KeyValue::Rotation(_) => toml::Value::Array(vec![toml::Value::Float(0.0); 3]),
+                        KeyValue::Other(v) => v.clone(),
+                    };
+                    // Only paths a track can take: the same check `-S` makes.
+                    let Ok(mut track) = crate::track::one_key(&target, t, start) else { continue };
+                    if crate::set::apply_to_doc(
+                        &mut match now.to_toml_string().ok().and_then(|s| s.parse::<toml_edit::DocumentMut>().ok()) {
+                            Some(d) => d,
+                            None => continue,
+                        },
+                        &track.spec_at(t, None),
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
+                    if let (KeyValue::Rotation(_), Source::Keys { keys, .. }) = (&value, &mut track.source) {
+                        keys[0].value = value.clone();
+                    }
+                    self.scene.tracks.push(track);
+                }
+            }
+        }
+    }
+
+    /// While record is armed and the clock is still, what the inspector and
+    /// the gizmos edit is the scene *at the playhead*: every keyed value is
+    /// put into the authored scene as the frame has it, so an edit starts
+    /// from what is on screen and the key it makes is the value you set.
+    ///
+    /// Not an edit and not in the history: a keyed value's authored value is
+    /// never seen (the keys override it), so the picture doesn't change. It
+    /// is written by Ctrl+S, which only changes what a muted or deleted track
+    /// would leave behind. Values the window keeps live (point size, haze,
+    /// exposure) are left alone; they don't go through the scene.
+    fn sync_record_base(&mut self) {
+        if !self.record_armed || self.playing || self.has_active_drag() {
+            return;
+        }
+        let at = (self.time.to_bits(), self.history.top_serial(), self.scene_generation);
+        if self.record_synced == Some(at) {
+            return;
+        }
+        self.record_synced = Some(at);
+        let specs: Vec<String> = self
+            .scene
+            .tracks
+            .iter()
+            .filter(|tr| !tr.mute && matches!(tr.source, crate::track::Source::Keys { .. }))
+            .filter(|tr| tr.class() != crate::track::Class::View)
+            .map(|tr| tr.spec_at(self.time, None))
+            .collect();
+        if specs.is_empty() {
+            return;
+        }
+        let Ok(text) = self.scene.to_toml_string() else { return };
+        let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else { return };
+        let mut changed = false;
+        for spec in &specs {
+            if let Ok(applied) = crate::set::apply_to_doc(&mut doc, spec) {
+                let new = spec.split_once('=').map(|(_, v)| v.trim());
+                changed |= applied.from.as_deref().map(str::trim) != new;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let dir = self.scene_path.as_deref().map(Path::new).and_then(Path::parent).unwrap_or(Path::new("."));
+        let Ok(mut synced) = Scene::from_toml_str(&doc.to_string(), dir) else { return };
+        synced.point_count = self.scene.point_count;
+        synced.point_count_defaulted = self.scene.point_count_defaulted;
+        if synced.transforms.len() != self.scene.transforms.len() {
+            return;
+        }
+        self.scene = synced;
+        self.bump_matrix_generation();
     }
 
     /// Record that the scene as it stands right now is what's on disk. Called
@@ -3214,6 +3373,7 @@ impl App {
             }
         }
         self.scene.subscenes.remove(k - 1);
+        crate::track::follow_subscenes(&mut self.scene.tracks, crate::track::ListChange::Removed(k - 1, Some(&name)));
         self.scene.xaos_matrix_layers.retain(|&l| l as usize != k);
         for l in &mut self.scene.xaos_matrix_layers {
             if *l as usize > k {
@@ -6188,11 +6348,10 @@ impl App {
         let before = self.edit_snapshot();
         // Tracks name maps the way `-S` does: by name, or by index where there
         // is none. Carry them over, or a rename leaves them aimed at nothing.
-        if self.scene.transforms[idx].layer == 0 {
-            let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
-            let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
-            crate::track::rename_map(&mut self.scene.tracks, &old, &new);
-        }
+        let refer = |n: &Option<String>| n.clone().unwrap_or_else(|| self.scene.layer_position(idx).to_string());
+        let (old, new) = (refer(&self.scene.transform_names[idx]), refer(&name));
+        let layer = crate::scene::map_layer(&self.scene.subscenes, self.scene.transforms[idx].layer);
+        crate::track::rename_map(&mut self.scene.tracks, layer, &old, &new);
         self.scene.transform_names[idx] = name;
         self.commit_edit(
             format!("Rename T{}", idx),
@@ -6309,7 +6468,9 @@ impl App {
     /// artwork. Turning `show_emphasis` off is the way to edit against the
     /// picture you are going to keep.
     fn emphasis_target(&self) -> Option<u32> {
-        if !self.show_emphasis || !self.show_gizmos {
+        // Nor while mute/solo is hiding points: the glow measures every point,
+        // hidden ones included, and would light material that isn't drawn.
+        if !self.show_emphasis || !self.show_gizmos || self.map_view.active() {
             return None;
         }
         self.selected_transform.map(|i| i as u32)
@@ -6326,6 +6487,35 @@ impl App {
             &self.point_compute.sensitivity_buffer,
             &self.point_compute.stats_buffer,
         );
+    }
+
+    /// Hand the mute/solo mask to the chaos pass and both renderers.
+    fn sync_map_view(&mut self) {
+        let n = self.scene.transforms.len();
+        if n != self.map_view_count {
+            self.map_view.clear();
+            self.map_view_count = n;
+        }
+        let hidden = self.map_view.hidden(n);
+        self.point_compute.set_hidden(&self.gpu.device, &self.gpu.queue, hidden.as_deref());
+        let binding = self.point_compute.mask_binding();
+        self.point_renderer.bind_mask(&self.gpu.device, &binding);
+        self.splat_renderer.bind_mask(&self.gpu.device, &binding);
+    }
+
+    /// Mute or unmute map `i`'s points (a view; see `map_view`).
+    pub fn toggle_map_mute(&mut self, i: usize) {
+        self.map_view.toggle_mute(i);
+    }
+
+    /// Solo or unsolo map `i`'s points; with `only`, this map alone, or
+    /// nothing soloed if it already was.
+    pub fn toggle_map_solo(&mut self, i: usize, only: bool) {
+        if only {
+            self.map_view.solo_only(i);
+        } else {
+            self.map_view.toggle_solo(i);
+        }
     }
 
     /// Whether the ring still holds points that predate the current emphasis
@@ -7518,7 +7708,20 @@ impl App {
             }
         }
         if self.playing {
-            if let Some(end) = self.timeline_end().filter(|&end| self.time >= end) {
+            if let Some((start, end)) = self.active_loop_region() {
+                // The region governs on its own: the timeline's end doesn't
+                // stop a loop set past it. Carried across the seam exactly as
+                // the whole-timeline loop is below.
+                if self.time >= end {
+                    let span = end - start;
+                    let back = ((self.time - start) / span).floor() * span;
+                    self.time -= back;
+                    if self.path_is_default() {
+                        self.camera_epoch -= back;
+                    }
+                    self.camera_lap = self.camera_local().floor() as i64;
+                }
+            } else if let Some(end) = self.timeline_end().filter(|&end| self.time >= end) {
                 if self.loop_playback && !self.scene.tracks.is_empty() {
                     // Round again. The default orbit is a cycle with no end of
                     // its own, so it is carried across the seam rather than
@@ -7542,6 +7745,7 @@ impl App {
             }
         }
         self.refresh_animation();
+        self.sync_record_base();
 
         // Keep the eye inside one zoom period. Last, so it catches the camera
         // however it moved this frame — dragged, scrolled, or flown along the
@@ -7630,7 +7834,99 @@ impl App {
                 self.camera_epoch = 0.0;
             }
         }
+        self.enter_loop_region();
         self.playing = true;
+    }
+
+    /// The loop region playback goes round in, when looping is on and a
+    /// region is set.
+    pub fn active_loop_region(&self) -> Option<(f64, f64)> {
+        self.loop_region.filter(|&(a, b)| self.loop_playback && b - a > 1e-3)
+    }
+
+    /// Set or clear the loop region (the Timeline's ruler). Its ends are put
+    /// in order, and setting one turns looping on: a region you just drew is
+    /// one you want to hear go round.
+    pub fn set_loop_region(&mut self, region: Option<(f64, f64)>) {
+        self.loop_region = region.map(|(a, b)| (a.min(b).max(0.0), a.max(b).max(0.0)));
+        if self.loop_region.is_some() {
+            self.loop_playback = true;
+        }
+    }
+
+    /// Play starting outside the loop region starts at its beginning, as a
+    /// DAW's does.
+    fn enter_loop_region(&mut self) {
+        if let Some((a, b)) = self.active_loop_region() {
+            if self.time < a || self.time >= b {
+                self.scrub_to(a);
+            }
+        }
+    }
+
+    /// Back to zero, playing or not (the transport's return-to-start).
+    pub fn return_to_start(&mut self) {
+        self.time = 0.0;
+        if !self.path_is_default() {
+            self.camera_epoch = 0.0;
+        }
+        self.camera_lap = self.camera_local().floor() as i64;
+    }
+
+    /// Frames a second, for showing the playhead in frames and stepping by
+    /// one: the Render job's, so a frame here is a frame of the file it writes.
+    pub fn frame_rate(&self) -> u32 {
+        self.ui_state.render_job.fps.max(1)
+    }
+
+    /// Step the playhead by `frames` frames (Left / Right), landing on a
+    /// whole frame.
+    pub fn step_frames(&mut self, frames: i64) {
+        let fps = self.frame_rate() as f64;
+        let here = (self.time * fps + 1e-6).floor() as i64;
+        let to = if frames < 0 && (self.time * fps - here as f64).abs() > 1e-6 { here } else { here + frames };
+        self.scrub_to(to as f64 / fps);
+    }
+
+    /// Every moment something is keyed: each track's keys and the camera's
+    /// own keys (not their repeats on later laps). Sorted, with repeats
+    /// dropped. What jumping between keys and snapping a dragged key go to.
+    pub fn key_times(&self) -> Vec<f64> {
+        let mut times: Vec<f64> = self
+            .scene
+            .tracks
+            .iter()
+            .flat_map(|t| match &t.source {
+                crate::track::Source::Keys { keys, .. } => keys.iter().map(|k| k.t).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        if !self.path_is_default() {
+            let p = self.camera_path();
+            times.extend((0..p.keys.len()).map(|k| p.time(k) as f64));
+        }
+        times.sort_by(f64::total_cmp);
+        times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        times
+    }
+
+    /// Put the playhead on the next key after it (`forward`) or the one
+    /// before (Shift+Right / Shift+Left). Returns false when there is none.
+    pub fn jump_to_key(&mut self, forward: bool) -> bool {
+        let times = self.key_times();
+        let here = self.time;
+        let to = if forward {
+            times.into_iter().find(|&t| t > here + 1e-4)
+        } else {
+            times.into_iter().rev().find(|&t| t < here - 1e-4)
+        };
+        match to {
+            Some(t) => {
+                self.scrub_to(t);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Mute or unmute one track (the Timeline window). An edit: it changes
@@ -7697,17 +7993,45 @@ impl App {
     /// index, or `None` for a track that isn't keyed (or already has a key at
     /// this moment).
     pub fn add_key_at_playhead(&mut self, i: usize) -> Option<usize> {
-        let t = self.time;
+        self.add_key_at(i, self.time, None)
+    }
+
+    /// Key track `i` at `t` seconds (the Timeline's right-click, a paste, a
+    /// duplicate): with `value`, that value, replacing a key already at that
+    /// moment; without, the value the track has there, leaving one already
+    /// there alone. Returns the key's index, or `None` for a track that isn't
+    /// keyed or a value of the wrong kind for it.
+    pub fn add_key_at(&mut self, i: usize, t: f64, value: Option<crate::track::KeyValue>) -> Option<usize> {
+        use crate::track::KeyValue;
+        let t = t.max(0.0);
         let track = self.scene.tracks.get(i)?;
         let crate::track::Source::Keys { keys, .. } = &track.source else { return None };
-        if keys.iter().any(|k| (k.t - t).abs() < 1e-3) {
-            return keys.iter().position(|k| (k.t - t).abs() < 1e-3);
-        }
-        let value = track.sample(t, None);
+        let existing = keys.iter().position(|k| (k.t - t).abs() < 1e-3);
+        // A number goes on a number track, a pose on a pose track; anything
+        // else only on a track already stepping between such values.
+        let fits = |v: &KeyValue| {
+            keys.iter().all(|k| std::mem::discriminant(&k.value) == std::mem::discriminant(v))
+        };
+        let value = match value {
+            Some(v) if !fits(&v) => return None,
+            Some(v) => v,
+            None if existing.is_some() => return existing,
+            None => track.sample(t, None),
+        };
         let before = self.edit_snapshot();
         let crate::track::Source::Keys { keys, .. } = &mut self.scene.tracks[i].source else { return None };
-        let at = keys.partition_point(|k| k.t < t);
-        keys.insert(at, crate::track::Key { t, value });
+        let key = crate::track::Key { t, value };
+        let at = match existing {
+            Some(j) => {
+                keys[j] = key;
+                j
+            }
+            None => {
+                let j = keys.partition_point(|k| k.t < t);
+                keys.insert(j, key);
+                j
+            }
+        };
         let target = self.scene.tracks[i].target.clone();
         self.commit_edit(format!("Key {target} at {t:.2}s"), None, before);
         Some(at)
@@ -8237,6 +8561,13 @@ impl App {
             HelpAction::ToggleGizmos => self.toggle_gizmos(),
             HelpAction::ToggleEmphasis => self.toggle_emphasis(),
             HelpAction::CameraMotion => self.toggle_camera_motion(),
+            HelpAction::StepFrame => {
+                if shift {
+                    self.jump_to_key(true);
+                } else {
+                    self.step_frames(1);
+                }
+            }
             HelpAction::PathKey => {
                 if shift {
                     self.remove_path_key()
@@ -8336,7 +8667,8 @@ impl App {
         // The emphasis is settled first, because what the chaos pass measures
         // this frame is part of the params this upload writes.
         self.sync_emphasis();
-        if self.emphasis_filling() || self.anim_churning() {
+        self.sync_map_view();
+        if self.emphasis_filling() || self.point_compute.mask_filling() || self.anim_churning() {
             // The ring still holds points measured against a different
             // transform. Churning at the fill rate replaces them in about a
             // second instead of thirteen, and changes nothing about the
@@ -8725,6 +9057,98 @@ mod tests {
     }
 }
 
+
+/// What an edit from `was` to `now` asks record to key, in the paths a track
+/// names (`App::autokey`): a vector as its three parts, a rotation as the
+/// whole pose (or the one angle, where `tracks` already keys that angle).
+/// `None` for an edit to the timeline itself, which keys nothing.
+fn autokey_targets(
+    was: &Scene,
+    now: &Scene,
+    tracks: &[crate::track::Track],
+) -> Option<Vec<(String, crate::track::KeyValue)>> {
+    use crate::scene_diff::Change;
+    use crate::track::KeyValue;
+    let changes = crate::scene_diff::diff(was, now).ok()?;
+    // The camera's keys are a `[[track]]` too.
+    if changes.iter().any(|c| matches!(c, Change::Replaced(p) | Change::Unset(p) if p.starts_with("track"))) {
+        return None;
+    }
+    // (target, value), in the parts a track names.
+    let mut keys: Vec<(String, KeyValue)> = Vec::new();
+    let mut push = |target: String, v: KeyValue| {
+        if !keys.iter().any(|(k, _)| *k == target) {
+            keys.push((target, v));
+        }
+    };
+    for c in &changes {
+        let Change::Set(set) = c else { continue };
+        let Some((path, text)) = set.split_once('=') else { continue };
+        if path.starts_with("camera.") {
+            continue;
+        }
+        let Some(value) = toml::from_str::<toml::Table>(&format!("v = {text}")).ok().and_then(|t| t.get("v").cloned())
+        else {
+            continue;
+        };
+        let number = |v: &toml::Value| v.as_float().or(v.as_integer().map(|i| i as f64));
+        // A rotation, by an angle, a triple or the exact form: the pose.
+        let stem = path
+            .strip_suffix(".rotvec")
+            .or_else(|| path.strip_suffix(".rotation"))
+            .or_else(|| path.rsplit_once(".rotation.").map(|(s, _)| s));
+        if let Some(stem) = stem.filter(|s| crate::track::takes_rotations(&format!("{s}.rotation"))) {
+            let whole = format!("{stem}.rotation");
+            // Keyed by one angle already: that angle stays its own track.
+            if path.contains(".rotation.") && tracks.iter().any(|tr| tr.target == path) {
+                if let Some(x) = number(&value) {
+                    push(path.to_string(), KeyValue::Number(x));
+                }
+                continue;
+            }
+            let pose = match crate::track::authored_value(now, &whole).ok().flatten() {
+                Some(toml::Value::Array(a)) => match a.iter().filter_map(number).collect::<Vec<_>>()[..] {
+                    [x, y, z] => Some(crate::track::RotKey::from_euler([x, y, z])),
+                    _ => None,
+                },
+                _ => match crate::track::authored_value(now, &format!("{stem}.rotvec")).ok().flatten() {
+                    Some(toml::Value::Array(a)) => match a.iter().filter_map(number).collect::<Vec<_>>()[..] {
+                        [x, y, z] => Some(crate::track::RotKey::from_rotvec(glam::vec3(x as f32, y as f32, z as f32))),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+            };
+            if let Some(pose) = pose {
+                push(whole, KeyValue::Rotation(pose));
+            }
+            continue;
+        }
+        match &value {
+            toml::Value::Array(a) if a.len() == 3 => {
+                let parts = if path.ends_with("color") || path.ends_with("background") { ["r", "g", "b"] } else { ["x", "y", "z"] };
+                for (part, v) in parts.iter().zip(a) {
+                    if let Some(x) = number(v) {
+                        push(format!("{path}.{part}"), KeyValue::Number(x));
+                    }
+                }
+            }
+            // A uniform scale is three equal parts, as the parameter
+            // tree offers it.
+            v if path.ends_with("scale") && number(v).is_some() => {
+                for part in ["x", "y", "z"] {
+                    push(format!("{path}.{part}"), KeyValue::Number(number(v).unwrap()));
+                }
+            }
+            v => match number(v) {
+                Some(x) => push(path.to_string(), KeyValue::Number(x)),
+                None => push(path.to_string(), KeyValue::Other(v.clone())),
+            },
+        }
+    }
+    Some(keys)
+}
+
 #[cfg(test)]
 mod axis_scale_tests {
     use super::*;
@@ -8848,5 +9272,74 @@ mod axis_scale_tests {
         assert!((axis_scale_length(0.63, 0.5, 0.5, true) - 0.6).abs() < 1e-6);
         assert!((axis_scale_length(0.66, 0.5, 0.5, true) - 0.7).abs() < 1e-6);
         assert!((axis_scale_length(0.6, 0.5, 1.2, true) + 0.1).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod autokey_tests {
+    use super::*;
+    use crate::track::KeyValue;
+
+    fn scene() -> Scene {
+        Scene::load(concat!(env!("CARGO_MANIFEST_DIR"), "/scenes/sierpinski.toml")).unwrap()
+    }
+
+    /// `scene` with `-S` specs applied, as an edit would leave it.
+    fn edited(scene: &Scene, specs: &[&str]) -> Scene {
+        let mut doc: toml_edit::DocumentMut = scene.to_toml_string().unwrap().parse().unwrap();
+        for s in specs {
+            crate::set::apply_to_doc(&mut doc, s).unwrap();
+        }
+        Scene::from_toml_str(&doc.to_string(), Path::new("scenes")).unwrap()
+    }
+
+    fn targets(was: &Scene, now: &Scene) -> Vec<String> {
+        autokey_targets(was, now, &was.tracks).unwrap().into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// A map picked up and moved keys its whole position, every axis, in the
+    /// paths the parameter tree offers.
+    #[test]
+    fn a_move_keys_the_whole_position() {
+        let a = scene();
+        let b = edited(&a, &["transform.1.translation.y=0.9"]);
+        assert_eq!(targets(&a, &b), ["transform.1.translation.x", "transform.1.translation.y", "transform.1.translation.z"]);
+        let keys = autokey_targets(&a, &b, &[]).unwrap();
+        assert_eq!(keys[1].1, KeyValue::Number(0.9));
+        let cat = crate::params::catalogue(&a);
+        for t in targets(&a, &b) {
+            assert!(cat.iter().any(|p| p.path == t), "{t} isn't something a track can start on");
+        }
+    }
+
+    /// A turn keys the pose, not one Euler angle.
+    #[test]
+    fn a_turn_keys_the_pose() {
+        let a = scene();
+        let b = edited(&a, &["transform.2.rotation.z=30.0"]);
+        let keys = autokey_targets(&a, &b, &[]).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, "transform.2.rotation");
+        assert!(matches!(keys[0].1, KeyValue::Rotation(r) if r.euler == Some([0.0, 0.0, 30.0])));
+    }
+
+    #[test]
+    fn a_weight_keys_a_number() {
+        let a = scene();
+        let b = edited(&a, &["transform.0.variations.julia=0.4"]);
+        let keys = autokey_targets(&a, &b, &[]).unwrap();
+        assert!(keys.iter().any(|(t, v)| t == "transform.0.variations.julia" && *v == KeyValue::Number(0.4)), "{keys:?}");
+    }
+
+    /// Editing the timeline itself is not something to key.
+    #[test]
+    fn a_timeline_edit_keys_nothing() {
+        let a = scene();
+        let mut b = a.clone();
+        b.camera_path = Some(crate::path::CameraPath::new(
+            vec![crate::path::PathKey::from_camera(&OrbitCamera::from_chart(0.3, 0.2, 0.0, 3.0, Vec3::ZERO))],
+            crate::path::Loop::Once,
+        ));
+        assert!(autokey_targets(&a, &b, &[]).is_none_or(|k| k.is_empty()));
     }
 }

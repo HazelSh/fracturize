@@ -199,10 +199,14 @@ pub fn roll_seeded(settings: &RandomSettings, base: &Scene, seed: u64) -> Result
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut rolled = generate(settings, base, Action::Roll, &mut rng);
-    let name = format!("random-{seed}");
-    match &mut rolled {
-        Ok(r) => r.scene.name = name,
-        Err(f) => f.last.name = name,
+    // A roll keeps its base's name; from the blank scene, which has none of
+    // its own, it is named after its seed.
+    if !settings.parts.no_form() && roll::is_blank(base) {
+        let name = format!("random-{seed}");
+        match &mut rolled {
+            Ok(r) => r.scene.name = name,
+            Err(f) => f.last.name = name,
+        }
     }
     rolled
 }
@@ -406,6 +410,83 @@ mod tests {
         assert_eq!(backed_off(1.0, 9, 4), 0.25);
         assert_eq!(backed_off(1.0, 1000, 4), 1.0 / 16.0);
         assert_eq!(backed_off(2.0, 1000, 0), 2.0, "0 never backs off");
+    }
+
+    fn scene_file(name: &str) -> Scene {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes").join(name);
+        Scene::load(path.to_str().unwrap()).unwrap()
+    }
+
+    fn builtin(name: &str) -> RandomSettings {
+        profile::load(&profile::Entry::builtin(name)).unwrap().settings
+    }
+
+    /// A roll that leaves the form alone leaves everything about it alone:
+    /// the animation, the camera's flight, the zoom, the name.
+    #[test]
+    fn a_recolour_keeps_the_animation_and_the_flight() {
+        let base = scene_file("parasol_tide_opus55.toml");
+        assert!(!base.tracks.is_empty() && base.camera_path.is_some(), "the worked example animates");
+        let rolled = roll_seeded(&builtin("colour-only"), &base, 11).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        // The tracks and the camera's flight, as the file writes them.
+        let animation = |s: &Scene| s.to_toml_string().unwrap().split_once("[[track]]").map(|(_, t)| t.to_string());
+        assert_eq!(rolled.tracks, base.tracks);
+        assert_eq!(animation(&rolled), animation(&base));
+        assert_eq!(rolled.name, base.name);
+        let zoom = scene_file("wellspiral.toml");
+        let rolled = roll_seeded(&builtin("colour-only"), &zoom, 11).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!(rolled.zoom, zoom.zoom, "a recolour keeps its infinite zoom");
+        assert_eq!(animation(&rolled), animation(&zoom), "and its zoom loop");
+    }
+
+    /// A roll of the whole form changes what it draws and nothing else: the
+    /// name, the author and every setting the dice have no part for stay the
+    /// base's. Only a roll from the blank scene is named for its seed.
+    #[test]
+    fn a_roll_keeps_what_it_doesnt_draw() {
+        let base = scene_file("parasol_tide_opus55.toml");
+        let rolled = roll_seeded(&RandomSettings::default(), &base, 3).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!((rolled.name.as_str(), rolled.author.as_str()), (base.name.as_str(), base.author.as_str()));
+        assert_eq!((rolled.haze, rolled.exposure, rolled.decay), (base.haze, base.exposure, base.decay));
+        assert_eq!(rolled.color_contrast, base.color_contrast);
+        assert!(rolled.camera_orientation.angle_to(base.camera_orientation) < 1e-6, "the view keeps its direction");
+        let ratio = rolled.point_size / base.point_size;
+        assert!((ratio - rolled.camera_distance / base.camera_distance).abs() < 1e-4, "dots keep their size against the framing");
+        let fresh = roll_seeded(&RandomSettings::default(), &Scene::blank(), 3).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!(fresh.name, "random-3");
+        assert_eq!(fresh.author, "", "the dice aren't credited");
+    }
+
+    /// A roll draws the scene's own maps, so a composite's subscenes come
+    /// through even a roll of the whole form.
+    #[test]
+    fn a_roll_keeps_a_composites_subscenes() {
+        let base = scene_file("censer.toml");
+        let rolled = roll_seeded(&RandomSettings::default(), &base, 5).map(|r| r.scene).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!(rolled.subscenes.len(), base.subscenes.len());
+        let layered = |s: &Scene| {
+            s.transforms.iter().filter(|t| t.layer != 0).map(|t| (t.layer, t.matrix, t.variations.clone())).collect::<Vec<_>>()
+        };
+        assert_eq!(layered(&rolled), layered(&base));
+        assert_eq!(rolled.camera_focus, base.camera_focus, "the composition keeps its framing");
+        // And it is a scene the loader takes back.
+        let text = rolled.to_toml_string().unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes");
+        Scene::from_toml_str(&text, &dir).unwrap();
+    }
+
+    /// Mutations of an animated scene keep it animated, and every child
+    /// saves to a scene that loads with its tracks.
+    #[test]
+    fn mutations_keep_an_animated_scene_animated() {
+        let base = scene_file("parasol_tide_opus55.toml");
+        for seed in 0..12 {
+            let Ok(child) = mutate_seeded(&builtin("anything"), &base, seed).map(|r| r.scene) else { continue };
+            assert!(!child.tracks.is_empty(), "seed {seed} lost the animation");
+            let text = child.to_toml_string().unwrap();
+            let back = Scene::from_toml_str(&text, &std::env::temp_dir()).unwrap();
+            assert_eq!(back.tracks.len(), child.tracks.len(), "seed {seed}");
+        }
     }
 
     /// Every built-in profile rolls and mutates, and a part that's off is

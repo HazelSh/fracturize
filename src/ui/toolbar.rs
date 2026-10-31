@@ -564,8 +564,8 @@ pub(super) fn point_count_label(capacity: u32) -> String {
     }
 }
 
-/// Renderer mode, point count, edit/view mode and camera transport — the
-/// four settings that get changed most often mid-exploration.
+/// Renderer mode, point count, edit/view mode and the transport — the
+/// settings that get changed most often mid-exploration.
 fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     render_panel::render_mode(ui, app);
 
@@ -693,33 +693,7 @@ fn draw_quick_controls(ui: &mut egui::Ui, app: &mut App) {
     }
     ui.spacing_mut().item_spacing.x = spacing;
 
-    // Same defect, same fix: "Play" and "Pause" aren't the same width either,
-    // so this button used to shift whatever sat to its right when clicked.
-    let moving = app.camera_moving();
-    let play_width = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
-    let resp = ui.add(
-        egui::Button::new(if moving {
-            (icons::PAUSE, "Pause", egui::Atom::grow())
-        } else {
-            (icons::PLAY, "Play", egui::Atom::grow())
-        })
-        .min_size(egui::vec2(play_width, 0.0)),
-    );
-    let resp = hinted(
-        resp,
-        &mut app.ui_state,
-        if moving {
-            "Stop the camera (O, Z or Space)"
-        } else {
-            "Fly the camera along its path (O, Z or Space)"
-        },
-        if moving {
-            "click: stop the camera"
-        } else {
-            "click: start the camera moving"
-        },
-    );
-    if resp.clicked() {
-        app.toggle_camera_motion();
-    }
+    // The transport: record, return to start, play, the time, loop.
+    ui.separator();
+    super::transport::draw(ui, app);
 }

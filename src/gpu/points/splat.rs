@@ -128,6 +128,11 @@ pub struct SplatRenderer {
     accum_bind_group: BindGroup,
     tonemap_layout: BindGroupLayout,
     pub camera_buffer: Buffer,
+    // What `accum_bind_group` is rebuilt from when the mute/solo pair changes.
+    accum_layout: BindGroupLayout,
+    point_buffer: Buffer,
+    colormap_buffer: Buffer,
+    mask: super::mask::Binding,
     params_buffer: Buffer,
     /// Volume mode's uniform. Bound to every splat draw, plain ones included
     /// (they never read it), so the layout is one layout; zero-initialised,
@@ -298,6 +303,7 @@ impl SplatPipelines {
 
         // Accumulation bind group: points, camera, colormap (same shape as
         // the point renderer's)
+        let mask_entries = super::mask::layout_entries(4);
         let accum_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("splat_accum_bind_group_layout"),
             entries: &[
@@ -346,6 +352,9 @@ impl SplatPipelines {
                     },
                     count: None,
                 },
+                // Mute/solo: 4, the map record; 5, the mask
+                mask_entries[0],
+                mask_entries[1],
             ],
         });
 
@@ -722,28 +731,16 @@ impl SplatRenderer {
             mapped_at_creation: false,
         });
 
-        let accum_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("splat_accum_bind_group"),
-            layout: &accum_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: point_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: colormap_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: volume_params_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let mask = super::mask::Binding::stand_in(device);
+        let accum_bind_group = Self::make_accum_bind_group(
+            device,
+            &accum_layout,
+            point_buffer,
+            &camera_buffer,
+            colormap_buffer,
+            &volume_params_buffer,
+            &mask,
+        );
 
         Self {
             volume_params_buffer,
@@ -759,11 +756,57 @@ impl SplatRenderer {
             accum_bind_group,
             tonemap_layout,
             camera_buffer,
+            accum_layout,
+            point_buffer: point_buffer.clone(),
+            colormap_buffer: colormap_buffer.clone(),
+            mask,
             params_buffer,
             accum: None,
             supersample: None,
             dither: 0.0,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_accum_bind_group(
+        device: &Device,
+        layout: &BindGroupLayout,
+        point_buffer: &Buffer,
+        camera_buffer: &Buffer,
+        colormap_buffer: &Buffer,
+        volume_params_buffer: &Buffer,
+        mask: &super::mask::Binding,
+    ) -> BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat_accum_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: point_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: camera_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: colormap_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: volume_params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: mask.maps.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: mask.mask.as_entire_binding() },
+            ],
+        })
+    }
+
+    /// Clip against this mute/solo pair (`PointCompute::mask_binding`). A
+    /// no-op unless the pair is a different one from last time.
+    pub fn bind_mask(&mut self, device: &Device, mask: &super::mask::Binding) {
+        if mask.generation == self.mask.generation {
+            return;
+        }
+        self.mask = mask.clone();
+        self.accum_bind_group = Self::make_accum_bind_group(
+            device,
+            &self.accum_layout,
+            &self.point_buffer,
+            &self.camera_buffer,
+            &self.colormap_buffer,
+            &self.volume_params_buffer,
+            &self.mask,
+        );
     }
 
     /// Turn on supersampling for this renderer. Offline only — see

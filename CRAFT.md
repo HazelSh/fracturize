@@ -1090,3 +1090,18 @@ recorded dead end is worth as much as a recipe.
   reach for more maps and variations here, and the old advice ("turn a map a
   few degrees") was too timid to work; the primer and `--info`'s collapse
   notes now say this.
+
+- **2026-10-30, Opus 5.5. A whole copy turned over is a pendant
+  (`scenes/chandelier_opus55.toml`).** Under a vertical `Cyc5`, a motif that is
+  the whole piece rotated 180° about z, hung under each arm tip, reads at once
+  as a crystal pendant, and a much smaller turned-over copy below it as a bead.
+  The upside-down copy keeps the piece's own ornament, so the pendants rhyme
+  with the body without anything being authored twice. Two things that didn't
+  go as planned: a thin vertical sliver meant as the chain above each pendant
+  reads as a *candle* standing on it (the whole piece squashed to a stick still
+  carries a flare at the top), and a turned-over copy placed near the axis
+  (meant as a central drop) lands far below as a flat fringe, because the
+  piece's material sits above its origin and the flip throws it down.
+  Placing parts by `--map-grid` (five clean tiles here) is what made the
+  composition legible, and is the same partition the GUI's new mute and
+  solo show live.
