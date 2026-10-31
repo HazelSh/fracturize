@@ -79,7 +79,9 @@ fn rasterize(scene: &Scene, cam: &OrbitCamera, s: &Setup, pts: &[(Vec3, Vec3)]) 
     let th = cam.fov.tan_half();
     let (wf, hf) = (s.w as f32, s.h as f32);
     let aspect = wf / hf;
-    let radius_world = 0.5 * scene.point_size * cam.fov.point_scale();
+    // World size held whatever the lens (the GPU's rule too; equal to the
+    // first prototype's `* fov.point_scale()` at the default 45 degrees).
+    let radius_world = 0.5 * scene.point_size;
     let mut px: Vec<Vec<Frag>> = vec![Vec::new(); s.w * s.h];
     for &(p, rgb) in pts {
         let v = (view * p.extend(1.0)).xyz();

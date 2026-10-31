@@ -340,7 +340,11 @@ impl GlassRenderer {
             point_count: frame.point_count,
             color_rgb_mode: frame.rgb_mode as u32,
             ppw_unit: p.h as f32 / (2.0 * frame.fov.tan_half()),
-            radius_world: 0.5 * frame.point_size * frame.fov.point_scale(),
+            // A dot holds its world size whatever the lens: glass projects
+            // with the true tangent, so `Fov::point_scale` (the other
+            // renderers' correction for projecting without it) doesn't apply.
+            // Applied, a 1-degree axis pane's dots came out 47 times too big.
+            radius_world: 0.5 * frame.point_size,
             tau_point: frame.sigma * length * length / n as f32,
             near: frame.near,
             max_radius_px: MAX_RADIUS_PX,

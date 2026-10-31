@@ -89,27 +89,64 @@ thick pixels.** **K is a setting, not a constant**: live, offline and in the
 prototype. Hazel wants to be able to scale it up. Start live at 8; expect
 offline stills to want 16–32. See the findings for why.
 
-### On the GPU (not built yet; notes for whoever builds it)
+### On the GPU (built in slice 1)
 
-- **K-list entries are one `u32` each**: depth in the high bits and tau,
-  quantised to log scale, in the low byte, so `atomicMin` keeps the pair
-  together and sorted. View-space depth is positive, so its float bits sort as
-  an unsigned int; shifting off 8 mantissa bits is fine. The prototype stores
-  exact floats, so try the quantisation there first.
-- **Insertion**: read the K-th slot with a plain load first and skip if the
-  fragment is behind it. Otherwise bubble it in with `atomicMin` down the
-  list. Chaos points arrive in random depth order, so a pixel with n
-  fragments sees only about `K·(1 + ln(n/K))` insertions. Most fragments in a
-  hot pixel cost one read. This matters: the prototype's busiest pixel holds
-  30k of 3M fragments, and AGENTS.md records what one hot texel does to
-  blending throughput.
-- **The tau total and the two weight sums use ordinary additive hardware
-  blending** into float targets, with no atomics. The farthest depth is one
-  `atomicMax`.
-- **Memory**: K × 4 bytes a pixel for the list, plus a few float targets.
-  K = 8 at 1440×860 is about 40 MB; K = 64 is about 320 MB. Clearing it each
-  frame is a real cost on the T490, so measure it there.
-- **Throttle GPU benchmarks.** The desktop GPU is Hazel's display as well.
+`src/gpu/points/glass.rs`, `shaders/points/glass_common.wgsl`, `glass.wgsl`
+(the two passes) and `glass_resolve.wgsl`. What it does, and what changed
+from the notes this section used to hold:
+
+- **Rasterised in compute**, a thread a point, not through the hardware. The
+  thread does the prototype's own projection, disc and feather, so the dot
+  rule is a transcription rather than an imitation, and there is no
+  billboard/point-primitive switch. Discs are cropped at 8 px radius (a dot
+  that close is faint per pixel anyway).
+- **Every per-pixel quantity is an atomic `u32`**, in one 32-byte row a
+  pixel: total tau and the colour sums as fixed point (tau to 1e-6, weights
+  to 2.4e-7), the far depth as float bits (`atomicMax`, after a plain read
+  says it's needed), and the K-list's own tau, kept as entries come and go.
+  The plan said hardware blending into float targets; that would have meant
+  fp32 blending (fp16 stalls on small increments) and a raster pipeline, and
+  atomics were simpler and exact.
+- **K-list words** as planned: depth bits with tau log-quantised into the
+  low byte (8 steps an octave). Stored *inverted*, so a cleared buffer is
+  empty and `atomicMax` bubbles nearest-first. Sorted insertion it is: an
+  unsorted list with compare-exchange was tried and livelocked in hot pixels
+  (97 ms at K = 64).
+- **The weigh pass is O(1) for tail fragments**: the K-th slot plus the row.
+  Only the K listed fragments walk the list, stopping at the first entry not
+  in front. A fragment with more than tau 9 in front of it is skipped (all of
+  it together is under 0.012% of the colour). Capping the *total* near
+  opacity was tried and is wrong: the tail's share of the total ranks the
+  fragments behind the K-th, so it shifted thick pixels' colour.
+- **Dot size holds in world units whatever the lens** (`radius = point_size /
+  2`). The prototype's `* fov.point_scale()` is the other renderers'
+  correction for projecting without the lens's tangent; glass projects with
+  it, and a 1° axis pane's dots came out 47× too big. Same at 45°, so the
+  findings above stand.
+- **Panes**: each pane clears its own rows and resolves in its viewport.
+  Each is its own submit, as with the other renderers.
+- Hidden points (`--isolate`, mute/solo) add nothing; the zoom edge guard
+  scales tau. **No haze yet, and it writes no depth**, so gizmos always draw
+  over it.
+
+**Checked against the prototype on the same points**:
+`glass_gpu_matches_prototype` (ignored, needs a GPU) uploads the prototype's
+points and compares with `front_k`: RMSE 0.00004–0.00009 on lacewing,
+reliquary (K = 4, 8, 16) and apollonian_spheres. The worst single channel,
+0.003–0.018, is the byte-quantised tau.
+
+**Cost**, `glass_gpu_speed` (throttled, 1440×860, lacewing, GTX 1080), the
+whole frame's glass work:
+
+| points | K = 8 | K = 16 | K = 64 |
+|---|---|---|---|
+| 2M | 9.5 ms | 12.4 ms | 24.6 ms |
+| 8M | 33 ms | | |
+
+About 1 ms is clearing and resolving. At 2M and K = 8 the tau `atomicAdd`
+alone is 1.3 ms, and **the K-list insertion is most of the rest**: in sparse
+pixels nearly every fragment inserts, so the "one read for most fragments"
+saving only applies in dense ones. That's slice 2's problem.
 
 ## Decided
 
@@ -141,8 +178,12 @@ offline stills to want 16–32. See the findings for why.
 - **Mute/solo, `--isolate`, transparent output.** Hidden points should
   presumably add no tau. With `--transparent`, alpha is just
   `1 - exp(-tau_total)`.
-- **Where σ and K live.** Session state first (sliders in the Render window).
-  Scene, view or prefs data once we know which is right.
+- **Where σ and K live.** Session state first (sliders in the Render window,
+  under Session, as "opacity" and "depth layers"). Scene, view or prefs data
+  once we know which is right.
+- **Gizmos over glass.** It writes no depth, so the in-world UI is never
+  hidden by it. Writing the depth where the pixel crosses some opacity is the
+  obvious fix, if it's wanted.
 
 ## The prototype
 
@@ -258,9 +299,13 @@ The goal of slice 1 is a build Hazel can look at, not a finished feature.
 
 ## Slices
 
-1. **Live, in the window** (above).
+1. **Live, in the window** (above). **Built 2026-11-01** on branch `glass`,
+   staged through tryout for Hazel to look at.
 2. **Afford K.** Frame rate and memory at K = 4, 8, 16, 32, 64 on the 1080,
-   then the T490. Pick defaults, probably different live and offline.
+   then the T490. Pick defaults, probably different live and offline. Start
+   with the insertion cost in sparse pixels (see "Cost" above): ideas are a
+   per-pixel fragment count from a cheap first pass so sparse pixels skip
+   the list, or fewer, wider threads per pixel tile.
 3. **Offline stills** (`--glass`, the render dialog). Decide how it meets
    `--supersample` (the dot rule holds at any resolution, so perhaps it just
    works).
