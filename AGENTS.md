@@ -1416,8 +1416,17 @@ How it's put together, and what it rests on:
   pane the UI found under the pointer (`UiState::grid_hover`). Gizmos, labels,
   the ring, traces, emphasis and the xaos overlay aren't drawn.
 - **A pick doesn't stop the flight.** Elsewhere a press takes the camera off
-  its path; in grid view only a press that moves does, because a pick isn't a
-  grab and stopping the camera to choose would lose the view you chose from.
+  its path; in grid view only a press that becomes a drag does, because a pick
+  isn't a grab and stopping the camera to choose would lose the view you chose
+  from. The drag then applies the hand's whole travel so far at once.
+- **A click is told from a drag by two signals**, because here a click
+  replaces the scene (`grid_press_is_click`): under `GRID_CLICK_SLOP_PT` (6
+  logical points) of travel, latched, *and* released inside
+  `GRID_CLICK_MAX_HOLD` (0.5 s), on the tile it was pressed on. A slow nudge
+  or a held press never picks, so holding and releasing cancels. Neither
+  costs a drag any feel: the camera still follows the hand from the first
+  pixel, and a press that ends as a click puts the camera back where it was
+  at the press (`GridPress`), so its wobble doesn't stay.
 - **Each pane is its own ring** (`gpu::thumbs::GridPanes`, a `Thumbnail` with
   `with_ring`): the window's point budget divided between the panes, 64k to
   1M each, 16,384 walkers, converged once. Redrawn from the camera only when
