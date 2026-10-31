@@ -149,6 +149,7 @@ src/
       splat.rs     # Splat mode: additive log-density accumulation + tonemap;
                    # also volume mode's passes (spans, slices, weighted emission)
       volume.rs    # Volume mode's uniform, reference length, slice constants
+      glass.rs     # Glass mode: see-through dots, front-K + counted tail (compute)
       mask.rs      # Mute/solo: the per-point map record, the mask, the mixer rules
       moments.rs   # The retired moment reconstruction, kept for the reference
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
@@ -160,6 +161,7 @@ shaders/
   points/chaos.wgsl   # Chaos game + the 20 variation functions
   points/render.wgsl  # vs_main (quads), vs_point (1px points), shared fs
   points/splat.wgsl   # Splat accumulate (gaussian kernels) + log tonemap
+  points/glass*.wgsl  # Glass: common struct, the two compute passes, the resolve
   gizmo.wgsl
 scenes/          # TOML scene files
 ```
@@ -186,7 +188,7 @@ All GPU, three passes per frame:
    apply affine matrix, blend the 20 variation functions by weight, then apply the
    post-affine matrix (identity unless the scene sets one). Diverged or
    NaN walkers are re-seeded randomly (important for nonlinear variations).
-2. **Point render** — three interchangeable modes over the same point buffer
+2. **Point render** — four interchangeable modes over the same point buffer
    (`R` cycles live; `--splat`, `--volume` / a view's `renderer = "splat"` or
    `"volume"` select at launch):
    - **points** (`points/render.wgsl`, default): opaque depth-tested points with
@@ -320,6 +322,23 @@ All GPU, three passes per frame:
      is the check that the reference is the same transport. Use it before
      retuning anything here. `FRACTURIZE_VOLUME_STATS=1` prints the absorbance
      field's median, p90 and p99.
+   - **glass** (`points/glass.rs`, `shaders/points/glass*.wgsl`; live window
+     only so far): the attractor as an absorbing, tinted fog, each point a
+     flat disc of its colour, partly transparent. **A fresh renderer, not built
+     on volume, points or splat**; the design, decisions and open questions
+     are in `GLASS-RENDERER-PLAN.md`, and `src/glass_proto.rs` is its CPU
+     reference. A dot carries `σ·L²/N` of absorbance spread over the larger
+     of its disc and its pixel, so point count changes grain, never the look.
+     Per pixel: the total absorbance exactly, the K nearest fragments in
+     depth order, the rest assumed spread evenly to the farthest depth; the
+     colour is the mean weighted by what lies in front of each fragment. It
+     rasterises in **compute** (a thread a point, atomics into storage
+     buffers), not through the hardware, so the disc and feather are the
+     prototype's own. σ and K are session sliders in the Render window.
+     `glass_gpu_matches_prototype` (ignored, needs a GPU) feeds the
+     prototype's own points through the GPU path and compares: RMSE ~1e-4.
+     Not yet: haze, gizmo occlusion (it writes no depth), offline renders,
+     views and the CLI.
 3. **Gizmos, traces + indicators**: optional overlays (see keybinds). Traces
    (X) are CPU walkers (trace.rs ports the 20 variations from chaos.wgsl —
    keep them in sync!) rendered as alpha-faded line segments; they regenerate
@@ -602,7 +621,7 @@ and `--render` prints whichever form the framing it landed on needs.
 | J / K / L | selected transform's color: hue / saturation / value up (+Shift = down) |
 | E / Shift+E | cycle the variation slot targeted by - / = (shown in the status bar) |
 | - / = | targeted variation weight down / up (0.05 steps) on selected transform |
-| R | cycle renderer: points / splat (additive log-density) / volume (splat with absorption; skipped without fp32 blending) |
+| R | cycle renderer: points / splat (additive log-density) / volume (splat with absorption; skipped without fp32 blending) / glass (see-through dots) |
 | W / Shift+W | splat exposure up / down |
 | [ / ] | shrink / grow point size |
 | D / Shift+D | finer / coarser color detail (color_falloff) |

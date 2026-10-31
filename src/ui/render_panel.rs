@@ -70,6 +70,18 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
                 );
                 draw_opacity(ui, app);
             }
+            // Glass's two dials are session state too, for now (see
+            // GLASS-RENDERER-PLAN.md, "Where sigma and K live").
+            if app.render_mode == RenderMode::Glass {
+                ui.add_space(6.0);
+                class_heading(
+                    ui,
+                    "Session",
+                    "Lasts until you quit. Not saved with the scene, a view or your \
+                     preferences.",
+                );
+                draw_glass(ui, app);
+            }
 
             ui.add_space(6.0);
             class_heading(
@@ -84,7 +96,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.render_open = open;
 }
 
-/// The points/splat/volume segmented radio, shared by this panel and the
+/// The points/splat/volume/glass segmented radio, shared by this panel and the
 /// toolbar.
 ///
 /// A radio rather than toggles: there are exactly three renderers and the
@@ -122,6 +134,14 @@ pub fn render_mode(ui: &mut egui::Ui, app: &mut App) {
             } else {
                 "unavailable on this GPU"
             },
+        )
+        .option(
+            RenderMode::Glass,
+            "glass",
+            "See-through dots: the attractor as a tinted fog, where near material partly \
+             hides what is behind it. Thicker regions look more solid, not brighter. \
+             The opacity and depth layers are under Session (R)",
+            "click: switch to the glass renderer",
         )
         .show(ui);
     if let Some(mode) = chosen {
@@ -184,6 +204,50 @@ fn draw_opacity(ui: &mut egui::Ui, app: &mut App) {
     );
     if resp.changed() {
         app.set_opacity(opacity);
+    }
+}
+
+fn draw_glass(ui: &mut egui::Ui, app: &mut App) {
+    use crate::gpu::points::glass::{MAX_K, MAX_SIGMA, MIN_K};
+    let mut sigma = app.glass_sigma;
+    let resp = ui.add(
+        egui::Slider::new(&mut sigma, 0.0..=MAX_SIGMA)
+            .logarithmic(true)
+            .smallest_positive(0.05)
+            .text("opacity"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "How opaque the material is. About 0.5 is smoky glass you can see right \
+         through; 2 shows the depth; past 30 it is nearly a solid surface. It looks \
+         the same at any point count, window size or camera distance.",
+        "drag: adjust glass opacity",
+    );
+    if resp.changed() {
+        app.set_glass_sigma(sigma);
+    }
+
+    // K moves in powers of two, so the slider runs over the exponent.
+    let (lo, hi) = (MIN_K.trailing_zeros(), MAX_K.trailing_zeros());
+    let mut exp = app.glass_k.trailing_zeros();
+    let resp = ui.add(
+        egui::Slider::new(&mut exp, lo..=hi)
+            .custom_formatter(|v, _| format!("{}", 1u32 << (v as u32)))
+            .custom_parser(|s| s.trim().parse::<u32>().ok().map(|k| k.max(1).next_power_of_two().trailing_zeros() as f64))
+            .text("depth layers"),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "How many of the nearest dots each pixel keeps in exact depth order. More \
+         layers get the colour of thick, dense regions right (with few, colour from \
+         deep inside leaks forward a little) and cost memory and frame rate. How \
+         opaque a pixel is doesn't depend on it.",
+        "drag: adjust glass depth layers",
+    );
+    if resp.changed() {
+        app.set_glass_k(1 << exp);
     }
 }
 

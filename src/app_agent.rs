@@ -196,6 +196,7 @@ impl App {
             super::RenderMode::Points => "points",
             super::RenderMode::Splat => "splat",
             super::RenderMode::Volume => "volume",
+            super::RenderMode::Glass => "glass",
         };
         let mut v = json!({
             "scene_path": self.scene_path,
@@ -487,6 +488,7 @@ impl App {
             super::RenderMode::Points => "points",
             super::RenderMode::Splat => "splat",
             super::RenderMode::Volume => "volume",
+            super::RenderMode::Glass => "glass",
         };
         let job = agent_local::Job {
             prefs,

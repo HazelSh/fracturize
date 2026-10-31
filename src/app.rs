@@ -598,6 +598,8 @@ pub enum RenderMode {
     Points,
     Splat,
     Volume,
+    /// Partly transparent dots of an absorbing fog (`GLASS-RENDERER-PLAN.md`).
+    Glass,
 }
 
 impl RenderMode {
@@ -612,6 +614,7 @@ impl RenderMode {
             RenderMode::Points => "points",
             RenderMode::Splat => "splat (additive log-density)",
             RenderMode::Volume => "volume (splat with absorption)",
+            RenderMode::Glass => "glass (see-through dots)",
         }
     }
 }
@@ -1115,6 +1118,17 @@ pub struct App {
     volume_bounds: Option<(Vec3, f32)>,
     volume_bounds_key: u64,
 
+    /// Glass: the renderer, and its two dials. Both **session state** for
+    /// now, as `GLASS-RENDERER-PLAN.md` says: sigma is the material's
+    /// opacity, K how many fragments a pixel keeps in depth order.
+    glass_renderer: crate::gpu::points::GlassRenderer,
+    pub glass_sigma: f32,
+    pub glass_k: u32,
+    /// A composite's reference length for glass, keyed on
+    /// `attractor_fingerprint` (the plain attractor's walk describes none).
+    glass_length: Option<f32>,
+    glass_length_key: u64,
+
     /// The tonemap grade — gamma, its threshold, and vibrancy.
     ///
     /// Live, and exactly live: the grade is a pure function of the accumulated
@@ -1394,6 +1408,8 @@ impl App {
             &point_compute.colormap_buffer,
         );
 
+        let glass_renderer = crate::gpu::points::GlassRenderer::new(&gpu.device);
+
         let emphasis_renderer = EmphasisRenderer::new(
             &gpu.device,
             gpu.format,
@@ -1628,6 +1644,11 @@ impl App {
                 .clamp(0.0, crate::gpu::points::volume::MAX_OPACITY),
             volume_bounds: None,
             volume_bounds_key: 0,
+            glass_renderer,
+            glass_sigma: crate::gpu::points::glass::DEFAULT_SIGMA,
+            glass_k: crate::gpu::points::glass::DEFAULT_K,
+            glass_length: None,
+            glass_length_key: 0,
             grade: grade.clamped(),
             show_traces: false,
             scene,
@@ -2553,9 +2574,11 @@ impl App {
                 RenderMode::Splat => Some("splat".to_string()),
                 // The mode is saved; the opacity is session state and is not.
                 RenderMode::Volume => Some("volume".to_string()),
+                // Live only for now: a view records no glass, and opens as points.
+                RenderMode::Glass => None,
             },
             exposure: match self.render_mode {
-                RenderMode::Points => None,
+                RenderMode::Points | RenderMode::Glass => None,
                 RenderMode::Splat | RenderMode::Volume => Some(self.exposure),
             },
             // Only under splat, and only when the grade actually says
@@ -6831,12 +6854,13 @@ impl App {
     }
 
     pub fn toggle_render_mode(&mut self) {
-        // Points, splat, volume, round again. A GPU without fp32 blending has
+        // Points, splat, volume, glass, round again. A GPU without fp32 blending has
         // no volume mode, and the cycle simply skips it.
         self.render_mode = match self.render_mode {
             RenderMode::Points => RenderMode::Splat,
             RenderMode::Splat if self.volume_available() => RenderMode::Volume,
-            RenderMode::Splat | RenderMode::Volume => RenderMode::Points,
+            RenderMode::Splat | RenderMode::Volume => RenderMode::Glass,
+            RenderMode::Glass => RenderMode::Points,
         };
         log::info!("Renderer: {}", self.render_mode.label());
     }
@@ -6941,6 +6965,41 @@ impl App {
     /// Render window greys the segment out, saying why, when it cannot.
     pub fn volume_available(&self) -> bool {
         self.splat_renderer.volume_available()
+    }
+
+    /// Set glass's material opacity, sigma (the Render window's slider).
+    /// Session state, like volume's opacity.
+    pub fn set_glass_sigma(&mut self, sigma: f32) {
+        self.glass_sigma = sigma.clamp(0.0, crate::gpu::points::glass::MAX_SIGMA);
+    }
+
+    /// Set glass's K, a power of two in the Render window's range.
+    pub fn set_glass_k(&mut self, k: u32) {
+        use crate::gpu::points::glass::{MAX_K, MIN_K};
+        self.glass_k = k.clamp(MIN_K, MAX_K).next_power_of_two().min(MAX_K);
+    }
+
+    /// Glass's reference length L, which the material's opacity is measured
+    /// against: tau_point = sigma * L^2 / N. The attractor's radius, as in
+    /// the prototype. Under infinite zoom, which has no radius, the eye's
+    /// distance from the fixed point (an open question in the plan; it keeps
+    /// the picture the same across a wrap). A composite measures its visible
+    /// layers together, once a change.
+    fn glass_length(&mut self) -> f32 {
+        if let Some(z) = self.zoom() {
+            return (self.camera.eye() - z.fixed_point).length();
+        }
+        let radius = if self.scene.is_composite() {
+            let key = self.attractor_fingerprint();
+            if self.glass_length_key != key || self.glass_length.is_none() {
+                self.glass_length = crate::trace::measure_layers(&self.scene).union.map(|u| u.radius);
+                self.glass_length_key = key;
+            }
+            self.glass_length
+        } else {
+            self.attractor.as_ref().map(|a| a.radius)
+        };
+        radius.filter(|r| r.is_finite() && *r > 0.0).unwrap_or(self.camera.distance * 0.5)
     }
 
     /// Set the volume-mode opacity (the Render window's slider). Session state:
@@ -8674,6 +8733,47 @@ impl App {
                     self.use_point_primitives(SCREENSHOT_HEIGHT as f32),
                 );
             }
+            RenderMode::Glass => {
+                // The buffers resize to the screenshot here and back to the
+                // window's on the next frame, as splat's do.
+                let length = self.glass_length();
+                let frame = crate::gpu::points::glass::GlassFrame {
+                    view_proj: mvp,
+                    pane: crate::gpu::Viewport { x: 0, y: 0, w: SCREENSHOT_WIDTH, h: SCREENSHOT_HEIGHT },
+                    fov: self.camera.fov,
+                    near: self.camera.near_plane(),
+                    point_size: self.rendered_point_size(),
+                    point_count,
+                    sigma: self.glass_sigma,
+                    length,
+                    k: self.glass_k,
+                    color_contrast: self.color_contrast,
+                    rgb_mode: self.scene.packs_rgb(),
+                    background: self.scene.background.to_array(),
+                    alpha: if self.transparent_render {
+                        crate::gpu::buffers::Alpha::Straight
+                    } else {
+                        crate::gpu::buffers::Alpha::Opaque
+                    },
+                    zoom: self.point_compute.zoom.as_ref(),
+                    guard_eye: self.camera.eye(),
+                };
+                let mask = self.point_compute.mask_binding();
+                self.glass_renderer.render(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut encoder,
+                    &color_view,
+                    self.gpu.format,
+                    &depth_view,
+                    (SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT),
+                    wgpu::LoadOp::Clear(crate::scene::clear_color(self.scene.background, alpha)),
+                    &frame,
+                    &self.point_compute.point_buffer,
+                    &self.point_compute.colormap_buffer,
+                    &mask,
+                );
+            }
         }
 
         let bytes_per_row = SCREENSHOT_WIDTH * 4;
@@ -9105,6 +9205,46 @@ impl App {
                         primitives,
                     );
                 }
+                Some(RenderMode::Glass) => {
+                    let length = self.glass_length();
+                    let frame = crate::gpu::points::glass::GlassFrame {
+                        view_proj: pane.view_proj(),
+                        pane: pane.rect.viewport(),
+                        fov: pane.camera.fov,
+                        near: pane.camera.near_plane(),
+                        point_size: self.rendered_point_size(),
+                        point_count,
+                        sigma: self.glass_sigma,
+                        length,
+                        k: self.glass_k,
+                        color_contrast: self.color_contrast,
+                        rgb_mode: self.scene.packs_rgb(),
+                        background: self.scene.background.to_array(),
+                        alpha: self.window_alpha(),
+                        zoom: self.point_compute.zoom.as_ref(),
+                        guard_eye,
+                    };
+                    let load = if split {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(self.window_clear())
+                    };
+                    let mask = self.point_compute.mask_binding();
+                    self.glass_renderer.render(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        &mut encoder,
+                        &color_view,
+                        self.gpu.format,
+                        &depth_view,
+                        (width, height),
+                        load,
+                        &frame,
+                        &self.point_compute.point_buffer,
+                        &self.point_compute.colormap_buffer,
+                        &mask,
+                    );
+                }
             }
 
             // === STEP 2.4: LIGHT UP WHAT THE SELECTED TRANSFORM MOVES ===
@@ -9231,7 +9371,7 @@ fn grade_for_view(
     grade: crate::gpu::points::splat::Grade,
 ) -> Option<crate::gpu::points::splat::Grade> {
     match mode {
-        RenderMode::Points => None,
+        RenderMode::Points | RenderMode::Glass => None,
         RenderMode::Splat | RenderMode::Volume if grade.is_neutral() => None,
         RenderMode::Splat | RenderMode::Volume => Some(grade),
     }

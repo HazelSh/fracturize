@@ -71,8 +71,7 @@ fn points(scene: &Scene, n: usize) -> Vec<(Vec3, Vec3)> {
 }
 
 /// Every fragment every dot makes, per pixel.
-fn rasterize(scene: &Scene, cam: &OrbitCamera, s: &Setup) -> Vec<Vec<Frag>> {
-    let pts = points(scene, s.n);
+fn rasterize(scene: &Scene, cam: &OrbitCamera, s: &Setup, pts: &[(Vec3, Vec3)]) -> Vec<Vec<Frag>> {
     let stats = crate::trace::measure(&scene.transforms, &vec![true; scene.transforms.len()]);
     let l = stats.map(|st| st.radius).unwrap_or(1.0).max(1e-3);
     let tau_point = s.sigma * l * l / s.n as f32; // world area x optical depth
@@ -82,7 +81,7 @@ fn rasterize(scene: &Scene, cam: &OrbitCamera, s: &Setup) -> Vec<Vec<Frag>> {
     let aspect = wf / hf;
     let radius_world = 0.5 * scene.point_size * cam.fov.point_scale();
     let mut px: Vec<Vec<Frag>> = vec![Vec::new(); s.w * s.h];
-    for (p, rgb) in pts {
+    for &(p, rgb) in pts {
         let v = (view * p.extend(1.0)).xyz();
         let z = -v.z;
         if z <= cam.near_plane() {
@@ -238,7 +237,7 @@ fn glass_proto() {
     let cam = crate::offline::effective_camera(None, &scene, CameraOverride::default());
     let bg = scene.background;
     let t = std::time::Instant::now();
-    let px = rasterize(&scene, &cam, &s);
+    let px = rasterize(&scene, &cam, &s, &points(&scene, s.n));
     let frags: usize = px.iter().map(Vec::len).sum();
     let busiest = px.iter().map(Vec::len).max().unwrap_or(0);
     println!(
@@ -268,4 +267,266 @@ fn glass_proto() {
     let out = format!("{stem}.png");
     sheet(&row, w, h, zoom).save(&out).unwrap();
     println!("  wrote {out}  (exact, then per K: front+tail, truncated)  {:.2}s", t.elapsed().as_secs_f32());
+}
+
+/// A point's colour as the chaos pass packs it for a mixed-RGB scene: 8 bits
+/// a channel through a square root (`pack_rgb` in chaos.wgsl), in the top 24
+/// bits of the word. Returns the word and the colour it decodes to.
+fn pack_rgb(c: Vec3) -> (u32, Vec3) {
+    let q = (c.clamp(Vec3::ZERO, Vec3::ONE).powf(0.5) * 255.0).round();
+    let word = ((q.x as u32) << 8) | ((q.y as u32) << 16) | ((q.z as u32) << 24);
+    let d = q / 255.0;
+    (word, d * d)
+}
+
+/// The GPU glass renderer against this prototype, on the *same* points: the
+/// GPU's front + tail should match `front_k` at the same K up to its
+/// quantisation (log-tau in a byte, fixed-point sums). Needs a GPU, so it is
+/// ignored; run it like `glass_proto`, with GLASS_SCENE, GLASS_SIZE,
+/// GLASS_POINTS, GLASS_SIGMA and GLASS_K (one value). Writes `gpu-k{K}.png`
+/// beside the prototype's panels.
+#[test]
+#[ignore]
+fn glass_gpu_matches_prototype() {
+    use crate::gpu::points::glass::{GlassFrame, GlassRenderer};
+    use wgpu::util::DeviceExt;
+
+    let name: String = env("GLASS_SCENE", "lacewing".to_string());
+    let size: String = env("GLASS_SIZE", "192x108".to_string());
+    let (w, h): (usize, usize) = size.split_once('x').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap())).unwrap();
+    let s = Setup { w, h, n: env("GLASS_POINTS", 200_000), sigma: env("GLASS_SIGMA", 2.0) };
+    let k: usize = env("GLASS_K", 8);
+
+    let scene = Scene::load(format!("scenes/{name}.toml")).unwrap();
+    let cam = crate::offline::effective_camera(None, &scene, CameraOverride::default());
+    let bg = scene.background;
+    let packed: Vec<(u32, Vec3, Vec3)> = points(&scene, s.n)
+        .into_iter()
+        .map(|(p, c)| {
+            let (word, rgb) = pack_rgb(c);
+            (word, p, rgb)
+        })
+        .collect();
+    let pts: Vec<(Vec3, Vec3)> = packed.iter().map(|&(_, p, c)| (p, c)).collect();
+    let px = rasterize(&scene, &cam, &s, &pts);
+    let ex: Vec<Vec3> = px.iter().map(|f| exact(f, bg)).collect();
+    let fk: Vec<Vec3> = px.iter().map(|f| front_k(f, bg, k)).collect();
+
+    let (device, queue, adapter) = crate::offline::create_device().unwrap();
+    let mut words: Vec<u32> = Vec::with_capacity(packed.len() * 4);
+    for &(c, p, _) in &packed {
+        words.extend([p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), c]);
+    }
+    let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("proto_points"),
+        contents: bytemuck::cast_slice(&words),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let colormap = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("proto_colormap"),
+        contents: &[0u8; 256 * 16],
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let mask = crate::gpu::points::mask::Binding::stand_in(&device);
+    let format = wgpu::TextureFormat::Rgba32Float;
+    let extent = wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 };
+    let tex = |format, usage| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let target = tex(format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+    let depth = tex(crate::gpu::points::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+
+    let mut glass = GlassRenderer::new(&device);
+    let radius = crate::trace::measure(&scene.transforms, &vec![true; scene.transforms.len()]).map(|st| st.radius).unwrap_or(1.0).max(1e-3);
+    let frame = GlassFrame {
+        view_proj: cam.view_proj(w as f32 / h as f32),
+        pane: crate::gpu::Viewport { x: 0, y: 0, w: w as u32, h: h as u32 },
+        fov: cam.fov,
+        near: cam.near_plane(),
+        point_size: scene.point_size,
+        point_count: packed.len() as u32,
+        sigma: s.sigma,
+        length: radius,
+        k: k as u32,
+        color_contrast: 1.0,
+        rgb_mode: true,
+        background: bg.to_array(),
+        alpha: crate::gpu::buffers::Alpha::Opaque,
+        zoom: None,
+        guard_eye: Vec3::ZERO,
+    };
+    let row = (w * 16).next_multiple_of(256);
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    glass.render(
+        &device,
+        &queue,
+        &mut encoder,
+        &target.create_view(&Default::default()),
+        format,
+        &depth.create_view(&Default::default()),
+        (w as u32, h as u32),
+        wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        &frame,
+        &point_buffer,
+        &colormap,
+        &mask,
+    );
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row as u32), rows_per_image: Some(h as u32) },
+        },
+        extent,
+    );
+    let t = std::time::Instant::now();
+    queue.submit([encoder.finish()]);
+    readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    let gpu_time = t.elapsed().as_secs_f32();
+    let data = readback.slice(..).get_mapped_range();
+    let floats: &[f32] = bytemuck::cast_slice(&data);
+    let gpu: Vec<Vec3> = (0..w * h)
+        .map(|i| {
+            let o = (i / w) * row / 4 + (i % w) * 4;
+            Vec3::new(floats[o], floats[o + 1], floats[o + 2])
+        })
+        .collect();
+
+    let worst = gpu.iter().zip(&fk).map(|(a, b)| (*a - *b).abs().max_element()).fold(0.0f32, f32::max);
+    println!(
+        "{name} {w}x{h} N={} sigma={} K={k} on {adapter}: gpu vs front_k rmse {:.5} (worst channel {:.4}); \
+         gpu vs exact {:.4}, front_k vs exact {:.4}; gpu {:.3}s",
+        s.n,
+        s.sigma,
+        rmse(&gpu, &fk),
+        worst,
+        rmse(&gpu, &ex),
+        rmse(&fk, &ex),
+        gpu_time,
+    );
+    let stem = format!("renders/glass-proto/{name}-{w}x{h}-n{}-s{}", s.n, s.sigma);
+    std::fs::create_dir_all(&stem).unwrap();
+    let zoom = (512 / w.max(h)).max(1);
+    sheet(&[ex.clone(), fk.clone(), gpu.clone()], w, h, zoom).save(format!("{stem}-gpu-k{k}.png")).unwrap();
+    sheet(&[gpu.clone()], w, h, 1).save(format!("{stem}/gpu-k{k}.png")).unwrap();
+    assert!(rmse(&gpu, &fk) < 0.01, "the GPU's front + tail strays from the prototype's");
+}
+
+/// What the glass passes cost at a live window's size, throttled: each frame
+/// is one short submission followed by twice its time idle (the GPU is
+/// Hazel's display). Points are the prototype's, copied with a little jitter
+/// up to GLASS_POINTS (default 8M). Ignored; needs a GPU. GLASS_SIZE defaults
+/// to 1440x860, GLASS_K to "4,8,16,32,64".
+#[test]
+#[ignore]
+fn glass_gpu_speed() {
+    use crate::gpu::points::glass::{GlassFrame, GlassRenderer};
+    use wgpu::util::DeviceExt;
+
+    let name: String = env("GLASS_SCENE", "lacewing".to_string());
+    let size: String = env("GLASS_SIZE", "1440x860".to_string());
+    let (w, h): (u32, u32) = size.split_once('x').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap())).unwrap();
+    let n: usize = env("GLASS_POINTS", 8_000_000);
+    let ks: Vec<u32> = env("GLASS_K", "4,8,16,32,64".to_string()).split(',').map(|k| k.parse().unwrap()).collect();
+    let scene = Scene::load(format!("scenes/{name}.toml")).unwrap();
+    let cam = crate::offline::effective_camera(None, &scene, CameraOverride::default());
+    let base = points(&scene, n.min(1_000_000));
+    let radius = crate::trace::measure(&scene.transforms, &vec![true; scene.transforms.len()]).map(|st| st.radius).unwrap_or(1.0).max(1e-3);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+    let jitter = radius * 2e-3;
+    let mut words: Vec<u32> = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let (p, c) = base[i % base.len()];
+        let p = if i < base.len() {
+            p
+        } else {
+            p + Vec3::new(rng.r#gen::<f32>() - 0.5, rng.r#gen::<f32>() - 0.5, rng.r#gen::<f32>() - 0.5) * jitter
+        };
+        words.extend([p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), pack_rgb(c).0]);
+    }
+
+    let (device, queue, adapter) = crate::offline::create_device().unwrap();
+    let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("speed_points"),
+        contents: bytemuck::cast_slice(&words),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    drop(words);
+    let colormap = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("speed_colormap"),
+        contents: &[0u8; 256 * 16],
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let mask = crate::gpu::points::mask::Binding::stand_in(&device);
+    let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let tex = |format| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let target = tex(format).create_view(&Default::default());
+    let depth = tex(crate::gpu::points::DEPTH_FORMAT).create_view(&Default::default());
+    let mut glass = GlassRenderer::new(&device);
+    println!("{name} {w}x{h} N={n} on {adapter}");
+    for &k in &ks {
+        let frame = GlassFrame {
+            view_proj: cam.view_proj(w as f32 / h as f32),
+            pane: crate::gpu::Viewport { x: 0, y: 0, w, h },
+            fov: cam.fov,
+            near: cam.near_plane(),
+            point_size: scene.point_size,
+            point_count: n as u32,
+            sigma: 2.0,
+            length: radius,
+            k,
+            color_contrast: 1.0,
+            rgb_mode: true,
+            background: scene.background.to_array(),
+            alpha: crate::gpu::buffers::Alpha::Opaque,
+            zoom: None,
+            guard_eye: Vec3::ZERO,
+        };
+        for passes in [0, 1, 2] {
+        glass.passes = passes;
+        let mut times = Vec::new();
+        for rep in 0..12 {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            glass.render(&device, &queue, &mut encoder, &target, format, &depth, (w, h), wgpu::LoadOp::Clear(wgpu::Color::BLACK), &frame, &point_buffer, &colormap, &mask);
+            let t = std::time::Instant::now();
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            let dt = t.elapsed();
+            if rep >= 2 {
+                times.push(dt.as_secs_f32() * 1000.0);
+            }
+            std::thread::sleep(dt * 2 + std::time::Duration::from_millis(5));
+        }
+        times.sort_by(f32::total_cmp);
+        println!("  K={k:3} passes={passes}: median {:.2} ms, min {:.2} ms", times[times.len() / 2], times[0]);
+        }
+    }
 }

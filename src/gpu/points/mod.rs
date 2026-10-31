@@ -10,6 +10,7 @@ pub mod compute;
 pub mod density;
 pub mod downsample;
 pub mod emphasis;
+pub mod glass;
 pub mod mask;
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod moments;
@@ -20,5 +21,6 @@ pub mod volume;
 pub use compute::PointCompute;
 pub use downsample::Filter;
 pub use emphasis::{EmphasisParams, EmphasisRenderer};
+pub use glass::GlassRenderer;
 pub use renderer::{PointRenderer, DEPTH_FORMAT};
 pub use splat::SplatRenderer;

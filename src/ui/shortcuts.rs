@@ -161,7 +161,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
     (
         "Renderer",
         &[
-            ("R", "switch renderer: points / splat / volume", Some(HelpAction::RenderMode)),
+            ("R", "switch renderer: points / splat / volume / glass", Some(HelpAction::RenderMode)),
             ("W / Shift+W", "splat exposure up / down", Some(HelpAction::Exposure)),
             ("] / [", "grow / shrink point size", Some(HelpAction::PointSize)),
             ("F / Shift+F", "more / less haze", Some(HelpAction::HazeIntensity)),
