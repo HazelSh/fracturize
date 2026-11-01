@@ -178,33 +178,13 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.timeline_open = open;
 }
 
-/// The window's own controls. The transport itself — record, return to
-/// start, the time, loop — is in the toolbar (`ui::transport`); this Play
-/// runs the clock and leaves the camera as attached or detached as it is.
+/// The window's own controls: snapping and the zoom. The transport itself
+/// (to start, Play, record, loop, the time) is the toolbar's, and it is the
+/// only Play: there used to be a second one here that ran the clock without
+/// the camera, and two buttons called Play that did different things was one
+/// too many.
 fn draw_header(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        let playing = app.is_playing();
-        let w = num::icon_button_width(ui, &[(icons::PLAY, "Play"), (icons::PAUSE, "Pause")]);
-        let resp = ui.add(
-            egui::Button::new(if playing {
-                (icons::PAUSE, "Pause", egui::Atom::grow())
-            } else {
-                (icons::PLAY, "Play", egui::Atom::grow())
-            })
-            .min_size(egui::vec2(w, 0.0)),
-        );
-        let resp = hinted(
-            resp,
-            &mut app.ui_state,
-            "Play or pause the timeline. Every track plays; the camera follows only if it \
-             is attached (the link on the camera row). The toolbar's Play, and O, Z or \
-             Space, fly the camera too: they attach it and play.",
-            if playing { "click: pause" } else { "click: play from the playhead" },
-        );
-        if resp.clicked() {
-            app.toggle_playback();
-        }
-
         let snap = app.ui_state.timeline_snap;
         let resp = ui.add(egui::Button::selectable(snap, (icons::MAGNET, "Snap")));
         let resp = hinted(
@@ -1137,7 +1117,7 @@ fn camera_description(app: &App) -> String {
     } else {
         format!(
             "The camera's path: {} keypoints, {:.1}s, {}. Each diamond is the moment the \
-             camera passes a key. Edit it in the Camera window.",
+             camera passes a key. Click this row to edit it.",
             p.keys.len(),
             p.duration(),
             p.loops.kind().label()
@@ -1426,7 +1406,7 @@ fn draw_camera_detail(ui: &mut egui::Ui, app: &mut App) {
     }
     let authored = !app.path_is_default() || app.scene.camera_path.is_some();
     let flying_default = app.path_is_default();
-    super::camera_panel::draw_path_controls(ui, app, flying_default, authored);
+    draw_path_controls(ui, app, flying_default, authored);
 
     // Loops come back round after their last key: how long that takes is the
     // lap, and the closing segment is whatever it leaves.
@@ -1485,6 +1465,24 @@ fn draw_camera_detail(ui: &mut egui::Ui, app: &mut App) {
             "click: choose a saved view to key",
         );
     });
+
+    // The one path operation that lived only in the Camera window.
+    let resp = ui.add_enabled(authored, egui::Button::new((icons::RESET, "Back to the default orbit")));
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if authored {
+            "Delete this scene's camera keys and go back to the default orbit: one turn around \
+             wherever you leave the camera. Ctrl+Z brings the keys back."
+        } else {
+            "Already on the default orbit"
+        },
+        "click: reset to the default orbit",
+    );
+    if resp.clicked() {
+        app.reset_path_to_default();
+        app.ui_state.timeline_camera_key = None;
+    }
 
     let Some(k) = app.ui_state.timeline_camera_key.filter(|&k| authored && k < p.keys.len()) else {
         ui.label(egui::RichText::new("Click a diamond to edit that view.").small().weak());
@@ -1582,4 +1580,164 @@ fn track_names(app: &mut App) -> Vec<String> {
             None => t.target.clone(),
         })
         .collect()
+}
+
+/// The path's transport and shape controls, pinned below the keypoint list.
+fn draw_path_controls(ui: &mut egui::Ui, app: &mut App, flying_default: bool, authored: bool) {
+    // One key of your own isn't a path yet, and the list above doesn't show the
+    // orbit that's actually flying — so say which is which.
+    if authored && flying_default {
+        ui.label(
+            egui::RichText::new(
+                "Add one more keypoint to fly this path instead of the default orbit.",
+            )
+            .small()
+            .color(super::theme::warn(ui.visuals())),
+        );
+    }
+
+    let seconds = app.camera_path().duration();
+    let zoom_loop = app.path_zoom_loop();
+    // A zoom loop closes under the scene's scale symmetry, so it only exists
+    // when there is one to close under.
+    let zoom = app.zoom().map(|z| (z.map, z.log_scale / std::f32::consts::LN_2));
+
+    // No Play here: the toolbar's is the only one, and it plays the camera
+    // along this path whenever the camera is attached.
+    ui.horizontal(|ui| {
+        ui.label("length");
+        let mut secs = seconds;
+        let resp = ui.add(
+            num::Drag::new(&mut secs)
+                .speed(0.1)
+                .range(0.1..=600.0)
+                .suffix("s"),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "How long the whole path takes. Every key's time stretches with it, \
+             so they keep their spacing; drag a key on the Timeline to retime \
+             just that one",
+            "drag: set the path duration",
+        );
+        if resp.changed() {
+            app.set_path_seconds(secs);
+        }
+    });
+
+    draw_loop(ui, app, zoom, zoom_loop);
+}
+
+/// How the path gets back to its start: a four-way radio, because it is one
+/// choice and a path is always on one of them.
+///
+/// It used to be two checkboxes — `loop`, and a `zoom loop` row that greyed
+/// itself out while the other was on. Two boxes for a four-way choice draws a
+/// picture that isn't true: it says the two can be combined (they can't — see
+/// `path::Loop`), and it leaves the ordinary case, "play once and stop", with
+/// nothing on screen naming it at all. You could only tell you were on it by
+/// noticing that neither box was ticked.
+///
+/// `zoom` is greyed rather than dropped when the scene has no scale symmetry
+/// to close under, on the same reasoning the old row was: a mode that isn't
+/// drawn can't tell you it exists, and the tooltip is where it says how to get
+/// one. The period count beside it follows the same rule.
+fn draw_loop(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    zoom: Option<(usize, f32)>,
+    current: Option<crate::path::ZoomLoop>,
+) {
+    use crate::path::LoopKind;
+
+    let zoom_note = match zoom {
+        Some((map, octaves)) => format!(
+            "Loop by zooming in until the picture repeats itself, instead of \
+             flying back to the first keypoint. The animation plays as a zoom \
+             that never ends.\n\n\
+             The zoom centres on transform {}, and repeats every {:.2} octaves. \
+             A single keypoint is enough, and gives a steady zoom with no seam.",
+            map, octaves
+        ),
+        None => "Loop by zooming in until the picture repeats itself, so the \
+                 animation plays as a zoom that never ends.\n\n\
+                 This needs infinite zoom, which this scene doesn't use yet. Turn \
+                 it on under infinite zoom in the Look window."
+            .to_string(),
+    };
+
+    let kind = app.path_loop().kind();
+    ui.horizontal(|ui| {
+        ui.label("Loop");
+        let chosen = super::radio::radio(&mut app.ui_state, "path_loop", kind)
+            .option(
+                LoopKind::Once,
+                "once",
+                "Fly from the first keypoint to the last, then stop. Starts and \
+                 stops gently.",
+                "click: play the path once and stop",
+            )
+            .option(
+                LoopKind::PingPong,
+                "ping-pong",
+                "Fly out to the last keypoint and back again, forever. Good for \
+                 a path whose ends are far apart. It slows down smoothly at each \
+                 end, so the turnarounds don't jolt.",
+                "click: loop out and back along the path",
+            )
+            .option(
+                LoopKind::Closed,
+                "loop",
+                "Fly from the last keypoint back to the first, for a seamless \
+                 loop at a steady speed. Choosing this on the default orbit makes \
+                 it this scene's own path.",
+                "click: loop back round to the first keypoint",
+            )
+            .option_enabled(
+                zoom.is_some(),
+                LoopKind::Zoom,
+                "zoom",
+                zoom_note,
+                if zoom.is_some() {
+                    "click: loop as an endless zoom"
+                } else {
+                    // No arrow: the UI font has no U+2192, and a missing glyph
+                    // in the one line that tells you where to go is worse than
+                    // a comma.
+                    "needs infinite zoom: see the Look window"
+                },
+            )
+            .show(ui);
+        if let Some(kind) = chosen {
+            app.set_path_loop(kind);
+        }
+
+        // The zoom loop's one parameter, on the same row as the option it
+        // belongs to and greyed off it: a modifier of that segment, not a
+        // fifth thing to pick.
+        let Some((_, octaves)) = zoom else { return };
+        let mut periods = current.map_or(1, |z| z.periods);
+        let suffix = if periods == 1 { " repeat" } else { " repeats" };
+        let resp = ui.add_enabled(
+            current.is_some(),
+            num::Drag::new(&mut periods).speed(0.05).range(1..=64).suffix(suffix),
+        );
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            format!(
+                "How many times the picture repeats in one loop. Each repeat is \
+                 {:.2} octaves, so {} of them zoom in by a factor of {:.0}. More \
+                 makes a longer fall; the loop is seamless either way.",
+                octaves,
+                periods,
+                2f32.powf(octaves * periods as f32),
+            ),
+            "drag: repeats per loop",
+        );
+        if resp.changed() {
+            app.set_path_zoom_periods(periods);
+        }
+    });
 }

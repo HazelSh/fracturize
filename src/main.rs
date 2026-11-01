@@ -681,7 +681,7 @@ struct Args {
     /// single still, prefer --effort or --spp, because a buffer caps the
     /// samples in the picture and accumulation doesn't.
     ///
-    /// In windowed mode the Render window's value, saved in prefs, sits
+    /// In windowed mode the toolbar's point count, saved in prefs, sits
     /// between this and the scene's own point_count.
     #[arg(short, long, value_name = "N", help_heading = "Offline render")]
     points: Option<usize>,
@@ -2722,15 +2722,15 @@ impl ApplicationHandler for AppWrapper {
                     // Handle letter keys by logical key (respects keyboard layout)
                     match &event.logical_key {
                         Key::Named(NamedKey::Space) => {
-                            // Same action as O and Z: start/stop the camera
-                            // flying its path. No suppression block needed
+                            // Same action as O and Z: play / pause the
+                            // scene (`App::toggle_play`). No suppression block needed
                             // here the way Tab needed one above — egui only
                             // turns Space into a click when a widget already
                             // holds focus (`Context::interact`'s
                             // `memory.has_focus(id)` check), which is exactly
                             // what `egui_wants_keyboard_input()` tests, so the
                             // existing gate above already covers it.
-                            app.toggle_camera_motion();
+                            app.toggle_play();
                         }
                         Key::Character(c) => match c.as_str() {
                             "s" | "S" => {
@@ -2767,7 +2767,7 @@ impl ApplicationHandler for AppWrapper {
                                     // The scene browser is what "open" shows.
                                     app.toggle_browser();
                                 } else {
-                                    app.toggle_camera_motion();
+                                    app.toggle_play();
                                 }
                             }
                             "n" | "N" => {
@@ -2790,10 +2790,10 @@ impl ApplicationHandler for AppWrapper {
                                         app.undo();
                                     }
                                 } else {
-                                    // Same action as O. One motion, so one verb
-                                    // — two keys for it, because both were in
-                                    // people's fingers before they merged.
-                                    app.toggle_camera_motion();
+                                    // Same action as O: play / pause. Two keys
+                                    // for it, because both were in people's
+                                    // fingers before they merged.
+                                    app.toggle_play();
                                 }
                             }
                             "y" | "Y" => {

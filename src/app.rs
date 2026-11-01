@@ -578,9 +578,8 @@ pub enum HelpAction {
     InvertPitch,
     RenderMode,
     Exposure,
-    /// Start / stop the camera flying its path (O, Z) — one action, because
-    /// there's one motion.
-    CameraMotion,
+    /// Play / pause the scene (O, Z, Space): `App::toggle_play`.
+    Play,
     /// Left / Right: a frame back or on; with shift, to the key before or after
     StepFrame,
     PathKey,
@@ -693,6 +692,15 @@ const GRID_CLICK_SLOP_PT: f32 = 6.0;
 /// A click is quick; a press held longer than this is someone orbiting slowly,
 /// or changing their mind, and releasing it never picks a tile.
 const GRID_CLICK_MAX_HOLD: Duration = Duration::from_millis(500);
+
+/// Does pressing Play attach the camera? Only when it is detached and the
+/// scene has no tracks: then the camera is the only thing there is to play,
+/// and a play that left it detached would move nothing but the playhead.
+/// Otherwise attachment is the person's choice, and play leaves it be.
+/// Split out so the rule can be checked without a GPU.
+fn play_attaches(attached: bool, has_tracks: bool) -> bool {
+    !attached && !has_tracks
+}
 
 /// Was a press in the mutation grid a click? `slipped` is whether it ever
 /// travelled past `GRID_CLICK_SLOP_PT` — latched, so a drag that comes back to
@@ -1802,7 +1810,7 @@ impl App {
         }
         self.stop_following();
         self.invalidate_default_path();
-        log::info!("Loaded view (camera stopped; press O to fly the path)");
+        log::info!("Loaded view (camera detached; attach it on the Timeline to fly the path)");
     }
 
     // === The camera path (one system, with a default) ===
@@ -2030,24 +2038,28 @@ impl App {
 
     /// Attach the camera to the timeline or detach it (the Timeline's camera
     /// row). Not an edit: how you are watching, like orbiting. Attaching the
-    /// default orbit starts it from where the camera is now, as playing does.
+    /// default orbit starts it from where the camera is now. Detaching is
+    /// `stop_following`, so in a scene with no tracks it pauses too.
     pub fn set_camera_attached(&mut self, attached: bool) {
         if attached == self.camera_follows {
             return;
         }
-        if attached {
-            if !self.camera_path().playable() {
-                return;
-            }
-            if self.path_is_default() {
-                self.invalidate_default_path();
-                self.refresh_default_path();
-                self.camera_epoch = self.time;
-            }
-            self.camera_lap = self.camera_local().floor() as i64;
+        if !attached {
+            self.stop_following();
+            log::info!("Camera: detached");
+            return;
         }
-        self.camera_follows = attached;
-        log::info!("Camera: {}", if attached { "attached to the timeline" } else { "detached" });
+        if !self.camera_path().playable() {
+            return;
+        }
+        if self.path_is_default() {
+            self.invalidate_default_path();
+            self.refresh_default_path();
+            self.camera_epoch = self.time;
+        }
+        self.camera_lap = self.camera_local().floor() as i64;
+        self.camera_follows = true;
+        log::info!("Camera: attached to the timeline");
     }
 
     /// Take the camera off the path, because the framing is being set by hand.
@@ -2091,44 +2103,56 @@ impl App {
         self.pending_rewrap = 0;
     }
 
-    /// Start / stop the camera flying the path (O, Z, and the toolbar's
-    /// transport button). The one motion control there is.
-    pub fn toggle_camera_motion(&mut self) {
-        if self.camera_moving() {
-            self.camera_follows = false;
+    /// Play or pause the scene (O, Z, Space, and the toolbar's Play). The one
+    /// play there is: it runs the clock, every track moves on it, and the
+    /// camera flies its path (the default orbit if the scene has none) if
+    /// and only if it is attached. Pausing stops the clock and nothing else;
+    /// the camera stays attached, so scrubbing still moves it.
+    ///
+    /// Attachment is the person's choice and play leaves it alone, with one
+    /// exception: in a scene with no tracks the camera is all there is to
+    /// play, so playing a detached camera there would only move the
+    /// playhead. Play attaches it instead (`play_attaches`).
+    pub fn toggle_play(&mut self) {
+        if self.playing {
             self.playing = false;
-            log::info!("Camera: stopped");
+            log::info!("Timeline: paused");
             return;
         }
-        let path = self.camera_path();
+        let attach = play_attaches(self.camera_follows, !self.scene.tracks.is_empty());
         // `playable` is the rule, not a keypoint count: a zoom loop flies on a
         // single key, because its closing segment runs to that key's own image
-        // under the symmetry. Counting to two here refused to *start* one —
-        // though a loop already in flight kept going as you deleted down to
-        // one key, which is what made it look like the spline was at fault.
-        if !path.playable() {
+        // under the symmetry.
+        if attach && !self.camera_path().playable() {
             log::warn!("Camera path has too few keypoints to fly — press Y to add some");
             return;
         }
-        log::info!(
-            "Camera: flying {} keys over {:.1}s{}",
-            path.keys.len(),
-            path.duration(),
-            if self.path_is_default() { " (default orbit)" } else { "" },
-        );
         // Play resumes from the playhead — the timeline's clock is a place,
         // not a stopwatch — except from the very end of a one-shot, which
-        // starts over. The default orbit always starts from where you are.
+        // starts over.
         if self.timeline_end().is_some_and(|end| self.time >= end - 1e-6) {
             self.time = 0.0;
-            self.camera_epoch = 0.0;
+            if !self.path_is_default() {
+                self.camera_epoch = 0.0;
+            }
         }
         self.enter_loop_region();
-        if self.path_is_default() {
-            self.camera_epoch = self.time;
+        if attach {
+            // After the clock has moved: attaching the default orbit starts it
+            // from where the camera is, at the playhead play starts from.
+            self.set_camera_attached(true);
         }
-        self.camera_lap = self.camera_local().floor() as i64;
-        self.camera_follows = true;
+        if self.camera_follows {
+            self.camera_lap = self.camera_local().floor() as i64;
+        }
+        log::info!(
+            "Timeline: playing{}",
+            match (self.camera_follows, self.path_is_default()) {
+                (false, _) => ", camera detached",
+                (true, true) => ", camera on the default orbit",
+                (true, false) => ", camera on its path",
+            },
+        );
         self.playing = true;
     }
 
@@ -2309,7 +2333,7 @@ impl App {
                 let Some(zoom) = self.point_compute.zoom else {
                     log::warn!(
                         "A zoom loop closes under the scene's scale symmetry, and this scene \
-                         has none. The Render window's infinite-zoom section lists every \
+                         has none. The Look window's infinite-zoom section lists every \
                          transform and says which of them could carry one."
                     );
                     return;
@@ -3706,11 +3730,25 @@ impl App {
     }
 
     pub fn zoom_in(&mut self) {
-        self.zoom_steps(1.0);
+        self.zoom_by_hand(1.0);
     }
 
     pub fn zoom_out(&mut self) {
-        self.zoom_steps(-1.0);
+        self.zoom_by_hand(-1.0);
+    }
+
+    /// The wheel or Up/Down, moving the camera in or out. The default orbit is
+    /// rebuilt at the new distance and keeps flying if attached; an authored
+    /// path would put the camera straight back on its next frame, so a zoom
+    /// detaches from it, as a drag does. Pausing no longer detaches, so
+    /// without this the wheel would do nothing on a paused authored path.
+    fn zoom_by_hand(&mut self, steps: f32) {
+        self.cancel_camera_glide();
+        if self.camera_follows && !self.path_is_default() {
+            self.stop_following();
+        }
+        self.zoom_steps(steps);
+        self.invalidate_default_path();
     }
 
     /// Mouse wheel: zoom, always. **Alt**+wheel over a hovered gizmo adjusts
@@ -3759,10 +3797,8 @@ impl App {
             );
             return;
         }
-        self.cancel_camera_glide();
         self.show_zoom_cursor(steps);
-        self.zoom_steps(steps);
-        self.invalidate_default_path();
+        self.zoom_by_hand(steps);
     }
 
     /// Point the cursor at what the wheel is doing, with hysteresis on the swap.
@@ -6970,7 +7006,8 @@ impl App {
     /// Set glass's material opacity, sigma (the Render window's slider).
     /// Session state, like volume's opacity.
     pub fn set_glass_sigma(&mut self, sigma: f32) {
-        self.glass_sigma = sigma.clamp(0.0, crate::gpu::points::glass::MAX_SIGMA);
+        use crate::gpu::points::glass::{MAX_SIGMA, MIN_SIGMA};
+        self.glass_sigma = sigma.clamp(MIN_SIGMA, MAX_SIGMA);
     }
 
     /// Set glass's K, a power of two in the Render window's range.
@@ -8006,13 +8043,11 @@ impl App {
                         self.camera_lap = 0;
                     }
                 } else {
+                    // Stopped at the end, still attached: playing again
+                    // starts over (`toggle_play`), and scrubbing moves the
+                    // camera along the path as it does at any other pause.
                     self.time = end;
                     self.playing = false;
-                    // A scene without tracks is the old camera-only transport,
-                    // where finishing the path let go of the camera.
-                    if self.scene.tracks.is_empty() {
-                        self.camera_follows = false;
-                    }
                     log::info!("Timeline: finished");
                 }
             }
@@ -8091,24 +8126,6 @@ impl App {
         // Only the clock moves. An attached camera follows it on the next
         // update, as it does when playing; a detached one stays put.
         self.time = t.max(0.0);
-    }
-
-    /// Play or pause the timeline's clock (the Timeline's own button). Unlike
-    /// O, which flies the camera, this leaves the camera as attached or
-    /// detached as it is.
-    pub fn toggle_playback(&mut self) {
-        if self.playing {
-            self.playing = false;
-            return;
-        }
-        if self.timeline_end().is_some_and(|end| self.time >= end - 1e-6) {
-            self.time = 0.0;
-            if !self.path_is_default() {
-                self.camera_epoch = 0.0;
-            }
-        }
-        self.enter_loop_region();
-        self.playing = true;
     }
 
     /// The loop region playback goes round in, when looping is on and a
@@ -8874,7 +8891,7 @@ impl App {
             HelpAction::ToggleSelected => self.toggle_selected_transform(),
             HelpAction::ToggleGizmos => self.toggle_gizmos(),
             HelpAction::ToggleEmphasis => self.toggle_emphasis(),
-            HelpAction::CameraMotion => self.toggle_camera_motion(),
+            HelpAction::Play => self.toggle_play(),
             HelpAction::StepFrame => {
                 if shift {
                     self.jump_to_key(true);
@@ -9484,6 +9501,17 @@ mod tests {
     #[test]
     fn a_click_that_ends_on_another_tile_picks_nothing() {
         assert!(!grid_press_is_click(false, Duration::from_millis(120), false));
+    }
+
+    /// Play leaves a camera the person detached detached — except where the
+    /// camera is all the scene has to play, and a play that left it alone
+    /// would move nothing but the playhead.
+    #[test]
+    fn play_attaches_the_camera_only_when_there_is_nothing_else_to_play() {
+        assert!(!play_attaches(true, false));
+        assert!(!play_attaches(true, true));
+        assert!(!play_attaches(false, true));
+        assert!(play_attaches(false, false));
     }
 
     #[test]

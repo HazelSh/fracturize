@@ -147,17 +147,17 @@ details.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ File Explore │ Transforms Subscenes Xaos Collab │ Camera Timeline Render │ │  toolbar
-│   │ Undo Redo │ quick controls │ transport          scene name* │ Help   │
+│ File Explore │ Transforms │ Undo ↷ │ Splat·6.0M▾ Look │ Edit Mode 💡⇢ │    │  toolbar
+│   ⏮ ▶Play ⏺ ⟲ time  Timeline …        *name — author │ Collaborate Help▾│
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │   floating windows over the viewport          world-anchored labels      │
-│   (Transforms docked left, Render right…)     gizmos, traces, indicators │
+│   (Transforms right, Look left…)              gizmos, traces, indicators │
 │                                                                          │
 │                                                        axis cross  (o)   │
 │   Timeline (wide and low, above the status bar)                          │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ hint for whatever is under the pointer     d Λ · pts · FPS ms p99 ~~~~  │  status bar
+│ hint under the pointer   d Λ · FPS ms p99 ~~~~ · pts │ level  ▢▴    │  status bar
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -192,26 +192,52 @@ From left to right, ordered by task:
 | Group | Contents | Kind of control |
 |---|---|---|
 | Where a scene comes from | **File**, **Explore** | menu buttons (§6.6) |
-| What I'm working on | Transforms, Subscenes, Xaos, Collaborate | window toggles |
-| How I'm looking at it | Camera, Timeline, Render | window toggles |
-| | Undo, Redo | command buttons |
-| Quick controls | renderer radio, point count button (opens a slider popup), Edit/View mode, emphasis | each delegates to its panel's own widget |
-| | transport: record, to start, play/pause, time, loop | `ui/transport.rs` |
-| (right) | scene name and author (click to edit), `*` when unsaved; **Help** | |
+| What I'm working on | **Transforms** | window toggle |
+| | **Undo**, redo (icon only, beside Undo) | command buttons |
+| How it's drawn | the drawing button, `Splat · 6.0M ▾`: renderer, opacity, point count; then **Look** beside it | a button that opens a popup of the panels' own widgets |
+| Edit tools | **Edit Mode**, then emphasis and the xaos overlay to its right | toggles; the two icons do nothing outside edit mode |
+| Time | to start, **Play**, record, loop, the time, **Timeline** | `ui/transport.rs`, then the Timeline toggle |
+| (right) | `*` name — author (click to edit); **Collaborate**, with what's waiting on you as a warn-orange badge on its icon; **Help** | Help is a menu |
+
+The other windows open from where the work is (TOPBAR-PLAN.md §3): Subscenes
+from File and the Transforms rail's layer picker, Xaos from the inspector's
+Xaos block, Views and Settings from File, About
+from Help.
 
 Rules:
 
-- **File and Explore are the only menus.** There's no Edit/View menu bar,
-  because it would be mostly empty duplicates of the toggles. Don't add a
-  third menu without a group of commands that is conventional, numerous and
-  infrequent (that's the trade-off a menu is right for).
+- **File, Explore and Help are the only menus**; the drawing button opens a
+  popup. There's no Edit/View menu bar, because it would be mostly empty
+  duplicates of the bar. Don't add a fourth menu without a group of commands
+  that is conventional, numerous and infrequent (that's the trade-off a menu
+  is right for).
+- **A window doesn't earn a toolbar toggle by existing.** Transforms, Timeline
+  and Collaborate have one; everything else opens from a menu row and from the
+  place you are when you want it. Before adding a toggle, say what it pushes
+  down the ladder below.
 - **A quick control goes on the toolbar only if it's reached for constantly
   and the panel version is friction.** It must call the panel's own widget
   function, never a copy of it.
-- **When space runs out, window toggles drop their captions and keep their
-  icons** (`toolbar_compact`, with hysteresis so it doesn't flicker). Plan
-  for it: every toggle's icon has to identify it alone, and its tooltip says
-  the name.
+- **Every item has a caption, and when space runs out things give way one
+  at a time, always in the same order** (`toolbar::Forms`): the time's frame
+  count, the author, Timeline's caption, Collaborate's, then the renderer's
+  name. File, Explore, Transforms, Undo, Look, **Edit Mode**, Play and Help
+  never lose theirs; Edit Mode's word is what says which mode you're in and
+  what the two buttons beside it belong to.
+- **Then whole items move into the overflow menu** (`⋯`, just left of Help),
+  captioned there, one at a time in `toolbar::OVERFLOW_ORDER`. File, Explore,
+  Play and Help never move, so nothing is ever unreachable and nothing is
+  pushed off the edge. A new toolbar item must say where it goes in that
+  order and what its row in the menu is.
+- Each item's forms are pinned to measured widths (never pixel constants:
+  they follow the font and the panel scale), and an overflowed item saves
+  what it last measured on the bar, so the step is computed, not stepped
+  toward. Going back needs a margin so a window edge on a boundary doesn't
+  flicker. The bar is close to full at 1440; measure what a new item costs
+  before adding it.
+- **The document's name is never what's left over.** It's capped at 28
+  characters of the button font and cut with `…`, with its `*` in a cell of
+  its own.
 - **The transport is always visible**, whether or not the Timeline is open,
   because a hand reaches for play without looking.
 
@@ -232,7 +258,11 @@ Rules:
   performance cluster: FPS, mean ms, p99 ms, `ui` ms, present wait, and a
   120-sample sparkline. Every readout has a fixed character budget (§6.2).
 - The status bar describes state and the hint. It doesn't hold controls,
-  except for the dimension lock and clickable notices.
+  except for the dimension lock, clickable notices, and **the view corner**
+  at the far right: how the viewport is divided (one button, opening a menu
+  upward) and level (an icon). Small view and camera controls collect there,
+  beside the point count and the frame rate, where they describe the view
+  rather than the scene.
 
 ### Windows
 
@@ -357,7 +387,7 @@ monospace text and nowhere else.
 ### Sizes
 
 Sizes are egui 0.35's defaults, which we don't override. All of them scale
-with the **UI scale** preference (Controls window, 0.7–2.0, applied as egui's
+with the **UI scale** preference (Settings window, 0.7–2.0, applied as egui's
 zoom factor):
 
 | Style | Size | Use |
@@ -489,10 +519,14 @@ like it's vibrating. No screenshot shows this, which is why it's a house
 rule.
 
 **Buttons whose caption changes** (Edit Mode / View Mode, Play / Pause, the
-point count): pin the width with `num::icon_button_width` /
-`text_button_width`, then pin the caption to the left with an
-`egui::Atom::grow()` after it, so neither the neighbours nor the button's own
-icon move.
+drawing button): build them with `num::Pinned`, which pins every state to the
+widest and holds the caption at the left. Never pin by hand with
+`icon_button_width` and a `min_size`: the caption is followed by an
+`Atom::grow()`, egui puts a gap before that too, and a hand-made width that
+forgets it lets the widest state push its neighbours by that gap every time
+it appears (Play/Pause did, until 2026-11-01).
+`a_pinned_button_is_the_same_width_in_every_state` draws every state and
+checks.
 
 ### 6.3 Sliders and drag fields
 
@@ -519,7 +553,7 @@ Rules:
 
 - **Toggle button** (`ui.toggle_value`, lit in accent blue when on): a mode
   or a window that is on or off and that lives in a strip of buttons — the
-  toolbar's window toggles, Edit Mode, emphasis, record.
+  toolbar's Transforms, Timeline and Collaborate, Edit Mode, emphasis, record.
 - **Checkbox**: an on/off setting in a form or table. In a table it goes in
   the **On** column, flush right (`Col::tick`), so ticks line up from one
   table to the next. Checkboxes are also the right way to confirm something
@@ -543,7 +577,7 @@ Rules:
 | **Command** | icon + verb, plain button | Undo, Roll one, Duplicate |
 | **Opens a dialog or asks for more input** | caption ends in **`…`** | `Open…`, `Save as…`, `Render job…`, `Mutate…`, `Animate a parameter…`, `Only to…` |
 | **Opens a window** | a toggle (lit while the window's open) on the toolbar; a `…` row in a menu, also lit while open | Transforms; Explore → History… |
-| **Shows a menu** | caption names the menu, no `…`; the menu opens below | File, Explore; a point-count button that opens a popup |
+| **Shows a menu** | caption names the menu, no `…`; the menu opens below | File, Explore, Help; the drawing button (`Splat · 6.0M ▾`) that opens a popup |
 | **Destructive** | `confirm::danger_button` (§6.9) | Delete preset, Stop render, Discard edits |
 | **Commit / start** | pinned at the bottom of its window, beside its cost | Start (render job), Send request |
 
@@ -609,13 +643,15 @@ stands between you and losing work.
 
 ### 6.10 Timeline controls (`ui/timeline.rs`, `ui/transport.rs`)
 
-- **Transport** (toolbar): record, to start, play/pause, the time (seconds
-  *and* frames at the Render job's fps; type `12.5`, `300f` or `1:02.5`
-  while paused), loop. Play flies the camera (attach and play). O, Z and
+- **Transport** (toolbar): to start, play/pause, record, loop, in a DAW's
+  order (Logic's, Reaper's), then the time: seconds *and* frames at the
+  Render job's fps, a number box like any other, so drag it to move the
+  playhead a frame per two points of travel, or click and type `12.5`,
+  `300f` or `1:02.5`. Play flies the camera (attach and play). O, Z and
   Space all play.
-- **The Timeline window**: its own Play (clock only; it leaves the camera
-  where it is), Snap (the magnet, on by default; Ctrl flips it for one drag),
-  Whole (zoom to fit).
+- **The Timeline window**: Snap (the magnet, on by default; Ctrl flips it for
+  one drag) and Whole (zoom to fit). It has no Play of its own: the
+  toolbar's is the one, lit while playing.
 - **The ruler is fixed; the lanes zoom.** Only the ruler scrubs. Clicking a
   row selects it and moves nothing else. Ctrl+scroll zooms around the
   pointer; Shift+scroll or a middle-drag moves along.
@@ -654,8 +690,11 @@ stands between you and losing work.
   colour swatch and a name. A variation is a name.
 - An icon leads its caption, consistently, so a column of buttons lines up
   by icon.
-- An icon on its own must still say what it is, because the toolbar can drop
-  captions; its tooltip gives the name.
+- An icon may stand alone only next to something that explains it (redo
+  beside Undo, the emphasis and overlay buttons beside Edit Mode, the
+  Subscenes button beside the layer picker), or with a glyph everyone already
+  knows (record, to start, loop). Where the squeeze ladder drops a caption,
+  the icon left behind still has its tooltip naming it.
 
 ### 6.13 Things painted in the viewport
 

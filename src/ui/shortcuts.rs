@@ -12,76 +12,11 @@
 
 use crate::app::{App, HelpAction};
 
-use super::camera_panel::draw_input_prefs;
 use super::hints::hinted;
 
 /// One row: key label, description, and what clicking it does (`None` =
 /// informational, e.g. mouse gestures that have no keyboard equivalent).
 type Row = (&'static str, &'static str, Option<HelpAction>);
-
-use crate::version::BUILD;
-
-/// Side of the reserved logo square, in points.
-const LOGO_SIDE: f32 = 44.0;
-
-/// The logo we don't have yet: a faint outlined square holding its place.
-/// Outlined rather than left blank because an empty gap in a header reads as a
-/// layout bug. When there's an asset, replace the paint with an `egui::Image`
-/// of the same size and the rest of the row keeps its geometry.
-fn logo_slot(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(LOGO_SIDE, LOGO_SIDE), egui::Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    ui.painter().rect_stroke(
-        rect,
-        6.0,
-        ui.visuals().widgets.noninteractive.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-}
-
-/// Name, version, repo, and the two things a stranger most needs warning
-/// about. This is the window someone opens first, so the "what am I even
-/// running" answer lives at the top of it.
-fn draw_about(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal(|ui| {
-        logo_slot(ui);
-        ui.add_space(6.0);
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Fracturize").heading());
-                ui.label(egui::RichText::new(BUILD).small().weak());
-            });
-            ui.label(egui::RichText::new("3D IFS fractal renderer").small().weak());
-            // `CARGO_PKG_REPOSITORY` rather than a literal: the URL is
-            // metadata about the crate, and Cargo.toml is where the rest of it
-            // lives. egui-winit's link handling opens this in a real browser.
-            let resp = ui.hyperlink_to(
-                egui::RichText::new(env!("CARGO_PKG_REPOSITORY")).small(),
-                env!("CARGO_PKG_REPOSITORY"),
-            );
-            hinted(
-                resp,
-                &mut app.ui_state,
-                "Source code, scenes and issues. Opens in your browser.",
-                "click: open the repository in a browser",
-            );
-        });
-    });
-
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(
-            "Pre-release: the scene format, the GUI and CLI, the renderer and the \
-             math itself can all change without notice, so scenes and old renders \
-             may not survive an update. Roughly 95% vibecoded, mostly by Claudes, \
-             with minimal human involvement in the code.",
-        )
-        .small()
-        .weak(),
-    );
-}
 
 /// Every binding, grouped by the task it belongs to. Order within a section
 /// is roughly "most reached-for first". Keep this in sync with the keyboard
@@ -100,7 +35,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
             ("axis cross", "click a ball (bottom right) to look down that axis", None),
             ("T / Shift+T", "one view, four views, or one big and three small", Some(HelpAction::ViewLayout)),
             ("drag in an axis view", "pan (an axis view looks one way only)", None),
-            ("O / Z / Space", "start / stop the camera flying its path", Some(HelpAction::CameraMotion)),
+            ("O / Z / Space", "play / pause the scene (the camera flies if attached)", Some(HelpAction::Play)),
             ("I", "invert mouse pitch", Some(HelpAction::InvertPitch)),
             ("V", "save the current view", Some(HelpAction::SaveView)),
         ],
@@ -109,7 +44,7 @@ const SECTIONS: &[(&str, &[Row])] = &[
         "Camera paths",
         &[
             ("Y / Shift+Y", "add a keypoint here / remove the last one", Some(HelpAction::PathKey)),
-            ("", "set how the path loops in the Camera window", None),
+            ("", "set how the path loops in the Timeline's camera row", None),
             ("", "with no keypoints, the path is one full orbit", None),
         ],
     ),
@@ -215,55 +150,6 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     super::window(ctx, app, super::WindowKey::Keybinds, "Controls")
         .open(&mut open)
         .show(ctx, |ui| {
-            draw_about(ui, app);
-            ui.separator();
-
-            // These three are settings, and they now look like enough of a
-            // settings dialog to want saying so. Left here rather than given a
-            // window of their own: three controls don't fill one, and this is
-            // the window a stranger opens first.
-            ui.label(egui::RichText::new("Settings").strong().small());
-            draw_input_prefs(ui, app);
-
-            ui.horizontal(|ui| {
-                // Applied on *release*, not while dragging.
-                //
-                // This is a slider that sets how big sliders are, which makes
-                // live application a feedback loop: every frame it re-scales
-                // the widget you are holding, so the handle moves out from
-                // under the pointer, which moves the handle again. It flickers,
-                // it jumps, and it is close to unusable. Dragging shows the
-                // pending number and the panel only re-lays-out once you let
-                // go — the one control in the app where live application is
-                // actively wrong.
-                let mut scale = app.ui_state.pending_ui_scale.unwrap_or(app.ui_scale());
-                let resp = ui.add(
-                    egui::Slider::new(&mut scale, 0.7..=2.0)
-                        .fixed_decimals(2)
-                        .text("panel scale"),
-                );
-                let resp = hinted(
-                    resp,
-                    &mut app.ui_state,
-                    "How big the panels and text are. Takes effect when you let \
-                     go. The picture itself isn't affected.",
-                    "drag: resize the panels (applies on release)",
-                );
-                if resp.dragged() {
-                    app.ui_state.pending_ui_scale = Some(scale);
-                } else if resp.changed() {
-                    // A click on the track, or an arrow key: no drag to wait for.
-                    app.ui_state.pending_ui_scale = None;
-                    app.set_ui_scale(scale);
-                }
-                if resp.drag_stopped() {
-                    app.ui_state.pending_ui_scale = None;
-                    app.set_ui_scale(scale);
-                }
-            });
-
-            ui.separator();
-
             ui.label(
                 egui::RichText::new("Click a row to use it. Shift+click does the second action, where there is one.")
                     .small()

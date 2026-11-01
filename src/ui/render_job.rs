@@ -1093,9 +1093,9 @@ fn look(ui: &mut egui::Ui, st: &mut UiState, f: &mut RenderJobForm, env: &Env) {
     // is never shown is a trap, so it is stated when there is one, whatever
     // the renderer, so the line doesn't come and go with it.
     if let Some(grade) = &env.grade {
-        let text = if f.splat { format!("Grade from the Render window: {grade}") } else { format!("Grade (splat only): {grade}") };
+        let text = if f.splat { format!("Grade from the Look window: {grade}") } else { format!("Grade (splat only): {grade}") };
         caption(ui, &text).on_hover_text(
-            "Gamma and vibrancy are set in the Render window, where you can see them working. A \
+            "Gamma and vibrancy are set in the Look window, where you can see them working. A \
              splat render uses whatever is set there.",
         );
     }

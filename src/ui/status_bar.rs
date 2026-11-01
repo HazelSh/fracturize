@@ -68,6 +68,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The corner for view and camera controls, beside the
+                    // point count and the frame rate: how the viewport is
+                    // divided, and level. Laid out right to left, so the
+                    // layout button is the one in the corner.
+                    draw_view_layout(ui, app);
+                    draw_level(ui, app);
+                    ui.separator();
                     let (valid, capacity, warming) = app.point_stats();
                     let resp = num::text_cell(
                         ui,
@@ -437,5 +444,76 @@ fn draw_sparkline(ui: &mut egui::Ui, samples: &[f32], p99_ms: f32) {
             [egui::pos2(x_of(i), y_of(a)), egui::pos2(x_of(i + 1), y_of(b))],
             egui::Stroke::new(1.2, color),
         );
+    }
+}
+
+/// How the viewport is divided (`multiview`): one button showing the current
+/// layout, opening a menu upward of the three. A menu rather than the radio
+/// it was on the toolbar: three segments with a mark each cost more width
+/// than the bar had, and this is chosen now and then, not every minute.
+fn draw_view_layout(ui: &mut egui::Ui, app: &mut App) {
+    use crate::multiview::Layout;
+    let later = if app.grid_view() { " Takes effect when you leave the mutation grid." } else { "" };
+    let layouts = [
+        (Layout::Single, icons::SQUARE, "One view", "One view (T).".to_string()),
+        (
+            Layout::Quad,
+            icons::SQUARES_FOUR,
+            "Four views",
+            "Four views: the perspective view top left, with top, front and right around \
+             it (T). Drag in an axis view to pan, and click a ball on its axis cross to \
+             look down another axis."
+                .to_string(),
+        ),
+        (
+            Layout::OneAndThree,
+            icons::LAYOUT,
+            "One big, three small",
+            "The perspective view large, with top, front and right down the side (T)."
+                .to_string(),
+        ),
+    ];
+    let current = app.view_layout();
+    let icon = layouts.iter().find(|l| l.0 == current).map_or(icons::SQUARE, |l| l.1);
+    let resp = ui.add(egui::Button::new((icon, icons::CARET_UP)).small());
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        format!("How the view is divided: one view, four, or one big and three small (T).{later}"),
+        "click: choose how the view is divided",
+    );
+    let mut chosen = None;
+    egui::Popup::menu(&resp).align(egui::RectAlign::TOP_END).show(|ui| {
+        for (layout, icon, name, tip) in &layouts {
+            let r = ui.add(egui::Button::selectable(*layout == current, (*icon, *name)));
+            if hinted(r, &mut app.ui_state, format!("{tip}{later}"), "click: use this layout").clicked() {
+                chosen = Some(*layout);
+                ui.close();
+            }
+        }
+    });
+    if let Some(layout) = chosen {
+        app.set_view_layout(layout);
+    }
+}
+
+/// Level: put the horizon back. An icon in the camera corner, greyed (not
+/// hidden) when the camera is already level.
+fn draw_level(ui: &mut egui::Ui, app: &mut App) {
+    let level = app.camera.is_level();
+    let resp = ui.add_enabled(!level, egui::Button::new(super::icons::TARGET).small());
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if level {
+            "Level: the horizon is already level"
+        } else {
+            "Level: make the horizon level again. Dragging in circles tilts it a little at \
+             a time"
+        },
+        "click: level the camera",
+    );
+    if resp.clicked() {
+        app.level_camera();
     }
 }

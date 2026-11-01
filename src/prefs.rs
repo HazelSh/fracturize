@@ -28,10 +28,20 @@ pub struct PanelPrefs {
     /// What the dice may roll (`dice::RandomSettings`).
     #[serde(default)]
     pub random_settings_open: bool,
+    /// The Views window: this framing, and the saved views. It is what was
+    /// left of the Camera window once the Timeline took the camera's path, so
+    /// it reads that window's old key.
+    #[serde(default, alias = "camera_open")]
+    pub views_open: bool,
+    /// The Look window (it was the Render window, and reads its old key).
+    #[serde(default, alias = "render_open")]
+    pub look_open: bool,
+    /// Settings: the person's own preferences (File → Settings…).
     #[serde(default)]
-    pub camera_open: bool,
+    pub settings_open: bool,
+    /// About Fracturize (Help → About).
     #[serde(default)]
-    pub render_open: bool,
+    pub about_open: bool,
     /// The Keybinds window. Lives here with the rest since the UI review: it
     /// was the one window that explains the whole app, and the only one whose
     /// open state evaporated at exit — so a person who found it, used it and

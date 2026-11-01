@@ -299,17 +299,60 @@ The goal of slice 1 is a build Hazel can look at, not a finished feature.
 
 ## Slices
 
-1. **Live, in the window** (above). **Built 2026-11-01** on branch `glass`,
-   staged through tryout for Hazel to look at.
-2. **Afford K.** Frame rate and memory at K = 4, 8, 16, 32, 64 on the 1080,
-   then the T490. Pick defaults, probably different live and offline. Start
-   with the insertion cost in sparse pixels (see "Cost" above): ideas are a
-   per-pixel fragment count from a cheap first pass so sparse pixels skip
-   the list, or fewer, wider threads per pixel tile.
-3. **Offline stills** (`--glass`, the render dialog). Decide how it meets
-   `--supersample` (the dot rule holds at any resolution, so perhaps it just
-   works).
-4. **Animations, sheets, zoom scenes**, and the open questions above.
-5. **Revisit glow.**
-6. If it's good: decide what happens to the old volume renderer, and maybe
-   to points and splat.
+1. **Live, in the window.** Built 2026-11-01, **accepted** by Hazel and
+   merged. Her verdict: "an excellent renderer that splits the difference
+   visually between points and splats ... should become the default
+   renderer in future." Dots were the right call; big dots popping in and
+   out with the fizz give a point cloud real depth and space.
+   After her first look: dots shrunk to the points renderer's on-screen size
+   (they were 21% wider and blurred the surface into mush), opacity default
+   1.2 on a log slider over 0.05–32, and the sliders moved to the toolbar's
+   drawing popup with the rest of the renderer controls.
+
+What she asked for next, 2026-11-01, in the order I'd do it:
+
+2. **Glass as a first-class citizen of a scene.** Small, and every later
+   slice wants it.
+   - **Opacity becomes scene data** (`[meta]`, undoable, saved by Ctrl+S,
+     `-S`, `--info`, tracks): scenes want anywhere from 0.3 to 10 and it
+     changes their feel a great deal. Follow `ADDING-A-SCENE-FEATURE.md`.
+     K stays a render setting, not the scene's.
+   - **`renderer = "glass"` in view files**, so V saves it and `-v` opens it.
+   - **Write depth**, so gizmos mix with glass instead of always sitting on
+     top: the depth where the pixel's accumulated opacity crosses one half,
+     read off the K-list in the resolve.
+   - **Haze, by eye.** Glass has real occlusion now, so haze is a pure
+     distance cue. Likely candidates: fade each fragment's colour toward the
+     background by depth (aerial perspective, as points does), or thin its
+     tau with distance (as splat does). Try both.
+3. **The look: density that glows, and surface detail.** Hazel: opacity
+   scales brightness, and dense regions want "a bit of emission /
+   intensification of colour when stacked" (what splat does), and large dots
+   blur surface detail in a way the volume renderer doesn't. Prototype on
+   the CPU first; that's what `glass_proto.rs` is for. Starting points:
+   - **Emission beside absorption.** Each dot also emits light, absorbed by
+     the material in front of it more weakly than it absorbs the background
+     (say `exp(-a·tau_front)` with `a < 1`), added on top and tonemapped
+     softly. Dense regions then brighten instead of only going opaque, and
+     low opacity no longer means dim. One more dial ("glow"), or derive it.
+   - **Surface detail.** First see whether the smaller dots fixed it. If not:
+     the front of the K-list is a depth map per pixel, which is enough for a
+     cheap screen-space shading cue (eye-dome lighting, or normals from depth
+     differences) to bring back the surface the blur hides.
+4. **Speed.** The dedicated performance pass (was "afford K"). Hazel's hell
+   test is **cyber_nest zoomed in**: slower than points or splat (fine) and
+   a little faster than volume, with rendering problems too. Measure it with
+   `glass_gpu_speed` on that framing first; suspects are the K-list
+   insertion in sparse pixels, dots grazing the camera (each up to an
+   8 px radius of atomics) and hot pixels. Then frame rate and memory at
+   K = 4–64 on the 1080 and the T490, and pick defaults.
+5. **Offline.** `--glass` (and `--glass-opacity`, `--glass-layers`) for
+   `--render`, the render job dialog, transparency (alpha is
+   `1 − exp(−tau)`), supersampling (the dot rule should just work at any
+   resolution), animations, sheets, thumbnails and the mutation grid's panes
+   (both splat-only today). Accumulation can't fold laps into one
+   histogram, but averaging several independent passes cuts grain.
+6. **Zoom scenes**: L under infinite zoom (the eye's distance from the
+   fixed point, as built, needs checking against a wrap).
+7. **Default renderer, and the old ones.** Once the above holds up: glass as
+   the default, and decide what happens to volume (and maybe points/splat).

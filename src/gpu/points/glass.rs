@@ -37,12 +37,19 @@ pub const DEFAULT_K: u32 = 8;
 pub const MIN_K: u32 = 4;
 pub const MAX_K: u32 = 64;
 /// The default opacity of the material, sigma.
-pub const DEFAULT_SIGMA: f32 = 2.0;
-pub const MAX_SIGMA: f32 = 64.0;
+pub const DEFAULT_SIGMA: f32 = 1.2;
+/// The opacity slider's range, logarithmic: most scenes want 0.3 to 10.
+pub const MIN_SIGMA: f32 = 0.05;
+pub const MAX_SIGMA: f32 = 32.0;
 /// The largest disc drawn, as a radius in pixels. A dot that close is faint
 /// per pixel under the dot rule anyway; past this it is cropped rather than
 /// left to stall the thread that draws it.
 const MAX_RADIUS_PX: f32 = 8.0;
+/// A dot's radius as a share of the scene's `point_size`: the points
+/// renderer's on-screen size (`point_size * point_scale * H / z` pixels
+/// across), so one point size draws the same dot in both. The first build
+/// used 0.5, 21% wider, and big dots blurred the surface into mush.
+const DOT_RADIUS: f32 = 0.414_213_56; // tan(22.5 degrees)
 /// Words a pixel in the sums buffer (`STRIDE` in glass_common.wgsl).
 const STRIDE: u64 = 8;
 
@@ -344,7 +351,7 @@ impl GlassRenderer {
             // with the true tangent, so `Fov::point_scale` (the other
             // renderers' correction for projecting without it) doesn't apply.
             // Applied, a 1-degree axis pane's dots came out 47 times too big.
-            radius_world: 0.5 * frame.point_size,
+            radius_world: DOT_RADIUS * frame.point_size,
             tau_point: frame.sigma * length * length / n as f32,
             near: frame.near,
             max_radius_px: MAX_RADIUS_PX,

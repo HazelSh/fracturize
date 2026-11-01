@@ -224,8 +224,9 @@ fn draw_layer_picker(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         ui.add_space(4.0);
         let mut chosen = None;
+        let open_w = ui.spacing().interact_size.y + 4.0;
         let resp = egui::ComboBox::from_id_salt("fracturize_transform_layer")
-            .width(RAIL_WIDTH - 16.0)
+            .width(RAIL_WIDTH - 16.0 - open_w - ui.spacing().item_spacing.x)
             .selected_text(label(app, current))
             .show_ui(ui, |ui| {
                 for k in 0..app.scene.layer_count() {
@@ -241,6 +242,20 @@ fn draw_layer_picker(ui: &mut egui::Ui, app: &mut App) {
             "Choose whose transforms to list: this scene's own, or a subscene's",
             "click: choose which transforms to list",
         );
+        // The Subscenes window's door from here: the picker is where you
+        // notice a scene has layers. The picker beside it says what it's for.
+        let open = app.ui_state.panels.subscenes_open;
+        let resp = ui.add(egui::Button::selectable(open, icons::UNITE).min_size(egui::vec2(open_w, 0.0)));
+        if hinted(
+            resp,
+            &mut app.ui_state,
+            "The Subscenes window: show or hide each layer, its share of the points, where it sits",
+            if open { "click: close the Subscenes window" } else { "click: open the Subscenes window" },
+        )
+        .clicked()
+        {
+            app.ui_state.panels.subscenes_open = !open;
+        }
         if let Some(k) = chosen {
             // Listing a layer's maps is not selecting it as a whole, so the
             // viewport keeps showing maps rather than one subscene gizmo.
