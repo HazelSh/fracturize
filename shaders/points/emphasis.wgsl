@@ -225,7 +225,6 @@ fn fs_accumulate(in: GlowOutput) -> @location(0) vec4<f32> {
 
 struct FullscreenOut {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
 }
 
 // One oversized triangle rather than a quad: no diagonal seam, three vertices
@@ -236,13 +235,21 @@ fn vs_composite(@builtin(vertex_index) idx: u32) -> FullscreenOut {
     let y = f32(idx & 2u) * 2.0 - 1.0;
     var out: FullscreenOut;
     out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
     return out;
 }
 
 // How lit this *pixel* is: the mean over the material under it, which is what
 // the accumulator's two channels are for.
-fn pixel_glow(uv: vec2<f32>) -> f32 {
+//
+// Addressed by framebuffer pixel, never by the triangle's own 0-1 uv. The
+// accumulator is the whole window, and in a multiview pane the accumulate pass
+// drew into it at the pane's place in the window; a uv derived from NDC spans
+// only the pane, so it read the window-wide texture squeezed into the pane —
+// the glow arrived as a shifted, shrunk ghost beside the material it was
+// about. `clip_position.xy` is framebuffer pixels whatever the viewport, as
+// the splat tonemap already relies on.
+fn pixel_glow(frag: vec2<f32>) -> f32 {
+    let uv = frag / vec2<f32>(textureDimensions(accum));
     let acc = textureSampleLevel(accum, accum_sampler, uv, 0.0);
     if acc.g <= 0.0 {
         return 0.0;
@@ -259,7 +266,7 @@ fn pixel_glow(uv: vec2<f32>) -> f32 {
 // alias along. A threshold is what used to make this blocky.
 @fragment
 fn fs_dim(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let alpha = (1.0 - pixel_glow(in.uv)) * params.dim;
+    let alpha = (1.0 - pixel_glow(in.clip_position.xy)) * params.dim;
     return vec4<f32>(alpha * params.background, alpha);
 }
 
@@ -281,6 +288,6 @@ fn fs_dim(in: FullscreenOut) -> @location(0) vec4<f32> {
 // hue where the author put it.
 @fragment
 fn fs_brighten(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let lift = params.glow_gain * pixel_glow(in.uv);
+    let lift = params.glow_gain * pixel_glow(in.clip_position.xy);
     return vec4<f32>(lift * params.color, 0.0);
 }
