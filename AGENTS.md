@@ -1022,7 +1022,7 @@ Conventions worth keeping:
 ### Multiview: the viewport as panes
 
 FEATURE-PLANS item 2 (`src/multiview.rs`, `ui::panes`). `T` / `Shift+T` or the
-toolbar's three-icon radio picks a layout — **one view**, **four views**
+layout button in the status bar's view corner (a menu opening upward) picks a layout — **one view**, **four views**
 (perspective top-left, top above front down the right, right beside front
 along the bottom, so top and front share x and right and front share y) or **one big, three small** (perspective left, the three axis
 views down the right). A preference (`view_layout`, `view_axes` in prefs), not
