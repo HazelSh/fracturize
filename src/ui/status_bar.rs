@@ -70,10 +70,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The corner for view and camera controls, beside the
                     // point count and the frame rate: how the viewport is
-                    // divided, and level. Laid out right to left, so the
-                    // layout button is the one in the corner.
+                    // divided, level, and the Views window. Laid out right to
+                    // left, so the layout button is the one in the corner.
                     draw_view_layout(ui, app);
                     draw_level(ui, app);
+                    draw_views_toggle(ui, app);
                     ui.separator();
                     let (valid, capacity, warming) = app.point_stats();
                     let resp = num::text_cell(
@@ -512,6 +513,24 @@ fn draw_view_layout(ui: &mut egui::Ui, app: &mut App) {
     });
     if let Some(layout) = chosen {
         app.set_view_layout(layout);
+    }
+}
+
+/// The Views window: this framing as numbers, and the saved views. It lives
+/// in the view corner rather than the File menu, because a view is how you
+/// look into the fractal, which is what this corner is for. Lit while open.
+fn draw_views_toggle(ui: &mut egui::Ui, app: &mut App) {
+    let open = app.ui_state.panels.views_open;
+    let resp = ui.add(egui::Button::selectable(open, icons::VIDEO_CAMERA).small());
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        "Views: this framing as numbers, and the views this scene has saved (V saves \
+         one). Click a saved view to go back to it.",
+        "toggle the Views window",
+    );
+    if resp.clicked() {
+        app.ui_state.panels.views_open = !open;
     }
 }
 

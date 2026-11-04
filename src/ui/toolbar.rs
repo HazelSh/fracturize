@@ -629,13 +629,6 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
         if menu_item(ui, app, &format!("{} Screenshot", icons::CAMERA), "S", "Save the picture as it is now to the screenshots folder.") {
             app.request_screenshot();
         }
-        menu_toggle(
-            ui,
-            app,
-            |p| &mut p.views_open,
-            &format!("{} Views…", icons::VIDEO_CAMERA),
-            "This framing as numbers, and the views this scene has saved (V saves one). Click a saved view to go back to it.",
-        );
         if menu_item(ui, app, &format!("{} Render job…", icons::STACK), "P", "Render a high-quality still or animation in the background. Shows how long it'll take before you start, and you can pause or stop it.") {
             super::render_job::open(app);
         }

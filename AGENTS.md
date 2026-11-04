@@ -770,8 +770,9 @@ Views…. Settings: File → Settings….
 
 **The view corner** is the status bar's far right, beside the point count and
 the frame rate: how the viewport is divided (`multiview`'s one, four, or one
-big and three small, as one button opening a menu upward) and level (an
-icon, greyed when the camera is already level). Small view and camera
+big and three small, as one button opening a menu upward), level (an
+icon, greyed when the camera is already level) and the Views window (lit
+while open). Small view and camera
 controls collect there. It is the status bar's one cluster of controls,
 because they describe the view rather than the scene.
 
@@ -806,7 +807,7 @@ where "start a new document" lives in every program.
 | Random flames | The dice profile picker, then a scrolling list of rolls, docked down the left by default; live thumbnails, click one to open it. See "Random Flames" |
 | Random settings | The dice profile: picker, save / save as / revert (with a `*` when changed); one list of parts — shape, structure, colour — each switched on or off with its ranges under it; the quality check; how big a mutation's step is; Roll one and Mutate at the foot. See "The dice" |
 | Look (toolbar, beside the drawing button) | Exposure, point size, colour falloff, the gradient and contrast, background and transparency, the haze button, infinite zoom (incl. the zoom-map picker); then the grade. "Look" is a working name |
-| Views (File → Views…) | This view: distance, roll, level, the yaw · pitch · focus readout; then saved views (click to go there, right-click to rename, Save current) |
+| Views (status bar, view corner) | This view: distance, roll, level, the yaw · pitch · focus readout; then saved views (click to go there, right-click to rename, Save current) |
 | Scenes (Ctrl+O, B) | Folder tree and places on the left, the folder's scenes (and renders with a scene in them) as thumbnail rows on the right; the same selection the arrow keys walk. What File → Open… shows you. See "The scene browser" |
 | Controls (H, F1, Help → Controls) | The keybind table, scrollable, rows clickable |
 | Settings (File → Settings…) | The person's preferences: orbit style, field of view, invert pitch, panel scale, highlight colour |
