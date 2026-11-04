@@ -77,7 +77,7 @@ pub fn draw_play(ui: &mut egui::Ui, app: &mut App) {
 /// Record and loop: how play behaves.
 pub fn draw_record_loop(ui: &mut egui::Ui, app: &mut App) {
     let armed = app.record_armed;
-    let red = ui.visuals().error_fg_color;
+    let red = super::theme::recording(ui.visuals());
     let resp = ui.add(egui::Button::selectable(
         armed,
         egui::RichText::new(icons::RECORD).color(if armed { red } else { ui.visuals().text_color() }),

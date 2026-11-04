@@ -31,6 +31,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             ui.add_space(6.0);
             ui.label(egui::RichText::new("The panels").strong());
             draw_panel_scale(ui, app);
+            draw_selection_colour(ui, app);
         });
     super::remember(ctx, app, super::WindowKey::Settings);
     app.ui_state.panels.settings_open = open;
@@ -158,6 +159,45 @@ fn draw_panel_scale(ui: &mut egui::Ui, app: &mut App) {
         if resp.drag_stopped() {
             app.ui_state.pending_ui_scale = None;
             app.set_ui_scale(scale);
+        }
+    });
+}
+
+/// The highlight colour: one swatch, live, and a way back to the default.
+/// A preference, so not undoable; Default is the undo.
+fn draw_selection_colour(ui: &mut egui::Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        let current = app.selection_colour();
+        let [r, g, b] = current.unwrap_or({
+            let c = super::theme::DEFAULT_SELECTION;
+            [c.r(), c.g(), c.b()]
+        });
+        let mut srgb = [r, g, b];
+        let resp = ui.color_edit_button_srgb(&mut srgb);
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            "The colour that marks what's selected: the chosen option, a window that's \
+             open, the selected transform or track, a render's progress. Click to pick another.",
+            "click: pick the highlight colour",
+        );
+        if resp.changed() {
+            app.set_selection_colour(Some(srgb));
+        }
+        ui.label("highlight colour");
+        let resp = ui.add_enabled(current.is_some(), egui::Button::new("Default"));
+        let resp = hinted(
+            resp,
+            &mut app.ui_state,
+            if current.is_some() {
+                "Go back to the standard blue"
+            } else {
+                "This is the standard blue already"
+            },
+            "click: use the standard highlight colour",
+        );
+        if resp.clicked() {
+            app.set_selection_colour(None);
         }
     });
 }

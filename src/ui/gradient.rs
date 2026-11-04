@@ -400,13 +400,17 @@ fn draw_handles(ui: &mut egui::Ui, app: &mut App, strip: egui::Rect) {
         );
 
         let is_sel = selected == Some(i);
-        let outline = if is_sel || resp.hovered() {
-            ui.visuals().widgets.active.fg_stroke.color
+        // The selected stop is ringed in the selection colour, the way every
+        // other selected thing is; hover only brightens the plain ring.
+        let (outline, width) = if is_sel {
+            (super::theme::selected_edge(ui.visuals()), 2.5)
+        } else if resp.hovered() {
+            (ui.visuals().widgets.active.fg_stroke.color, 1.5)
         } else {
-            ui.visuals().widgets.inactive.bg_stroke.color
+            (ui.visuals().widgets.inactive.bg_stroke.color, 1.5)
         };
         ui.painter()
-            .circle(handle.center(), HANDLE_H * 0.42, color32(stop.color), egui::Stroke::new(1.5, outline));
+            .circle(handle.center(), HANDLE_H * 0.42, color32(stop.color), egui::Stroke::new(width, outline));
 
         if resp.clicked() {
             selected = Some(i);

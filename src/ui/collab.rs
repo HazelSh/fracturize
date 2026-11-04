@@ -368,11 +368,13 @@ fn card(ui: &mut egui::Ui, app: &mut App, thread: &Thread, m: &Message, o: &thre
     let tweaked = app.collab.tweaks.contains_key(&key) || (previewing && app.preview_tweaked());
     let verdict = thread.verdict(&m.id, &o.id).map(|(_, a)| a.verdict);
     let live = m.withdrawn.is_none();
-    let frame = egui::Frame::group(ui.style()).fill(if previewing {
-        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
+    let frame = if previewing {
+        egui::Frame::group(ui.style())
+            .fill(super::theme::selected_tint(ui.visuals()))
+            .stroke(egui::Stroke::new(1.5, super::theme::selected_edge(ui.visuals())))
     } else {
-        ui.visuals().faint_bg_color
-    });
+        egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color)
+    };
     frame.show(ui, |ui| {
         ui.set_width(CARD_W);
         ui.vertical(|ui| {

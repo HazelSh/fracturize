@@ -1536,8 +1536,8 @@ impl FilenameTrouble {
         match self {
             // An error, not a warning: overwriting is a choice someone can
             // make, and writing to a directory is not a thing that can happen.
-            FilenameTrouble::IsDirectory => visuals.error_fg_color,
-            FilenameTrouble::WillOverwrite => visuals.warn_fg_color,
+            FilenameTrouble::IsDirectory => super::theme::error(visuals),
+            FilenameTrouble::WillOverwrite => super::theme::warn(visuals),
         }
     }
 
@@ -1753,19 +1753,6 @@ fn check_mark(ui: &mut egui::Ui, color: egui::Color32) {
 
 // --- Running ----------------------------------------------------------------
 
-/// A progress bar's three states.
-///
-/// `NotStarted` and `Done` are what a *per-phase* bar needed, and the job now
-/// draws one weighted bar for the whole render instead — but the states stay
-/// because `progress_row` is still the shared drawing, and a future second bar
-/// (a queue, a batch) would want them again. See `Ledger`.
-#[allow(dead_code)]
-enum BarState {
-    NotStarted,
-    Active(Option<f32>),
-    Done,
-}
-
 /// A progress bar's percentage caption: `"100.00%"` down to `"  0.00%"`, in a
 /// fixed six-character-plus-sign budget, monospace.
 ///
@@ -1779,45 +1766,19 @@ fn percent(fraction: f32) -> egui::WidgetText {
 }
 
 
-/// One labelled bar in the two-phase progress display.
-///
-/// `allow_pulse` governs the one deliberate exception to this app's
-/// zero-animation rule (see AGENTS.md): a bar whose phase genuinely never
-/// reports a total pulses instead of sitting dead at 0%, because motion is
-/// the only way to say "working, extent unknown" that a static bar can't.
-/// Every other state here — not-started, a real fraction, done — is static.
-fn progress_row(ui: &mut egui::Ui, label: &str, state: BarState, allow_pulse: bool) {
+/// The labelled progress bar: `ui::progress`'s house shape, with the
+/// percentage as its caption.
+fn progress_row(ui: &mut egui::Ui, label: &str, fraction: f32, tone: super::progress::Tone) {
     ui.horizontal(|ui| {
         ui.add_sized(
             [60.0, ui.spacing().interact_size.y],
             egui::Label::new(egui::RichText::new(label).small()),
         );
-        let (fraction, text, animate, fill): (f32, egui::WidgetText, bool, Option<egui::Color32>) =
-            match state {
-                BarState::NotStarted => (0.0, "not started".into(), false, None),
-                // Two decimal places, not whole percent. A whole-percent
-                // readout on an hours-long render sits on the same number for
-                // minutes at a time, which is indistinguishable from a job that
-                // has wedged — precisely when you most want to know it hasn't.
-                // Monospace and right-aligned in a fixed budget for the usual
-                // reason (`ui::num`): these digits change every frame.
-                BarState::Active(Some(f)) => (f, percent(f), false, None),
-                // No fraction while active means the underlying phase hasn't
-                // reported one — either it's the genuinely-unknown-extent case
-                // (encoding) or a brief gap right as a phase starts, before its
-                // first progress report arrives. Only the former pulses.
-                BarState::Active(None) if allow_pulse => (0.0, "working…".into(), true, None),
-                BarState::Active(None) => (0.0, percent(0.0), false, None),
-                BarState::Done => (1.0, "done".into(), false, Some(DONE_GREEN)),
-            };
-        let mut bar = egui::ProgressBar::new(fraction)
-            .desired_width(ui.available_width())
-            .text(text)
-            .animate(animate);
-        if let Some(c) = fill {
-            bar = bar.fill(c);
-        }
-        ui.add(bar);
+        // Two decimal places, not whole percent. A whole-percent readout on
+        // an hours-long render sits on the same number for minutes at a time,
+        // which is indistinguishable from a job that has wedged — precisely
+        // when you most want to know it hasn't.
+        super::progress::bar(ui, fraction, percent(fraction), tone);
     });
 }
 
@@ -1924,7 +1885,8 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // the phases are wildly unequal — an A2 poster spends 67s accumulating and
     // 5.7s saving. Weighting by measured seconds gives one bar that is
     // monotonic and roughly linear in time.
-    progress_row(ui, "Progress", BarState::Active(Some(overall)), false);
+    let tone = if paused || cancelling { super::progress::Tone::Held } else { super::progress::Tone::Running };
+    progress_row(ui, "Progress", overall, tone);
 
     // Both durations in fixed-width cells, and the whole line in one: this is
     // the readout that ticks every frame for an hour, so every length change

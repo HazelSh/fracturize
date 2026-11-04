@@ -381,7 +381,7 @@ fn row(
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
     if selected {
-        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill.gamma_multiply(0.6));
+        super::theme::paint_selected(&painter, rect, 3.0, &visuals);
     } else if resp.hovered() {
         painter.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
     }
@@ -430,7 +430,7 @@ fn row(
     match (&entry.scene, entry.author()) {
         (Err(e), _) => {
             let first = e.lines().next().unwrap_or_default().to_string();
-            line(&painter, y(1.0), first, body, visuals.error_fg_color, width);
+            line(&painter, y(1.0), first, body, super::theme::error(&visuals), width);
         }
         (Ok(_), Some(author)) => {
             line(&painter, y(1.0), format!("by {author}"), body, visuals.text_color(), width)
