@@ -608,12 +608,16 @@ checks.
 | a custom bar | a *share* of a whole | the Weight share bar under the Transforms list |
 
 **The Weight share bar** (`transforms::draw_weight_share`) is one segment per
-enabled transform, the selected one first in its colour, the rest dimmed.
-Each segment carries the transform's name in small text, black or white by
-the segment's brightness, clipped at the segment's edge rather than
-shortened. A segment narrower than `SHARE_NAME_MIN_PX` (14px, two or three
-letters) shows colour only, and past `SHARE_MAX_SEGMENTS` the others merge
-into one grey segment. Drag along it to set the selected transform's share.
+enabled transform, **always in layer order**: the selected one in its colour
+with both edges marked, the rest dimmed. Selecting another transform changes
+which segment is lit and nothing else; a bar that reorders itself on every
+selection can't be read at a glance. Each segment carries the transform's
+number and then its name, in small text, black or white by the segment's
+brightness, clipped at the segment's edge, so a narrow segment still shows
+the number. A segment narrower than `SHARE_NAME_MIN_PX` (14px) shows colour
+only, and past `SHARE_MAX_SEGMENTS` the maps before and after the selected
+one merge into a grey span each. Drag sideways on it to change the selected
+transform's share by the distance dragged.
 
 Rules:
 

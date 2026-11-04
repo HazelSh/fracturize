@@ -443,7 +443,7 @@ Performance on the reference machine (ThinkPad T490, Intel UHD 620, 1280x720):
 | drag a whole subscene's gizmo | move / turn / resize the entire subscene (select its row in the Subscenes window first); its tips resize uniformly, and alt+scroll over it sets its share of the points |
 | click a Transforms row | select that transform (two-way with gizmo selection) |
 | double-click a Transforms row | rename it inline |
-| drag along the Weight share bar (under the Transforms list) | set the selected transform's share of the weight, the rest held |
+| drag sideways on the Weight share bar (under the Transforms list) | change the selected transform's share of the weight, the rest held |
 | alt+click a row's eye | solo it; alt+click again brings everything back |
 | click a row's M / S | mute / solo the points that map placed — a view, not an edit (alt+click S: this map alone, again to clear) |
 | click an xaos edge (overlay on) | open its popover: multiplier, probability, cut/restore, only exit |
@@ -976,9 +976,10 @@ Conventions worth keeping:
   list whose job is to be clicked and scrolled. It came out. The weight lives
   in the inspector's first block, and how it is spread is the **Weight share**
   bar under the list (`draw_weight_share`): one fixed-size bar of the layer's
-  enabled maps, the selected one first in its colour, the rest dimmed; drag
-  along it to set the selected map's share with the others' weight held, so
-  the scale doesn't move under the pointer. Under xaos a tick marks its walk
+  enabled maps, always in layer order (the selected one lit in its colour,
+  the rest dimmed, so changing the selection moves nothing), each labelled
+  number first; drag sideways to change the selected map's share with the
+  others' weight held, so the scale doesn't move under the pointer. Under xaos a tick marks its walk
   share.
 - **The inspector's blocks are in the order you wander into them**, roughly
   Apophysis's: Weight, Appearance, Shape, Variations, Symmetry, Post-affine,

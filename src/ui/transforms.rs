@@ -400,15 +400,21 @@ fn draw_list_actions(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
 /// at that: a strip inside the selection list where a click adjusted a weight
 /// instead of choosing the tab it sat on. The rail is for choosing, so the
 /// weight came out of it. What the bars said — how the weight is spread across
-/// the maps — is said here once, as one fixed-size bar of the whole: the
-/// selected map's share first, in its colour, then everyone else's, dimmed.
+/// the maps — is said here once, as one fixed-size bar of the whole, every map
+/// in layer order: the selected one in its colour and outlined, the rest
+/// dimmed.
 ///
-/// Dragging (or clicking) along it sets the selected map's share, with the
-/// rest of the layer's weight held where it is: share `p` against a rest `r`
-/// is weight `p·r / (1 − p)`. Held, the rest doesn't move during the drag, so
-/// the bar under the pointer means the same thing from the first pixel to the
-/// last — unlike scaling a bar drawn against the largest weight, where dragging
-/// the largest moves the scale it is measured on.
+/// **Always in layer order, whatever is selected.** It used to put the
+/// selected map first, so choosing another transform reshuffled every segment
+/// of the bar — a widget that rearranges itself under you is one you can't
+/// learn to read at a glance (Hazel, 2026-10-31: "keep UI in-position").
+///
+/// Dragging along it changes the selected map's share by the distance dragged
+/// (a full bar's width is 100%), with the rest of the layer's weight held where
+/// it is: share `p` against a rest `r` is weight `p·r / (1 − p)`. Relative, not
+/// "boundary under the pointer", because the selected segment no longer starts
+/// at the bar's left end. Held, the rest doesn't move during the drag, so a
+/// pixel of travel means the same thing from the first to the last.
 ///
 /// Counted over the layer's enabled maps, because those are the ones the walk
 /// draws from. Under xaos a tick marks where the walk actually puts this map,
@@ -455,10 +461,12 @@ fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
         if editable { egui::Sense::click_and_drag() } else { egui::Sense::hover() },
     );
 
-    // The segments: the selected map first, then the others in layer order,
-    // or every map in layer order when nothing is selected.
+    // The segments: every map in layer order, selected or not, so nothing
+    // moves when the selection does.
     let painter = ui.painter();
     painter.rect_filled(bar, 2.0, ui.visuals().extreme_bg_color);
+    // Where the selected map's segment begins, found while drawing.
+    let mut seg_start = bar.min.x;
     if total > 0.0 {
         let colour = |i: usize| color32_from_vec3(app.scene.colors.get(i).copied().unwrap_or(Vec3::ONE));
         let font = egui::TextStyle::Small.resolve(ui.style());
@@ -484,34 +492,58 @@ fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
             }
             *x += w;
         };
-        if let Some(i) = sel {
-            segment(&mut x, weight(i) / total, colour(i), Some(transform_label(app, i)));
-        }
         let dim = if sel.is_some() { 0.35 } else { 0.8 };
-        let others: Vec<usize> = in_layer.iter().copied().filter(|&i| Some(i) != sel).collect();
-        if others.len() > SHARE_MAX_SEGMENTS {
-            segment(&mut x, rest / total, ui.visuals().weak_text_color().gamma_multiply(dim), None);
+        let label = |i: usize| share_label(app, i);
+        if in_layer.len() > SHARE_MAX_SEGMENTS {
+            // Too many to draw one by one: what comes before the selected map
+            // and what comes after, each as one grey span, so the selected
+            // segment still sits where layer order puts it.
+            let grey = ui.visuals().weak_text_color().gamma_multiply(dim);
+            let split = sel.and_then(|i| in_layer.iter().position(|&j| j == i));
+            let before: f32 = split.map_or(total, |k| in_layer[..k].iter().map(|&j| weight(j)).sum());
+            segment(&mut x, before / total, grey, None);
+            if let (Some(i), Some(k)) = (sel, split) {
+                segment(&mut x, weight(i) / total, colour(i), Some(label(i)));
+                let after: f32 = in_layer[k + 1..].iter().map(|&j| weight(j)).sum();
+                segment(&mut x, after / total, grey, None);
+            }
         } else {
-            for i in others {
-                segment(&mut x, weight(i) / total, colour(i).gamma_multiply(dim), Some(transform_label(app, i)));
+            for &i in &in_layer {
+                if Some(i) == sel {
+                    seg_start = x;
+                    segment(&mut x, weight(i) / total, colour(i), Some(label(i)));
+                } else {
+                    segment(&mut x, weight(i) / total, colour(i).gamma_multiply(dim), Some(label(i)));
+                }
+            }
+        }
+        if let Some(i) = sel {
+            if in_layer.len() > SHARE_MAX_SEGMENTS {
+                let k = in_layer.iter().position(|&j| j == i).unwrap_or(0);
+                seg_start = bar.min.x + width * in_layer[..k].iter().map(|&j| weight(j)).sum::<f32>() / total;
             }
         }
     }
     if let Some(p) = share {
-        // The boundary between this map and the rest: the thing a drag moves.
-        let bx = bar.min.x + width * p;
+        // Both edges of the selected map's segment: what a drag widens. Drawn
+        // in the text colour, not the selection colour, so nothing tints how
+        // the transform's own colour reads (as with the gradient's stops).
         let stroke_colour = if resp.hovered() || resp.dragged() {
             ui.visuals().strong_text_color()
         } else {
             ui.visuals().text_color()
         };
-        painter.line_segment(
-            [egui::pos2(bx, bar.min.y - 2.0), egui::pos2(bx, bar.max.y + 2.0)],
-            egui::Stroke::new(2.0, stroke_colour),
-        );
+        for bx in [seg_start, seg_start + width * p] {
+            painter.line_segment(
+                [egui::pos2(bx, bar.min.y - 2.0), egui::pos2(bx, bar.max.y + 2.0)],
+                egui::Stroke::new(2.0, stroke_colour),
+            );
+        }
     }
     if let Some(w) = walk {
-        let wx = bar.min.x + width * w.clamp(0.0, 1.0);
+        // Where the selected segment would end if it were as wide as the
+        // walk's share of it.
+        let wx = (seg_start + width * w.clamp(0.0, 1.0)).min(bar.max.x);
         let tick = egui::Rect::from_min_max(egui::pos2(wx - 1.0, bar.max.y), egui::pos2(wx + 1.0, bar.max.y + 4.0));
         painter.rect_filled(tick, 0.0, ui.visuals().strong_text_color());
     }
@@ -523,7 +555,7 @@ fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
         (Some(_), Some(p)) if rest > 0.0 => {
             let mut t = format!(
                 "This transform has {}% of the weight, against everything else. \
-                 Drag along the bar to set its share; the others keep theirs.",
+                 Drag sideways on the bar to change its share; the others keep theirs.",
                 super::num::fixed(p * 100.0, 1)
             );
             if let Some(w) = walk {
@@ -548,9 +580,10 @@ fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
         tooltip,
         if editable { "drag: set this transform's share of the weight" } else { "how the weight is shared" },
     );
-    if editable && (resp.dragged() || resp.clicked()) {
-        if let (Some(i), Some(pos)) = (sel, resp.interact_pointer_pos()) {
-            let p = ((pos.x - bar.min.x) / width).clamp(0.005, 0.995);
+    if editable && resp.dragged() {
+        if let (Some(i), Some(p0)) = (sel, share) {
+            let dx = resp.drag_delta().x;
+            let p = (p0 + dx / width).clamp(0.005, 0.995);
             let next = p * rest / (1.0 - p);
             if (next - weight(i)).abs() > 1e-6 {
                 app.set_transform_weight(i, next);
@@ -842,6 +875,16 @@ pub struct ZoomAction {
 }
 
 /// A transform's display name, or `T<i>` when it hasn't got one.
+/// A Weight share segment's label: the transform's number, then its name.
+/// Number first, so a segment too narrow for the name still says which map
+/// it is — the clip takes the name before the number.
+fn share_label(app: &App, i: usize) -> String {
+    match app.scene.transform_names.get(i).and_then(|n| n.clone()).filter(|n| !n.trim().is_empty()) {
+        Some(name) => format!("{i} {name}"),
+        None => format!("{i}"),
+    }
+}
+
 pub fn transform_label(app: &App, i: usize) -> String {
     app.scene
         .transform_names
