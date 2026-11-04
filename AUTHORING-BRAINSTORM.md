@@ -4,6 +4,11 @@
 things that cite CRAFT.md or a file:line are grounded, the rest are proposals with
 an experiment attached. Written 2026-08-07.*
 
+*Status, 2026-11-05: §6's items 1–8 are built (post-affine and symmetry groups,
+`[[symmetry]]` kept live, `--info` symmetry, gizmos and panel verbs, `d` and the
+dimension lock, lacunarity `Λ`, `repeat`), and so is `--stats` from item 9.
+Items 10–11 (`--factor`, crossover) and the rest are still proposals.*
+
 **If you are picking this up to implement:** four things are Hazel's decisions, not
 open proposals — the per-transform **post-affine slot** (§3.1), **symmetry declared
 in the scene file and kept live in the renderer** rather than expanded at load

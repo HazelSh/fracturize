@@ -41,15 +41,13 @@ checklist to run before handing a build over.
 | `UI-GUIDELINES.md` | How the GUI is built: principles, widgets, type, colour, help text |
 | `CRAFT.md` | Authoring scenes as art; the discovery log |
 | `ADDING-A-SCENE-FEATURE.md` | Checklist for every place a scene feature reaches |
-| `UI-REVIEW-PLAN.md` | The GUI read as a stranger would; a worklist |
 | `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
 | `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
-| `TIMELINE-PLAN.md` | Open questions on the timeline: auto-key, and moving the camera path into `[[track]]` form |
 | `ANIMATION-PLAN.md` | The timeline as a DAW's automation section: what DAW, Blender and VFX users expect, the loop seam, morphs, the agent side |
-| `GIZMO-PLAN.md`, `XAOS-PLAN.md`, `PALETTE-PLAN.md` | Plans for features now built; the reasoning behind them |
-| `RENDER-QUALITY-BASELINE.md`, `RENDER-QUALITY-PLAN.md`, `RENDER-GUI-PLAN.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: measurements, plan, GUI, posters |
+| `GIZMO-PLAN.md`, `XAOS-PLAN.md` | Plans for features now built; the reasoning behind them, and what is left (gizmo slices 6–7, xaos coupling) |
+| `RENDER-QUALITY-BASELINE.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: the measurements, and posters / what is left |
 | `GLASS-RENDERER-PLAN.md` | The partly-transparent renderer, restarted from scratch: dots as samples of an absorbing fog |
-| `VOLUME-RENDERER-PLAN.md` | The volume renderer's plan and history |
+| `VOLUME-RENDERER-PLAN.md` | The volume renderer's model and history; superseded by glass, kept while the volume code is |
 | `NOTES-infinite-zoom.md` | Why `[zoom]` works the way it does, and the dead ends |
 | `LIKENESS-PLAN.md`, `FIT-OPTIMIZER-PLAN.md`, `IFS-INVERSE-BACKGROUND.md` | Fitting a scene to a picture: plan, solver, background theory |
 | `AUTHORING-BRAINSTORM.md`, `XAOS-AND-BEYOND-BRAINSTORM.md` | Brainstorms: proposals, not decisions |
@@ -735,7 +733,7 @@ File  Explore | Transforms | Undo ↷ | Splat · 6.0M ▾  Look | Edit Mode 💡
 
 ordered by task rather than by module: where does a scene come from, what am I
 working on, undo, how it's drawn, the edit tools, time; then the document,
-talking to an agent, and help. `TOPBAR-PLAN.md` is the reasoning.
+talking to an agent, and help.
 
 **Every item has a caption, and things give way one at a time.** When the
 window is too narrow, `toolbar::Forms` drops, in this order: the time's frame
@@ -3318,7 +3316,7 @@ number tracks instead), the curve editor proper (dragging a key's value as
 well as its time), box selection and moving many keys at once, per-key
 interpolation, markers and a tempo grid (`ANIMATION-PLAN.md`), the loop
 region as scene data,
-spin/turn rate tracks and post-rotation poses (TIMELINE-PLAN §3 C), walkers carried between frames instead of a refill, motion blur, an
+spin/turn rate tracks and post-rotation poses (ANIMATION-PLAN.md, "Rotation tracks"), walkers carried between frames instead of a refill, motion blur, an
 `--key`/`--plot` CLI, and tracks in random rolls and mutations.
 
 ## Two machines, one repo: how to not make a mess
@@ -3597,8 +3595,8 @@ The size *floors* deliberately do **not** scale with N (the splat radius's
 target can represent, and letting a splat be that small is what supersampling
 buys: at 4x, a point a quarter of an output pixel across stays a quarter of an
 output pixel instead of being inflated to a whole one. Scaling the floors would
-undo the feature for the smallest material there is. (`RENDER-QUALITY-PLAN.md`
-says to scale both bounds; that is right for the cap and wrong for the floor.)
+undo the feature for the smallest material there is. (The render-quality plan
+said to scale both bounds; that is right for the cap and wrong for the floor.)
 
 **Brightness is invariant to the factor**, and the arithmetic is exact rather
 than approximate. The filter takes a weighted *mean* over each N x N block,
@@ -3725,7 +3723,7 @@ untested follow-on — if there is a lever here it is **more walkers**, not more
 iterations per walker. `num_workgroups` is a hardcoded 64. Changing it changes
 walker seeding and therefore the image, so it is not a free experiment.
 
-`RENDER-QUALITY-PLAN.md` calls dispatch batching "the real GPU-side lever".
+The render-quality plan called dispatch batching "the real GPU-side lever".
 That was the right thing to test and the wrong answer; this is the note saying
 so.
 

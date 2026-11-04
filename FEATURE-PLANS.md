@@ -269,6 +269,13 @@ generalised from one map to any set, and live.
 
 ### 6. Render job presets, save/load, and load from a PNG
 
+> **Status, 2026-11-05: built, short of loading from a PNG.** Presets are
+> files with built-ins, a picker with Save / Save as / Revert / Delete and a
+> `*`, and `--render-preset` / `--save-render-preset` on the CLI (AGENTS.md
+> "Render Jobs", cfeb4c4, ab498af). A preset never carries the look or the
+> machine settings. Not built: reading a preset out of a PNG's record or a
+> `.render.toml`, and output path patterns. Item 7 (queue) isn't started.
+
 **Where it stands.** `JobParams` (`src/render_job.rs`) is the job. The dialog
 has hardcoded size presets only. Every still already carries
 `fracturize:render` in the PNG (`src/record.rs`), and the `.render.toml`

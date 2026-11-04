@@ -43,16 +43,16 @@ slice 4b. The reasons it is not being used are all interface:
 
 1. The render-job dialog has no accumulation control at all — its default
    works out to **9.6 samples/px at 1080p and 2.4 at 4K**, because the ring
-   path's density *falls* as the output grows (measured in
-   `RENDER-GUI-PLAN.md` §9). That is the single biggest source of the grain.
+   path's density *falls* as the output grows (measured for
+   the render GUI work; the dialog now defaults to accumulating at `medium`). That is the single biggest source of the grain.
 2. `--effort` stops at `huge` = 10,000 spp, which at 4K is about five minutes.
    Nothing in the interface suggests that 100,000 is a thing you may type, and
    it is.
 3. Nothing anywhere says what a sample count buys. The table above is the
    first time that has been written down in user-facing terms.
 
-Fixing 1 is `RENDER-GUI-PLAN.md` slice 4, already planned. That plan's remaining
-slices are now **the highest-value work in this document**, ahead of everything
+Fixing 1 was the render GUI plan's slice 4 (done, `523089e`). Its remaining
+slices (now §9's slices 8a/8b below) are now **the highest-value work in this document**, ahead of everything
 below, because they are what turn "renders finish in seconds" into "renders can
 be asked for real work".
 
@@ -379,7 +379,7 @@ of unreported work at the end of a multi-hour job.
 
 ## 8. Reversal: checkpoint and resume are now required
 
-`RENDER-GUI-PLAN.md` §7 argued for surfacing `--checkpoint` but building no
+The render GUI plan argued for surfacing `--checkpoint` but building no
 resume UI, on the grounds that the GUI process persists and Pause already
 frees the GPU. **That reasoning was sound for renders that take minutes and
 does not survive renders that take hours.** A multi-hour render that cannot
@@ -398,7 +398,7 @@ as a requirement of the tiled path rather than a nicety.
 
 ## 9. Slices
 
-**0 — Finish `RENDER-GUI-PLAN.md` slices 3-5 first.** *(done: `9be7a9b`, `523089e`, `4adb407`)* The estimator, the
+**0 — Finish the render GUI plan's slices 3-5 first.** *(done: `9be7a9b`, `523089e`, `4adb407`)* The estimator, the
 samples radio defaulting to accumulate, and the DE slider. This is where the
 grain actually gets fixed (§1), it needs none of the machinery below, and
 without it the tiled renderer would ship with the same 9.6-samples/px default
@@ -479,6 +479,18 @@ shares its readback with, rather than left to slice 10.
 > than a phase needing its own readout.
 
 **8 — Per-pass checkpoint and the GUI resume** (§8, §13).
+
+**8a — Sidecar files in the dialog** (moved here from the render GUI plan,
+deleted 2026-11-05; its slices 1–5 are built): `.fgrade` and `.fhist`
+checkboxes, defaulting their paths off the render name the way the CLI's
+bare-flag forms do.
+
+**8b — Stop offers the checkpoint.** Stop already keeps the partial picture
+(AGENTS.md, "Cancelling keeps the work"). What's left is offering the
+histogram as a `.fhist` once the chaos game has stopped. It has to be a prompt
+that gets answered and closes, not a state the dialog can sit in, because the
+histogram is a texture: 265 MB at 1080p×2 and over a gigabyte at 4K×2. Needs
+8a's `.fhist` writer.
 
 **9 — `MAX_SUPERSAMPLE` to 16** (§5) *(done, `4d4ab7a`)*, once the rest makes it safe. Late
 deliberately: §3 and §11 both say it is not what the poster needs, so it should

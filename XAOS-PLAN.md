@@ -1,5 +1,10 @@
 # Xaos — plan
 
+*Status, 2026-11-05: phases 1–6 built. Phase 6 (random rolls and mutation)
+landed as a part of the dice (AGENTS.md, "The dice": xaos is a part). Only
+phase 7, coupling between subscenes (§8), is left, and that one only if
+it's wanted.*
+
 *Status, 2026-10-14: phases 1–5 built (Claude Opus 5.5) — format, engine,
 CLI, `--info`, inspector block, rail mark, linked map, matrix window, viewport
 overlay — plus `--isolate a>b` / `--edge-grid`, which this plan didn't have.

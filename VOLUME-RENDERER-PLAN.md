@@ -6,7 +6,10 @@ single opacity control between the two, and later the lighting that occlusion
 makes possible.
 
 Status: slice 1 built (live window, one-pass stills, session-only opacity); see
-"Slice 1 findings" below. Slices 2-7 are plan.
+"Slice 1 findings" below. **Superseded by glass** (`GLASS-RENDERER-PLAN.md`,
+2026-11-01): slices 2–7 won't be built on this renderer. Kept because the
+volume code (`volume.rs`, `moments.rs`, `splat.wgsl`) still cites it for its
+model. Delete it along with that code if glass replaces it.
 
 ## The model
 

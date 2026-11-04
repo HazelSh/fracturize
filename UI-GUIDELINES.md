@@ -206,7 +206,7 @@ From left to right, ordered by task:
 | Time | to start, **Play**, record, loop, the time, **Timeline** | `ui/transport.rs`, then the Timeline toggle |
 | (right) | `*` name — author (click to edit); **Collaborate**, with what's waiting on you as a warn-orange badge on its icon; **Help** | Help is a menu |
 
-The other windows open from where the work is (TOPBAR-PLAN.md §3): Subscenes
+The other windows open from where the work is: Subscenes
 from File and the Transforms rail's layer picker, Xaos from the inspector's
 Xaos block, Views and Settings from File, About
 from Help.

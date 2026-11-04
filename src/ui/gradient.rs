@@ -11,7 +11,8 @@
 //! so a designed palette can render as a small arc of itself with no
 //! indication why. The second strip is what the fractal actually indexes
 //! into, drawn directly under the palette it came from, with the control that
-//! caused it immediately below — see the fifth weakness in PALETTE-PLAN.md §3.
+//! caused it immediately below — a contrast-compressed palette otherwise reads as a broken one
+//! (AGENTS.md, "Colour" → GUI).
 //!
 //! Everything here paints **sRGB**: the stored colours are linear (the render
 //! surface encodes for itself), so they go through `palette::to_srgb8` on the

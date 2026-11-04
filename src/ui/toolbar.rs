@@ -5,7 +5,7 @@
 //!
 //! Every item has a caption. When the window is too narrow, a fixed list of
 //! things gives way one at a time, always in the same order (`Forms`, the
-//! squeeze ladder): see TOPBAR-PLAN.md §4. File, Explore, Transforms, Undo,
+//! squeeze ladder): see AGENTS.md, "Human Interface". File, Explore, Transforms, Undo,
 //! Play and Help never lose their captions. It used to drop every window
 //! toggle's caption at once, which left seven icons nobody could tell apart.
 //!

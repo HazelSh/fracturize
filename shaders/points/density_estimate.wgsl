@@ -10,7 +10,7 @@
 //
 // ## Why a mip pyramid and not a summed-area table
 //
-// RENDER-QUALITY-PLAN.md proposes a SAT: 4 taps for any radius, O(pixels)
+// The render-quality plan proposed a SAT: 4 taps for any radius, O(pixels)
 // instead of O(pixels x r²). The arithmetic is right and the precision is not.
 // A SAT accumulates the whole image into its far corner, and a box query is the
 // *difference* of two large nearly-equal sums. On a plausible accumulating

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Survey what exposure several scenes *want*, to settle decision 5.
 
-Decision 5 in RENDER-QUALITY-PLAN.md is whether exposure should be normalized
+Decision 5 of the render-quality work (AGENTS.md, "Settling decision 5",
+settled 2026-08-14: fixed) was whether exposure should be normalized
 per image from that image's own density (what Apophysis does), or stay the
 scene-independent constant it is today.
 
