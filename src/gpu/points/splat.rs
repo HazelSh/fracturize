@@ -1349,7 +1349,7 @@ impl SplatRenderer {
         queue.submit(std::iter::once(encoder.finish()));
         let map = |buf: &Buffer| {
             buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            crate::gpu::wait::idle(&device);
         };
         map(&count_read);
         let count = {
@@ -1550,7 +1550,7 @@ impl SplatRenderer {
         encoder.copy_buffer_to_buffer(&m.slices, 0, &read, 0, bytes);
         queue.submit(std::iter::once(encoder.finish()));
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        crate::gpu::wait::idle(&device);
         let d = read.slice(..).get_mapped_range();
         let words: &[u32] = bytemuck::cast_slice(&d);
         let mut out = vec![0.0f32; (m.width * m.height * 4) as usize];

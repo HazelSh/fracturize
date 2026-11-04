@@ -176,7 +176,7 @@ impl HashGrid {
         slice.map_async(wgpu::MapMode::Read, |_| {});
 
         // Poll until mapped
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        crate::gpu::wait::idle(&device);
 
         let data = slice.get_mapped_range();
         let counter: VoxelCounter = *bytemuck::from_bytes(&data);

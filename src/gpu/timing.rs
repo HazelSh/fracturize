@@ -185,7 +185,7 @@ impl GpuTimer {
 
         let slice = self.readback.slice(..bytes);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        crate::gpu::wait::idle(&device);
         let out = {
             let data = slice.get_mapped_range();
             let ticks: Vec<u64> = data

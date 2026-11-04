@@ -14,6 +14,7 @@ pub mod overlay;
 pub mod points;
 pub mod thumbs;
 pub mod timing;
+pub mod wait;
 
 // Re-export shared types
 pub use buffers::CameraUniforms;

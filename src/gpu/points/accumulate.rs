@@ -457,7 +457,7 @@ impl Accumulator {
 
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        crate::gpu::wait::idle(&device);
         let out = {
             let data = slice.get_mapped_range();
             bytemuck::cast_slice::<u8, u32>(&data).to_vec()

@@ -5184,6 +5184,9 @@ impl App {
         );
 
         std::thread::spawn(move || {
+            // A GPU that stops answering ends the job through `control`
+            // instead of hanging it or unwinding through a dead device.
+            crate::gpu::wait::attach_job(control.clone());
             control.phase(crate::render_job::Phase::Setup);
             let base = crate::offline::OfflineParams {
                 gpu_reserve,
@@ -5288,7 +5291,9 @@ impl App {
                         break;
                     }
                     finished = Some(Err(String::from(
-                        "the render thread stopped unexpectedly — if it ran out of GPU memory                          the details are on stderr. Try fewer points, less supersampling, or a                          smaller output.",
+                        "the render thread stopped unexpectedly — if it ran out of GPU memory \
+                         the details are on stderr. Try fewer points, less supersampling, \
+                         or a smaller output.",
                     )));
                     break;
                 }

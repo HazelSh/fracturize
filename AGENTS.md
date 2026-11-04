@@ -159,6 +159,8 @@ src/
       mask.rs      # Mute/solo: the per-point map record, the mask, the mixer rules
       moments.rs   # The retired moment reconstruction, kept for the reference
     thumbs.rs    # Scene thumbnails for the browser: a 256-walker ring, splatted
+    wait.rs      # Every offline GPU wait: 1s steps, fails a 60s stall or a lost
+                 # device, and never unwinds through a dead device
     gizmo.rs     # Transform gizmos (unit tetrahedra per transform)
     lines.rs     # In-world line renderer (traces, camera path, indicators)
     overlay.rs   # MSAA target for the in-world UI: depth blit, composite
@@ -3526,6 +3528,17 @@ rendering).
   subtracted, or the projected remaining time climbs while progress is frozen,
   which is a countdown that goes up.
 - One job at a time. A queue was deferred in the first plan and stays deferred.
+- **A GPU that stops answering ends the job; it never hangs it.** Every
+  offline wait is `gpu::wait::idle`, never a bare `device.poll(Wait)`: it
+  polls in 1 s steps and fails the job after 60 s with nothing back, when
+  the device is lost, or 5 s after Stop on a GPU that isn't answering. The
+  longest legitimate wait measured on the GTX 1080 is a lap of 40M points,
+  0.14 s. On failure a job reports to its dialog and **parks its thread**,
+  and the CLI exits 1 without destructors, because the alternative is
+  worse in exactly this order: wgpu 29's `poll` *panics* on device loss,
+  and unwinding frees buffers on the dead device, which segfaulted inside
+  the NVIDIA driver and took the app down (Xid 13, 2026-11-05). The parked
+  job's memory is freed when the app exits, and the message says so.
 
 The CLI paths pass `control: None` and are unchanged.
 

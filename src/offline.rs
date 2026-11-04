@@ -485,6 +485,9 @@ pub(crate) fn create_device() -> Result<(wgpu::Device, wgpu::Queue, String), Str
         trace: Default::default(),
     }))
     .map_err(|e| format!("Failed to create device: {}", e))?;
+    // Every wait on this device from this thread goes through `gpu::wait`,
+    // which needs to hear when the driver takes it away.
+    crate::gpu::wait::watch(&device);
     Ok((device, queue, adapter_name))
 }
 
@@ -522,7 +525,7 @@ impl DeviceErrors {
     /// work first, because an allocation failure is reported asynchronously and
     /// checking without polling would usually look clean.
     fn take(&self, device: &wgpu::Device) -> Option<String> {
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        crate::gpu::wait::idle(&device);
         self.0.lock().expect("device error slot").take()
     }
 }
@@ -627,7 +630,7 @@ fn run_fill(
         queue.submit(std::iter::once(encoder.finish()));
         if i % 16 == 15 {
             // Let the queue drain so we don't buffer unbounded work
-            let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            crate::gpu::wait::idle(&device);
             // Checked on the same cadence: the drain is where this loop has
             // already given up its latency, so pausing or cancelling here
             // costs nothing extra and can't leave submitted work orphaned.
@@ -648,7 +651,7 @@ fn run_fill(
     }
     // Unconditional, and it has to be: on the cancel path there is submitted
     // work in flight that the readback would otherwise race.
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    crate::gpu::wait::idle(&device);
     if let Some(c) = control {
         c.progress(total_frames, total_frames);
     }
@@ -1315,7 +1318,7 @@ impl TileTarget {
     ) {
         let slice = self.readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        crate::gpu::wait::idle(&device);
         {
             let data = slice.get_mapped_range();
             let x0 = (dst_x * 4) as usize;
@@ -1575,7 +1578,7 @@ fn read_float_texture(
 
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    crate::gpu::wait::idle(&device);
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     {
         let data = slice.get_mapped_range();
@@ -2445,7 +2448,7 @@ fn volume_reference(
     );
     queue.submit(std::iter::once(encoder.finish()));
     readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    crate::gpu::wait::idle(&device);
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     {
         let d = readback.slice(..).get_mapped_range();
@@ -3069,7 +3072,7 @@ fn render_accumulated(params: OfflineParams) -> Result<Outcome, String> {
                 }
             }
             let lap_started = Instant::now();
-            let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            crate::gpu::wait::idle(&device);
             let lap_took = lap_started.elapsed();
             pass_laps += 1;
 
