@@ -2,26 +2,30 @@
 //!
 //! Apophysis's transform preview draws a grid and the selected transform
 //! applied to it, and at small variation amounts you can watch the grid start
-//! to bend away from a plain affine copy. This is that, in 3D.
+//! to bend. This is that, in 3D.
 //!
-//! **The lattice fills the box the map's own layer's attractor occupies**,
-//! because those are the points the map is actually applied to; space outside
-//! the attractor is never fed to it, and a lattice there would show a warp
-//! nothing in the picture undergoes. Each line is sampled finely and taken
-//! through the whole map — affine, variation blend, post-affine — by
-//! [`trace::apply_variations`], the CPU twin of the shader's, so what is drawn
-//! is what the walkers do. The symmetry group is left out: it acts after the
-//! map, rigidly, and its copies are already drawn as the orbit ghosts.
+//! **The lattice is the map's own frame**: the cube from −1 to +1 on each of
+//! its input axes. Through the plain affine that cube is centred on the
+//! gizmo's origin dot, its middle lines run along the gizmo's axes and its
+//! faces pass through the tips, so a map with no variations draws a cage on
+//! its own gizmo and the warp is how far the cage has left it. It used to
+//! fill the box of the layer's attractor instead, which wandered away from
+//! the gizmo and changed size with the picture (Hazel, 2026-10-31 and
+//! 2026-11-04: "can travel far from the transform's gizmo").
 //!
-//! Behind it, faint and grey, is the same lattice through the map with its
-//! variation blend replaced by plain `linear = 1` — the map as a pure affine.
-//! The gap between the two is the warp. A plain map draws one over the other.
+//! Each line is sampled finely and taken through the whole map — affine,
+//! variation blend, post-affine — by [`trace::apply_variations`], the CPU twin
+//! of the shader's, so what is drawn is what the walkers do. The symmetry
+//! group is left out: it acts after the map, rigidly, and its copies are
+//! already drawn as the orbit ghosts. There is no second, unwarped grid: the
+//! gizmo is the reference.
 //!
-//! Lines are coloured by the input axis they run along, in the gizmo's axis
-//! colours, so a line can be followed through a fold. Where a variation tears
-//! space (spherical's pole, a non-finite value, a jump far longer than its
-//! neighbours) the line is broken rather than drawn as a streak across the
-//! screen.
+//! Lines are one light grey, opaque, and the line shader fades them toward
+//! mid-grey with depth across the grid's own front-to-back extent
+//! (`LineRenderer::upload_fade`), so the fade always spans near to far
+//! whatever the camera distance. Where a variation tears space (spherical's
+//! pole, a non-finite value, a jump far longer than its neighbours) a line is
+//! broken rather than drawn as a streak across the screen.
 
 use glam::{Mat4, Vec3};
 use rand::RngCore;
@@ -29,16 +33,16 @@ use rand::RngCore;
 use crate::gpu::lines::LineVertex;
 use crate::scene::{TransformSpec, NUM_VARIATIONS};
 
-/// Lattice lines per axis.
-const LEVELS: usize = 5;
+/// Lattice lines per axis, across −1..1: the origin, the tips, and three
+/// between each.
+const LEVELS: usize = 9;
 /// Samples along each line. Fine enough that a swirl reads as a curve.
 const SAMPLES: usize = 48;
-/// An axis under this share of the longest is drawn as one plane through its
-/// middle: a flat attractor's map only ever sees that plane, and a stack of
-/// nearly coincident ones is clutter.
-const FLAT_SHARE: f32 = 0.1;
-const WARPED_ALPHA: f32 = 0.85;
-const REFERENCE: [f32; 4] = [0.62, 0.62, 0.62, 0.22];
+/// The near colour, linear: a light grey (sRGB ≈ 0.86). The depth fade takes
+/// it toward [`FADE_GREY`].
+pub const NEAR_GREY: [f32; 4] = [0.70, 0.70, 0.70, 1.0];
+/// What the far side of the grid fades to, linear: sRGB mid-grey.
+pub const FADE_GREY: [f32; 3] = [0.214, 0.214, 0.214];
 /// Slot 10, julia: the one variation that draws a random branch.
 const JULIA: usize = 10;
 
@@ -62,39 +66,25 @@ impl RngCore for Constant {
     }
 }
 
-/// The lattice lines: each a run of input points, and the axis it runs along.
-fn lattice(bounds: [Vec3; 2]) -> Vec<(usize, Vec<Vec3>)> {
-    let [lo, hi] = bounds;
-    let size = hi - lo;
-    let longest = size.max_element();
-    if !(longest > 0.0) || !size.is_finite() {
-        return Vec::new();
-    }
-    let levels = |a: usize| -> Vec<f32> {
-        if size[a] < FLAT_SHARE * longest {
-            vec![(lo[a] + hi[a]) * 0.5]
-        } else {
-            (0..LEVELS).map(|i| lo[a] + size[a] * i as f32 / (LEVELS - 1) as f32).collect()
-        }
-    };
+/// The lattice lines in the map's input frame: each a run of points along one
+/// axis of the cube −1..1.
+fn lattice() -> Vec<Vec<Vec3>> {
+    let at = |i: usize, n: usize| -1.0 + 2.0 * i as f32 / n as f32;
     let mut lines = Vec::new();
     for a in 0..3 {
-        if size[a] < FLAT_SHARE * longest {
-            continue;
-        }
         let (b, c) = ((a + 1) % 3, (a + 2) % 3);
-        for &vb in &levels(b) {
-            for &vc in &levels(c) {
+        for i in 0..LEVELS {
+            for j in 0..LEVELS {
                 let line = (0..=SAMPLES)
                     .map(|s| {
                         let mut p = Vec3::ZERO;
-                        p[a] = lo[a] + size[a] * s as f32 / SAMPLES as f32;
-                        p[b] = vb;
-                        p[c] = vc;
+                        p[a] = at(s, SAMPLES);
+                        p[b] = at(i, LEVELS - 1);
+                        p[c] = at(j, LEVELS - 1);
                         p
                     })
                     .collect();
-                lines.push((a, line));
+                lines.push(line);
             }
         }
     }
@@ -102,9 +92,7 @@ fn lattice(bounds: [Vec3; 2]) -> Vec<(usize, Vec<Vec3>)> {
 }
 
 /// Push one polyline's images as segments, breaking it where space tears.
-/// `step` is how long a segment of the plain affine image is, which is what a
-/// segment of the warped one is judged against.
-fn push_polyline(verts: &mut Vec<LineVertex>, points: &[Vec3], color: [f32; 4], far: f32, tear: f32) {
+fn push_polyline(verts: &mut Vec<LineVertex>, points: &[Vec3], far: f32, tear: f32) {
     for pair in points.windows(2) {
         let (a, b) = (pair[0], pair[1]);
         if !a.is_finite() || !b.is_finite() || a.length() > far || b.length() > far {
@@ -113,18 +101,21 @@ fn push_polyline(verts: &mut Vec<LineVertex>, points: &[Vec3], color: [f32; 4], 
         if a.distance(b) > tear {
             continue;
         }
-        verts.push(LineVertex { position: a.to_array(), color });
-        verts.push(LineVertex { position: b.to_array(), color });
+        verts.push(LineVertex { position: a.to_array(), color: NEAR_GREY });
+        verts.push(LineVertex { position: b.to_array(), color: NEAR_GREY });
     }
 }
 
-/// The selected map's warp of the box `bounds` (in its layer's own space),
-/// drawn in scene space through `placement`.
-pub fn build(spec: &TransformSpec, placement: Mat4, bounds: [Vec3; 2]) -> Vec<LineVertex> {
-    let lines = lattice(bounds);
-    if lines.is_empty() {
-        return Vec::new();
-    }
+/// The drawn lattice, and the box it occupies in scene space: what the depth
+/// fade is spread across.
+pub struct Warp {
+    pub verts: Vec<LineVertex>,
+    pub extent: Option<[Vec3; 2]>,
+}
+
+/// The selected map's warp of its own frame, drawn in scene space through
+/// `placement`.
+pub fn build(spec: &TransformSpec, placement: Mat4) -> Warp {
     let affine = |p: Vec3| placement.transform_point3(spec.post_affine.transform_point3(spec.matrix.transform_point3(p)));
     let warp = |p: Vec3, rng: &mut Constant| {
         let v = crate::trace::apply_variations(&spec.variations, spec.matrix.transform_point3(p), rng);
@@ -136,35 +127,47 @@ pub fn build(spec: &TransformSpec, placement: Mat4, bounds: [Vec3; 2]) -> Vec<Li
     // length is a seam, not a curve.
     let corners: Vec<Vec3> = (0..8)
         .map(|i| {
-            let pick = |k: usize, a: usize| if i >> k & 1 == 1 { bounds[1][a] } else { bounds[0][a] };
-            affine(Vec3::new(pick(0, 0), pick(1, 1), pick(2, 2)))
+            let pick = |k: usize| if i >> k & 1 == 1 { 1.0 } else { -1.0 };
+            affine(Vec3::new(pick(0), pick(1), pick(2)))
         })
         .collect();
     let centre = corners.iter().copied().sum::<Vec3>() / 8.0;
     let reach = corners.iter().map(|c| c.distance(centre)).fold(0.0, f32::max).max(1e-4);
     let far = centre.length() + 20.0 * reach;
-    let tear = 0.5 * reach.max(1e-4);
+    let tear = 0.25 * reach;
 
+    let lines = lattice();
     let mut verts = Vec::new();
-    for (_, line) in &lines {
-        let image: Vec<Vec3> = line.iter().map(|&p| affine(p)).collect();
-        push_polyline(&mut verts, &image, REFERENCE, far, f32::INFINITY);
-    }
     let branches: &[u32] = if spec.variations[JULIA] != 0.0 { &[0, u32::MAX] } else { &[0] };
     for &bits in branches {
         let mut rng = Constant(bits);
-        for (axis, line) in &lines {
-            let c = crate::palette::axes::axis_linear(*axis);
+        for line in &lines {
             let image: Vec<Vec3> = line.iter().map(|&p| warp(p, &mut rng)).collect();
-            push_polyline(&mut verts, &image, [c.x, c.y, c.z, WARPED_ALPHA], far, tear);
+            push_polyline(&mut verts, &image, far, tear);
         }
     }
-    verts
+    let extent = verts.iter().map(|v| Vec3::from(v.position)).fold(None, |acc: Option<[Vec3; 2]>, p| {
+        Some(acc.map_or([p, p], |[lo, hi]| [lo.min(p), hi.max(p)]))
+    });
+    Warp { verts, extent }
+}
+
+/// Where the depth fade starts and ends for an eye looking along `forward`:
+/// the nearest and farthest of the grid's box corners, measured along the
+/// view direction.
+pub fn depth_span(extent: [Vec3; 2], eye: Vec3, forward: Vec3) -> (f32, f32) {
+    let [lo, hi] = extent;
+    (0..8)
+        .map(|i| {
+            let pick = |k: usize, a: usize| if i >> k & 1 == 1 { hi[a] } else { lo[a] };
+            (Vec3::new(pick(0, 0), pick(1, 1), pick(2, 2)) - eye).dot(forward)
+        })
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(n, f), d| (n.min(d), f.max(d)))
 }
 
 /// What [`build`] depends on, folded into one number, so the lines are rebuilt
 /// only when they would differ.
-pub fn fingerprint(spec: &TransformSpec, placement: Mat4, bounds: [Vec3; 2]) -> u64 {
+pub fn fingerprint(spec: &TransformSpec, placement: Mat4) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let mut mix = |x: f32| {
         h = (h ^ x.to_bits() as u64).wrapping_mul(0x100000001b3);
@@ -173,7 +176,6 @@ pub fn fingerprint(spec: &TransformSpec, placement: Mat4, bounds: [Vec3; 2]) -> 
         m.to_cols_array().into_iter().for_each(&mut mix);
     }
     spec.variations[..NUM_VARIATIONS].iter().copied().for_each(&mut mix);
-    bounds.iter().flat_map(|v| v.to_array()).for_each(&mut mix);
     h
 }
 
@@ -188,36 +190,44 @@ mod tests {
         spec
     }
 
-    const BOX: [Vec3; 2] = [Vec3::splat(-1.0), Vec3::splat(1.0)];
+    #[test]
+    fn a_plain_map_draws_a_cage_on_its_own_gizmo() {
+        // Through the plain affine, the cube's centre is the map's origin and
+        // its corners are origin ± each axis: the gizmo's tips are on it.
+        let spec = plain();
+        let w = build(&spec, Mat4::IDENTITY);
+        let origin = spec.matrix.transform_point3(Vec3::ZERO);
+        let tip = spec.matrix.transform_point3(Vec3::X);
+        let has = |q: Vec3| w.verts.iter().any(|v| Vec3::from(v.position).distance(q) < 1e-4);
+        assert!(has(origin), "no line through the origin dot");
+        assert!(has(tip), "no line through the x tip");
+        let [lo, hi] = w.extent.unwrap();
+        assert!(((lo + hi) * 0.5).distance(origin) < 1e-4, "the cage isn't centred on the gizmo");
+    }
 
     #[test]
-    fn a_plain_map_draws_its_warp_over_its_affine_image() {
-        let verts = build(&plain(), Mat4::IDENTITY, BOX);
-        let (reference, warped): (Vec<&LineVertex>, Vec<&LineVertex>) = verts.iter().partition(|v| v.color == REFERENCE);
-        assert_eq!(reference.len(), warped.len());
-        for (r, w) in reference.iter().zip(&warped) {
-            assert!(Vec3::from(r.position).distance(Vec3::from(w.position)) < 1e-5);
-        }
+    fn the_cage_follows_the_map() {
+        let mut spec = plain();
+        let a = build(&spec, Mat4::IDENTITY).extent.unwrap();
+        spec.matrix = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)) * spec.matrix;
+        let b = build(&spec, Mat4::IDENTITY).extent.unwrap();
+        assert!((b[0] - a[0] - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-4);
     }
 
     #[test]
     fn a_variation_bends_the_lattice_off_its_affine_image() {
+        let plain_verts = build(&plain(), Mat4::IDENTITY).verts;
         let mut spec = plain();
         spec.variations[0] = 0.5;
         spec.variations[3] = 0.5; // swirl
-        let verts = build(&spec, Mat4::IDENTITY, BOX);
-        let half = verts.len() / 2;
-        let moved = (0..half)
-            .filter(|&i| Vec3::from(verts[i].position).distance(Vec3::from(verts[half + i].position)) > 1e-3)
+        let bent = build(&spec, Mat4::IDENTITY).verts;
+        assert_eq!(plain_verts.len(), bent.len());
+        let moved = plain_verts
+            .iter()
+            .zip(&bent)
+            .filter(|(a, b)| Vec3::from(a.position).distance(Vec3::from(b.position)) > 1e-3)
             .count();
-        assert!(moved > half / 2, "only {moved} of {half} vertices moved");
-    }
-
-    #[test]
-    fn a_flat_box_is_one_plane() {
-        let lines = lattice([Vec3::new(-1.0, -1.0, -0.01), Vec3::new(1.0, 1.0, 0.01)]);
-        assert_eq!(lines.len(), 2 * LEVELS);
-        assert!(lines.iter().all(|(_, l)| l.iter().all(|p| p.z == 0.0)));
+        assert!(moved > plain_verts.len() / 2, "only {moved} of {} vertices moved", plain_verts.len());
     }
 
     #[test]
@@ -225,9 +235,9 @@ mod tests {
         let mut spec = plain();
         spec.variations[0] = 0.0;
         spec.variations[JULIA] = 1.0;
-        let reference = build(&plain(), Mat4::IDENTITY, BOX).len() / 2;
-        let warped = build(&spec, Mat4::IDENTITY, BOX).len() - reference;
-        assert!(warped > reference, "{warped} warped vertices against {reference}");
+        let one = build(&plain(), Mat4::IDENTITY).verts.len();
+        let both = build(&spec, Mat4::IDENTITY).verts.len();
+        assert!(both > one, "{both} vertices against {one}");
     }
 
     #[test]
@@ -235,9 +245,18 @@ mod tests {
         let mut spec = plain();
         spec.variations[0] = 0.0;
         spec.variations[2] = 1.0; // spherical
-        let verts = build(&spec, Mat4::IDENTITY, BOX);
-        for pair in verts.chunks(2).filter(|p| p[0].color != REFERENCE) {
-            assert!(Vec3::from(pair[0].position).distance(Vec3::from(pair[1].position)) <= 0.5 * 3f32.sqrt() * 0.5 + 1e-3);
+        let w = build(&spec, Mat4::IDENTITY);
+        assert!(w.verts.iter().all(|v| Vec3::from(v.position).is_finite()));
+        let plain_reach = 3f32.sqrt() * 0.5; // the blank map's cube, centre to corner
+        for pair in w.verts.chunks(2) {
+            assert!(Vec3::from(pair[0].position).distance(Vec3::from(pair[1].position)) <= 0.25 * plain_reach + 1e-3);
         }
+    }
+
+    #[test]
+    fn the_fade_spans_the_grid_front_to_back() {
+        let extent = [Vec3::splat(-1.0), Vec3::splat(1.0)];
+        let (near, far) = depth_span(extent, Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z);
+        assert!((near - 4.0).abs() < 1e-5 && (far - 6.0).abs() < 1e-5, "{near} {far}");
     }
 }

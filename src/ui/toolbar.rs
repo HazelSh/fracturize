@@ -1316,7 +1316,7 @@ fn draw_companions(ui: &mut egui::Ui, app: &mut App) {
         if !app.show_gizmos {
             "Show how the selected transform bends space, as a grid it carries. Only in edit mode"
         } else if warp {
-            "Showing how the selected transform bends space: a grid through the space its points come from, carried by the transform. The faint grey grid is where it would land with no variations. Click to stop"
+            "Showing how the selected transform bends space: a cage around its gizmo, carried through the transform. With no variations it sits square on the gizmo; how far it bends away is the warp. Click to stop"
         } else {
             "Show how the selected transform bends space, as a grid it carries"
         },

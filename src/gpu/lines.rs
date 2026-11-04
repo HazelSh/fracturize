@@ -15,10 +15,25 @@ pub struct LineVertex {
     pub color: [f32; 4],
 }
 
+/// A depth fade toward a fixed grey: `strength` of the way to `grey` at
+/// `far`, none at `near`, measured along `forward` from `eye`. Mirrored as
+/// `Fade` in `shaders/trace.wgsl`. Zero, the default, is no fade.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct Fade {
+    pub eye: [f32; 3],
+    pub near: f32,
+    pub forward: [f32; 3],
+    pub far: f32,
+    pub grey: [f32; 3],
+    pub strength: f32,
+}
+
 pub struct LineRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
+    fade_buffer: wgpu::Buffer,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_count: u32,
 }
@@ -32,16 +47,18 @@ impl LineRenderer {
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("trace_bind_group_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+            entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                // The fade is read in both stages: depth per vertex, the mix
+                // per fragment.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
                 count: None,
-            }],
+            }),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -106,19 +123,28 @@ impl LineRenderer {
         });
 
         let camera_buffer = create_camera_buffer(device);
+        let fade_buffer = {
+            use wgpu::util::DeviceExt;
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("trace_fade"),
+                contents: bytemuck::bytes_of(&Fade::default()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        };
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("trace_bind_group"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: fade_buffer.as_entire_binding() },
+            ],
         });
 
         Self {
             pipeline,
             bind_group,
             camera_buffer,
+            fade_buffer,
             vertex_buffer: None,
             vertex_count: 0,
         }
@@ -126,6 +152,11 @@ impl LineRenderer {
 
     pub fn upload_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+    }
+
+    /// Set the depth fade. Like the camera, it lands before the next submit.
+    pub fn upload_fade(&self, queue: &wgpu::Queue, fade: &Fade) {
+        queue.write_buffer(&self.fade_buffer, 0, bytemuck::bytes_of(fade));
     }
 
     /// Replace the line geometry (pairs of vertices per segment)

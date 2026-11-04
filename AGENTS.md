@@ -993,14 +993,17 @@ Conventions worth keeping:
   the gizmo pass depth-tests against the same buffer right after.
 - **The warp grid** (`src/warp.rs`, the grid toggle beside the xaos one,
   edit mode) shows how the selected map bends space, Apophysis's transform
-  preview in 3D: a 5×5×5 lattice filling the box the map's own layer's
-  attractor occupies (the points it is actually fed), taken through the whole
-  map by `trace::apply_variations`, coloured by the input axis each line runs
-  along, over a faint grey copy through the map as a plain affine. The gap
-  between the two is the warp. Julia is drawn on both branches; a line breaks
-  where a variation tears space instead of streaking across the screen; an
-  axis under a tenth of the longest collapses to one plane. The symmetry group
-  is left out, since its copies are the orbit ghosts.
+  preview in 3D: the cube from −1 to +1 in the map's own frame, 9 lines an
+  axis, taken through the whole map by `trace::apply_variations`. Through the
+  plain affine it is a cage centred on the gizmo's origin dot with the tips on
+  its faces, so with no variations it sits square on the gizmo and the warp is
+  how far it bends away; there is no separate unwarped grid, the gizmo is the
+  reference. Light grey and opaque, faded toward mid-grey with depth across
+  the grid's own front-to-back extent (`gpu::lines::Fade`, per pane), so the
+  fade always spans near to far. Julia is drawn on both branches; a line
+  breaks where a variation tears space instead of streaking across the
+  screen. The symmetry group is left out, since its copies are the orbit
+  ghosts.
 - **Inspector fields are Mat4 <-> TRS.** A matrix that doesn't decompose
   faithfully (shear, or a mirrored det<0 matrix) routes to a raw 3x4 grid
   plus a "Remove shear" button. Mutations produce such matrices, so
