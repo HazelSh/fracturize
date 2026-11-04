@@ -162,6 +162,12 @@ saving only applies in dense ones. That's slice 2's problem.
 - **1px feathered disc edges** are fine.
 - **Low-count speckle is intended.**
 - **K is configurable**, defaulting to 8 live.
+- **Opacity defaults to 1.5** (2026-11-04; it was 1.2).
+- **`DOT_RADIUS` stays as it is.** Hazel has tuned scenes against the
+  current dot size (2026-11-04). The blank scene's point size went down to
+  0.001 instead (`scene::BLANK_POINT_SIZE`), and she sets the built-in
+  default scene's herself. A file that leaves `point_size` out still reads
+  0.012, so no saved scene moves.
 
 ## Open
 
@@ -184,6 +190,21 @@ saving only applies in dense ones. That's slice 2's problem.
 - **Gizmos over glass.** It writes no depth, so the in-world UI is never
   hidden by it. Writing the depth where the pixel crosses some opacity is the
   obvious fix, if it's wanted.
+- **A point size people can read.** Hazel, 2026-11-04: point size is
+  counterintuitive. The slider is already logarithmic, so the curve isn't
+  the trouble; the unit is. A world diameter of 0.002 means something
+  different in every scene. A candidate: **detail, in dots across**, the
+  attractor's diameter over a dot's, about `2L / point_size` with glass's
+  own L. It reads the same in every scene, bigger is sharper, a `[`/`]` step
+  is a fixed ratio, and under zoom L is the eye's distance, so it holds
+  across a wrap. Random rolls already size this way (`0.0018 · radius`,
+  about 1,100 across); 0.001 on a unit attractor is about 2,000. Two
+  choices, both Hazel's: show it only in the slider and keep `point_size` in
+  the file (the figure then drifts as the attractor is reshaped), or store it
+  as a new key and port every scene once (reshaping keeps the look). Either
+  way the `≈N px` readout should follow glass's rules while glass is on:
+  today it uses the points renderer's (at least 1 px, at most 12), and under
+  glass a dot below a pixel only changes grain, and above one, softness.
 
 ## The prototype
 
@@ -346,13 +367,80 @@ What she asked for next, 2026-11-01, in the order I'd do it:
    insertion in sparse pixels, dots grazing the camera (each up to an
    8 px radius of atomics) and hot pixels. Then frame rate and memory at
    K = 4–64 on the 1080 and the T490, and pick defaults.
-5. **Offline.** `--glass` (and `--glass-opacity`, `--glass-layers`) for
-   `--render`, the render job dialog, transparency (alpha is
-   `1 − exp(−tau)`), supersampling (the dot rule should just work at any
-   resolution), animations, sheets, thumbnails and the mutation grid's panes
-   (both splat-only today). Accumulation can't fold laps into one
-   histogram, but averaging several independent passes cuts grain.
+5. **Offline: render jobs, `--render`, sheets.** Planned in detail
+   2026-11-04; see "Slice 5" below.
 6. **Zoom scenes**: L under infinite zoom (the eye's distance from the
    fixed point, as built, needs checking against a wrap).
 7. **Default renderer, and the old ones.** Once the above holds up: glass as
    the default, and decide what happens to volume (and maybe points/splat).
+   Needs slice 5a first. Until then a render job opened from a glass window
+   renders **points** (the form copies the window's renderer only when it is
+   splat), so the window and `P` would disagree by default. Also: the startup
+   and view code fall back to points, so views must start writing
+   `renderer = "points"` explicitly, or an old points view opens as glass.
+
+## Slice 5: offline
+
+Most of it exists. `GlassRenderer` takes whatever device it's handed, the `S`
+screenshot already renders glass off screen (transparency included, as
+`Alpha::Straight`), and render jobs already run on a second device. What's
+missing is an offline path that draws with it.
+
+**Do slice 2's opacity first, or with this.** Without opacity as scene data a
+`--render` doesn't know what the scene was tuned at, and a job has to inherit
+the window's slider.
+
+### 5a. Stills, one pass
+
+- **A third offline renderer.** `TileRenderer` in `offline.rs` gains `Glass`.
+  It draws into the supersampled target, and the points path's downsampler
+  filters it down. Glass has no tonemap, so filtering its final linear colour
+  is right (splat has to filter before its log; glass doesn't).
+- **L is one function.** The reference length is worked out in
+  `App::glass_length` (the attractor's radius, a composite measured with
+  `trace::measure_layers`, the eye's distance from the fixed point under
+  zoom). Move it beside the renderer, so the window and `--render` can't
+  disagree about how opaque a scene is.
+- **The mute/solo mask** binds 16-byte stand-ins, as the other offline
+  renderers do.
+- **Supersampling.** Dots come out the right size with no change, because
+  `ppw_unit` is taken from the target's height. What doesn't scale is
+  `MAX_RADIUS_PX` (8): it must be multiplied by N, as `max_point_pixels` is,
+  or near dots shrink as quality goes up. The 1 px feather probably scales
+  with N too, so a 2× still is the window's picture with less aliasing rather
+  than a sharper one. Check by eye.
+- **Memory**, per accumulation pixel: `(8 + K) × 4` bytes. 1080p at 2× with
+  K = 16 is about 800 MB; 4K at 2× is about 3.2 GB. `fit_k` quietly halves K
+  until the list fits one binding: fine live, wrong for a still. Offline
+  should tile instead, with `tile::TilePlan` and a margin of
+  `MAX_RADIUS_PX × N` plus the filter radius. A first cut can refuse and say
+  which size fits.
+- **Job params.** `JobParams::splat: bool` becomes a renderer: points, splat,
+  or glass with its opacity and K. The dialog's renderer radio gets glass;
+  opacity comes from the window, as exposure does. K defaults to 16–32 for
+  stills, since the prototype found K = 8 leaves a colour bias in dense
+  cores. The estimate gets the memory figure above and a measured
+  cost a point (`glass_gpu_speed`).
+- **CLI**: `--glass`, `--glass-opacity`, `--glass-layers`; `renderer =
+  "glass"` in views (slice 2). The render record carries opacity and K.
+- 16-bit already works (a resolve pipeline per target format).
+
+### 5b. Past one pass
+
+Glass can't fold laps into a histogram, but the average of M independent
+passes (each a refill on a fresh seed, as `resume_seed` deals) has 1/√M the
+grain. That gives the dialog's samples choice and a preset's `spp` a glass
+meaning (passes) instead of greying them out. More points per pass is still
+the bigger lever: the average converges to the N-point picture, which by the
+prototype is already the object. Throttle between passes for the GPU share.
+
+### 5c. Animations, sheets, grids
+
+These fall out of 5a, since they all draw through `TileRenderer`: a frame or
+a tile at a time, refilling per frame where tracks move the attractor. Zoom
+scenes use L as the window does, pending slice 6.
+
+### Not in slice 5
+
+Thumbnails and the mutation grid's panes (`gpu/thumbs.rs` is splat-only), and
+volume's exact reference: glass has its own, `glass_proto.rs`.
