@@ -42,10 +42,10 @@ use super::UiState;
 
 /// Character budget for the elapsed/remaining readout: two seven-character
 /// duration cells plus `" elapsed · about "` and `" left"`, then
-/// `" · done about tomorrow 03:10"`. Sized to the
+/// `" · done about 2026-11-12 03:10"` (a render can run for weeks). Sized to the
 /// longest form, so the countdown appearing doesn't resize the line it
 /// lands in.
-const ELAPSED_CHARS: usize = 63;
+const ELAPSED_CHARS: usize = 66;
 
 /// "Done" reads the same everywhere: the theme's success green.
 const DONE_GREEN: egui::Color32 = super::theme::SUCCESS;
@@ -1894,8 +1894,8 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // the readout that ticks every frame for an hour, so every length change
     // in it is a shuffle you watch.
     let line = match remaining {
-        // "about", because it is: it starts from the estimate quoted before
-        // Start, steers to measured progress from 5%, and is filtered.
+        // "about", because it is: extrapolated from progress watched since
+        // the start (shown after five seconds of it), and filtered.
         // The clock time only while it is working: paused, it would slide
         // later every second.
         Some(r) => {

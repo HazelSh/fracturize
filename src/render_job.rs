@@ -582,8 +582,7 @@ impl Ledger {
         Self { setup: SETUP_SECS, accumulate, resolve, save }
     }
 
-    /// The whole job's estimated seconds.
-    pub fn total(self) -> f32 {
+    fn total(self) -> f32 {
         (self.setup + self.accumulate + self.resolve + self.save).max(f32::EPSILON)
     }
 
@@ -806,7 +805,8 @@ pub fn format_duration(secs: f32) -> String {
     match s {
         0..=59 => format!("{}s", s),
         60..=3599 => format!("{}m {:02}s", s / 60, s % 60),
-        _ => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+        3600..=86_399 => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+        _ => format!("{}d {:02}h", s / 86_400, (s % 86_400) / 3600),
     }
 }
 
@@ -895,10 +895,11 @@ mod tests {
     /// The countdown's width is what holds the readout still, so the claim
     /// that seven characters covers every branch is asserted rather than
     /// believed — across the two length changes an elapsed time makes while
-    /// you watch it (`59s -> 1m 00s`, `59m 59s -> 1h 00m`).
+    /// you watch it (`59s -> 1m 00s`, `59m 59s -> 1h 00m`, `23h 59m -> 1d
+    /// 00h`), and on to a render that runs for weeks.
     #[test]
     fn a_duration_cell_is_seven_characters_wide() {
-        for secs in [0.0, 9.0, 10.0, 59.0, 60.0, 599.0, 3599.0, 3600.0, 86_399.0] {
+        for secs in [0.0, 9.0, 10.0, 59.0, 60.0, 599.0, 3599.0, 3600.0, 86_399.0, 86_400.0, 99.0 * 86_400.0] {
             let cell = format_duration_cell(secs);
             assert_eq!(cell.chars().count(), 7, "{} -> {:?}", secs, cell);
             assert_eq!(cell.trim(), format_duration(secs));
@@ -1330,6 +1331,7 @@ mod tests {
         assert_eq!(format_duration(9.0), "9s");
         assert_eq!(format_duration(75.0), "1m 15s");
         assert_eq!(format_duration(3800.0), "1h 03m");
+        assert_eq!(format_duration(4.0 * 86_400.0 + 7400.0), "4d 02h");
         assert_eq!(format_estimate(60.0, 90.0), "1m 00s – 1m 30s");
         assert_eq!(format_estimate(0.0, 1.0), "unknown");
     }

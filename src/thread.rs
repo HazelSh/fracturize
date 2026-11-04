@@ -605,7 +605,8 @@ pub fn when(secs: u64) -> String {
 }
 
 /// A finishing time, as a countdown's reader wants it: `15:42` today,
-/// `tomorrow 03:10`, else the date as well. Local time, as [`when`] is.
+/// `tomorrow 03:10`, `Sunday 14:30` within the week, then the date. Local
+/// time, as [`when`] is.
 pub fn clock_at(secs: u64, now: u64) -> String {
     let offset = local_offset(secs).map_or(0, |(o, _)| o);
     clock_text(secs as i64 + offset, now as i64 + offset)
@@ -614,9 +615,17 @@ pub fn clock_at(secs: u64, now: u64) -> String {
 /// [`clock_at`] on times already shifted to local.
 fn clock_text(at: i64, now: i64) -> String {
     let full = civil(at);
-    match at.div_euclid(86_400) - now.div_euclid(86_400) {
-        0 => full[11..].to_string(),
-        1 => format!("tomorrow {}", &full[11..]),
+    let day = at.div_euclid(86_400);
+    let time = &full[11..];
+    match day - now.div_euclid(86_400) {
+        0 => time.to_string(),
+        1 => format!("tomorrow {time}"),
+        2..=6 => {
+            // Day 0 of the epoch was a Thursday.
+            const WEEKDAYS: [&str; 7] =
+                ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"];
+            format!("{} {time}", WEEKDAYS[day.rem_euclid(7) as usize])
+        }
         _ => full,
     }
 }
@@ -932,6 +941,7 @@ mod tests {
         // 2025-10-26 14:30, seen from earlier that day, the day before, and a week before.
         assert_eq!(clock_text(1_761_489_000, 1_761_480_000), "14:30");
         assert_eq!(clock_text(1_761_489_000, 1_761_400_000), "tomorrow 14:30");
+        assert_eq!(clock_text(1_761_489_000, 1_761_200_000), "Sunday 14:30");
         assert_eq!(clock_text(1_761_489_000, 1_760_800_000), "2025-10-26 14:30");
     }
 }

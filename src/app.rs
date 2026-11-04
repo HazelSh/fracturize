@@ -121,10 +121,6 @@ pub struct JobHandle {
     /// [`tick_estimate`](Self::tick_estimate).
     eta: Option<f32>,
     eta_at: f32,
-    /// Whether the ledger's seconds are this machine's, measured at launch.
-    /// Only then can they stand in for the countdown before progress can
-    /// carry one; otherwise they are relative weights at a guessed speed.
-    ledger_measured: bool,
 }
 
 /// Time constant of the ETA filter, in seconds of working time: how long the
@@ -134,6 +130,13 @@ pub struct JobHandle {
 /// job which genuinely slows down (a tile grid hitting the small tiles at the
 /// edge) says so within a few seconds rather than a minute.
 const ETA_TAU: f32 = 6.0;
+
+/// Working seconds of observed progress before a countdown is shown.
+///
+/// Time, not a share of the job: what makes an extrapolation worth showing
+/// is having watched the rate for a while, and a threshold at 5% done kept a
+/// four-day render blank for nearly five hours.
+const ETA_AFTER_SECS: f32 = 5.0;
 
 impl JobHandle {
     pub fn paused(&self) -> bool {
@@ -208,15 +211,15 @@ impl JobHandle {
     /// The unfiltered extrapolation [`tick_estimate`](Self::tick_estimate)
     /// steers towards. Split out so the filter can be tested against it.
     ///
-    /// Before 5% the extrapolation is noise, so the ledger's own cost stands
-    /// in — the figure the dialog quoted before Start, less what is done —
-    /// and the filter hands over to the measured figure as progress grows.
+    ///
+    /// Nothing until [`ETA_AFTER_SECS`] of work has been watched, and nothing
+    /// while no progress has been reported at all.
     fn raw_remaining_secs(&self) -> Option<f32> {
         let f = self.overall();
-        if f < 0.05 {
-            return self.ledger_measured.then(|| self.ledger.total() * (1.0 - f));
-        }
         let working = self.working_elapsed();
+        if working < ETA_AFTER_SECS || f <= 0.0 {
+            return None;
+        }
         Some((working / f - working).max(0.0))
     }
 
@@ -5102,10 +5105,9 @@ impl App {
         // Built here rather than on the job thread because the *measured*
         // throughput lives on the app: the job renders on its own device and
         // has no idea how fast this machine is.
-        let throughput = self.measured_throughput();
         let ledger = crate::render_job::Ledger::for_job(
             &params,
-            throughput,
+            self.measured_throughput(),
             self.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT,
         );
 
@@ -5131,7 +5133,6 @@ impl App {
             paused_total: Duration::ZERO,
             eta: None,
             eta_at: 0.0,
-            ledger_measured: throughput.is_some(),
         };
 
         let out = params.out_path.clone();

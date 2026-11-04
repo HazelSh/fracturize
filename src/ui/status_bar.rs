@@ -27,7 +27,7 @@ const POINTS_CHARS: usize = 26;
 const ZOOM_CHARS: usize = 8;
 /// Budget for `(drawing X.XM)`.
 const DRAWING_CHARS: usize = 17;
-/// Budget for `render <phase>: NNN% · NNh NNm left`, the longest phase.
+/// Budget for `render <phase>: NNN% · NNd NNh left`, the longest phase.
 const JOB_CHARS: usize = 44;
 /// Gap between the `d ... (class)` and `Λ ...` readouts — same width as the
 /// sparkline-to-FPS-text gap below, since both are two sub-readouts inside
