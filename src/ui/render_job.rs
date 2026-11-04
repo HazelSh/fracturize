@@ -41,10 +41,11 @@ use super::table::{self, Col};
 use super::UiState;
 
 /// Character budget for the elapsed/remaining readout: two seven-character
-/// duration cells plus `" elapsed · about "` and `" left"`. Sized to the
-/// longer of the two forms so the countdown appearing at 5% doesn't resize
-/// the line it lands in.
-const ELAPSED_CHARS: usize = 36;
+/// duration cells plus `" elapsed · about "` and `" left"`, then
+/// `" · done about tomorrow 03:10"`. Sized to the
+/// longest form, so the countdown appearing doesn't resize the line it
+/// lands in.
+const ELAPSED_CHARS: usize = 63;
 
 /// "Done" reads the same everywhere: the theme's success green.
 const DONE_GREEN: egui::Color32 = super::theme::SUCCESS;
@@ -1784,13 +1785,14 @@ fn progress_row(ui: &mut egui::Ui, label: &str, fraction: f32, tone: super::prog
 
 fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // Read what the display needs before taking `&mut` for the buttons.
-    let (phase, overall, elapsed, remaining, paused, cancelling, cancel_arm, log, out) = {
+    let (phase, overall, elapsed, remaining, finish, paused, cancelling, cancel_arm, log, out) = {
         let job = app.job().expect("caller checked");
         (
             job.phase,
             job.overall(),
             job.started.elapsed().as_secs_f32(),
             job.remaining_secs(),
+            job.finish_clock(),
             job.paused(),
             job.cancelling(),
             job.cancel_arm,
@@ -1892,9 +1894,18 @@ fn draw_running(ui: &mut egui::Ui, app: &mut App) {
     // the readout that ticks every frame for an hour, so every length change
     // in it is a shuffle you watch.
     let line = match remaining {
-        // "about", because it is: the countdown is only shown once progress
-        // can support it, and it is filtered, not exact.
-        Some(r) => format!("{} elapsed · about {} left", format_duration_cell(elapsed), format_duration_cell(r)),
+        // "about", because it is: it starts from the estimate quoted before
+        // Start, steers to measured progress from 5%, and is filtered.
+        // The clock time only while it is working: paused, it would slide
+        // later every second.
+        Some(r) => {
+            let mut line =
+                format!("{} elapsed · about {} left", format_duration_cell(elapsed), format_duration_cell(r));
+            if let Some(at) = finish.filter(|_| !paused) {
+                line += &format!(" · done about {at}");
+            }
+            line
+        }
         None => format!("{} elapsed", format_duration_cell(elapsed)),
     };
     num::small_cell(ui, &line, ELAPSED_CHARS);

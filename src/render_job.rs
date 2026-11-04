@@ -582,7 +582,8 @@ impl Ledger {
         Self { setup: SETUP_SECS, accumulate, resolve, save }
     }
 
-    fn total(self) -> f32 {
+    /// The whole job's estimated seconds.
+    pub fn total(self) -> f32 {
         (self.setup + self.accumulate + self.resolve + self.save).max(f32::EPSILON)
     }
 

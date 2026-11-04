@@ -27,8 +27,8 @@ const POINTS_CHARS: usize = 26;
 const ZOOM_CHARS: usize = 8;
 /// Budget for `(drawing X.XM)`.
 const DRAWING_CHARS: usize = 17;
-/// Budget for `render <phase>: NNN% (paused)`.
-const JOB_CHARS: usize = 34;
+/// Budget for `render <phase>: NNN% · NNh NNm left`, the longest phase.
+const JOB_CHARS: usize = 44;
 /// Gap between the `d ... (class)` and `Λ ...` readouts — same width as the
 /// sparkline-to-FPS-text gap below, since both are two sub-readouts inside
 /// one cluster rather than a boundary between clusters (those use 10.0).
@@ -174,13 +174,31 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                             job.phase.label(),
                             num::cell(job.overall() * 100.0, 0, 3),
                         );
-                        let text = if job.paused() { format!("{} (paused)", text) } else { text };
+                        // How long, beside how far: the window says to close it
+                        // and watch here, so the countdown has to be here too.
+                        let text = match job.remaining_secs() {
+                            _ if job.paused() => format!("{text} (paused)"),
+                            Some(left) => format!(
+                                "{text} · {} left",
+                                crate::render_job::format_duration(left)
+                            ),
+                            None => text,
+                        };
+                        let finish = job.finish_clock().filter(|_| !job.paused());
                         ui.add_space(10.0);
                         // A percentage climbing 9% -> 10% -> 100% used to widen
                         // this label twice during every render, shoving the
                         // sparkline and the whole performance cluster leftwards
                         // while you watched them.
-                        num::text_cell(ui, &text, JOB_CHARS);
+                        let resp = num::text_cell(ui, &text, JOB_CHARS);
+                        let hover = match finish {
+                            Some(at) => format!("A render job is running. It should be done about {at}. Click to see it."),
+                            None => "A render job is running. Click to see it.".to_string(),
+                        };
+                        let resp = hinted(resp.interact(egui::Sense::click()), &mut app.ui_state, &hover, "click: show the render job");
+                        if resp.clicked() {
+                            super::render_job::open(app);
+                        }
                         ui.spinner();
                     } else if let Some(done) = app.job_done().filter(|d| !d.seen) {
                         // A job finished with its window closed has nowhere

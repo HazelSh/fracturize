@@ -121,6 +121,10 @@ pub struct JobHandle {
     /// [`tick_estimate`](Self::tick_estimate).
     eta: Option<f32>,
     eta_at: f32,
+    /// Whether the ledger's seconds are this machine's, measured at launch.
+    /// Only then can they stand in for the countdown before progress can
+    /// carry one; otherwise they are relative weights at a guessed speed.
+    ledger_measured: bool,
 }
 
 /// Time constant of the ETA filter, in seconds of working time: how long the
@@ -194,12 +198,23 @@ impl JobHandle {
         self.eta
     }
 
+    /// The local clock time the countdown lands on: `15:42`, `tomorrow 03:10`.
+    pub fn finish_clock(&self) -> Option<String> {
+        let left = self.remaining_secs()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(crate::thread::clock_at(now + left.round() as u64, now))
+    }
+
     /// The unfiltered extrapolation [`tick_estimate`](Self::tick_estimate)
     /// steers towards. Split out so the filter can be tested against it.
+    ///
+    /// Before 5% the extrapolation is noise, so the ledger's own cost stands
+    /// in — the figure the dialog quoted before Start, less what is done —
+    /// and the filter hands over to the measured figure as progress grows.
     fn raw_remaining_secs(&self) -> Option<f32> {
         let f = self.overall();
         if f < 0.05 {
-            return None;
+            return self.ledger_measured.then(|| self.ledger.total() * (1.0 - f));
         }
         let working = self.working_elapsed();
         Some((working / f - working).max(0.0))
@@ -5087,9 +5102,10 @@ impl App {
         // Built here rather than on the job thread because the *measured*
         // throughput lives on the app: the job renders on its own device and
         // has no idea how fast this machine is.
+        let throughput = self.measured_throughput();
         let ledger = crate::render_job::Ledger::for_job(
             &params,
-            self.measured_throughput(),
+            throughput,
             self.max_point_capacity() as u64 * crate::render_job::BYTES_PER_POINT,
         );
 
@@ -5115,6 +5131,7 @@ impl App {
             paused_total: Duration::ZERO,
             eta: None,
             eta_at: 0.0,
+            ledger_measured: throughput.is_some(),
         };
 
         let out = params.out_path.clone();

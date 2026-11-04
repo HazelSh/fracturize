@@ -604,6 +604,23 @@ pub fn when(secs: u64) -> String {
     }
 }
 
+/// A finishing time, as a countdown's reader wants it: `15:42` today,
+/// `tomorrow 03:10`, else the date as well. Local time, as [`when`] is.
+pub fn clock_at(secs: u64, now: u64) -> String {
+    let offset = local_offset(secs).map_or(0, |(o, _)| o);
+    clock_text(secs as i64 + offset, now as i64 + offset)
+}
+
+/// [`clock_at`] on times already shifted to local.
+fn clock_text(at: i64, now: i64) -> String {
+    let full = civil(at);
+    match at.div_euclid(86_400) - now.div_euclid(86_400) {
+        0 => full[11..].to_string(),
+        1 => format!("tomorrow {}", &full[11..]),
+        _ => full,
+    }
+}
+
 /// A time at an offset from UTC, in seconds, named `zone`.
 fn local_text(secs: u64, offset: i64, zone: &str) -> String {
     let sign = if offset < 0 { '-' } else { '+' };
@@ -912,5 +929,9 @@ mod tests {
         // the day before. The zone is always said.
         assert_eq!(local_text(1_761_442_200, 13 * 3600, "NZDT"), "2025-10-26 14:30 NZDT (UTC+13:00)");
         assert_eq!(local_text(1_761_442_200, -(3 * 3600 + 1800), ""), "2025-10-25 22:00 (UTC-03:30)");
+        // 2025-10-26 14:30, seen from earlier that day, the day before, and a week before.
+        assert_eq!(clock_text(1_761_489_000, 1_761_480_000), "14:30");
+        assert_eq!(clock_text(1_761_489_000, 1_761_400_000), "tomorrow 14:30");
+        assert_eq!(clock_text(1_761_489_000, 1_760_800_000), "2025-10-26 14:30");
     }
 }
