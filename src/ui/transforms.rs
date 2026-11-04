@@ -580,9 +580,20 @@ fn draw_weight_share(ui: &mut egui::Ui, app: &mut App, selected: Option<usize>) 
         tooltip,
         if editable { "drag: set this transform's share of the weight" } else { "how the weight is shared" },
     );
+    // Which edge the drag took hold of, decided at the press by whichever
+    // is nearer: widening from the left edge means moving left.
+    let left_id = ui.id().with("weight_share_left");
+    if editable && resp.drag_started() {
+        if let (Some(p), Some(pos)) = (share, resp.interact_pointer_pos()) {
+            let right = seg_start + width * p;
+            let left = (pos.x - seg_start).abs() < (pos.x - right).abs();
+            ui.data_mut(|d| d.insert_temp(left_id, left));
+        }
+    }
     if editable && resp.dragged() {
         if let (Some(i), Some(p0)) = (sel, share) {
-            let dx = resp.drag_delta().x;
+            let left = ui.data(|d| d.get_temp::<bool>(left_id)).unwrap_or(false);
+            let dx = if left { -resp.drag_delta().x } else { resp.drag_delta().x };
             let p = (p0 + dx / width).clamp(0.005, 0.995);
             let next = p * rest / (1.0 - p);
             if (next - weight(i)).abs() > 1e-6 {
