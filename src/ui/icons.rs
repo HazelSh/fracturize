@@ -191,3 +191,5 @@ pub const INFO: &str = "\u{E2CE}";
 pub const CLOUD_FOG: &str = "\u{E53C}";
 /// The Help menu (Phosphor "question")
 pub const QUESTION: &str = "\u{E3E8}";
+/// The warp lattice toggle (edit mode): grid-nine
+pub const GRID_NINE: &str = "\u{EC8C}";

@@ -442,6 +442,11 @@ fn draw_overflow_menu(ui: &mut egui::Ui, app: &mut App, forms: Forms) {
                         if hinted(r, &mut app.ui_state, "Draw which transform may follow which, as arrows between gizmos. Only in edit mode", "click: show or hide the xaos edges").clicked() {
                             app.ui_state.xaos_overlay = !on;
                         }
+                        let on = app.ui_state.warp_view;
+                        let r = ui.add(egui::Button::selectable(on, format!("{} Warp grid", icons::GRID_NINE)));
+                        if hinted(r, &mut app.ui_state, "Show how the selected transform bends space, as a grid it carries. Only in edit mode", "click: show or hide the warp grid").clicked() {
+                            app.ui_state.warp_view = !on;
+                        }
                     });
                 }
                 Item::Drawing => {
@@ -1298,9 +1303,28 @@ fn draw_companions(ui: &mut egui::Ui, app: &mut App) {
     if resp.clicked() {
         app.ui_state.xaos_overlay = !app.ui_state.xaos_overlay;
     }
-    // The warp grid's toggle (branch `warp-view`) goes here, as the third
-    // companion: it too is about the selected map, so only edit mode has it.
-    // It wants a row in the overflow menu's Companions arm too.
+    // The warp lattice: the third sibling, for the same reason. It is about
+    // the selected map, and only edit mode has one.
+    let warp = app.ui_state.warp_view;
+    let resp = ui.add_enabled(
+        app.show_gizmos,
+        egui::Button::selectable(warp && app.show_gizmos, icons::GRID_NINE),
+    );
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        if !app.show_gizmos {
+            "Show how the selected transform bends space, as a grid it carries. Only in edit mode"
+        } else if warp {
+            "Showing how the selected transform bends space: a grid through the space its points come from, carried by the transform. The faint grey grid is where it would land with no variations. Click to stop"
+        } else {
+            "Show how the selected transform bends space, as a grid it carries"
+        },
+        if warp { "click: hide the warp grid" } else { "click: show the warp grid" },
+    );
+    if resp.clicked() {
+        app.ui_state.warp_view = !app.ui_state.warp_view;
+    }
 }
 
 #[cfg(test)]
