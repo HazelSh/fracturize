@@ -21,7 +21,7 @@
 //! gizmo is the reference.
 //!
 //! Lines are one light grey, opaque, and the line shader fades them toward
-//! mid-grey with depth across the grid's own front-to-back extent
+//! mid-grey (mixed in display space, so evenly to the eye) with depth across the grid's own front-to-back extent
 //! (`LineRenderer::upload_fade`), so the fade always spans near to far
 //! whatever the camera distance. Where a variation tears space (spherical's
 //! pole, a non-finite value, a jump far longer than its neighbours) a line is
@@ -38,9 +38,9 @@ use crate::scene::{TransformSpec, NUM_VARIATIONS};
 const LEVELS: usize = 9;
 /// Samples along each line. Fine enough that a swirl reads as a curve.
 const SAMPLES: usize = 48;
-/// The near colour, linear: a light grey (sRGB ≈ 0.86). The depth fade takes
-/// it toward [`FADE_GREY`].
-pub const NEAR_GREY: [f32; 4] = [0.70, 0.70, 0.70, 1.0];
+/// The near colour, linear: nearly white (sRGB ≈ 0.96), so the fade toward
+/// [`FADE_GREY`] has the whole range above mid-grey to cover.
+pub const NEAR_GREY: [f32; 4] = [0.91, 0.91, 0.91, 1.0];
 /// What the far side of the grid fades to, linear: sRGB mid-grey.
 pub const FADE_GREY: [f32; 3] = [0.214, 0.214, 0.214];
 /// Slot 10, julia: the one variation that draws a random branch.

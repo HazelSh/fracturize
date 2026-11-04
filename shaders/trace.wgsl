@@ -67,5 +67,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let t = clamp((in.depth - fade.near) / max(fade.far - fade.near, 1e-6), 0.0, 1.0);
-    return vec4<f32>(mix(in.color.rgb, fade.grey, t * fade.strength), in.color.a);
+    // Mixed in display space (gamma 2.2), not linear light: a linear mix
+    // stays near the light end for most of the depth and darkens only at the
+    // back, which reads as a weak fade. At strength 0 this is the identity.
+    let k = 1.0 / 2.2;
+    let rgb = mix(pow(in.color.rgb, vec3(k)), pow(fade.grey, vec3(k)), t * fade.strength);
+    return vec4<f32>(pow(rgb, vec3(2.2)), in.color.a);
 }
