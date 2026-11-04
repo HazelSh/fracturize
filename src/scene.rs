@@ -1234,6 +1234,9 @@ pub struct SceneMeta {
     pub visible: Option<bool>,
 }
 
+/// The blank scene's point size (File → New blank scene, `--blank`).
+pub const BLANK_POINT_SIZE: f32 = 0.001;
+
 fn default_point_size() -> f64 {
     0.012
 }
@@ -1805,7 +1808,10 @@ impl Scene {
         Self {
             name: "untitled".to_string(),
             author: String::new(),
-            point_size: default_point_size() as f32,
+            // Finer than a file's missing-key default (0.012): a blank
+            // scene's attractor is about a unit across, and glass wants
+            // small dots there. Files that leave `point_size` out keep 0.012.
+            point_size: BLANK_POINT_SIZE,
             points_per_frame: 100_000,
             point_count: DEFAULT_POINT_COUNT,
             point_count_defaulted: true,

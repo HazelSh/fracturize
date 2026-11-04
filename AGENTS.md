@@ -341,7 +341,7 @@ All GPU, three passes per frame:
      colour is the mean weighted by what lies in front of each fragment. It
      rasterises in **compute** (a thread a point, atomics into storage
      buffers), not through the hardware, so the disc and feather are the
-     prototype's own. σ ("glass opacity", default 1.2) and K ("depth
+     prototype's own. σ ("glass opacity", default 1.5) and K ("depth
      layers") are session sliders in the toolbar's drawing popup. A dot's
      radius is `tan 22.5° · point_size`, the points renderer's size on
      screen.

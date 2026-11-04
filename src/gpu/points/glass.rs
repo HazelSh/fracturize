@@ -37,7 +37,7 @@ pub const DEFAULT_K: u32 = 8;
 pub const MIN_K: u32 = 4;
 pub const MAX_K: u32 = 64;
 /// The default opacity of the material, sigma.
-pub const DEFAULT_SIGMA: f32 = 1.2;
+pub const DEFAULT_SIGMA: f32 = 1.5;
 /// The opacity slider's range, logarithmic: most scenes want 0.3 to 10.
 pub const MIN_SIGMA: f32 = 0.05;
 pub const MAX_SIGMA: f32 = 32.0;
