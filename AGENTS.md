@@ -43,6 +43,7 @@ checklist to run before handing a build over.
 | `ADDING-A-SCENE-FEATURE.md` | Checklist for every place a scene feature reaches |
 | `FEATURE-PLANS.md` | Hazel's 2026-10-19 list as four tracks of plans |
 | `AGENT-COLLAB-PLAN.md` | Human-agent proposals, review and the live bridge |
+| `EMAIL-COLLAB-PLAN.md` | Threads between people, by email: friends with and without Fracturize (not built) |
 | `ANIMATION-PLAN.md` | The timeline as a DAW's automation section: what DAW, Blender and VFX users expect, the loop seam, morphs, the agent side |
 | `GIZMO-PLAN.md`, `XAOS-PLAN.md` | Plans for features now built; the reasoning behind them, and what is left (gizmo slices 6–7, xaos coupling) |
 | `RENDER-QUALITY-BASELINE.md`, `RENDER-SCALE-PLAN.md` | Offline render quality: the measurements, and posters / what is left |
