@@ -2,6 +2,11 @@
 //! folder's scenes on the right, each row carrying a thumbnail rendered from
 //! the scene's own camera.
 //!
+//! It is also the picker for **Import as subscene**: the same window, titled
+//! for the job, where choosing a row places that scene in this one instead of
+//! opening it (`App::browser_purpose`). One file picker, so the two can't come
+//! to disagree about folders, places or what a scene looks like.
+//!
 //! The model is `scene_browser` and the thumbnails are `gpu::thumbs`; this
 //! draws them. Up/Down/Enter still walk and load the selection — the rows are
 //! the same `browser_selected` state those keys drive — and the row the keys
@@ -22,7 +27,7 @@ use egui::text::{LayoutJob, TextWrapping};
 
 use crate::app::App;
 use crate::gpu::thumbs::{ThumbKey, ThumbState};
-use crate::scene_browser::{folder_label, same_path, Entry, Folder, Sort};
+use crate::scene_browser::{folder_label, same_path, Entry, Folder, Purpose, Sort};
 use crate::scene_source::SourceKind;
 
 use super::hints::hinted;
@@ -50,7 +55,11 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     let mut actions = Vec::new();
     let mut hovered = None;
 
-    super::window(ctx, app, super::WindowKey::Scenes, "Scenes")
+    let title = match app.browser_purpose {
+        Purpose::Open => "Scenes",
+        Purpose::ImportSubscene => "Import as subscene",
+    };
+    super::window(ctx, app, super::WindowKey::Scenes, title)
         .open(&mut open)
         .show(ctx, |ui| {
             egui::Panel::top("fracturize_scenes_bar").show(ui, |ui| {
@@ -86,7 +95,8 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
             Action::Open(path) => app.browser_open_folder(&path),
             Action::Load(i) => {
                 app.set_browser_selected(i);
-                // Closes the browser itself.
+                // Opens or imports, by the browser's purpose, and closes it
+                // when that worked.
                 app.browser_load_selected();
             }
             Action::AddPlace(path) => app.add_browser_place(&path),
@@ -96,7 +106,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         }
     }
     if !open {
-        app.show_browser = false;
+        app.close_browser();
     }
 }
 
@@ -304,6 +314,12 @@ fn list(ui: &mut egui::Ui, app: &mut App, actions: &mut Vec<Action>) -> Option<P
         .as_deref()
         .map(PathBuf::from)
         .or_else(|| app.scene_png.clone());
+    let importing = app.browser_purpose == Purpose::ImportSubscene;
+    let hint = if importing {
+        "click: place this scene in yours as a subscene · the row under the pointer flies its camera path"
+    } else {
+        "click: open this scene · the row under the pointer flies its camera path"
+    };
 
     let (folder, thumbs, ui_state) = app.browser_parts();
     let folder = match folder {
@@ -348,12 +364,15 @@ fn list(ui: &mut egui::Ui, app: &mut App, actions: &mut Vec<Action>) -> Option<P
             if let Some(e) = problem {
                 tooltip = format!("{tooltip}\n\n{e}");
             }
-            let resp = hinted(
-                resp,
-                ui_state,
-                tooltip,
-                "click: open this scene · the row under the pointer flies its camera path",
-            );
+            if importing {
+                // Said before the click rather than after it.
+                if is_open {
+                    tooltip.push_str("\n\nThis is the scene you have open; it can't be placed inside itself");
+                } else if entry.scene.as_ref().is_ok_and(|s| s.is_composite()) {
+                    tooltip.push_str("\n\nThis scene has subscenes of its own, and subscenes can't be nested yet");
+                }
+            }
+            let resp = hinted(resp, ui_state, tooltip, hint);
             if resp.hovered() {
                 hovered = Some(entry.path.clone());
             }

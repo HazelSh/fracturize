@@ -198,7 +198,7 @@ All GPU, three passes per frame:
 2. **Point render** — four interchangeable modes over the same point buffer
    (`R` cycles live; `--splat`, `--volume` / a view's `renderer = "splat"` or
    `"volume"` select at launch):
-   - **points** (`points/render.wgsl`, default): opaque depth-tested points with
+   - **points** (`points/render.wgsl`): opaque depth-tested points with
      adaptive pipeline selection. When the projected point size at orbit distance
      is subpixel (the common case), points are drawn as native 1px point
      primitives (~3x faster). Otherwise, 4-vertex instanced triangle-strip
@@ -330,8 +330,8 @@ All GPU, three passes per frame:
      retuning anything here. `FRACTURIZE_VOLUME_STATS=1` prints the absorbance
      field's median, p90 and p99.
    - **glass** (`points/glass.rs`, `shaders/points/glass*.wgsl`; live window
-     and `S` only so far; Hazel accepted slice 1 on 2026-11-01 and wants it
-     to become the default renderer once it's complete): the attractor as an absorbing, tinted fog, each point a
+     and `S` only so far; Hazel accepted slice 1 on 2026-11-01, and it is the
+     live window's default renderer since 2026-11-05): the attractor as an absorbing, tinted fog, each point a
      flat disc of its colour, partly transparent. **A fresh renderer, not built
      on volume, points or splat**; the design, decisions and open questions
      are in `GLASS-RENDERER-PLAN.md`, and `src/glass_proto.rs` is its CPU
@@ -1770,6 +1770,14 @@ beside a 16:9 thumbnail. Sort by name or newest. The folder you were in and
 the sort persist to prefs. A render with a scene in it is listed too, marked
 `PNG`; a `.render.toml` sidecar and an ordinary picture are not. A scene
 that fails to parse is listed with its error rather than left out.
+
+**It is also the picker for Import as subscene** (File menu, the Subscenes
+window's Import button): the same window, titled "Import as subscene", where
+choosing a row places that scene in this one instead of opening it
+(`App::browser_purpose`). A failed import keeps the window open and says why;
+the open scene and composites say on hover that they can't be placed. There
+is no second list of scene files anywhere — that was a submenu of `scenes/`,
+and it couldn't reach any other folder or show what a scene looks like.
 
 **Thumbnails are live renders, not cached PNGs** (`src/gpu/thumbs.rs`). Each
 is a `PointCompute` with 256 walkers and an 8k ring, drawn by an ordinary

@@ -651,49 +651,21 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// "Import as subscene ▸": the scenes folder as a submenu. The same list and
-/// the same refusals as the Subscenes window's Import button, so the two
-/// can't disagree about what can be placed.
+/// "Import as subscene…": the Scenes browser, picking a scene to place in
+/// this one. The same refusals as the Subscenes window's Import button.
 fn draw_import_menu(ui: &mut egui::Ui, app: &mut App) {
     let zoomed = app.scene.zoom.is_some();
     let full = app.scene.layer_count() >= crate::subscene::MAX_LAYERS;
-    let mut picked = None;
-    let resp = ui
-        .add_enabled_ui(!zoomed && !full, |ui| {
-            ui.menu_button(format!("{} Import as subscene", icons::PLUS), |ui| {
-                let files = app.importable_scenes();
-                if files.is_empty() {
-                    ui.label(egui::RichText::new("No scenes found in the scenes folder").weak());
-                }
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for f in files {
-                        let label = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                        if ui.button(label).on_hover_text(f.display().to_string()).clicked() {
-                            picked = Some(f);
-                            ui.close();
-                        }
-                    }
-                });
-            })
-            .response
-        })
-        .inner;
-    hinted(
-        resp,
-        &mut app.ui_state,
-        if zoomed {
-            "Subscenes don't work with infinite zoom yet. Turn infinite zoom off first"
-        } else if full {
-            "A scene can hold at most 15 subscenes"
-        } else {
-            "Place another scene inside this one. It keeps its own transforms and colours, and gets an equal share of the points"
-        },
-        "hover: choose a scene to place in this one",
-    );
-    if let Some(f) = picked {
-        app.ui_state.import_error = app.import_subscene(&f).err();
-        // Where the result shows, and where an error is said.
-        app.ui_state.panels.subscenes_open = true;
+    let tip = if zoomed {
+        "Subscenes don't work with infinite zoom yet. Turn infinite zoom off first"
+    } else if full {
+        "A scene can hold at most 15 subscenes"
+    } else {
+        "Place another scene inside this one. Opens the Scenes browser to choose it. It keeps its own transforms and colours, and gets an equal share of the points"
+    };
+    let label = format!("{} Import as subscene…", icons::PLUS);
+    if menu_item_enabled(ui, app, !zoomed && !full, &label, "", tip) {
+        app.browse_for_subscene();
     }
 }
 

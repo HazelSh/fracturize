@@ -40,33 +40,13 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     app.ui_state.panels.subscenes_open = open;
 }
 
-/// Import (a menu of scene files) and Remove, at the top: they act on the list.
+/// Import (through the Scenes browser) and Remove, at the top: they act on the list.
 fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let zoomed = app.scene.zoom.is_some();
         let full = app.scene.layer_count() >= crate::subscene::MAX_LAYERS;
-        let mut picked = None;
-        let resp = ui
-            .add_enabled_ui(!zoomed && !full, |ui| {
-                ui.menu_button((icons::PLUS, "Import scene"), |ui| {
-                    let files = app.importable_scenes();
-                    if files.is_empty() {
-                        ui.label(egui::RichText::new("No scenes found in the scenes folder").weak());
-                    }
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for f in files {
-                            let label = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                            if ui.button(label).on_hover_text(f.display().to_string()).clicked() {
-                                picked = Some(f);
-                                ui.close();
-                            }
-                        }
-                    });
-                })
-                .response
-            })
-            .inner;
-        hinted(
+        let resp = ui.add_enabled(!zoomed && !full, egui::Button::new((icons::PLUS, "Import scene…")));
+        let resp = hinted(
             resp,
             &mut app.ui_state,
             if zoomed {
@@ -78,8 +58,8 @@ fn draw_actions(ui: &mut egui::Ui, app: &mut App) {
             },
             "click: choose a scene to place in this one",
         );
-        if let Some(f) = picked {
-            app.ui_state.import_error = app.import_subscene(&f).err();
+        if resp.clicked() {
+            app.browse_for_subscene();
         }
 
         let selected = app.selected_subscene();

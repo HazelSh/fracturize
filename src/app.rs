@@ -1233,6 +1233,8 @@ pub struct App {
 
     // Scene browser (B, Ctrl+O)
     pub show_browser: bool,
+    /// Whether choosing a scene opens it or imports it as a subscene.
+    pub browser_purpose: crate::scene_browser::Purpose,
     /// The folder the browser is showing, read when it opens or navigates;
     /// `Err` when that folder couldn't be read.
     browser: Option<Result<crate::scene_browser::Folder, String>>,
@@ -1474,7 +1476,9 @@ impl App {
             // the splat it is a refinement of, rather than refusing to open.
             RenderMode::Splat
         } else {
-            RenderMode::Points
+            // Glass is the default renderer (Hazel, 2026-11-05), at its
+            // default opacity and depth layers (`glass::DEFAULT_SIGMA`, `DEFAULT_K`).
+            RenderMode::Glass
         };
         // Same precedence as everything else the scene now carries: the flag
         // beats the view, the view beats the scene file, the scene file beats
@@ -1718,6 +1722,7 @@ impl App {
             // Reopened below once the app exists — the browser has a directory
             // scan behind it, so it can't just be a bool set here.
             show_browser: false,
+            browser_purpose: crate::scene_browser::Purpose::Open,
             browser: None,
             browser_selected: 0,
             thumbs,
@@ -3378,11 +3383,15 @@ impl App {
         if self.scene.layer_count() >= crate::subscene::MAX_LAYERS {
             return Err(format!("A scene can hold at most {} subscenes", crate::subscene::MAX_LAYERS - 1));
         }
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let this = self.scene_path.as_deref().and_then(|p| std::fs::canonicalize(p).ok());
+        if this.as_deref() == Some(abs.as_path()) {
+            return Err("That's this scene's own file, and a scene can't be placed inside itself".into());
+        }
         let sub = Scene::load(path)?;
         if sub.is_composite() {
             return Err(format!("{} has subscenes of its own, and subscenes can't be nested yet", path.display()));
         }
-        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         // Relative to where this scene lives, which is what `file =` means.
         let here = self
             .scene_path
@@ -3447,30 +3456,6 @@ impl App {
         log::info!("Imported {} as subscene '{}'", path.display(), name);
         self.commit_edit(format!("Import {}", name), None, before);
         Ok(())
-    }
-
-    /// Scene files that could be imported as a subscene: `scenes/` and the
-    /// current scene's own directory, minus the current scene itself.
-    pub fn importable_scenes(&self) -> Vec<std::path::PathBuf> {
-        let mut dirs = vec![std::path::PathBuf::from("scenes")];
-        if let Some(dir) = self.scene_path.as_ref().and_then(|p| Path::new(p).parent()) {
-            if !dir.as_os_str().is_empty() {
-                dirs.push(dir.to_path_buf());
-            }
-        }
-        let current = self.scene_path.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
-        let mut files: Vec<std::path::PathBuf> = dirs
-            .iter()
-            .filter_map(|d| fs::read_dir(d).ok())
-            .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .filter(|p| std::fs::canonicalize(p).ok() != current)
-            .collect();
-        files.sort();
-        files.dedup_by(|a, b| std::fs::canonicalize(&*a).ok() == std::fs::canonicalize(&*b).ok());
-        files
     }
 
     /// Remove a subscene and its maps. Undoable, like deleting a transform.
@@ -4758,8 +4743,29 @@ impl App {
     /// showing (else the current scene's, else `scenes/`), fresh, so a scene
     /// that landed while it was closed is there.
     pub fn toggle_browser(&mut self) {
+        use crate::scene_browser::Purpose;
+        if self.show_browser && self.browser_purpose == Purpose::Open {
+            self.close_browser();
+        } else {
+            self.show_browser_for(Purpose::Open);
+        }
+    }
+
+    /// Show the browser to pick a scene to place in this one as a subscene.
+    pub fn browse_for_subscene(&mut self) {
+        self.show_browser_for(crate::scene_browser::Purpose::ImportSubscene);
+    }
+
+    pub fn close_browser(&mut self) {
+        self.show_browser = false;
+        self.browser_purpose = crate::scene_browser::Purpose::Open;
+    }
+
+    /// Show the browser for `purpose`. Already open, it only changes what a
+    /// pick does, and stays in its folder.
+    fn show_browser_for(&mut self, purpose: crate::scene_browser::Purpose) {
+        self.browser_purpose = purpose;
         if self.show_browser {
-            self.show_browser = false;
             return;
         }
         let current_dir = self
@@ -4898,10 +4904,31 @@ impl App {
             Some(Ok(f)) => f.entries.get(self.browser_selected).map(|e| e.path.clone()),
             _ => None,
         };
-        if let Some(path) = path {
-            self.request_load_scene(&path);
+        let Some(path) = path else {
+            self.close_browser();
+            return;
+        };
+        match self.browser_purpose {
+            crate::scene_browser::Purpose::Open => {
+                self.request_load_scene(&path);
+                self.close_browser();
+            }
+            crate::scene_browser::Purpose::ImportSubscene => match self.import_subscene(&path) {
+                Ok(()) => {
+                    // Including a refusal said a pick ago, which is no longer so.
+                    self.ui_state.import_error = None;
+                    self.notice = None;
+                    self.close_browser();
+                    // Where the new layer shows.
+                    self.ui_state.panels.subscenes_open = true;
+                }
+                // The browser stays open, so another scene can be picked.
+                Err(e) => {
+                    self.ui_state.import_error = Some(e.clone());
+                    self.set_notice(format!("Couldn't import {}: {}", path.display(), e), Tone::Error);
+                }
+            },
         }
-        self.show_browser = false;
     }
 
     /// Replace the current scene with one loaded from disk, rebuilding the

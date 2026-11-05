@@ -23,6 +23,16 @@ use serde::{Deserialize, Serialize};
 use crate::scene::Scene;
 use crate::scene_source::{self, SourceKind};
 
+/// What choosing a scene in the browser does. One picker, two doors: File →
+/// Open shows it to open a scene, and Import as subscene shows the same
+/// window, the same folders and the same thumbnails, to place one in this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Purpose {
+    #[default]
+    Open,
+    ImportSubscene,
+}
+
 /// How the list is ordered. Persisted in prefs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

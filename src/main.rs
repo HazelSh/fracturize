@@ -2637,7 +2637,7 @@ impl ApplicationHandler for AppWrapper {
                             } else if app.ui_state.render_job.open {
                                 app.ui_state.render_job.open = false;
                             } else if app.show_browser {
-                                app.toggle_browser();
+                                app.close_browser();
                             } else if app.collab.pending_apply.is_some() {
                                 app.collab.pending_apply = None;
                             } else if app.previewing().is_some() {
@@ -3026,7 +3026,7 @@ fn default_scene() -> Scene {
             colours_left_out: Vec::new(),
         name: "Default Sierpinski".to_string(),
         author: "Claude Opus 4.5 (Claude Code 2.0.76)".to_string(),
-        point_size: 0.002,
+        point_size: 0.001,
         points_per_frame: 100_000,
         point_count: 500_000,
         point_count_defaulted: true,
