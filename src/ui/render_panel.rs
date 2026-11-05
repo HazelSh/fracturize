@@ -525,6 +525,29 @@ pub fn point_count(ui: &mut egui::Ui, app: &mut App) {
                 .weak(),
         );
     }
+
+    // The first-run climb (`autotune`), again on request: a new monitor, a
+    // driver update, or a count dragged somewhere regrettable.
+    let running = app.point_tune_running();
+    let resp = ui.add_enabled(running.is_none(), egui::Button::new("Suit this computer").small());
+    let resp = hinted(
+        resp,
+        &mut app.ui_state,
+        match running {
+            Some(hz) => format!(
+                "Finding how many points this computer can draw at {hz:.0} frames a second. \
+                 It takes about ten seconds; the picture thins and thickens while it does."
+            ),
+            None => "Find how many points this computer can draw at the screen's refresh \
+                     rate, and use that. Takes about ten seconds, and is done once on the \
+                     first run."
+                .to_string(),
+        },
+        "click: pick a point count to suit this computer",
+    );
+    if resp.clicked() {
+        app.start_point_tune();
+    }
 }
 
 fn draw_output(ui: &mut egui::Ui, app: &mut App) {

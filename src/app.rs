@@ -1140,6 +1140,11 @@ pub struct App {
     /// request_point_capacity / apply_pending_capacity)
     pending_capacity: Option<u32>,
     last_capacity_change: Instant,
+    /// The first-run point-count climb, while it runs (see `autotune`).
+    point_tune: Option<crate::autotune::Tuner>,
+    /// This frame's wall-clock duration, unclamped (`frame_dt` is clamped to
+    /// 0.1 s for the simulation; a measurement must see a slow frame whole).
+    raw_frame_dt: Duration,
 
     /// Which renderer draws the fractal (R toggles)
     pub render_mode: RenderMode,
@@ -1682,6 +1687,8 @@ impl App {
             saved_views_cache: None,
             pending_capacity: None,
             last_capacity_change: Instant::now(),
+            point_tune: None,
+            raw_frame_dt: Duration::ZERO,
             render_mode,
             exposure,
             opacity: opacity
@@ -4963,7 +4970,11 @@ impl App {
         self.exposure = scene.exposure;
         // Same precedence as startup: a point count the person chose in the
         // Render window follows them across scene loads; otherwise take the
-        // scene file's own.
+        // scene file's own. A first-run climb still going stops here, saving
+        // nothing, and runs again next launch.
+        if self.point_tune.take().is_some() {
+            log::info!("Point count: stopped measuring, a scene was opened");
+        }
         self.buffer_capacity = self
             .prefs
             .point_count
@@ -7438,6 +7449,10 @@ impl App {
     /// the frame counter and the fan tell you you've gone too far while
     /// you're still holding the mouse and can drag back.
     pub fn request_point_capacity(&mut self, count: u32) {
+        // The person has taken the slider: their count wins over the climb's.
+        if self.point_tune.take().is_some() {
+            log::info!("Point count: stopped measuring, chosen by hand");
+        }
         let count = count.clamp(100_000, self.max_point_capacity());
         // Ignore jitter: a log slider emits a slightly different value every
         // pixel, and reallocating for a 1% change is pure churn.
@@ -7475,6 +7490,14 @@ impl App {
     /// the count follows the person across scenes and restarts.
     pub fn set_point_capacity(&mut self, count: u32) {
         let count = count.clamp(100_000, self.max_point_capacity());
+        self.reallocate_points(count);
+        self.prefs.point_count = Some(count as usize);
+        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Reallocate the ring at `count` without remembering it: the climb's
+    /// trial steps, which must not reach prefs until one is chosen.
+    fn reallocate_points(&mut self, count: u32) {
         if count == self.buffer_capacity {
             return;
         }
@@ -7485,8 +7508,75 @@ impl App {
         self.buffer_capacity = count;
         log::info!("Point buffer capacity: {} (restarting warmup)", count);
         self.rebuild_pipelines();
-        self.prefs.point_count = Some(count as usize);
-        self.prefs_dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Start measuring this machine for a point count (see `autotune`): on a
+    /// first run, from `main`, and from the drawing popup's button.
+    pub fn start_point_tune(&mut self) {
+        let hz = self
+            .window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .map_or(60.0, |mhz| mhz as f32 / 1000.0);
+        self.pending_capacity = None;
+        let (tuner, start) = crate::autotune::Tuner::new(hz, self.max_point_capacity());
+        log::info!(
+            "Point count: measuring this machine against {:.0} Hz, from {:.1}M points",
+            tuner.target_hz(),
+            start as f32 / 1e6
+        );
+        self.reallocate_points(start);
+        self.point_tune = Some(tuner);
+    }
+
+    /// Whether the point-count climb is running, for the status bar.
+    pub fn point_tune_running(&self) -> Option<f32> {
+        self.point_tune.as_ref().map(|t| t.target_hz())
+    }
+
+    /// One frame of the climb: time it, and act on what it says.
+    fn step_point_tune(&mut self) {
+        if self.point_tune.is_none() {
+            return;
+        }
+        let full = !self.point_compute.is_warming_up();
+        // A speck of an attractor draws a fraction of the ring (see
+        // `drawn_points`), so its frames say nothing about what the whole
+        // ring costs. Stop, keep nothing, and try again next launch.
+        if full {
+            let height = self.gpu.config.height as f32;
+            if self.drawn_points(height) < self.point_compute.valid_point_count() {
+                log::info!(
+                    "Point count: stopped measuring, this scene draws only part of the ring"
+                );
+                self.point_tune = None;
+                return;
+            }
+        }
+        let Some(tuner) = self.point_tune.as_mut() else { return };
+        match tuner.frame(self.raw_frame_dt, full) {
+            crate::autotune::Step::Wait => {}
+            crate::autotune::Step::Try(n) => {
+                if let Some(&(count, ms)) = tuner.log.last() {
+                    log::info!("Point count: {:.1}M at {:.2} ms a frame", count as f32 / 1e6, ms);
+                }
+                self.reallocate_points(n);
+            }
+            crate::autotune::Step::Done(n) => {
+                if let Some(&(count, ms)) = tuner.log.last() {
+                    log::info!("Point count: {:.1}M at {:.2} ms a frame", count as f32 / 1e6, ms);
+                }
+                self.point_tune = None;
+                log::info!("Point count: keeping {:.1}M", n as f32 / 1e6);
+                self.set_point_capacity(n);
+                // Short enough for the status bar's slot: the toolbar's drawing
+                // button already shows the count and is where it changes.
+                self.set_notice(
+                    format!("Set {:.1}M points to suit this computer", n as f32 / 1e6),
+                    Tone::Note,
+                );
+            }
+        }
     }
 
     /// CPU threads a render job may use — the preference, or one less than the
@@ -8058,7 +8148,8 @@ impl App {
 
     pub fn update(&mut self) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_update).as_secs_f32().min(0.1);
+        self.raw_frame_dt = now.duration_since(self.last_update);
+        let dt = self.raw_frame_dt.as_secs_f32().min(0.1);
         self.last_update = now;
         self.frame_dt = dt;
         self.flush_dirty_prefs();
@@ -8077,6 +8168,7 @@ impl App {
 
         let should_log = self.fps_tracker.frame();
         self.frame_count += 1;
+        self.step_point_tune();
         // One clock. The camera flies the path on it — which path, the scene's
         // own keys or the default orbit, is `camera_path`'s business, not this
         // loop's — and every track is sampled on it (`refresh_animation`).

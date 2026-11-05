@@ -1,4 +1,5 @@
 mod app;
+mod autotune;
 mod avif;
 mod checkpoint_file;
 mod camera;
@@ -2472,10 +2473,18 @@ impl ApplicationHandler for AppWrapper {
         // person across scenes. Precedence: --points > prefs > the scene
         // file's own point_count > the built-in default. `App::new` re-reads
         // prefs for its own copy; this read is only for the decision.
+        //
+        // With neither, this is a first run on this machine: the window
+        // measures how many points it holds at the display's refresh rate
+        // (`autotune`) and keeps that. Not for a screenshot, which must be
+        // reproducible from its flags and is gone before a climb would end.
+        let mut tune_points = false;
         if let Some(n) = self.args.points {
             scene.point_count = n;
         } else if let Some(n) = crate::prefs::Prefs::load().point_count {
             scene.point_count = n;
+        } else {
+            tune_points = !self.args.screenshot;
         }
         apply_zoom_args(&mut scene, &self.args, true);
         apply_palette_args(&mut scene, &self.args, true);
@@ -2504,6 +2513,10 @@ impl ApplicationHandler for AppWrapper {
             self.args.exposure,
             resolve_grade(&self.args, view_for_grade.as_ref()),
         ));
+        let mut app = app;
+        if tune_points {
+            app.start_point_tune();
+        }
 
         self.egui = Some(ui::EguiLayer::new(&window, &app.gpu.device, app.gpu.format));
         self.app = Some(app);

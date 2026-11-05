@@ -82,6 +82,8 @@ src/
   stats.rs       # --stats: image numbers, empty measured against the recorded background
   render_job.rs  # Render job model: params, events, pause/cancel, estimates
   render_preset.rs # Render presets: named size+quality files, built-ins in render_presets/
+  autotune.rs    # First-run point count: climb x1.5 until frames fall behind the
+                 # refresh rate, keep the last that kept up (pure, unit-tested)
   ui/            # egui layer (see "Human Interface" below)
     mod.rs         # EguiLayer, UiState, per-frame draw order, font install
     toolbar.rs     # Top strip: File/Explore/Help menus, undo/redo, the drawing
@@ -1014,7 +1016,19 @@ Conventions worth keeping:
   `out += w * f(p)`), and a row stays put at 0 so a drag can pass through it.
 - **Point count is a render property, not scene data.** `App::buffer_capacity`
   owns it and it persists to prefs. Startup precedence is `--points` > prefs >
-  the scene file > default. The offline `--render` path never reads prefs, so
+  the scene file > default. **With neither `--points` nor a pref — a first run
+  — the window measures the machine** (`src/autotune.rs`): from 1M, a step of
+  ×1.5 each time the ring has filled and a third of a second of frames kept up
+  with the monitor's refresh rate (mean within 4%), then back to the last
+  count that kept up, saved to prefs like a slider choice. About ten seconds,
+  capped at 32M and the device's limit. If 1M is already too slow it steps
+  down, but stops and keeps 1M when two steps down haven't made frames 15%
+  faster: then something else holds the frame rate (Xephyr's present did,
+  ~30 ms at any count, and walked the first version to the 100k floor). The
+  trial steps never touch prefs; the slider, opening a scene, or a scene that
+  draws only part of the ring (`drawn_points`) stops it with nothing saved,
+  so it runs again next launch. Not for `--screenshot`. "Suit this
+  computer" under the slider runs it again. The offline `--render` path never reads prefs, so
   CLI renders stay reproducible from flags plus scene. The toolbar drawing
   popup's control is a *logarithmic slider that applies live*, rate-limited to one
   reallocation per 250ms: it's the dial that decides whether the machine stays

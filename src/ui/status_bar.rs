@@ -77,16 +77,31 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
                     draw_views_toggle(ui, app);
                     ui.separator();
                     let (valid, capacity, warming) = app.point_stats();
+                    let tuning = app.point_tune_running();
                     let resp = num::text_cell(
                         ui,
                         &format!(
                             "{}M/{}M pts{}",
                             num::cell(valid as f32 / 1e6, 1, 5),
                             num::cell(capacity as f32 / 1e6, 1, 5),
-                            if warming { " (warming)" } else { "" },
+                            if tuning.is_some() {
+                                " (sizing)"
+                            } else if warming {
+                                " (warming)"
+                            } else {
+                                ""
+                            },
                         ),
                         POINTS_CHARS,
                     );
+                    let resp = match tuning {
+                        Some(hz) => resp.on_hover_text(format!(
+                            "Finding how many points this computer can draw at {hz:.0} \
+                             frames a second, by trying more until it slows down. It takes \
+                             about ten seconds."
+                        )),
+                        None => resp,
+                    };
                     // When the attractor has collapsed the renderer draws a
                     // fraction of the buffer (see `App::drawn_points`). Say so
                     // — a point count that doesn't match what's on screen is
